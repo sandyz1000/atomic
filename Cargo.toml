@@ -1,0 +1,44 @@
+[package]
+name = "atomic"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1.60"
+tokio = "1.23.0"
+tokio-util = "0.7.4"
+crossbeam = "0.8.2"
+dashmap = "5.4.0"
+envy = "^0.4.1"
+fasthash = "0.4.0"
+regex = "*"
+
+
+# randomness
+rand = "0.8.5"
+rand_distr = "0.4.3"
+rand_pcg = "0.3.1"
+
+# serialization
+bincode = "1.2.1"
+capnp = "0.15.1"
+capnp-futures = "0.15.0"
+serde = { version = "1.0.106", features = ["rc"] }
+serde_closure = "^0.3.3"
+serde_derive = "1.0.106"
+uriparse = "0.6.1"
+
+# dynamic typing
+downcast-rs = "1.1.1"
+dyn-clone = "1.0.1"
+serde_traitobject = "0.2.4"
+
+# optional features
+## aws
+rusoto_core = { version = "0.48.0", optional = true }
+rusoto_s3 = { version = "0.48.0", optional = true }
+
+[build-dependencies]
+capnpc = "*"
