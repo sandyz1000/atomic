@@ -1,0 +1,43 @@
+[package]
+name = "atomic-compute-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arrow = "49.0.0"
+parquet = "49.0.0"
+itertools = "0.12.0"
+
+
+[[bin]]
+name = "file_read"
+path = "./src/file_read.rs"
+
+[[bin]]
+name = "group_by"
+path = "./src/group_by.rs"
+
+[[bin]]
+name = "join"
+path = "./src/join.rs"
+
+[[bin]]
+name = "make_rdd"
+path = "./src/make_rdd.rs"
+
+[[bin]]
+name = "parquet_column_read"
+path = "./src/parquet_column_read.rs"
+
+[[bin]]
+name = "subtract"
+path = "./src/subtract.rs"
+
+[[bin]]
+name = "wordcount"
+path = "./src/wordcount.rs"
+
+[[bin]]
+name = "hdfs_file_read"
+path = "./src/hdfs_file_read.rs"
+
