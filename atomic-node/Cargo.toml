@@ -1,4 +1,4 @@
 [package]
-name = "atomic-node"
+name = "atomic_node"
 version = "0.1.0"
 edition = "2021"

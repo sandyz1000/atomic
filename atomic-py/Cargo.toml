@@ -1,5 +1,5 @@
 [package]
-name = "atomic-py"
+name = "atomic_py"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,7 +9,7 @@ name = "atomic_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.19.2"
+pyo3 = "0.23.1"
 serde = { version = "1.0.159", features = ["rc", "derive"] }
 atomic = { workspace = true }
 # atomic-sql = { workspace = true }

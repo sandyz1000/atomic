@@ -1,2 +1,4 @@
-# atomic
-A serverless distributed map reduce framework (faster implementation of Spark) in Rust.
+# Atomic (WIP)
+
+A high-performance distributed MapReduce framework, written in Rust, leveraging actor-based mailbox communication for efficient task coordination and faster execution compared to Spark.
+
