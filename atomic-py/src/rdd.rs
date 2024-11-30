@@ -50,31 +50,31 @@ trait PythonFunction {
 
 pub struct SimplePythonFunction {
     command: Vec<u8>,
-    envVars: HashMap<String, String>,
-    pythonIncludes: Vec<String>,
-    pythonExec: String,
-    pythonVer: String,
-    broadcastVars: Vec<Broadcast>,
+    env_vars: HashMap<String, String>,
+    python_includes: Vec<String>,
+    python_exec: String,
+    python_ver: String,
+    broadcast_vars: Vec<Broadcast>,
     accumulator: PythonAccumulatorV2,
 }
 
 impl SimplePythonFunction {
     pub fn new(
         command: Vec<u8>,
-        envVars: HashMap<String, String>,
-        pythonIncludes: Vec<String>,
-        pythonExec: String,
-        pythonVer: String,
-        broadcastVars: Vec<Broadcast>,
+        env_vars: HashMap<String, String>,
+        python_includes: Vec<String>,
+        python_exec: String,
+        python_ver: String,
+        broadcast_vars: Vec<Broadcast>,
         accumulator: PythonAccumulatorV2,
     ) -> Self {
         Self {
             command,
-            envVars,
-            pythonIncludes,
-            pythonExec,
-            pythonVer,
-            broadcastVars,
+            env_vars,
+            python_includes,
+            python_exec,
+            python_ver,
+            broadcast_vars,
             accumulator,
         }
     }

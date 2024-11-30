@@ -2,21 +2,20 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::serialized_data_capnp::serialized_data;
 use crate::{Error, NetworkError, Result};
-use capnp::message::{Builder as MsgBuilder, ReaderOptions};
-use capnp_futures::serialize as capnp_serialize;
+// use crate::serialized_data_capnp::serialized_data;
+// use capnp::message::{Builder as MsgBuilder, ReaderOptions};
+// use capnp_futures::serialize as capnp_serialize;
 use dashmap::{DashMap, DashSet};
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_stream::StreamExt;
 
-
-const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
-    traversal_limit_in_words: std::u64::MAX,
-    nesting_limit: 64,
-};
+// const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
+//     traversal_limit_in_words: Some(std::usize::MAX),
+//     nesting_limit: 64,
+// };
 
 pub(crate) enum MapOutputTrackerMessage {
     // Contains shuffle_id
@@ -71,22 +70,29 @@ impl MapOutputTracker {
             }
         };
         let (reader, writer) = stream.split();
-        let reader = reader.compat();
-        let mut writer = writer.compat_write();
+        
+        // let reader = reader.compat();
+        // let mut writer = writer.compat_write();
+        
         log::debug!(
             "connected to master to fetch shuffle task #{} data hosts",
             shuffle_id
         );
         let shuffle_id_bytes = bincode::serialize(&shuffle_id)?;
-        let mut message = MsgBuilder::new_default();
-        let mut shuffle_data = message.init_root::<serialized_data::Builder>();
-        shuffle_data.set_msg(&shuffle_id_bytes);
-        capnp_serialize::write_message(&mut writer, &message).await?;
-        let message_reader = capnp_serialize::read_message(reader, CAPNP_BUF_READ_OPTS)
-            .await?
-            .ok_or_else(|| NetworkError::NoMessageReceived)?;
-        let shuffle_data = message_reader.get_root::<serialized_data::Reader>()?;
-        let locs: Vec<String> = bincode::deserialize(&shuffle_data.get_msg()?)?;
+        
+        // TODO: Use rkyv to read and write message 
+        
+        // let mut message = MsgBuilder::new_default();
+        // let mut shuffle_data = message.init_root::<serialized_data::Builder>();
+        // shuffle_data.set_msg(&shuffle_id_bytes);
+        // capnp_serialize::write_message(&mut writer, &message).await?;
+        // let message_reader = capnp_serialize::read_message(reader, CAPNP_BUF_READ_OPTS)
+        //     .await?
+        //     .ok_or_else(|| NetworkError::NoMessageReceived)?;
+        // let shuffle_data = message_reader.get_root::<serialized_data::Reader>()?;
+        // let locs: Vec<String> = bincode::deserialize(&shuffle_data.get_msg()?)?;
+
+        let locs: Vec<String> = vec![];
         Ok(locs)
     }
 
@@ -107,17 +113,21 @@ impl MapOutputTracker {
                 let server_uris_clone: Arc<ServerURIsMap> = server_uris.clone();
                 tokio::spawn(async move {
                     let (reader, writer) = stream.split();
-                    let reader = reader.compat();
-                    let writer = writer.compat_write();
+                    // let reader = reader.compat();
+                    // let writer = writer.compat_write();
 
+                    // TODO: Read messages from serialized buffer
                     // reading
-                    let message_reader = capnp_serialize::read_message(reader, CAPNP_BUF_READ_OPTS)
-                        .await?
-                        .ok_or_else(|| NetworkError::NoMessageReceived)?;
-                    let shuffle_id = {
-                        let data = message_reader.get_root::<serialized_data::Reader>()?;
-                        bincode::deserialize(data.get_msg()?)?
-                    };
+                    // let message_reader = capnp_serialize::read_message(reader, CAPNP_BUF_READ_OPTS)
+                    //     .await?
+                    //     .ok_or_else(|| NetworkError::NoMessageReceived)?;
+                    // let shuffle_id = {
+                    //     let data = message_reader.get_root::<serialized_data::Reader>()?;
+                    //     bincode::deserialize(data.get_msg()?)?
+                    // };
+
+                    let shuffle_id: usize = 0;
+
                     while server_uris_clone
                         .get(&shuffle_id)
                         .ok_or_else(|| MapOutputError::ShuffleIdNotFound(shuffle_id))?
@@ -147,14 +157,17 @@ impl MapOutputTracker {
 
                     // writting response
                     let result = bincode::serialize(&locs)?;
-                    let mut message = MsgBuilder::new_default();
-                    let mut locs_data = message.init_root::<serialized_data::Builder>();
-                    locs_data.set_msg(&result);
+                    // let mut message = MsgBuilder::new_default();
+                    // let mut locs_data = message.init_root::<serialized_data::Builder>();
+                    // locs_data.set_msg(&result);
+                    
                     // TODO: remove blocking call when possible
-                    futures::executor::block_on(async {
-                        capnp_futures::serialize::write_message(writer, message)
-                            .await
-                            .map_err(Error::CapnpDeserialization)?;
+                    tokio::task::spawn_blocking(async {
+                        // capnp_futures::serialize::write_message(writer, message)
+                        //     .await
+                        //     .map_err(Error::CapnpDeserialization)?;
+
+                        // TODO: Write message to writer
                         Ok::<_, Error>(())
                     })?;
                     Ok::<_, Error>(())

@@ -1,19 +1,19 @@
 
-mod serde_serialization;
-
 use chrono::prelude::*;
 use atomic::io::*;
 use atomic::*;
+use serde_closure::{traits::Fn, Fn};
 
 fn main() -> Result<()> {
     
     let context = Context::new()?;
+
     let deserializer = Fn!(|file: Vec<u8>| {
         String::from_utf8(file)
             .unwrap()
             .lines()
             .map(|s| s.to_string())
-            .collect::<Vec<_>>()
+            .collect::<Vec<String>>()
     });
 
     let lines = context.read_source(LocalFsReaderConfig::new("./csv_folder"), deserializer);
@@ -31,6 +31,7 @@ fn main() -> Result<()> {
         });
         Box::new(iter) as Box<dyn Iterator<Item = _>>
     }));
+    
     let sum = line.reduce_by_key(Fn!(|((vl, cl), (vr, cr))| (vl + vr, cl + cr)), 1);
     let avg = sum.map(Fn!(|(k, (v, c))| (k, v as f64 / c)));
     let res = avg.collect().unwrap();

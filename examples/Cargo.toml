@@ -1,12 +1,14 @@
 [package]
-name = "atomic-compute-example"
+name = "examples"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-arrow = "49.0.0"
-parquet = "49.0.0"
-itertools = "0.12.0"
+arrow = { workspace = true }
+parquet = { workspace = true }
+itertools = { workspace = true }
+atomic = { path = "../core" }
+serde_closure = { workspace = true }
 
 
 [[bin]]

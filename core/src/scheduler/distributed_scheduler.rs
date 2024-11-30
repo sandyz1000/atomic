@@ -2,7 +2,7 @@ use std::collections::{btree_set::BTreeSet, vec_deque::VecDeque, HashMap, HashSe
 use std::iter::FromIterator;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::dependency::ShuffleDependencyTrait;
@@ -24,21 +24,20 @@ use crate::scheduler::{
     TaskResult, 
     TastEndReason,
 };
-use crate::serializable_traits::{AnyData, Data};
-use crate::serialized_data_capnp::serialized_data;
+use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::shuffle::ShuffleMapTask;
-use capnp::message::ReaderOptions;
-use capnp_futures::serialize as capnp_serialize;
+// use capnp::message::ReaderOptions;
+// use crate::serialized_data_capnp::serialized_data;
+// use capnp_futures::serialize as capnp_serialize;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use core::ops::Fn as SerFunc;
 
-const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
-    traversal_limit_in_words: std::u64::MAX,
-    nesting_limit: 64,
-};
+// const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
+//     traversal_limit_in_words: std::u64::MAX,
+//     nesting_limit: 64,
+// };
 
 // Just for now, creating an entire scheduler functions without dag scheduler trait.
 // Later change it to extend from dag scheduler.
@@ -127,23 +126,25 @@ impl DistributedScheduler {
         task: TaskOption,
         target_port: u16,
     ) where
-        F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
         R: futures::AsyncRead + std::marker::Unpin,
     {
         let result: TaskResult = {
-            let message = capnp_futures::serialize::read_message(receiver, CAPNP_BUF_READ_OPTS)
-                .await
-                .unwrap()
-                .ok_or_else(|| NetworkError::NoMessageReceived)
-                .unwrap();
-            let task_data = message.get_root::<serialized_data::Reader>().unwrap();
+            // let message = capnp_futures::serialize::read_message(receiver, CAPNP_BUF_READ_OPTS)
+            //     .await
+            //     .unwrap()
+            //     .ok_or_else(|| NetworkError::NoMessageReceived)
+            //     .unwrap();
+            // let task_data = message.get_root::<serialized_data::Reader>().unwrap();
+            let task_data: String = String::new();
             log::debug!(
                 "received task #{} result of {} bytes from executor @{}",
                 task.get_task_id(),
-                task_data.get_msg().unwrap().len(),
+                task_data,
                 target_port
             );
-            bincode::deserialize(&task_data.get_msg().unwrap()).unwrap()
+            // bincode::deserialize(&task_data.get_msg().unwrap()).unwrap()
+            bincode::deserialize(&task_data).unwrap()
         };
 
         match task {
@@ -205,6 +206,25 @@ impl DistributedScheduler {
 
 #[async_trait::async_trait]
 impl NativeScheduler for DistributedScheduler {
+    #[inline]
+    fn get_event_queue(&self) -> &Arc<DashMap<usize, VecDeque<CompletionEvent>>> {
+        &self.event_queues
+    }
+
+    #[inline]
+    fn get_next_job_id(&self) -> usize {
+        self.next_job_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    #[inline]
+    fn get_next_stage_id(&self) -> usize {
+        self.next_stage_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    #[inline]
+    fn get_next_task_id(&self) -> usize {
+        self.next_task_id.fetch_add(1, Ordering::SeqCst)
+    }
     /// This function is used to submit a task to remote executor 
     fn submit_task<T: Data, U: Data, F>(
         &self,
@@ -212,7 +232,7 @@ impl NativeScheduler for DistributedScheduler {
         _id_in_job: usize,
         target_executor: SocketAddrV4,
     ) where
-        F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
     {
         if !env::Configuration::get().is_driver {
             return;
@@ -226,8 +246,8 @@ impl NativeScheduler for DistributedScheduler {
                 match TcpStream::connect(&target_executor).await {
                     Ok(mut stream) => {
                         let (reader, writer) = stream.split();
-                        let reader = reader.compat();
-                        let writer = writer.compat_write();
+                        // let reader = reader.compat();
+                        // let writer = writer.compat_write();
                         let task_bytes = bincode::serialize(&task).unwrap();
                         log::debug!(
                             "sending task #{} of {} bytes to exec @{},",
@@ -237,15 +257,17 @@ impl NativeScheduler for DistributedScheduler {
                         );
 
                         // TODO: remove blocking call when possible
-                        futures::executor::block_on(async {
-                            let mut message = capnp::message::Builder::new_default();
-                            let mut task_data = message.init_root::<serialized_data::Builder>();
-                            task_data.set_msg(&task_bytes);
-                            capnp_serialize::write_message(writer, message)
-                                .await
-                                .map_err(Error::CapnpDeserialization)
-                                .unwrap();
-                        });
+                        // tokio::task::spawn_blocking(async {
+                        //     let mut message = capnp::message::Builder::new_default();
+                        //     let mut task_data = message.init_root::<serialized_data::Builder>();
+                        //     task_data.set_msg(&task_bytes);
+                        //     capnp_serialize::write_message(writer, message)
+                        //         .await
+                        //         .map_err(Error::CapnpDeserialization)
+                        //         .unwrap();
+                            
+                        // });
+                        // TODO: Serialized `task_bytes` and write `task_bytes` to writer
 
                         log::debug!("sent data to exec @{}", target_executor.port());
 

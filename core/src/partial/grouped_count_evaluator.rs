@@ -5,7 +5,7 @@ use crate::partial::{
     approximate_evaluator::ApproximateEvaluator, bounded_double::BoundedDouble,
     count_evaluator::bound,
 };
-use crate::serializable_traits::Data;
+use crate::ser_data::Data;
 
 /// An ApproximateEvaluator for counts by key. Returns a map of key to confidence interval.
 pub(crate) struct GroupedCountEvaluator<T>

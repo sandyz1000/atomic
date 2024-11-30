@@ -3,12 +3,11 @@ use std::convert::TryFrom;
 use std::sync::{atomic, atomic::AtomicBool, Arc};
 
 use crate::env;
-use crate::serializable_traits::Data;
+use crate::ser_data::Data;
 use crate::shuffle::*;
 use futures::future;
 // TODO: Fix import
-use hyper::Uri;
-use hyper::Request;
+use http::Uri;
 use tokio::sync::Mutex;
 
 /// Parallel shuffle fetcher.
@@ -60,16 +59,9 @@ impl ShuffleFetcher {
             let server_queue = server_queue.clone();
             let failure = failure.clone();
             // spawn a future for each expected result set
-            // TODO: Fix hyper client here
             let task = async move {
-                // Fix hyper client builder here
-                // let req = Request::builder()
-                //     .uri(url)
-                //     .header(hyper::header::HOST, authority.as_str())
-                //     .body(Empty::<Bytes>::new())?;
-                // let
 
-                let client = Client::builder().http2_only(true).build_http::<Body>();
+                // let client = Client::builder().http2_only(true).build_http::<Body>();
                 let mut lock = server_queue.lock().await;
                 if let Some((server_uri, input_ids)) = lock.pop() {
                     let server_uri = format!("{}/shuffle/{}", server_uri, shuffle_id);
@@ -82,15 +74,16 @@ impl ShuffleFetcher {
                             return Err(ShuffleError::Other);
                         }
                         log::debug!("inside parallel fetch {}", input_id);
-                        let chunk_uri = ShuffleFetcher::make_chunk_uri(
+                        let chunk_uri: Uri = ShuffleFetcher::make_chunk_uri(
                             &server_uri,
                             &mut chunk_uri_str,
                             input_id,
                             reduce_id,
                         )?;
+                        
                         let data_bytes = {
-                            let res = client.get(chunk_uri).await?;
-                            hyper::body::to_bytes(res.into_body()).await
+                            // let res = client.get(chunk_uri).await?;
+                            // hyper::body::to_bytes(res.into_body()).await
                         };
                         if let Ok(bytes) = data_bytes {
                             let deser_data = bincode::deserialize::<Vec<(K, V)>>(&bytes.to_vec())?;

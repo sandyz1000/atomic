@@ -1,5 +1,5 @@
 use crate::rdd::rdd::Rdd;
-use crate::serializable_traits::Data;
+use crate::ser_data::Data;
 
 #[macro_use]
 mod base_scheduler;

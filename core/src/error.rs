@@ -35,8 +35,8 @@ pub enum Error {
     #[error(transparent)]
     BincodeDeserialization(#[from] bincode::Error),
 
-    #[error(transparent)]
-    CapnpDeserialization(#[from] capnp::Error),
+    // #[error(transparent)]
+    // CapnpDeserialization(#[from] capnp::Error),
 
     #[error("failure while downcasting an object to a concrete type: {0}")]
     DowncastFailure(&'static str),

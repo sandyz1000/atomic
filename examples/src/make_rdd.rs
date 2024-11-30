@@ -1,6 +1,6 @@
 mod serializer_example;
-
 pub(crate) use atomic::*;
+use serde_closure::{traits::Fn, Fn};
 
 fn main() -> Result<()> {
     let sc = Context::new()?;

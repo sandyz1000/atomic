@@ -6,7 +6,7 @@ use crate::dependency::ShuffleDependencyTrait;
 use crate::env;
 use crate::rdd::rdd::RddBase;
 use crate::scheduler::{Task, TaskBase};
-use crate::serializable_traits::AnyData;
+use crate::ser_data::AnyData;
 use crate::shuffle::*;
 use serde_derive::{Deserialize, Serialize};
 

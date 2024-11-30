@@ -1,4 +1,4 @@
-use crate::serializable_traits::Data;
+use crate::ser_data::Data;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::BinaryHeap;
 /// Bounded priority queue. This struct wraps the original BinaryHeap

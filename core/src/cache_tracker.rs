@@ -8,22 +8,21 @@ use std::time;
 use crate::cache::{BoundedMemoryCache, CachePutResponse, KeySpace};
 use crate::env;
 use crate::rdd::rdd::Rdd;
-use crate::serializable_traits::Data;
-use crate::serialized_data_capnp::serialized_data;
+use crate::ser_data::Data;
+// use crate::serialized_data_capnp::serialized_data;
 use crate::split::Split;
 use crate::{Error, NetworkError, Result};
-use capnp::message::ReaderOptions;
-use capnp_futures::serialize as capnp_serialize;
+// use capnp::message::ReaderOptions;
+// use capnp_futures::serialize as capnp_serialize;
 use dashmap::{DashMap, DashSet};
-use serde_derive::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_stream::StreamExt;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
-const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
-    traversal_limit_in_words: Some(std::usize::MAX),
-    nesting_limit: 64,
-};
+// const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
+//     traversal_limit_in_words: Some(std::usize::MAX),
+//     nesting_limit: 64,
+// };
 
 /// Cache tracker works by creating a server in master node and slave nodes acting as clients.
 // #[derive(Serialize, Deserialize)]
@@ -124,18 +123,24 @@ impl CacheTracker {
             // Due to current limitations w/ capnp_futures not being Send we use the normal
             // sync Write version here to avoid spawning a second thread to run the future to completion
             let shuffle_id_bytes = bincode::serialize(&message)?;
-            let mut message = capnp::message::Builder::new_default();
-            let mut shuffle_data = message.init_root::<serialized_data::Builder>();
-            shuffle_data.set_msg(&shuffle_id_bytes);
-            capnp::serialize::write_message(&mut stream, &message).map_err(Error::OutputWrite)?;
+            
+            // TODO: FixMe - Rkvy for serialization
+            // let mut message = capnp::message::Builder::new_default();
+            // let mut shuffle_data = message.init_root::<serialized_data::Builder>();
+            // shuffle_data.set_msg(&shuffle_id_bytes);
+            // capnp::serialize::write_message(&mut stream, &message).map_err(Error::OutputWrite)?;
+
         }
 
-        let message_reader = capnp_serialize::read_message(stream, CAPNP_BUF_READ_OPTS)
-            .await?
-            .ok_or_else(|| NetworkError::NoMessageReceived)?;
-        // TODO: Look for the get_root method in capnp_serialize
-        let shuffle_data = message_reader.get_root::<serialized_data::Reader>()?;
-        let reply: CacheTrackerMessageReply = bincode::deserialize(&shuffle_data.get_msg()?)?;
+        // let message_reader = capnp_serialize::read_message(stream, CAPNP_BUF_READ_OPTS)
+        //     .await?
+        //     .ok_or_else(|| NetworkError::NoMessageReceived)?;
+        // // TODO: Look for the get_root method in capnp_serialize
+        // let shuffle_data = message_reader.get_root::<serialized_data::Reader>()?;
+        // let reply: CacheTrackerMessageReply = bincode::deserialize(&shuffle_data.get_msg()?)?;
+        
+        let shuffle_data = String::new();
+        let reply: CacheTrackerMessageReply = bincode::deserialize(&shuffle_data)?;
         Ok(reply)
     }
 
@@ -162,23 +167,28 @@ impl CacheTracker {
                     let writer = writer.compat_write();
 
                     //reading
-                    let message_reader = capnp_serialize::read_message(reader, CAPNP_BUF_READ_OPTS)
-                        .await?
-                        .ok_or_else(|| NetworkError::NoMessageReceived)?;
-                    let data = message_reader.get_root::<serialized_data::Reader>()?;
-                    let message: CacheTrackerMessage = bincode::deserialize(data.get_msg()?)?;
+                    // let message_reader = capnp_serialize::read_message(reader, CAPNP_BUF_READ_OPTS)
+                    //     .await?
+                    //     .ok_or_else(|| NetworkError::NoMessageReceived)?;
+                    // let data = message_reader.get_root::<serialized_data::Reader>()?;
+                    // let message: CacheTrackerMessage = bincode::deserialize(data.get_msg()?)?;
+
+                    let data:&[u8] = "".as_bytes();
+                    let message: CacheTrackerMessage = bincode::deserialize(data)?;
 
                     // send reply
                     let reply = this.process_message(message);
                     let result = bincode::serialize(&reply)?;
-                    let mut message = capnp::message::Builder::new_default();
-                    let mut locs_data = message.init_root::<serialized_data::Builder>();
-                    locs_data.set_msg(&result);
-                    // TODO: remove blocking call when possible
-                    futures::executor::block_on(async {
-                        capnp_serialize::write_message(writer, message).await?;
-                        Ok::<_, Error>(())
-                    })?;
+                    
+                    // TODO: FixMe - Use rkvy for serialize data and write to `writer`
+                    // let mut message = capnp::message::Builder::new_default();
+                    // let mut locs_data = message.init_root::<serialized_data::Builder>();
+                    // locs_data.set_msg(&result);
+                    // // TODO: remove blocking call when possible
+                    // futures::executor::block_on(async {
+                    //     capnp_serialize::write_message(writer, message).await?;
+                    //     Ok::<_, Error>(())
+                    // })?;
 
                     Ok::<_, Error>(())
                 });

@@ -1,8 +1,8 @@
 use crate::aggregator::Aggregator;
-use crate::env;
 use crate::partitioner::Partitioner;
 use crate::rdd::rdd::RddBase;
-use crate::serializable_traits::Data;
+use crate::ser_data::{Data, SerFunc};
+use crate::{env, Rdd};
 use serde_derive::{Deserialize, Serialize};
 // TODO: Fix import here
 use std::cmp::Ordering;
@@ -10,44 +10,44 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
-// Revise if enum is good choice. Considering enum since down casting one trait 
+// Revise if enum is good choice. Considering enum since down casting one trait
 // object to another trait object is difficult.
-#[derive(Clone, Serialize, Deserialize)]
-pub enum Dependency {
-    NarrowDependency(Arc<dyn NarrowDependencyTrait>),
-    ShuffleDependency(Arc<dyn ShuffleDependencyTrait>),
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub enum Dependency<ND, SD> {
+    NarrowDependency(Arc<ND>),
+    ShuffleDependency(Arc<SD>),
 }
 
 pub trait NarrowDependencyTrait: Send + Sync {
     fn get_parents(&self, partition_id: usize) -> Vec<usize>;
-    fn get_rdd_base(&self) -> Arc<dyn RddBase>;
+    fn get_rdd_base(&self) -> Arc<impl RddBase>;
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct OneToOneDependency {
-    rdd_base: Arc<dyn RddBase>,
+pub struct OneToOneDependency<RDD> {
+    rdd_base: Arc<RDD>,
 }
 
-impl OneToOneDependency {
-    pub fn new(rdd_base: Arc<dyn RddBase>) -> Self {
+impl<RDD: RddBase> OneToOneDependency<RDD> {
+    pub fn new(rdd_base: Arc<RDD>) -> Self {
         OneToOneDependency { rdd_base }
     }
 }
 
-impl NarrowDependencyTrait for OneToOneDependency {
+impl<RDD: RddBase> NarrowDependencyTrait for OneToOneDependency<RDD> {
     fn get_parents(&self, partition_id: usize) -> Vec<usize> {
         vec![partition_id]
     }
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+    fn get_rdd_base(&self) -> Arc<impl RddBase> {
         self.rdd_base.clone()
     }
 }
 
 /// Represents a one-to-one dependency between ranges of partitions in the parent and child RDDs.
 #[derive(Serialize, Deserialize, Clone)]
-pub struct RangeDependency {
-    rdd_base: Arc<dyn RddBase>,
+pub struct RangeDependency<RDD> {
+    rdd_base: Arc<RDD>,
     /// the start of the range in the child RDD
     out_start: usize,
     /// the start of the range in the parent RDD
@@ -56,13 +56,8 @@ pub struct RangeDependency {
     length: usize,
 }
 
-impl RangeDependency {
-    pub fn new(
-        rdd_base: Arc<dyn RddBase>,
-        in_start: usize,
-        out_start: usize,
-        length: usize,
-    ) -> Self {
+impl<RDD: RddBase> RangeDependency<RDD> {
+    pub fn new(rdd_base: Arc<RDD>, in_start: usize, out_start: usize, length: usize) -> Self {
         RangeDependency {
             rdd_base,
             in_start,
@@ -72,7 +67,7 @@ impl RangeDependency {
     }
 }
 
-impl NarrowDependencyTrait for RangeDependency {
+impl<RDD: RddBase> NarrowDependencyTrait for RangeDependency<RDD> {
     fn get_parents(&self, partition_id: usize) -> Vec<usize> {
         if partition_id >= self.out_start && partition_id < self.out_start + self.length {
             vec![partition_id - self.out_start + self.in_start]
@@ -81,57 +76,62 @@ impl NarrowDependencyTrait for RangeDependency {
         }
     }
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+    fn get_rdd_base(&self) -> Arc<impl RddBase> {
         self.rdd_base.clone()
     }
 }
 
 pub trait ShuffleDependencyTrait: Send + Sync {
     fn get_shuffle_id(&self) -> usize;
-    fn get_rdd_base(&self) -> Arc<dyn RddBase>;
+    fn get_rdd_base(&self) -> Arc<impl RddBase>;
     fn is_shuffle(&self) -> bool;
-    fn do_shuffle_task(&self, rdd_base: Arc<dyn RddBase>, partition: usize) -> String;
+    fn do_shuffle_task(&self, rdd_base: Arc<impl RddBase>, partition: usize) -> String;
 }
 
-impl PartialOrd for dyn ShuffleDependencyTrait {
-    fn partial_cmp(&self, other: &dyn ShuffleDependencyTrait) -> Option<Ordering> {
-        Some(self.get_shuffle_id().cmp(&other.get_shuffle_id()))
-    }
-}
+// impl PartialOrd for dyn ShuffleDependencyTrait {
+//     fn partial_cmp(&self, other: &dyn ShuffleDependencyTrait) -> Option<Ordering> {
+//         Some(self.get_shuffle_id().cmp(&other.get_shuffle_id()))
+//     }
+// }
 
-impl PartialEq for dyn ShuffleDependencyTrait {
-    fn eq(&self, other: &dyn ShuffleDependencyTrait) -> bool {
-        self.get_shuffle_id() == other.get_shuffle_id()
-    }
-}
+// impl PartialEq for dyn ShuffleDependencyTrait {
+//     fn eq(&self, other: &dyn ShuffleDependencyTrait) -> bool {
+//         self.get_shuffle_id() == other.get_shuffle_id()
+//     }
+// }
 
-impl Eq for dyn ShuffleDependencyTrait {}
+// impl Eq for dyn ShuffleDependencyTrait {}
 
-impl Ord for dyn ShuffleDependencyTrait {
-    fn cmp(&self, other: &dyn ShuffleDependencyTrait) -> Ordering {
-        self.get_shuffle_id().cmp(&other.get_shuffle_id())
-    }
-}
+// impl Ord for dyn ShuffleDependencyTrait {
+//     fn cmp(&self, other: &dyn ShuffleDependencyTrait) -> Ordering {
+//         self.get_shuffle_id().cmp(&other.get_shuffle_id())
+//     }
+// }
 
-
-// #[derive(Serialize, Deserialize)]
-#[derive(Debug, Clone)]
-pub struct ShuffleDependency<K: Data, V: Data, C: Data> {
+#[derive(Debug, Clone, Serialize)]
+pub struct ShuffleDependency<K: Data, V: Data, C: Data, RDD, PR, F1, F2, F3> {
     pub shuffle_id: usize,
     pub is_cogroup: bool,
-    pub rdd_base: Arc<dyn RddBase>,  // this need to serializable
-    pub aggregator: Arc<Aggregator<K, V, C>>,  // this need to serializable
-    pub partitioner: Box<dyn Partitioner>,  // this need to serializable
+    pub rdd_base: Arc<RDD>, // this need to serializable
+    pub aggregator: Arc<Aggregator<K, V, C, F1, F2, F3>>, // this need to serializable
+    pub partitioner: Box<PR>, // this need to serializable
     is_shuffle: bool,
 }
 
-impl<K: Data, V: Data, C: Data> ShuffleDependency<K, V, C> {
+impl<K: Data, V: Data, C: Data, RDD, PR, F1, F2, F3> ShuffleDependency<K, V, C, RDD, PR, F1, F2, F3>
+where
+    RDD: RddBase,
+    PR: Partitioner,
+    F1: SerFunc<V, Output = C>,
+    F2: SerFunc<(C, V), Output = C>,
+    F3: SerFunc<(C, C), Output = C>,
+{
     pub fn new(
         shuffle_id: usize,
         is_cogroup: bool,
-        rdd_base: Arc<dyn RddBase>,
-        aggregator: Arc<Aggregator<K, V, C>>,
-        partitioner: Box<dyn Partitioner>,
+        rdd_base: Arc<RDD>,
+        aggregator: Arc<Aggregator<K, V, C, F1, F2, F3>>,
+        partitioner: Box<PR>,
     ) -> Self {
         ShuffleDependency {
             shuffle_id,
@@ -144,7 +144,18 @@ impl<K: Data, V: Data, C: Data> ShuffleDependency<K, V, C> {
     }
 }
 
-impl<K: Data + Eq + Hash, V: Data, C: Data> ShuffleDependencyTrait for ShuffleDependency<K, V, C> {
+impl<K, V, C, RDD, PR, F1, F2, F3> ShuffleDependencyTrait
+    for ShuffleDependency<K, V, C, RDD, PR, F1, F2, F3>
+where
+    K: Data + Eq + Hash,
+    V: Data,
+    C: Data,
+    RDD: RddBase,
+    PR: Partitioner,
+    F1: SerFunc<V, Output = C>,
+    F2: SerFunc<(C, V), Output = C>,
+    F3: SerFunc<(C, C), Output = C>,
+{
     fn get_shuffle_id(&self) -> usize {
         self.shuffle_id
     }
@@ -153,26 +164,26 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> ShuffleDependencyTrait for ShuffleDe
         self.is_shuffle
     }
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+    fn get_rdd_base(&self) -> Arc<impl RddBase> {
         self.rdd_base.clone()
     }
 
     /// NOTE: This is the actual task that run
-    /// The function is a method that performs a Shuffle task. It takes an RDD object and a partition 
+    /// The function is a method that performs a Shuffle task. It takes an RDD object and a partition
     /// index as parameters and returns a string representing the server URI for the Shuffle task.
     ///
-    /// The method first retrieves the specified partition's Split from the RDD. Then it iterates over 
-    /// all the elements in that Split and uses the Partitioner to get the corresponding Bucket ID based 
+    /// The method first retrieves the specified partition's Split from the RDD. Then it iterates over
+    /// all the elements in that Split and uses the Partitioner to get the corresponding Bucket ID based
     /// on the key-value pair's key.
-    /// Next, the method adds the key-value pair to the respective Bucket. If the key already exists in 
-    /// the Bucket, it calls the merge_value method of the Aggregator to merge the new value with the old 
+    /// Next, the method adds the key-value pair to the respective Bucket. If the key already exists in
+    /// the Bucket, it calls the merge_value method of the Aggregator to merge the new value with the old
     //// value. Otherwise, it calls the create_combiner method to create a new combiner.
     ///
-    /// Finally, the method serializes the key-value pairs in each Bucket into byte arrays and stores them 
-    /// in the SHUFFLE_CACHE environment variable. The key is a tuple of Shuffle ID, partition index, and 
+    /// Finally, the method serializes the key-value pairs in each Bucket into byte arrays and stores them
+    /// in the SHUFFLE_CACHE environment variable. The key is a tuple of Shuffle ID, partition index, and
     /// Bucket ID, and the value is the byte array.
     ///
-    /// The method returns the server URI for the Shuffle task so that the client can send requests to it 
+    /// The method returns the server URI for the Shuffle task so that the client can send requests to it
     /// to retrieve Shuffle data.
     ///
     /// Here is an example usage of the function in Rust:
@@ -192,7 +203,7 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> ShuffleDependencyTrait for ShuffleDe
     /// // execute the shuffle map task for partition 0
     /// let server_uri = shuffle_map_task.do_shuffle_task(Arc::new(rdd), 0);
     /// ```
-    fn do_shuffle_task(&self, rdd_base: Arc<dyn RddBase>, partition: usize) -> String {
+    fn do_shuffle_task(&self, rdd_base: Arc<RDD>, partition: usize) -> String {
         log::debug!(
             "executing shuffle task #{} for partition #{}",
             self.shuffle_id,

@@ -5,11 +5,9 @@ use crate::context::Context;
 use crate::dependency::{Dependency, OneToOneDependency};
 use crate::error::Result;
 use crate::rdd::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::{AnyData, Data};
-use core::ops::Fn as SerFunc;
-// use crate::serializable_traits::SerFunc;
+use crate::ser_data::{AnyData, Data};
+use crate::ser_data::SerFunc;
 use crate::split::Split;
-use serde_derive::{Deserialize, Serialize};
 
 // #[derive(Serialize, Deserialize)]
 pub struct FlatMapperRdd<T: Data, U: Data, F> {
@@ -35,7 +33,7 @@ where
 
 impl<T: Data, U: Data, F> FlatMapperRdd<T, U, F>
 where
-    F: SerFunc(T) -> Box<dyn Iterator<Item = U>>,
+    F: SerFunc<T, Output = Box<dyn Iterator<Item = U>>>,
 {
     pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
         let mut vals: RddVals = RddVals::new(prev.get_context());
@@ -55,7 +53,7 @@ where
 
 impl<T: Data, U: Data, F> RddBase for FlatMapperRdd<T, U, F>
 where
-    F: SerFunc(T) -> Box<dyn Iterator<Item = U>>,
+    F: SerFunc<T, Output = Box<dyn Iterator<Item = U>>>,
 {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
@@ -113,7 +111,7 @@ where
 
 impl<T: Data, U: Data, F: 'static> Rdd for FlatMapperRdd<T, U, F>
 where
-    F: SerFunc(T) -> Box<dyn Iterator<Item = U>>,
+    F: SerFunc<T, Output = Box<dyn Iterator<Item = U>>>,
 {
     type Item = U;
     fn get_rdd_base(&self) -> Arc<dyn RddBase> {

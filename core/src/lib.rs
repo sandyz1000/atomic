@@ -9,12 +9,13 @@
 //     unsize,
 //     binary_heap_into_iter_sorted
 // )]
-#![allow(dead_code, where_clauses_object_safety, deprecated)]
+#![allow(dead_code, deprecated)]
 #![allow(clippy::single_component_path_imports)]
 
 // TODO: Fix output path
 mod serialized_data_capnp {
-    include!(concat!(env!("OUT_DIR"), "/capnp/serialized_data_capnp.rs"));
+    // include!(concat!(env!("OUT_DIR"), "./capnp/serialized_data_capnp.rs"));
+    // include!("capnp/serialized_data_capnp.rs");
 }
 
 mod aggregator;
@@ -34,11 +35,12 @@ mod scheduler;
 mod shuffle;
 mod split;
 // pub mod serializers;
+mod ser_data;
 mod error;
 pub mod fs;
 mod hosts;
 mod utils;
-pub mod serializable_traits;
+// pub mod serializable_traits;
 // Import global external types and macros:
 // pub use serde_closure::Fn;
 

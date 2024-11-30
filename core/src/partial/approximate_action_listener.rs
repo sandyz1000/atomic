@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::partial::*;
 use crate::scheduler::JobListener;
-use crate::serializable_traits::AnyData;
+use crate::ser_data::AnyData;
 use crate::{Error, Result};
 use tokio::sync::Mutex;
 

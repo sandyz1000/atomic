@@ -1,28 +1,34 @@
 use crate::context::Context;
-use crate::dependency::{Dependency, OneToOneDependency};
+use crate::dependency::{Dependency, NarrowDependencyTrait, OneToOneDependency, ShuffleDependencyTrait};
 use crate::error::Result;
 use crate::partitioner::Partitioner;
 use crate::rdd::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::{AnyData, Data};
+use crate::ser_data::{AnyData, Data};
 use crate::split::Split;
 use crate::utils::random::RandomSampler;
 use serde_derive::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-// #[derive(Serialize, Deserialize)]
-pub struct PartitionwiseSampledRdd<T: Data> {
-    prev: Arc<dyn Rdd<Item = T>>,
-    vals: Arc<RddVals>,
-    sampler: Arc<dyn RandomSampler<T>>,
+#[derive(Serialize, Deserialize)]
+pub struct PartitionwiseSampledRdd<T: Data, RDD, ND, SD, RS> {
+    prev: Arc<RDD>,
+    vals: Arc<RddVals<ND, SD>>,
+    sampler: Arc<RS>,
     preserves_partitioning: bool,
     _marker_t: PhantomData<T>,
 }
 
-impl<T: Data> PartitionwiseSampledRdd<T> {
+impl<T: Data, RDD, ND, SD, RS> PartitionwiseSampledRdd<T, RDD, ND, SD, RS> 
+where 
+    RDD: Rdd<Item = T>,
+    RS: RandomSampler<T>,
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait,
+{
     pub(crate) fn new(
-        prev: Arc<dyn Rdd<Item = T>>,
-        sampler: Arc<dyn RandomSampler<T>>,
+        prev: Arc<RDD>,
+        sampler: Arc<RS>,
         preserves_partitioning: bool,
     ) -> Self {
         let mut vals = RddVals::new(prev.get_context());
@@ -42,7 +48,14 @@ impl<T: Data> PartitionwiseSampledRdd<T> {
     }
 }
 
-impl<T: Data> Clone for PartitionwiseSampledRdd<T> {
+impl<T, RDD, ND, SD, RS> Clone for PartitionwiseSampledRdd<T, RDD, ND, SD, RS> 
+where 
+    T: Data,
+    RDD: Rdd<Item = T>,
+    RS: RandomSampler<T>,
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait,
+{
     fn clone(&self) -> Self {
         PartitionwiseSampledRdd {
             prev: self.prev.clone(),
@@ -54,7 +67,14 @@ impl<T: Data> Clone for PartitionwiseSampledRdd<T> {
     }
 }
 
-impl<T: Data> RddBase for PartitionwiseSampledRdd<T> {
+impl<T, RDD, ND, SD, RS> RddBase for PartitionwiseSampledRdd<T, RDD, ND, SD, RS> 
+where 
+    T: Data,
+    RDD: Rdd<Item = T>,
+    RS: RandomSampler<T>,
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait,
+{
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -63,11 +83,11 @@ impl<T: Data> RddBase for PartitionwiseSampledRdd<T> {
         self.vals.context.upgrade().unwrap()
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency> {
+    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
         self.vals.dependencies.clone()
     }
 
-    fn splits(&self) -> Vec<Box<dyn Split>> {
+    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
         self.prev.splits()
     }
 
@@ -75,7 +95,7 @@ impl<T: Data> RddBase for PartitionwiseSampledRdd<T> {
         self.prev.number_of_splits()
     }
 
-    fn partitioner(&self) -> Option<Box<dyn Partitioner>> {
+    fn partitioner<P: Partitioner>(&self) -> Option<Box<P>> {
         if self.preserves_partitioning {
             self.prev.partitioner()
         } else {
@@ -83,21 +103,21 @@ impl<T: Data> RddBase for PartitionwiseSampledRdd<T> {
         }
     }
 
-    fn cogroup_iterator_any(
+    fn cogroup_iterator_any<S: Split + ?Sized>(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<S>,
+    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
-    fn iterator_any(
+    fn iterator_any<S: Split + ?Sized>(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<S>,
+    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside PartitionwiseSampledRdd iterator_any");
         Ok(Box::new(
             self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
+                .map(|x| Box::new(x)),
         ))
     }
 }
@@ -114,19 +134,25 @@ impl<T: Data> RddBase for PartitionwiseSampledRdd<T> {
 //     }
 // }
 
-impl<T: Data> Rdd for PartitionwiseSampledRdd<T> {
+impl<T: Data, RDD, ND, SD, RS> Rdd for PartitionwiseSampledRdd<T, RDD, ND, SD, RS> 
+where 
+    RDD: Rdd<Item = T>,
+    RS: RandomSampler<T>,
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait,
+{
     type Item = T;
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        Arc::new(self.clone()) as Arc<dyn RddBase>
-    }
-
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+    fn get_rdd_base(&self) -> Arc<impl RddBase> {
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
+        Arc::new(self.clone())
+    }
+
+    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<impl Iterator<Item = Self::Item>>> {
         let sampler_func = self.sampler.get_sampler(None);
         let iter = self.prev.iterator(split)?;
-        Ok(Box::new(sampler_func(iter).into_iter()) as Box<dyn Iterator<Item = T>>)
+        Ok(Box::new(sampler_func(iter).into_iter()))
     }
 }

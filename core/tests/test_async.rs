@@ -1,12 +1,11 @@
 //! Test whether the library can be used with different running async executors.
 use std::sync::Arc;
-
 use once_cell::sync::Lazy;
 use atomic::*;
 
 static CONTEXT: Lazy<Arc<Context>> = Lazy::new(|| Context::new().unwrap());
 
-#[tokio::test(core_threads = 4)]
+#[tokio::test]
 async fn existing_tokio_rt() -> Result<()> {
     let initially = async { "initially" }.await;
     assert_eq!(initially, "initially");

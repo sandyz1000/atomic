@@ -1,9 +1,3 @@
-use std::any::Any;
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::hash::Hasher;
-use std::marker::PhantomData;
-use std::sync::Arc;
 use crate::aggregator::Aggregator;
 use crate::context::Context;
 use crate::dependency::{
@@ -13,35 +7,44 @@ use crate::dependency::{
 use crate::error::Result;
 use crate::partitioner::Partitioner;
 use crate::rdd::rdd::*;
-use crate::serializable_traits::{AnyData, Data};
+use crate::ser_data::{AnyData, Data};
 use crate::shuffle::ShuffleFetcher;
 use crate::split::Split;
 use serde_derive::{Deserialize, Serialize};
+use std::any::Any;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::hash::Hasher;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
 #[derive(Clone, Serialize, Deserialize)]
-pub enum CoGroupSplitDep {
-    NarrowCoGroupSplitDep {
-        rdd: Arc<dyn RddBase>,
-        split: Box<dyn Split>,
-    },
-    ShuffleCoGroupSplitDep {
-        shuffle_id: usize,
-    },
+pub enum CoGroupSplitDep<RDD, S> {
+    NarrowCoGroupSplitDep { rdd: Arc<RDD>, split: Box<S> },
+    ShuffleCoGroupSplitDep { shuffle_id: usize },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct CoGroupSplit {
+struct CoGroupSplit<RDD, S> {
     index: usize,
-    deps: Vec<CoGroupSplitDep>,
+    deps: Vec<CoGroupSplitDep<RDD, S>>,
 }
 
-impl CoGroupSplit {
-    fn new(index: usize, deps: Vec<CoGroupSplitDep>) -> Self {
+impl<RDD, S> CoGroupSplit<RDD, S>
+where
+    RDD: RddBase + Clone,
+    S: Split,
+{
+    fn new(index: usize, deps: Vec<CoGroupSplitDep<RDD, S>>) -> Self {
         CoGroupSplit { index, deps }
     }
 }
 
-impl Hasher for CoGroupSplit {
+impl<RDD, S> Hasher for CoGroupSplit<RDD, S>
+where
+    RDD: RddBase + Clone,
+    S: Split + dyn_clone::DynClone,
+{
     fn finish(&self) -> u64 {
         self.index as u64
     }
@@ -53,48 +56,62 @@ impl Hasher for CoGroupSplit {
     }
 }
 
-impl Split for CoGroupSplit {
+impl<RDD, S> Split for CoGroupSplit<RDD, S>
+where
+    RDD: RddBase + Clone,
+    S: Split + dyn_clone::DynClone + Clone,
+{
     fn get_index(&self) -> usize {
         self.index
     }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct CoGroupedRdd<K: Data> {
-    pub(crate) vals: Arc<RddVals>,
-    pub(crate) rdds: Vec<Arc<dyn RddBase>>,
-    pub(crate) part: Box<dyn Partitioner>,
+pub struct CoGroupedRdd<K: Data, D: AnyData, RDD, PR, ND, SD> {
+    pub(crate) vals: Arc<RddVals<ND, SD>>,
+    pub(crate) rdds: Vec<Arc<RDD>>,
+    pub(crate) part: Box<PR>,
     _marker: PhantomData<K>,
+    _marker_d: PhantomData<D>
 }
 
-impl<K: Data + Eq + Hash> CoGroupedRdd<K> {
-    pub fn new(rdds: Vec<Arc<dyn RddBase>>, part: Box<dyn Partitioner>) -> Self {
+
+impl<K, D, RDD, PR, ND, SD> CoGroupedRdd<K, D, RDD, PR, ND, SD>
+where
+    K: Data + Eq + Hash,
+    D: AnyData,
+    RDD: RddBase,
+    PR: Partitioner,
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait,
+{
+    pub fn new(rdds: Vec<Arc<RDD>>, part: Box<PR>) -> Self {
         let context = rdds[0].get_context();
-        let mut vals: RddVals = RddVals::new(context.clone());
+        let mut vals = RddVals::new(context.clone());
         let create_combiner = Box::new(serde_closure::Fn!(|v: Box<dyn AnyData>| vec![v]));
-        fn merge_value(
-            mut buf: Vec<Box<dyn AnyData>>,
-            v: Box<dyn AnyData>,
-        ) -> Vec<Box<dyn AnyData>> {
+        
+        fn merge_value<D: AnyData>(
+            mut buf: Vec<Box<D>>,
+            v: Box<D>,
+        ) -> Vec<Box<impl AnyData>> {
             buf.push(v);
             buf
         }
+        
         let merge_value = Box::new(serde_closure::Fn!(|(buf, v)| merge_value(buf, v)));
-        fn merge_combiners(
-            mut b1: Vec<Box<dyn AnyData>>,
-            mut b2: Vec<Box<dyn AnyData>>,
-        ) -> Vec<Box<dyn AnyData>> {
+        fn merge_combiners<D: AnyData>(
+            mut b1: Vec<Box<D>>,
+            mut b2: Vec<Box<D>>,
+        ) -> Vec<Box<impl AnyData>> {
             b1.append(&mut b2);
             b1
         }
         let merge_combiners = Box::new(serde_closure::Fn!(|(b1, b2)| merge_combiners(b1, b2)));
-        let aggr = Arc::new(
-            Aggregator::<K, Box<dyn AnyData>, Vec<Box<dyn AnyData>>>::new(
-                create_combiner,
-                merge_value,
-                merge_combiners,
-            ),
-        );
+        let aggr = Arc::new(Aggregator::new(
+            create_combiner,
+            merge_value,
+            merge_combiners,
+        ));
         let mut deps = Vec::new();
         for (_index, rdd) in rdds.iter().enumerate() {
             let part = part.clone();
@@ -103,21 +120,21 @@ impl<K: Data + Eq + Hash> CoGroupedRdd<K> {
                 .map_or(false, |p| p.equals(&part as &dyn Any))
             {
                 let rdd_base = rdd.clone().into();
-                deps.push(Dependency::NarrowDependency(
-                    Arc::new(OneToOneDependency::new(rdd_base)) as Arc<dyn NarrowDependencyTrait>,
-                ))
+                deps.push(Dependency::NarrowDependency(Arc::new(
+                    OneToOneDependency::new(rdd_base),
+                )))
             } else {
                 let rdd_base = rdd.clone().into();
                 log::debug!("creating aggregator inside cogrouprdd");
-                deps.push(Dependency::ShuffleDependency(
-                    Arc::new(ShuffleDependency::new(
+                deps.push(Dependency::ShuffleDependency(Arc::new(
+                    ShuffleDependency::new(
                         context.new_shuffle_id(),
                         true,
                         rdd_base,
                         aggr.clone(),
                         part,
-                    )) as Arc<dyn ShuffleDependencyTrait>,
-                ))
+                    ),
+                )))
             }
         }
         vals.dependencies = deps;
@@ -131,7 +148,14 @@ impl<K: Data + Eq + Hash> CoGroupedRdd<K> {
     }
 }
 
-impl<K: Data + Eq + Hash> RddBase for CoGroupedRdd<K> {
+impl<K, RDD, PR, ND, SD> RddBase for CoGroupedRdd<K, RDD, PR, ND, SD>
+where
+    K: Data + Eq + Hash,
+    RDD: RddBase,
+    PR: Partitioner,
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait,
+{
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -140,11 +164,11 @@ impl<K: Data + Eq + Hash> RddBase for CoGroupedRdd<K> {
         self.vals.context.upgrade().unwrap()
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency> {
+    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
         self.vals.dependencies.clone()
     }
 
-    fn splits(&self) -> Vec<Box<dyn Split>> {
+    fn splits(&self) -> Vec<Box<impl Split>> {
         let mut splits = Vec::new();
         for i in 0..self.part.get_num_of_partitions() {
             splits.push(Box::new(CoGroupSplit::new(
@@ -164,7 +188,7 @@ impl<K: Data + Eq + Hash> RddBase for CoGroupedRdd<K> {
                         },
                     })
                     .collect(),
-            )) as Box<dyn Split>)
+            )))
         }
         splits
     }
@@ -173,35 +197,46 @@ impl<K: Data + Eq + Hash> RddBase for CoGroupedRdd<K> {
         self.part.get_num_of_partitions()
     }
 
-    fn partitioner(&self) -> Option<Box<dyn Partitioner>> {
+    fn partitioner(&self) -> Option<Box<impl Partitioner>> {
         let part = self.part.clone() as Box<dyn Partitioner>;
         Some(part)
     }
 
-    fn iterator_any(
+    fn iterator_any<S: Split + ?Sized>(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
-        Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
-        })))
+        split: Box<S>,
+    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+        Ok(Box::new(
+            self.iterator(split)?
+                .map(|(k, v)| Box::new((k, Box::new(v)))),
+        ))
     }
 }
 
-impl<K: Data + Eq + Hash> Rdd for CoGroupedRdd<K> {
-    type Item = (K, Vec<Vec<Box<dyn AnyData>>>);
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+
+impl<K, D, RDD, PR, ND, SD> Rdd for CoGroupedRdd<K, D, RDD, PR, ND, SD> 
+where
+    K: Data + Eq + Hash,
+    D: AnyData,
+    RDD: RddBase,
+    PR: Partitioner,
+    ND: NarrowDependencyTrait + 'static,
+    SD: ShuffleDependencyTrait + 'static,
+{
+    type Item = (K, Vec<Vec<Box<D>>>);
+    
+    fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         Arc::new(self.clone())
     }
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        Arc::new(self.clone()) as Arc<dyn RddBase>
+    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+        Arc::new(self.clone())
     }
 
     #[allow(clippy::type_complexity)]
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        if let Ok(split) = split.downcast::<CoGroupSplit>() {
-            let mut agg: HashMap<K, Vec<Vec<Box<dyn AnyData>>>> = HashMap::new();
+    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<impl Iterator<Item = Self::Item>>> {
+        if let Ok(split) = split.downcast::<CoGroupSplit<RDD, S>>() {
+            let mut agg: HashMap<K, Vec<Vec<Box<D>>>> = HashMap::new();
             for (dep_num, dep) in split.clone().deps.into_iter().enumerate() {
                 match dep {
                     CoGroupSplitDep::NarrowCoGroupSplitDep { rdd, split } => {
@@ -213,7 +248,7 @@ impl<K: Data + Eq + Hash> Rdd for CoGroupedRdd<K> {
                             );
                             let b = i
                                 .into_any()
-                                .downcast::<(Box<dyn AnyData>, Box<dyn AnyData>)>()
+                                .downcast::<(Box<D>, Box<D>)>()
                                 .unwrap();
                             let (k, v) = *b;
                             let k = *(k.into_any().downcast::<K>().unwrap());
@@ -225,7 +260,7 @@ impl<K: Data + Eq + Hash> Rdd for CoGroupedRdd<K> {
                     CoGroupSplitDep::ShuffleCoGroupSplitDep { shuffle_id } => {
                         log::debug!("inside iterator CoGroupedRdd shuffle dep, agg: {:?}", agg);
                         let num_rdds = self.rdds.len();
-                        let fut = ShuffleFetcher::fetch::<K, Vec<Box<dyn AnyData>>>(
+                        let fut = ShuffleFetcher::fetch::<K, Vec<Box<K>>>(
                             shuffle_id,
                             split.get_index(),
                         );

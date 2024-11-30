@@ -6,8 +6,7 @@ use std::option::Option;
 use std::sync::Arc;
 
 use crate::scheduler::{JobListener, NativeScheduler, Stage, TaskBase, TaskContext};
-use crate::serializable_traits::Data;
-use core::ops::Fn as SerFunc;
+use crate::ser_data::{Data, SerFunc};
 use crate::{Rdd, Result};
 use tokio::sync::Mutex;
 
@@ -47,16 +46,16 @@ impl Ord for Job {
 type PendingTasks = BTreeMap<Stage, BTreeSet<Box<dyn TaskBase>>>;
 
 /// Contains all the necessary types to run and track a job progress
-pub(crate) struct JobTracker<F, U: Data, T: Data, L>
+pub(crate) struct JobTracker<F, U: Data, T: Data, L, RDD>
 where
-    F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+    F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
     L: JobListener,
 {
     pub output_parts: Vec<usize>,
     pub num_output_parts: usize,
     pub final_stage: Stage,
     pub func: Arc<F>,
-    pub final_rdd: Arc<dyn Rdd<Item = T>>,
+    pub final_rdd: Arc<RDD>,
     pub run_id: usize,
     pub waiting: Mutex<BTreeSet<Stage>>,
     pub running: Mutex<BTreeSet<Stage>>,
@@ -68,20 +67,21 @@ where
     _marker_u: PhantomData<U>,
 }
 
-impl<F, U: Data, T: Data, L> JobTracker<F, U, T, L>
+impl<F, U: Data, T: Data, L, RDD> JobTracker<F, U, T, L, RDD>
 where
-    F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+    F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
     L: JobListener,
+    RDD: Rdd<Item = T>
 {
     pub async fn from_scheduler<S>(
         scheduler: &S,
         func: Arc<F>,
-        final_rdd: Arc<dyn Rdd<Item = T>>,
+        final_rdd: Arc<RDD>,
         output_parts: Vec<usize>,
         listener: L,
-    ) -> Result<Arc<JobTracker<F, U, T, L>>>
+    ) -> Result<Arc<Self>>
     where
-        S: NativeScheduler,
+        S: NativeScheduler + ?Sized,
     {
         let run_id = scheduler.get_next_job_id();
         let final_stage = scheduler

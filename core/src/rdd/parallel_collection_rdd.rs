@@ -2,10 +2,10 @@
 use std::sync::{Arc, Weak};
 
 use crate::context::Context;
-use crate::dependency::Dependency;
+use crate::dependency::{Dependency, NarrowDependencyTrait, ShuffleDependencyTrait};
 use crate::error::Result;
 use crate::rdd::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::{AnyData, Data};
+use crate::ser_data::{AnyData, Data};
 use crate::split::Split;
 use parking_lot::Mutex;
 use serde_derive::{Deserialize, Serialize};
@@ -48,30 +48,34 @@ impl<T: Data> ParallelCollectionSplit<T> {
         }
     }
     // Lot of unnecessary cloning is there. Have to refactor for better performance
-    fn iterator(&self) -> Box<dyn Iterator<Item = T>> {
+    fn iterator(&self) -> Box<impl Iterator<Item = T>> {
         let data = self.values.clone();
         let len = data.len();
         Box::new((0..len).map(move |i| data[i].clone()))
     }
 }
 
-// #[derive(Serialize, Deserialize)]
-pub struct ParallelCollectionVals<T> {
-    vals: Arc<RddVals>,
-    // #[serde(skip_serializing, skip_deserializing)]
+#[derive(Serialize, Deserialize)]
+pub struct ParallelCollectionVals<T, ND, SD> {
+    vals: Arc<RddVals<ND, SD>>,
+    #[serde(skip_serializing, skip_deserializing)]
     context: Weak<Context>,
     splits_: Vec<Arc<Vec<T>>>,
     num_slices: usize,
 }
 
-// #[derive(Serialize, Deserialize)]
-pub struct ParallelCollection<T> {
-    // #[serde(skip_serializing, skip_deserializing)]
+#[derive(Serialize, Deserialize)]
+pub struct ParallelCollection<T, ND, SD> {
+    #[serde(skip_serializing, skip_deserializing)]
     name: Mutex<String>,
-    rdd_vals: Arc<ParallelCollectionVals<T>>,
+    rdd_vals: Arc<ParallelCollectionVals<T, ND, SD>>,
 }
 
-impl<T: Data> Clone for ParallelCollection<T> {
+impl<T: Data, ND, SD> Clone for ParallelCollection<T, ND, SD> 
+where
+    ND: NarrowDependencyTrait, 
+    SD: ShuffleDependencyTrait
+{
     fn clone(&self) -> Self {
         ParallelCollection {
             name: Mutex::new(self.name.lock().clone()),
@@ -80,7 +84,11 @@ impl<T: Data> Clone for ParallelCollection<T> {
     }
 }
 
-impl<T: Data> ParallelCollection<T> {
+impl<T: Data, ND, SD> ParallelCollection<T, ND, SD> 
+where
+    ND: NarrowDependencyTrait, 
+    SD: ShuffleDependencyTrait
+{
     pub fn new<I>(context: Arc<Context>, data: I, num_slices: usize) -> Self
     where
         I: IntoIterator<Item = T>,
@@ -161,7 +169,11 @@ impl<T: Data> ParallelCollection<T> {
 // }
 
 // #[typetag::serde]
-impl<T: Data> RddBase for ParallelCollection<T> {
+impl<T: Data, ND, SD> RddBase for ParallelCollection<T, ND, SD> 
+where
+    ND: NarrowDependencyTrait, 
+    SD: ShuffleDependencyTrait
+{
     fn get_rdd_id(&self) -> usize {
         self.rdd_vals.vals.id
     }
@@ -179,59 +191,64 @@ impl<T: Data> RddBase for ParallelCollection<T> {
         *own_name = name.to_owned();
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency> {
+    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
         self.rdd_vals.vals.dependencies.clone()
     }
 
-    fn splits(&self) -> Vec<Box<dyn Split>> {
+    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
         (0..self.rdd_vals.splits_.len())
             .map(|i| {
                 Box::new(ParallelCollectionSplit::new(
                     self.rdd_vals.vals.id as i64,
                     i,
                     self.rdd_vals.splits_[i as usize].clone(),
-                )) as Box<dyn Split>
+                ))
             })
-            .collect::<Vec<Box<dyn Split>>>()
+            .collect()
     }
 
     fn number_of_splits(&self) -> usize {
         self.rdd_vals.splits_.len()
     }
 
-    fn cogroup_iterator_any(
+    fn cogroup_iterator_any<S: Split + ?Sized>(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<S>,
+    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
-    fn iterator_any(
+    fn iterator_any<S: Split + ?Sized>(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<S>,
+    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any parallel collection",);
         Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
+            self.iterator(split)?.map(|x| Box::new(x)),
         ))
     }
 }
 
-impl<T: Data> Rdd for ParallelCollection<T> {
+impl<T: Data, ND, SD> Rdd for ParallelCollection<T, ND, SD> 
+where
+    ND: NarrowDependencyTrait + 'static, 
+    SD: ShuffleDependencyTrait + 'static
+{
     type Item = T;
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
-        Arc::new(ParallelCollection {
+    fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
+        let par = ParallelCollection {
             name: Mutex::new(self.name.lock().clone()),
             rdd_vals: self.rdd_vals.clone(),
-        })
+        };
+
+        Arc::new(par)
     }
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        Arc::new(self.clone()) as Arc<dyn RddBase>
+    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+        Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute<S: Split + ?Sized >(&self, split: Box<S>) -> Result<Box<impl Iterator<Item = Self::Item>>> {
         if let Some(s) = split.downcast_ref::<ParallelCollectionSplit<T>>() {
             Ok(s.iterator())
         } else {

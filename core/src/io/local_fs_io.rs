@@ -22,7 +22,7 @@ impl LocalFsIO {
         decoder: F,
     ) -> Arc<dyn Rdd<Item = U>>
     where
-        F: SerFunc(Vec<u8>) -> U,
+        F: SerFunc<Vec<u8>, Output = U>,
         U: Data,
     {
         let rdd = LocalFsReadRdd::new(context.clone(), path.to_string(), num_slices);

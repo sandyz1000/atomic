@@ -11,10 +11,14 @@ use crate::shuffle::*;
 use crate::utils;
 use crossbeam::channel as cb_channel;
 use futures::future;
-use hyper::{
-    client::Client, server::conn::AddrIncoming, service::Service, Body, Request, Response, Server,
-    StatusCode, Uri,
-};
+// use hyper::{
+//     client::Client, server::conn::AddrIncoming, service::Service, Body, Request, Response, Server,
+//     StatusCode, Uri,
+// };
+
+use hyper::service::Service;
+use hyper::body::Body;
+
 use uuid::Uuid;
 
 pub(crate) type Result<T> = StdResult<T, ShuffleError>;
@@ -129,10 +133,10 @@ impl ShuffleManager {
         let (send_child, rcv_main) = cb_channel::unbounded::<Result<StatusCode>>();
         let (send_main, rcv_child) = cb_channel::unbounded::<()>();
         let uri_str = format!("{}/status", server_uri);
-        let status_uri = Uri::try_from(&uri_str)?;
+        let status_uri = http::Uri::try_from(&uri_str)?;
         tokio::spawn(
             #[allow(unreachable_code)]
-            // TODO: FixMe
+            // TODO: FixMe - Use reqwest client here
             async move {
                 let client = Client::builder().http2_only(true).build_http::<Body>();
                 // loop forever waiting for requests to send
@@ -167,7 +171,7 @@ impl ShuffleManager {
     }
 }
 
-type ShuffleServer = Server<AddrIncoming, ShuffleSvcMaker>;
+pub type ShuffleServer = Server<AddrIncoming, ShuffleSvcMaker>;
 
 #[derive(Debug, Clone)]
 pub struct ShuffleService;
@@ -178,7 +182,7 @@ pub enum ShuffleResponse {
 }
 
 impl ShuffleService {
-    fn response_type(&self, uri: &Uri) -> Result<ShuffleResponse> {
+    fn response_type(&self, uri: &http::Uri) -> Result<ShuffleResponse> {
         let parts: Vec<_> = uri.path().split('/').collect();
         match parts.as_slice() {
             [_, endpoint] if *endpoint == "status" => Ok(ShuffleResponse::Status(StatusCode::OK)),
@@ -191,7 +195,7 @@ impl ShuffleService {
         }
     }
 
-    fn get_cached_data(&self, uri: &Uri, parts: &[&str]) -> Result<Vec<u8>> {
+    fn get_cached_data(&self, uri: &http::Uri, parts: &[&str]) -> Result<Vec<u8>> {
         // the path is: .../{shuffleid}/{inputid}/{reduceid}
         let parts: Vec<_> = match parts
             .iter()
@@ -223,16 +227,16 @@ impl ShuffleService {
     }
 }
 
-impl Service<Request<Body>> for ShuffleService {
+impl Service<hyper::Request<Body>> for ShuffleService {
     type Response = Response<Body>;
     type Error = ShuffleError;
     type Future = future::Ready<StdResult<Self::Response, Self::Error>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context) -> Poll<StdResult<(), Self::Error>> {
-        Ok(()).into()
-    }
+    // fn poll_ready(&mut self, _cx: &mut Context) -> Poll<StdResult<(), Self::Error>> {
+    //     Ok(()).into()
+    // }
 
-    fn call(&mut self, req: Request<Body>) -> Self::Future {
+    fn call(&mut self, req: hyper::Request<Body>) -> Self::Future {
         match self.response_type(req.uri()) {
             Ok(response) => match response {
                 ShuffleResponse::Status(code) => {
@@ -262,9 +266,9 @@ impl<T> Service<T> for ShuffleSvcMaker {
     type Error = ShuffleError;
     type Future = future::Ready<StdResult<Self::Response, Self::Error>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context) -> Poll<StdResult<(), Self::Error>> {
-        Ok(()).into()
-    }
+    // fn poll_ready(&mut self, _cx: &mut Context) -> Poll<StdResult<(), Self::Error>> {
+    //     Ok(()).into()
+    // }
 
     fn call(&mut self, _: T) -> Self::Future {
         future::ok(ShuffleService)
@@ -273,6 +277,8 @@ impl<T> Service<T> for ShuffleSvcMaker {
 
 #[cfg(test)]
 mod tests {
+    use http::Uri;
+
     use super::*;
     use std::sync::Arc;
     use std::thread;

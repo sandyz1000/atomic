@@ -1,4 +1,4 @@
-use crate::serializable_traits::Data;
+use crate::ser_data::Data;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Poisson};
 use rand_pcg::Pcg64;
@@ -52,6 +52,22 @@ pub(crate) fn get_default_rng_from_seed(seed: u64) -> Pcg64 {
 fn get_rng_with_random_seed() -> Pcg64 {
     Pcg64::seed_from_u64(rand::random::<u64>())
 }
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub(crate) enum StatisticalSampler {
+    PoissonSampler(PoissonSampler),
+    BernoulliSampler(BernoulliSampler)
+}
+
+impl<T: Data> RandomSampler<T> for StatisticalSampler {
+    fn get_sampler(&self, seed: Option<u64>) -> RSamplerFunc<T> {
+        match self {
+            StatisticalSampler::PoissonSampler(poisson_sampler) => poisson_sampler.get_sampler(seed),
+            StatisticalSampler::BernoulliSampler(bernoulli_sampler) => bernoulli_sampler.get_sampler(seed),
+        }
+    }
+}
+
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub(crate) struct PoissonSampler {

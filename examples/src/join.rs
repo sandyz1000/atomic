@@ -18,6 +18,7 @@ fn main() -> Result<()> {
         (3, "C1".to_string()),
         (3, "C2".to_string()),
     ];
+    
     let col2 = sc.parallelize(col2, 4);
     let inner_joined_rdd = col2.join(col1.clone(), 4);
     let res = inner_joined_rdd.collect().unwrap();

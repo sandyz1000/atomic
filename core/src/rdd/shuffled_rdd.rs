@@ -5,11 +5,11 @@ use std::time::Instant;
 
 use crate::aggregator::Aggregator;
 use crate::context::Context;
-use crate::dependency::{Dependency, ShuffleDependency};
+use crate::dependency::{Dependency, NarrowDependencyTrait, ShuffleDependency, ShuffleDependencyTrait};
 use crate::error::Result;
 use crate::partitioner::Partitioner;
 use crate::rdd::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::{AnyData, Data};
+use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::shuffle::ShuffleFetcher;
 use crate::split::Split;
 use serde_derive::{Deserialize, Serialize};
@@ -32,15 +32,28 @@ impl Split for ShuffledRddSplit {
 }
 
 // #[derive(Serialize, Deserialize)]
-pub struct ShuffledRdd<K: Data + Eq + Hash, V: Data, C: Data> {
-    parent: Arc<dyn Rdd<Item = (K, V)>>,
-    aggregator: Arc<Aggregator<K, V, C>>,
-    vals: Arc<RddVals>,
-    part: Box<dyn Partitioner>,
+#[derive(Serialize)]
+pub struct ShuffledRdd<K: Data + Eq + Hash, V: Data, C: Data, F1, F2, F3, RDD, PA, ND, SD> {
+    parent: Arc<RDD>,
+    aggregator: Arc<Aggregator<K, V, C, F1, F2, F3>>,
+    vals: Arc<RddVals<ND, SD>>,
+    part: Box<PA>,
     shuffle_id: usize,
 }
 
-impl<K: Data + Eq + Hash, V: Data, C: Data> Clone for ShuffledRdd<K, V, C> {
+impl<K, V, C, F1, F2, F3, RDD, PA, ND, SD> Clone for ShuffledRdd<K, V, C, F1, F2, F3, RDD, PA, ND, SD> 
+where 
+    K: Data + Eq + Hash,
+    V: Data,
+    C: Data,
+    RDD: Rdd<Item = (K, V)>,
+    F1: SerFunc<V, Output = C>,
+    F2: SerFunc<(C, V), Output = C>,
+    F3: SerFunc<(C, C), Output = C>,
+    PA: Partitioner,
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait
+{
     fn clone(&self) -> Self {
         ShuffledRdd {
             parent: self.parent.clone(),
@@ -52,7 +65,12 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> Clone for ShuffledRdd<K, V, C> {
     }
 }
 
-impl<K: Data + Eq + Hash, V: Data, C: Data> ShuffledRdd<K, V, C> {
+impl<K, V, C, F1, F2, F3> ShuffledRdd<K, V, C, F1, F2, F3> 
+where
+    K: Data + Eq + Hash,
+    V: Data,
+    C: Data 
+{
     pub(crate) fn new(
         parent: Arc<dyn Rdd<Item = (K, V)>>,
         aggregator: Arc<Aggregator<K, V, C>>,
@@ -132,7 +150,7 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> RddBase for ShuffledRdd<K, V, C> {
     }
 }
 
-impl<K: Data + Eq + Hash, V: Data, C: Data> Rdd for ShuffledRdd<K, V, C> {
+impl<K: Data + Eq + Hash, V: Data, C: Data, F1, F2, F3> Rdd for ShuffledRdd<K, V, C, F1, F2, F3> {
     type Item = (K, C);
 
     fn get_rdd_base(&self) -> Arc<dyn RddBase> {

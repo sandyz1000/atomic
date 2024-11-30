@@ -1,9 +1,9 @@
 use crate::error::{Error, Result};
 use crate::io::*;
 use crate::rdd::rdd::HdfsReadRdd;
-use crate::*;
 use hdrs::Client;
 use std::io::{Read, Write};
+use crate::ser_data::{SerFunc, Data};
 
 pub struct HdfsIO {
     nn: String,
@@ -68,7 +68,7 @@ impl HdfsIO {
         decoder: F,
     ) -> Arc<dyn Rdd<Item = U>>
     where
-        F: SerFunc(Vec<u8>) -> U,
+        F: SerFunc<Vec<u8>, Output = U>,
         U: Data,
     {
         let rdd = HdfsReadRdd::new(context.clone(), self.nn.clone(), path.to_string(), num_slices);

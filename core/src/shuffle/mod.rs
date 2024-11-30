@@ -1,7 +1,5 @@
+use hyper::{body::Body, Response, StatusCode};
 use std::result::Result as StdResult;
-
-// use crate::SerBox;
-use hyper::{Body, Response, StatusCode};
 use thiserror::Error;
 
 pub(self) mod shuffle_fetcher;
@@ -56,12 +54,12 @@ pub enum ShuffleError {
     Other,
 }
 
-impl Into<Response<Body>> for ShuffleError {
-    fn into(self) -> Response<Body> {
+impl Into<Response<String>> for ShuffleError {
+    fn into(self) -> Response<String> {
         match self {
             ShuffleError::UnexpectedUri(uri) => Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Body::from(format!("Failed to parse: {}", uri)))
+                .body(format!("Failed to parse: {}", uri))
                 .unwrap(),
             ShuffleError::RequestedCacheNotFound => Response::builder()
                 .status(StatusCode::NOT_FOUND)

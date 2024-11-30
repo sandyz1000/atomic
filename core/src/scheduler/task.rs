@@ -2,11 +2,9 @@ use std::cmp::Ordering;
 use std::net::Ipv4Addr;
 
 use crate::scheduler::ResultTask;
-use crate::serializable_traits::{AnyData, Data};
-use std::ops::Fn as SerFunc;
+use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::shuffle::ShuffleMapTask;
 use downcast_rs::{impl_downcast, Downcast};
-use serde_derive::{Deserialize, Serialize};
 
 
 pub struct TaskContext {
@@ -86,7 +84,7 @@ impl<K> TaskBox for K
 
 impl_downcast!(TaskBox);
 
-// #[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum TaskOption {
     ResultTask(Box<dyn TaskBox>),
     
@@ -95,7 +93,7 @@ pub enum TaskOption {
 
 impl<T: Data, U: Data, F> From<ResultTask<T, U, F>> for TaskOption
 where
-    F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static + Clone,
+    F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output =  U>,
 {
     fn from(t: ResultTask<T, U, F>) -> Self {
         TaskOption::ResultTask(Box::new(t) as Box<dyn TaskBox>)

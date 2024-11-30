@@ -5,22 +5,20 @@ use std::time::{Duration, Instant};
 use crate::env;
 use crate::error::{Error, NetworkError, Result};
 use crate::scheduler::TaskOption;
-use crate::serialized_data_capnp::serialized_data;
-use capnp::{
-    message::{Builder as MsgBuilder, HeapAllocator, Reader as CpnpReader, ReaderOptions},
-    serialize::OwnedSegments,
-};
-use capnp_futures::serialize as capnp_serialize;
+// use crate::serialized_data_capnp::serialized_data;
+// use capnp::{
+//     message::{Builder as MsgBuilder, HeapAllocator, Reader as CpnpReader, ReaderOptions},
+//     serialize::OwnedSegments,
+// };
+// use capnp_futures::serialize as capnp_serialize;
 use crossbeam::channel::bounded;
 use crossbeam::channel::{Receiver, Sender};
-use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::task::{spawn, spawn_blocking};
 
-const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
-    traversal_limit_in_words: std::u64::MAX,
-    nesting_limit: 64,
-};
+// const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
+//     traversal_limit_in_words: Some(std::usize::MAX),
+//     nesting_limit: 64,
+// };
 
 pub(crate) struct Executor {
     port: u16,
@@ -42,7 +40,7 @@ impl Executor {
             futures::executor::block_on(async move {
                 let (send_child, rcv_main) = bounded::<Signal>(100);
                 let process_err = Arc::clone(&self).process_stream(rcv_main);
-                let handler_err = spawn(Arc::clone(&self).signal_handler(send_child));
+                let handler_err = tokio::task::spawn(Arc::clone(&self).signal_handler(send_child));
                 tokio::select! {
                     err = process_err => err,
                     err = handler_err => err?,
@@ -58,14 +56,16 @@ impl Executor {
             .await
             .map_err(NetworkError::TcpListener)?;
         // TODO: Fix the listener
+        
         while let Some(Ok(mut stream)) = listener.accept().await {
             let rcv_main = rcv_main.clone();
             let _exec = Arc::clone(&self);
             
-            let res: Result<Signal> = spawn(async move {
+            let res: Result<Signal> = tokio::task::spawn(async move {
                 let (reader, writer) = stream.split();
-                let reader = reader.compat();
-                let mut writer = writer.compat_write();
+                // let reader = reader.compat();
+                // let mut writer = writer.compat_write();
+                
                 match rcv_main.try_recv() {
                     Ok(Signal::ShutDownError) => {
                         log::info!("shutting down executor @{} due to error", _exec.port);
@@ -82,7 +82,8 @@ impl Executor {
                     let message_reader = capnp_serialize::read_message(reader, CAPNP_BUF_READ_OPTS)
                         .await?
                         .ok_or_else(|| NetworkError::NoMessageReceived)?;
-                    spawn_blocking(move || -> Result<_> {
+                    
+                    tokio::task::spawn_blocking(move || -> Result<_> {
                         let des_task = _exec.deserialize_task(message_reader)?;
                         _exec.run_task(des_task)
                     })
@@ -140,6 +141,7 @@ impl Executor {
         Ok(des_task)
     }
 
+    // TODO: FixMe - Remove the usage of capnproto and use rkvy here
     fn run_task(self: &Arc<Self>, des_task: TaskOption) -> Result<MsgBuilder<HeapAllocator>> {
         // Run execution + serialization in parallel in the executor threadpool
         let result: Result<Vec<u8>> = {
@@ -272,10 +274,13 @@ mod tests {
 
     fn send_shutdown_signal_msg(stream: &mut std::net::TcpStream) -> Result<()> {
         let signal = bincode::serialize(&Signal::ShutDownGracefully)?;
-        let mut message = capnp::message::Builder::new_default();
-        let mut msg_data = message.init_root::<serialized_data::Builder>();
-        msg_data.set_msg(&signal);
-        capnp::serialize::write_message(stream, &message).map_err(Error::OutputWrite)?;
+        
+        // let mut message = capnp::message::Builder::new_default();
+        // let mut msg_data = message.init_root::<serialized_data::Builder>();
+        // msg_data.set_msg(&signal);
+        // capnp::serialize::write_message(stream, &message).map_err(Error::OutputWrite)?;
+
+        // TODO: Write `signal_data` to stream use rkyv for serialization and deserilization
         Ok(())
     }
 
@@ -288,8 +293,8 @@ mod tests {
         let port = executor.port;
         let (send_exec, client_rcv) = unbounded::<ComputeResult>();
 
-        let test_fut = spawn_blocking(move || test_func(client_rcv, port));
-        let worker_fut = spawn_blocking(move || executor.worker());
+        let test_fut = tokio::task::spawn_blocking(move || test_func(client_rcv, port));
+        let worker_fut = tokio::task::spawn_blocking(move || executor.worker());
         let (test_res, worker_res) = tokio::join!(test_fut, worker_fut);
         checker_func(send_exec, worker_res?)?;
         test_res?

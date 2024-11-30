@@ -3,18 +3,17 @@ use std::io::{BufReader, Read};
 use std::sync::{Arc, Weak};
 
 use crate::context::Context;
-use crate::dependency::Dependency;
+use crate::dependency::{Dependency, NarrowDependencyTrait, ShuffleDependencyTrait};
 use crate::error::Result;
 use crate::rdd::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::AnyData;
+use crate::ser_data::AnyData;
 use crate::split::Split;
 use hdrs::Client;
 use parking_lot::Mutex;
-use serde_derive::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 
-
-// #[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct HdfsReadRddSplit {
     rdd_id: i64,
     index: usize,
@@ -61,25 +60,29 @@ impl HdfsReadRddSplit {
 /// splits_: Partitions
 /// num_slices: Number of partitions
 /// context: Environment/Context (accepts a weak reference)
-// #[derive(Serialize, Deserialize)]
-pub(crate) struct HdfsReadRddVals {
-    vals: Arc<RddVals>,
-    // #[serde(skip_serializing, skip_deserializing)]
+#[derive(Serialize, Deserialize)]
+pub(crate) struct HdfsReadRddVals<ND, SD> {
+    vals: Arc<RddVals<ND, SD>>,
+    #[serde(skip_serializing, skip_deserializing)]
     context: Weak<Context>,
     splits_: Vec<Vec<String>>,
     num_slices: usize,
 }
 
-// #[derive(Serialize, Deserialize)]
-pub struct HdfsReadRdd {
-    // #[serde(skip_serializing, skip_deserializing)]
+#[derive(Serialize, Deserialize)]
+pub struct HdfsReadRdd<ND, SD> {
+    #[serde(skip_serializing, skip_deserializing)]
     name: Mutex<String>,
     nn: String,
     path: String,
-    rdd_vals: Arc<HdfsReadRddVals>,
+    rdd_vals: Arc<HdfsReadRddVals<ND, SD>>,
 }
 
-impl Clone for HdfsReadRdd {
+impl<ND, SD> Clone for HdfsReadRdd<ND, SD> 
+where 
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait
+{
     fn clone(&self) -> Self {
         HdfsReadRdd {
             name: Mutex::new(self.name.lock().clone()),
@@ -94,7 +97,11 @@ impl Clone for HdfsReadRdd {
 /// 接收一个context, 一个路径path和分区数量num_slices
 /// 产生一个HdfsReadRdd对象
 ///
-impl HdfsReadRdd {
+impl<ND, SD> HdfsReadRdd<ND, SD> 
+where 
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait
+{
     pub(crate) fn new(context: Arc<Context>, nn:String, path: String, num_slices: usize) -> Self {
 
         let nn_c = nn.clone();
@@ -159,7 +166,11 @@ impl HdfsReadRdd {
     }
 }
 
-impl RddBase for HdfsReadRdd {
+impl<ND, SD> RddBase for HdfsReadRdd<ND, SD> 
+where 
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait
+{
     fn get_rdd_id(&self) -> usize {
         self.rdd_vals.vals.id
     }
@@ -177,11 +188,11 @@ impl RddBase for HdfsReadRdd {
         *own_name = name.to_owned();
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency> {
+    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
         self.rdd_vals.vals.dependencies.clone()
     }
 
-    fn splits(&self) -> Vec<Box<dyn Split>> {
+    fn splits(&self) -> Vec<Box<impl Split>> {
         (0..self.rdd_vals.splits_.len())
             .map(|i| {
                 Box::new(HdfsReadRddSplit::new(
@@ -189,9 +200,9 @@ impl RddBase for HdfsReadRdd {
                     self.nn.clone(),
                     i,
                     self.rdd_vals.splits_[i as usize].to_vec(),
-                )) as Box<dyn Split>
+                ))
             })
-            .collect::<Vec<Box<dyn Split>>>()
+            .collect()
     }
 
     fn number_of_splits(&self) -> usize {
@@ -204,21 +215,20 @@ impl RddBase for HdfsReadRdd {
         self.iterator_any(split)
     }
 
-    fn iterator_any(
+    fn iterator_any<S: Split + Clone>(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<S>,
+    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any parallel collection",);
         Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
+            self.iterator(split)?.map(|x| Box::new(x)),
         ))
     }
 }
 
-impl Rdd for HdfsReadRdd {
+impl<ND, SD> Rdd for HdfsReadRdd<ND, SD> {
     type Item = Vec<u8>;
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+    fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         Arc::new(HdfsReadRdd {
             name: Mutex::new(self.name.lock().clone()),
             nn: self.nn.clone(),
@@ -227,11 +237,11 @@ impl Rdd for HdfsReadRdd {
         })
     }
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+    fn get_rdd_base(&self) -> Arc<impl RddBase> {
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<dyn Split>) -> Result<Box<impl Iterator<Item = Self::Item>>> {
         if let Some(s) = split.downcast_ref::<HdfsReadRddSplit>() {
             Ok(s.iterator())
         } else {

@@ -10,7 +10,7 @@ use crate::context::Context;
 use crate::dependency::{Dependency, NarrowDependencyTrait};
 use crate::error::{Error, Result};
 use crate::rdd::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::{AnyData, Data};
+use crate::ser_data::{AnyData, Data};
 use crate::split::Split;
 use crate::utils;
 

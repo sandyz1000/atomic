@@ -1,4 +1,4 @@
-use crate::serializable_traits::AnyData;
+use crate::ser_data::AnyData;
 use crate::{Error, Result};
 
 /// Interface used to listen for job completion or failure events after submitting a job to the

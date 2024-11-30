@@ -10,8 +10,7 @@ use crate::dependency::Dependency;
 use crate::error::{Error, Result};
 use crate::io::*;
 use crate::rdd::rdd::{MapPartitionsRdd, MapperRdd, Rdd, RddBase};
-use crate::serializable_traits::{AnyData, Data};
-use core::ops::Fn as SerFunc;
+use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::split::Split;
 use log::debug;
 use rand::prelude::*;
@@ -58,7 +57,7 @@ impl LocalFsReaderConfig {
 impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
     fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> Arc<dyn Rdd<Item = U>>
     where
-        F: SerFunc(Vec<u8>) -> U,
+        F: SerFunc<Vec<u8>, Output = U>,
         U: Data,
     {
         let reader: LocalFsReader<BytesReader> = LocalFsReader::<BytesReader>::new(self, context);
@@ -71,7 +70,7 @@ impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
         );
         
         let files_per_executor = Arc::new(
-            MapPartitionsRdd::new(Arc::new(reader) as Arc<dyn Rdd<Item = _>>, read_files).pin(),
+            MapPartitionsRdd::new(Arc::new(reader), read_files).pin(),
         );
         let decoder = MapperRdd::new(files_per_executor, decoder).pin();
         decoder.register_op_name("local_fs_reader<bytes>");
@@ -80,9 +79,9 @@ impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
 }
 
 impl ReaderConfiguration<PathBuf> for LocalFsReaderConfig {
-    fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> Arc<dyn Rdd<Item = U>>
+    fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> Arc<impl Rdd<Item = U>>
     where
-        F: SerFunc(PathBuf) -> U,
+        F: SerFunc<PathBuf, Output = U>,
         U: Data,
     {
         let reader = LocalFsReader::<FileReader>::new(self, context);
@@ -315,7 +314,7 @@ macro_rules! impl_common_lfs_rddb_funcs {
             self.context.clone()
         }
 
-        fn get_dependencies(&self) -> Vec<Dependency> {
+        fn get_dependencies<ND, SD>(&self) -> Vec<Dependency<ND, SD>> {
             vec![]
         }
 
@@ -323,13 +322,12 @@ macro_rules! impl_common_lfs_rddb_funcs {
             true
         }
 
-        fn iterator_any(
+        fn iterator_any<S: Split + ?Sized>(
             &self,
-            split: Box<dyn Split>,
-        ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+            split: Box<S>,
+        ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
             Ok(Box::new(
-                self.iterator(split)?
-                    .map(|x| Box::new(x) as Box<dyn AnyData>),
+                self.iterator(split)?.map(|x| Box::new(x)),
             ))
         }
     };
@@ -381,15 +379,15 @@ impl RddBase for LocalFsReader<FileReader> {
 
 macro_rules! impl_common_lfs_rdd_funcs {
     () => {
-        fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>>
+        fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>>
         where
             Self: Sized,
         {
-            Arc::new(self.clone()) as Arc<dyn Rdd<Item = Self::Item>>
+            Arc::new(self.clone())
         }
 
-        fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-            Arc::new(self.clone()) as Arc<dyn RddBase>
+        fn get_rdd_base(&self) -> Arc<impl RddBase> {
+            Arc::new(self.clone())
         }
     };
 }

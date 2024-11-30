@@ -2,32 +2,32 @@ use std::fmt::Display;
 use std::marker::PhantomData;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-
+use serde_derive::{Serialize, Deserialize};
 use crate::env;
 use crate::rdd::rdd::Rdd;
 use crate::scheduler::{Task, TaskBase, TaskContext};
-use crate::serializable_traits::{AnyData, Data};
+use crate::ser_data::{AnyData, Data};
 use crate::split::Split;
-use serde::{Deserialize, Serialize};
 
-// #[derive(Serialize, Deserialize)]
-pub(crate) struct ResultTask<T, U, F>
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ResultTask<T, U, F, R>
 where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U
         + 'static
         + Send
         + Sync
-        // + serde::Serialize
-        // + serde::Deserialize
+        // + serde::ser::Serialize
+        // + serde::de::DeserializeOwned
         + Clone,
     T : Data,
-    U : Data
+    U : Data,
+    R: Rdd<Item = T>
 {
     pub task_id: usize,
     pub run_id: usize,
     pub stage_id: usize,
     pinned: bool,
-    pub rdd: Arc<dyn Rdd<Item = T>>,
+    pub rdd: Arc<R>,
     pub func: Arc<F>,
     pub partition: usize,
     pub locs: Vec<Ipv4Addr>,
@@ -35,7 +35,7 @@ where
     _marker: PhantomData<T>,
 }
 
-impl<T, U, F> ResultTask<T, U, F>
+impl<T, U, F> ResultTask<T, U, F, R>
 where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U
         + 'static

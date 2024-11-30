@@ -2,30 +2,31 @@ use std::marker::PhantomData;
 use std::net::Ipv4Addr;
 use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, Arc};
 use crate::context::Context;
-use crate::dependency::{Dependency, OneToOneDependency};
+use crate::dependency::{Dependency, NarrowDependencyTrait, OneToOneDependency};
 use crate::error::Result;
 use crate::rdd::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::{AnyData, Data};
-use core::ops::Fn as SerFunc;
+use crate::ser_data::{AnyData, Data, SerFunc};
 // use crate::serializable_traits::SerFunc;
 use crate::split::Split;
 use parking_lot::Mutex;
-use serde_derive::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 /// An RDD that applies the provided function to every partition of the parent RDD.
-// #[derive(Serialize, Deserialize)]
-pub struct MapPartitionsRdd<T: Data, U: Data, F> {
-    // #[serde(skip_serializing, skip_deserializing)]
+#[derive(Serialize, Deserialize)]
+pub struct MapPartitionsRdd<T: Data, U: Data, F, RDD, ND, SD> {
+    #[serde(skip_serializing, skip_deserializing)]
     name: Mutex<String>,
-    prev: Arc<dyn Rdd<Item = T>>,
-    vals: Arc<RddVals>,
+    prev: Arc<RDD>,
+    vals: Arc<RddVals<ND, SD>>,
     f: F,
     pinned: AtomicBool,
+    _marker_u: PhantomData<U>,
     _marker_t: PhantomData<T>,
 }
 
-impl<T: Data, U: Data, F> Clone for MapPartitionsRdd<T, U, F>
+impl<T: Data, U: Data, F, RDD, ND, SD> Clone for MapPartitionsRdd<T, U, F, RDD, ND, SD>
 where
+    RDD: Rdd<Item = T>,
     F: Fn(usize, Box<dyn Iterator<Item = T>>) -> Box<dyn Iterator<Item = U>> + Clone,
 {
     fn clone(&self) -> Self {
@@ -36,15 +37,17 @@ where
             f: self.f.clone(),
             pinned: AtomicBool::new(self.pinned.load(SeqCst)),
             _marker_t: PhantomData,
+            _marker_u: PhantomData,
         }
     }
 }
 
-impl<T: Data, U: Data, F> MapPartitionsRdd<T, U, F>
+impl<T: Data, U: Data, F, RDD, ND, SD> MapPartitionsRdd<T, U, F, RDD, ND, SD>
 where
-    F: SerFunc(usize, Box<dyn Iterator<Item = T>>) -> Box<dyn Iterator<Item = U>>,
+    RDD: Rdd<Item = T>,
+    F: SerFunc<(usize, Box<dyn Iterator<Item = T>>), Output = Box<dyn Iterator<Item = U>>>,
 {
-    pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+    pub(crate) fn new(prev: Arc<RDD>, f: F) -> Self {
         let mut vals: RddVals = RddVals::new(prev.get_context());
         vals.dependencies
             .push(Dependency::NarrowDependency(Arc::new(
@@ -58,6 +61,7 @@ where
             f,
             pinned: AtomicBool::new(false),
             _marker_t: PhantomData,
+            _marker_u: PhantomData,
         }
     }
 
@@ -67,9 +71,12 @@ where
     }
 }
 
-impl<T: Data, U: Data, F> RddBase for MapPartitionsRdd<T, U, F>
+impl<T: Data, U: Data, F, RDD, ND, SD> RddBase for MapPartitionsRdd<T, U, F, RDD, ND, SD>
 where
-    F: SerFunc(usize, Box<dyn Iterator<Item = T>>) -> Box<dyn Iterator<Item = U>>,
+    RDD: Rdd<Item = T>,
+    F: SerFunc<(usize, Box<dyn Iterator<Item = T>>), Output = Box<dyn Iterator<Item = U>>>,
+    ND: NarrowDependencyTrait,
+    SD: ShuffleDependencyTrait
 {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
@@ -88,7 +95,7 @@ where
         *own_name = name.to_owned();
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency> {
+    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
         self.vals.dependencies.clone()
     }
 
@@ -142,16 +149,17 @@ where
 //     }
 // }
 
-impl<T: Data, U: Data, F: 'static> Rdd for MapPartitionsRdd<T, U, F>
+impl<T: Data, U: Data, F, RDD> Rdd for MapPartitionsRdd<T, U, F, RDD>
 where
-    F: SerFunc(usize, Box<dyn Iterator<Item = T>>) -> Box<dyn Iterator<Item = U>>,
+    F: SerFunc<(usize, Box<dyn Iterator<Item = T>>), Output = Box<dyn Iterator<Item = U>>> + 'static,
+    RDD: Rdd<Item = T>,
 {
     type Item = U;
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        Arc::new(self.clone()) as Arc<dyn RddBase>
+    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+        Arc::new(self.clone())
     }
 
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+    fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         Arc::new(self.clone())
     }
     

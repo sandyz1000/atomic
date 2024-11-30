@@ -1,6 +1,6 @@
-use crate::serializable_traits::Data;
+use crate::ser_data::Data;
 use downcast_rs::Downcast;
-// use fasthash::MetroHasher;
+use fasthash::MetroHasher;
 use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
@@ -18,10 +18,9 @@ pub trait Partitioner:
 dyn_clone::clone_trait_object!(Partitioner);
 
 pub fn hash<T: Hash>(t: &T) -> u64 {
-    // let mut s: MetroHasher = Default::default();
-    // t.hash(&mut s);
-    // s.finish()
-    unimplemented!()
+    let mut s: MetroHasher = Default::default();
+    t.hash(&mut s);
+    s.finish()
 }
 
 // #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

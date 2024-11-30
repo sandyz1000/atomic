@@ -14,11 +14,8 @@ use crate::scheduler::{
     CompletionEvent, 
     EventQueue, 
     Job, 
-    JobListener, 
-    JobTracker, 
     LiveListenerBus, 
     NativeScheduler,
-    NoOpListener, 
     ResultTask, 
     Stage, 
     TaskBase, 
@@ -27,8 +24,7 @@ use crate::scheduler::{
     TaskResult, 
     TastEndReason,
 };
-use crate::serializable_traits::{AnyData, Data};
-use core::ops::Fn as SerFunc;
+use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::shuffle::ShuffleMapTask;
 use crate::{env, Result};
 use dashmap::DashMap;
@@ -101,7 +97,7 @@ impl LocalScheduler {
         _id_in_job: usize,
         attempt_id: usize,
     ) where
-        F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
     {
         let des_task: TaskOption = bincode::deserialize(&task).unwrap();
         let result = des_task.run(attempt_id);
@@ -162,6 +158,26 @@ impl LocalScheduler {
 
 #[async_trait::async_trait]
 impl NativeScheduler for LocalScheduler {
+    #[inline]
+    fn get_event_queue(&self) -> &Arc<DashMap<usize, VecDeque<CompletionEvent>>> {
+        &self.event_queues
+    }
+
+    #[inline]
+    fn get_next_job_id(&self) -> usize {
+        self.next_job_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    #[inline]
+    fn get_next_stage_id(&self) -> usize {
+        self.next_stage_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    #[inline]
+    fn get_next_task_id(&self) -> usize {
+        self.next_task_id.fetch_add(1, Ordering::SeqCst)
+    }
+
     /// Every single task is run in the local thread pool
     fn submit_task<T: Data, U: Data, F>(
         &self,
@@ -169,7 +185,7 @@ impl NativeScheduler for LocalScheduler {
         id_in_job: usize,
         _server_address: SocketAddrV4,
     ) where
-        F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
     {
         log::debug!("inside submit task");
         let my_attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);

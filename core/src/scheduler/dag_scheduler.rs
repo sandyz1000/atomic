@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::error::Error;
 
 use crate::scheduler::{Scheduler, TaskBase};
-use crate::serializable_traits::AnyData;
+use crate::ser_data::{AnyData, Data};
 
 #[derive(Debug, Clone)]
 pub struct FetchFailedVals {
@@ -71,7 +71,7 @@ impl Scheduler for DAGScheduler {
         todo!()
     }
 
-    fn run_job<T: crate::serializable_traits::Data, U: crate::serializable_traits::Data, F>(
+    fn run_job<T: Data, U: Data, F>(
         &self,
         rdd: &dyn crate::Rdd<Item = T>,
         func: F,

@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::*;
 use crate::rdd::MapperRdd;
 use std::io::{self, Read};
+use atomic::ser_data::{Data, SerFunc};
 
 pub struct HdfsIO {
     nn: String,
@@ -54,7 +55,7 @@ impl HdfsIO {
 
     pub fn read_to_rdd<U, F>(&mut self, path: &str, context: &Arc<Context>, num_slices: usize, f: F) -> Result<SerArc<dyn Rdd<Item = U>>> 
     where
-        F: SerFunc(Vec<u8>) -> Vec<U>,
+        F: SerFunc<Vec<u8>, Output=Vec<U>>,
         U: Data,
     {
         let mut buf = Vec::new();
@@ -118,7 +119,7 @@ impl HdfsIO {
 
     pub fn read_dir_to_rdd<U, F>(&mut self, path: &str, context: &Arc<Context>, num_slices: usize, f: F) -> Result<SerArc<dyn Rdd<Item = Vec<U>>>>
     where
-        F: SerFunc(Vec<u8>) -> Vec<U>,
+        F: SerFunc<Vec<u8>, Output = Vec<U>>,
         U: Data,
     {
         let mut vec = Vec::<Vec<u8>>::new();

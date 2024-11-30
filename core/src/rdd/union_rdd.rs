@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 use crate::partitioner::Partitioner;
 use crate::rdd::union_rdd::UnionVariants::{NonUniquePartitioner, PartitionerAware};
 use crate::rdd::rdd::*;
-use crate::serializable_traits::{AnyData, Data};
+use crate::ser_data::{AnyData, Data};
 use crate::split::Split;
 
 #[derive(Clone, Serialize, Deserialize)]

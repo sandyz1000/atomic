@@ -16,9 +16,8 @@ use crate::io::ReaderConfiguration;
 use crate::partial::{ApproximateEvaluator, PartialResult};
 use crate::rdd::rdd::{ParallelCollection, Rdd, RddBase, UnionRdd};
 use crate::scheduler::{DistributedScheduler, LocalScheduler, NativeScheduler, TaskContext};
-use crate::serializable_traits::Data;
-use core::ops::Fn as SerFunc;
-use crate::serialized_data_capnp::serialized_data;
+use crate::ser_data::{Data, SerFunc};
+// use crate::serialized_data_capnp::serialized_data;
 use crate::{env, hosts, utils};
 use once_cell::sync::OnceCell;
 use simplelog::{SharedLogger, WriteLogger, TermLogger, CombinedLogger, TerminalMode, Config, ColorChoice};
@@ -48,15 +47,16 @@ impl Default for Schedulers {
 }
 
 impl Schedulers {
-    fn run_job<T: Data, U: Data, F>(
+    fn run_job<T: Data, U: Data, F, RDD>(
         &self,
         func: Arc<F>,
-        final_rdd: Arc<dyn Rdd<Item = T>>,
+        final_rdd: Arc<RDD>,
         partitions: Vec<usize>,
         allow_local: bool,
     ) -> Result<Vec<U>>
     where
-        F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        RDD: Rdd<Item = T>,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
     {
         // TODO: Schedulers code for distributed and local is duplicate, merge in common trait
         let op_name = final_rdd.get_op_name();
@@ -88,17 +88,18 @@ impl Schedulers {
         }
     }
 
-    fn run_approximate_job<T: Data, U: Data, R, F, E>(
+    fn run_approximate_job<T: Data, U: Data, R, F, E, RDD>(
         &self,
         func: Arc<F>,
-        final_rdd: Arc<dyn Rdd<Item = T>>,
+        final_rdd: Arc<RDD>,
         evaluator: E,
         timeout: Duration,
     ) -> Result<PartialResult<R>>
     where
-        F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + Debug + Send + Sync + 'static,
+        RDD: Rdd<Item = T>
     {
         let op_name = final_rdd.get_op_name();
         log::info!("starting `{}` job", op_name);
@@ -384,12 +385,15 @@ impl Context {
                 format!("{}:{}", socket_addr.ip(), socket_addr.port() + 10)
             ) {
                 let signal = bincode::serialize(&Signal::ShutDownGracefully).unwrap();
-                let mut message = capnp::message::Builder::new_default();
-                let mut task_data = message.init_root::<serialized_data::Builder>();
-                task_data.set_msg(&signal);
-                capnp::serialize::write_message(&mut stream, &message)
-                    .map_err(Error::OutputWrite)
-                    .unwrap();
+                // let mut message = capnp::message::Builder::new_default();
+                // let mut task_data = message.init_root::<serialized_data::Builder>();
+                // task_data.set_msg(&signal);
+                // capnp::serialize::write_message(&mut stream, &message)
+                //     .map_err(Error::OutputWrite)
+                //     .unwrap();
+                
+                // TODO: Write signal to `stream`
+                // TODO: Use `rkvy` for serialization
             } 
             else {
                 log::error!(
@@ -413,7 +417,7 @@ impl Context {
         self: &Arc<Self>,
         seq: I,
         num_slices: usize,
-    ) -> Arc<dyn Rdd<Item = T>>
+    ) -> Arc<impl Rdd<Item = T>>
     where
         I: IntoIterator<Item = T>,
     {
@@ -428,7 +432,7 @@ impl Context {
         end: u64,
         step: usize,
         num_slices: usize,
-    ) -> Arc<dyn Rdd<Item = u64>> {
+    ) -> Arc<impl Rdd<Item = u64>> {
         // TODO: input validity check
         let seq = (start..=end).step_by(step);
         let rdd = self.parallelize(seq, num_slices);
@@ -440,7 +444,7 @@ impl Context {
         self: &Arc<Self>,
         seq: I,
         num_slices: usize,
-    ) -> Arc<dyn Rdd<Item = T>>
+    ) -> Arc<impl Rdd<Item = T>>
     where
         I: IntoIterator<Item = T>,
     {
@@ -454,18 +458,19 @@ impl Context {
         func: F,
     ) -> impl Rdd<Item = O>
     where
-        F: SerFunc(I) -> O,
+        F: SerFunc<I, Output = O>,
         C: ReaderConfiguration<I>,
     {
         config.make_reader(self.clone(), func)
     }
 
-    pub fn run_job<T: Data, U: Data, F>(
+    pub fn run_job<T: Data, U: Data, F, RDD>(
         self: &Arc<Self>,
-        rdd: Arc<dyn Rdd<Item = T>>,
+        rdd: Arc<RDD>,
         func: F,
     ) -> Result<Vec<U>>
     where
+        RDD: Rdd<Item = T>,
         F: Fn(Box<dyn Iterator<Item = T>>) -> U,
     {
         let cl = serde_closure::Fn!(move |(_task_context, iter)| (func)(iter));
@@ -480,14 +485,15 @@ impl Context {
         )
     }
 
-    pub fn run_job_with_partitions<T: Data, U: Data, F, P>(
+    pub fn run_job_with_partitions<T: Data, U: Data, F, P, RDD>(
         self: &Arc<Self>,
-        rdd: Arc<dyn Rdd<Item = T>>,
+        rdd: Arc<RDD>,
         func: F,
         partitions: P,
     ) -> Result<Vec<U>>
     where
-        F: SerFunc(Box<dyn Iterator<Item = T>>) -> U,
+        RDD: Rdd<Item = T>,
+        F: SerFunc<Box<dyn Iterator<Item = T>>, Output = U>,
         P: IntoIterator<Item = usize>,
     {
         let cl = serde_closure::Fn!(move |(_task_context, iter)| (func)(iter));
@@ -499,13 +505,14 @@ impl Context {
             )
     }
 
-    pub fn run_job_with_context<T: Data, U: Data, F>(
+    pub fn run_job_with_context<T: Data, U: Data, F, RDD>(
         self: &Arc<Self>,
-        rdd: Arc<dyn Rdd<Item = T>>,
+        rdd: Arc<RDD>,
         func: F,
     ) -> Result<Vec<U>>
     where
-        F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        RDD: Rdd<Item = T>,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
     {
         log::debug!("inside run job in context");
         let func = Arc::new(func);
@@ -519,17 +526,18 @@ impl Context {
 
     /// Run a job that can return approximate results. Returns a partial result
     /// (how partial depends on whether the job was finished before or after timeout).
-    pub(crate) fn run_approximate_job<T: Data, U: Data, R, F, E>(
+    pub(crate) fn run_approximate_job<T: Data, U: Data, R, F, E, RDD>(
         self: &Arc<Self>,
         func: F,
-        rdd: Arc<dyn Rdd<Item = T>>,
+        rdd: Arc<RDD>,
         evaluator: E,
         timeout: Duration,
     ) -> Result<PartialResult<R>>
     where
-        F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + Debug + Send + Sync + 'static,
+        RDD: Rdd<Item = T>
     {
         self.scheduler
             .run_approximate_job(
@@ -542,7 +550,7 @@ impl Context {
 
     pub(crate) fn get_preferred_locs(
         &self,
-        rdd: Arc<dyn RddBase>,
+        rdd: Arc<impl RddBase>,
         partition: usize,
     ) -> Vec<std::net::Ipv4Addr> {
         match &self.scheduler {

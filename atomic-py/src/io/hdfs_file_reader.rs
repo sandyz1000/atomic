@@ -11,8 +11,7 @@ use crate::error::{Error, Result};
 use crate::hosts::Hosts;
 use crate::io::*;
 use crate::rdd::{MapPartitionsRdd, MapperRdd, Rdd, RddBase};
-use crate::serializers::serializable_traits::{AnyData, Data};
-use core::ops::Fn as SerFunc;
+use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::split::Split;
 use crate::Fn;
 use log::debug;
@@ -50,7 +49,7 @@ impl HdfsReaderConfig {
         HdfsReaderConfig {
             filter_ext: None,
             expect_dir: true,
-            namenode: nn, //这里namenode的ip可能有误（不知道socketAddr转为string带不带端口号）
+            namenode: nn,
             dir_path: path.into(),
             executor_partitions: None,
         }
@@ -63,7 +62,6 @@ impl HdfsReaderConfig {
 
     /// Set the namenode.
     pub fn set_namenode<T: Into<String>>(&mut self, namenode: T) {
-        //这里之后可能得做一下保护，只能设置一次namenode
         self.namenode = namenode.into();
     }
 
@@ -85,7 +83,7 @@ impl HdfsReaderConfig {
 impl ReaderConfiguration<Vec<u8>> for HdfsReaderConfig {
     fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> SerArc<dyn Rdd<Item = U>>
     where
-        F: SerFunc(Vec<u8>) -> U,
+        F: SerFunc<Vec<u8>, Output = U>,
         U: Data,
     {
         let reader = HdfsReader::<BytesReader>::new(self, context);
@@ -107,7 +105,7 @@ impl ReaderConfiguration<Vec<u8>> for HdfsReaderConfig {
 impl ReaderConfiguration<PathBuf> for HdfsReaderConfig {
     fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> SerArc<dyn Rdd<Item = U>>
     where
-        F: SerFunc(PathBuf) -> U,
+        F: SerFunc<PathBuf, Output=U>,
         U: Data,
     {
         let reader = HdfsReader::<FileReader>::new(self, context);
@@ -254,7 +252,7 @@ impl<T: Data> HdfsReader<T> {
         let avg_partition_size = (total_size / num_partitions) as u64;
 
         let partitions = self.assign_files_to_partitions(
-            //将文件分配到分区
+
             num_partitions,
             files,
             file_size_mean,
@@ -271,9 +269,9 @@ impl<T: Data> HdfsReader<T> {
         &self,
         num_partitions: u64,
         files: Vec<(u64, PathBuf)>,
-        file_size_mean: u64, //平均大小
+        file_size_mean: u64,
         avg_partition_size: u64,
-        std_dev: f32, //文件大小的标准差
+        std_dev: f32,
     ) -> Vec<Vec<PathBuf>> {
         // Accept ~ 0.25 std deviations top from the average partition size
         // when assigning a file to a partition.
@@ -289,26 +287,25 @@ impl<T: Data> HdfsReader<T> {
         );
 
         let mut partitions = Vec::with_capacity(num_partitions as usize);
-        let mut partition = Vec::with_capacity(0); //这样分配？
+        let mut partition = Vec::with_capacity(0);
         let mut curr_part_size = 0_u64;
-        let mut rng = rand::thread_rng(); //RNG牛B
+        let mut rng = rand::thread_rng();
 
         for (size, file) in files.into_iter() {
             if partitions.len() as u64 == num_partitions - 1 {
-                //最后一个分区，所有剩余文件都放里面
                 partition.push(file);
                 continue;
             }
 
             let new_part_size = curr_part_size + size;
-            let larger_than_mean = rng.gen::<bool>(); //随机生成？？
-            if (larger_than_mean && new_part_size < high_part_size_bound)//正常情况
+            let larger_than_mean = rng.gen::<bool>();
+            if (larger_than_mean && new_part_size < high_part_size_bound)
                 || (!larger_than_mean && new_part_size <= avg_partition_size)
             {
                 partition.push(file);
                 curr_part_size = new_part_size;
             } else if size > avg_partition_size as u64 {
-                //单个大文件
+                
                 if !partition.is_empty() {
                     partitions.push(partition);
                 }
@@ -316,7 +313,7 @@ impl<T: Data> HdfsReader<T> {
                 partition = vec![];
                 curr_part_size = 0;
             } else {
-                //要开新分区了
+                
                 if !partition.is_empty() {
                     partitions.push(partition);
                 }
@@ -325,7 +322,6 @@ impl<T: Data> HdfsReader<T> {
             }
         }
         if !partition.is_empty() {
-            //推入最后一个分区
             partitions.push(partition);
         }
 

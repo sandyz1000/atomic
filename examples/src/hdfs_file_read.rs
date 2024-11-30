@@ -1,6 +1,7 @@
 use std::time::Instant;
 use atomic::io::*;
 use atomic::*;
+use serde_closure::{traits::Fn, Fn};
 use std::{env, fs, os::unix::prelude::FileExt, io::Write};
 
 fn main() -> Result<()> {
@@ -30,7 +31,7 @@ fn main() -> Result<()> {
     let line = lines.flat_map(Fn!(|lines: Vec<String>| {
         println!("flat map");
         let iter = lines.into_iter().map(|line| {
-            let line = line.split(',').collect::<Vec<_>>();
+            let line: Vec<String> = line.split(',').collect();
             (
                 (line[0].to_string()),
                 (line[7].parse::<f64>().unwrap(), 1.0),
