@@ -91,11 +91,11 @@ where
         self.prev.splits()
     }
 
-    fn number_of_splits(&self) -> usize {
+    fn number_of_splits<S: Split + ?Sized>(&self) -> usize {
         self.prev.number_of_splits()
     }
 
-    fn partitioner<P: Partitioner>(&self) -> Option<Box<P>> {
+    fn partitioner<P: Partitioner + ?Sized>(&self) -> Option<Box<P>> {
         if self.preserves_partitioning {
             self.prev.partitioner()
         } else {

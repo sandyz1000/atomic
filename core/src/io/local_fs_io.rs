@@ -1,3 +1,4 @@
+use crate::dependency::{NarrowDependencyTrait, ShuffleDependencyTrait};
 use crate::io::*;
 use crate::rdd::local_fs_read_rdd::LocalFsReadRdd;
 
@@ -5,11 +6,11 @@ pub struct LocalFsIO {}
 
 impl LocalFsIO {
 
-    pub fn read_to_rdd(
+    pub fn read_to_rdd<ND: NarrowDependencyTrait, SD: ShuffleDependencyTrait>(
         path: &str,
         context: &Arc<Context>,
         num_slices: usize,
-    ) -> LocalFsReadRdd
+    ) -> LocalFsReadRdd<ND, SD>
     {
         let rdd = LocalFsReadRdd::new(context.clone(), path.to_string(), num_slices);
         rdd
@@ -20,7 +21,7 @@ impl LocalFsIO {
         context: &Arc<Context>,
         num_slices: usize,
         decoder: F,
-    ) -> Arc<dyn Rdd<Item = U>>
+    ) -> Arc<impl Rdd<Item = U>>
     where
         F: SerFunc<Vec<u8>, Output = U>,
         U: Data,

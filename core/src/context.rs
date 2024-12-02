@@ -10,6 +10,7 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, Instant};
+use crate::dependency::{NarrowDependencyTrait, ShuffleDependencyTrait};
 use crate::error::{Error, Result};
 use crate::executor::{Executor, Signal};
 use crate::io::ReaderConfiguration;
@@ -440,15 +441,17 @@ impl Context {
         rdd
     }
 
-    pub fn parallelize<T: Data, I>(
+    pub fn parallelize<T: Data, I, ND, SD>(
         self: &Arc<Self>,
         seq: I,
         num_slices: usize,
     ) -> Arc<impl Rdd<Item = T>>
     where
         I: IntoIterator<Item = T>,
+        ND: NarrowDependencyTrait,
+        SD: ShuffleDependencyTrait
     {
-        Arc::new(ParallelCollection::new(self.clone(), seq, num_slices))
+        Arc::new(ParallelCollection::<T, ND, SD>::new(self.clone(), seq, num_slices))
     }
 
     /// Load from a distributed source and turns it into a parallel collection.
@@ -548,9 +551,9 @@ impl Context {
             )
     }
 
-    pub(crate) fn get_preferred_locs(
+    pub(crate) fn get_preferred_locs<RDB: RddBase>(
         &self,
-        rdd: Arc<impl RddBase>,
+        rdd: Arc<RDB>,
         partition: usize,
     ) -> Vec<std::net::Ipv4Addr> {
         match &self.scheduler {
@@ -559,7 +562,7 @@ impl Context {
         }
     }
 
-    pub fn union<T: Data>(rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<impl Rdd<Item = T>> {
+    pub fn union<T: Data>(rdds: &[Arc<impl Rdd<Item = T>>]) -> Result<impl Rdd<Item = T>> {
         UnionRdd::new(rdds)
     }
 }

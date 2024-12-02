@@ -1,31 +1,23 @@
-use std::collections::{BTreeSet, VecDeque};
-use std::net::{Ipv4Addr, SocketAddrV4};
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
-use std::fmt::Debug;
-use std::option::Option;
-use crate::partial::{ApproximateActionListener, ApproximateEvaluator, PartialResult};
-use crate::scheduler::listener::{JobEndListener, JobStartListener};
 use crate::dependency::{Dependency, ShuffleDependencyTrait};
 use crate::env;
 use crate::error::{Error, Result};
-use crate::rdd::rdd::{RddBase, Rdd};
+use crate::partial::{ApproximateActionListener, ApproximateEvaluator, PartialResult};
+use crate::rdd::rdd::{Rdd, RddBase};
+use crate::scheduler::listener::{JobEndListener, JobStartListener};
 use crate::scheduler::{
-    CompletionEvent, 
-    FetchFailedVals, 
-    JobListener, 
-    JobTracker, 
-    ResultTask, 
-    Stage, 
-    TaskBase,
-    TaskContext, 
-    TaskOption, 
-    NoOpListener
+    CompletionEvent, FetchFailedVals, JobListener, JobTracker, NoOpListener, ResultTask, Stage,
+    TaskBase, TaskContext, TaskOption,
 };
 use crate::ser_data::{Data, SerFunc};
 use crate::shuffle::ShuffleMapTask;
 use dashmap::DashMap;
+use std::collections::{BTreeSet, VecDeque};
+use std::fmt::Debug;
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::option::Option;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub(crate) type EventQueue = Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
 
@@ -37,7 +29,7 @@ pub(crate) trait NativeScheduler: Send + Sync {
         jt: Arc<JobTracker<F, U, T, L, RDD>>,
     ) -> Result<Option<Vec<U>>>
     where
-        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output =  U>,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
         L: JobListener,
     {
         if jt.final_stage.parents.is_empty() && (jt.num_output_parts == 1) {
@@ -218,7 +210,7 @@ pub(crate) trait NativeScheduler: Send + Sync {
         jt: Arc<JobTracker<F, U, T, L, RDD>>,
     ) -> Result<()>
     where
-        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
         L: JobListener,
     {
         // TODO: logging
@@ -487,19 +479,22 @@ pub(crate) trait NativeScheduler: Send + Sync {
         target_executor: SocketAddrV4,
     ) where
         F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>;
-    
+
     async fn update_cache_locs(&self) -> Result<()>;
-    
+
     fn get_event_queue(&self) -> &Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
-    
-    async fn get_missing_parent_stages<'a>(&'a self, stage: Stage) -> Result<Vec<Stage>>;
-    
+
+    async fn get_missing_parent_stages<'a, SD: ShuffleDependencyTrait, RDD: RddBase>(
+        &'a self,
+        stage: Stage<SD, RDD>,
+    ) -> Result<Vec<Stage<SD, RDD>>>;
+
     fn get_next_job_id(&self) -> usize;
-    
+
     fn get_next_stage_id(&self) -> usize;
-    
+
     fn get_next_task_id(&self) -> usize;
-    
+
     fn next_executor_server<S: TaskBase>(&self, rdd: &S) -> SocketAddrV4;
 
     fn get_preferred_locs<RDD: RddBase>(&self, rdd: Arc<RDD>, partition: usize) -> Vec<Ipv4Addr> {
@@ -533,7 +528,10 @@ pub(crate) trait NativeScheduler: Send + Sync {
         }
     }
 
-    async fn get_shuffle_map_stage<SD: ShuffleDependencyTrait>(&self, shuf: Arc<SD>) -> Result<Stage>;
+    async fn get_shuffle_map_stage<SD: ShuffleDependencyTrait>(
+        &self,
+        shuf: Arc<SD>,
+    ) -> Result<Stage>;
 
     /// Run an approximate job on the given RDD and pass all the results to an ApproximateEvaluator
     /// as they arrive. Returns a partial result object from the evaluator.
@@ -546,7 +544,7 @@ pub(crate) trait NativeScheduler: Send + Sync {
     ) -> Result<PartialResult<R>>
     where
         RDD: Rdd<Item = T>,
-        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>,
+        F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + Debug + Send + Sync + 'static,
     {
@@ -675,7 +673,7 @@ pub(crate) trait NativeScheduler: Send + Sync {
                     stage.id,
                     evt.task.get_task_id()
                 );
-                
+
                 jt.pending_tasks
                     .lock()
                     .await
@@ -773,5 +771,4 @@ pub(crate) trait NativeScheduler: Send + Sync {
         let locs_opt = self.cache_locs.get(&rdd.get_rdd_id());
         locs_opt.map(|l| l.clone())
     }
-
 }

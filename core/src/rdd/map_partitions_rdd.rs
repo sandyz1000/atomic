@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 use std::net::Ipv4Addr;
 use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, Arc};
 use crate::context::Context;
-use crate::dependency::{Dependency, NarrowDependencyTrait, OneToOneDependency};
+use crate::dependency::{Dependency, NarrowDependencyTrait, OneToOneDependency, ShuffleDependencyTrait};
 use crate::error::Result;
 use crate::rdd::rdd::{Rdd, RddBase, RddVals};
 use crate::ser_data::{AnyData, Data, SerFunc};
@@ -149,13 +149,15 @@ where
 //     }
 // }
 
-impl<T: Data, U: Data, F, RDD> Rdd for MapPartitionsRdd<T, U, F, RDD>
+impl<T: Data, U: Data, F, RDD, ND, SD> Rdd for MapPartitionsRdd<T, U, F, RDD, ND, SD>
 where
     F: SerFunc<(usize, Box<dyn Iterator<Item = T>>), Output = Box<dyn Iterator<Item = U>>> + 'static,
     RDD: Rdd<Item = T>,
+    ND: NarrowDependencyTrait + 'static,
+    SD: ShuffleDependencyTrait + 'static
 {
     type Item = U;
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<RDD> {
         Arc::new(self.clone())
     }
 

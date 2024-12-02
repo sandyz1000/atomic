@@ -37,7 +37,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 // Values which are needed for all RDDs
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RddVals<ND, SD> {
     pub id: usize,
     pub dependencies: Vec<Dependency<ND, SD>>,
@@ -69,10 +69,8 @@ where
 // Refactored RDD trait into two traits one having RddBase trait which contains only non generic methods
 // which provide information for dependency lists
 // Another separate Rdd containing generic methods like map, etc.,
-pub trait RddBase: Send + Sync + 'static
-// + erased_serde::Serialize
-// + erased_serde::Deserializer<'static>
-{
+pub trait RddBase: Send + Sync + 'static {
+
     fn get_rdd_id(&self) -> usize;
 
     fn get_context(&self) -> Arc<Context>;
@@ -85,7 +83,7 @@ pub trait RddBase: Send + Sync + 'static
         log::debug!("couldn't register op name")
     }
 
-    fn get_dependencies<ND, SD>(&self) -> Vec<Dependency<ND, SD>>;
+    fn get_dependencies<SD: ShuffleDependencyTrait, ND: NarrowDependencyTrait>(&self) -> Vec<Dependency<ND, SD>>;
 
     fn preferred_locations<S: Split + ?Sized>(&self, _split: Box<S>) -> Vec<Ipv4Addr> {
         Vec::new()
@@ -97,7 +95,7 @@ pub trait RddBase: Send + Sync + 'static
 
     fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>>;
 
-    fn number_of_splits(&self) -> usize {
+    fn number_of_splits<S: Split + ?Sized>(&self) -> usize {
         self.splits().len()
     }
 
@@ -106,12 +104,12 @@ pub trait RddBase: Send + Sync + 'static
     fn iterator_any<S: Split + ?Sized>(
         &self,
         split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>>;
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>>;
 
-    fn cogroup_iterator_any(
+    fn cogroup_iterator_any<S: Split + ?Sized>(
         &self,
-        split: Box<impl Split>,
-    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+        split: Box<S>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
@@ -141,6 +139,7 @@ pub trait RddBase: Send + Sync + 'static
 // }
 
 impl<I: Rdd + ?Sized> RddBase for Arc<I> {
+    
     fn get_rdd_id(&self) -> usize {
         (**self).get_rdd_base().get_rdd_id()
     }
@@ -157,16 +156,17 @@ impl<I: Rdd + ?Sized> RddBase for Arc<I> {
         (**self).get_rdd_base().get_dependencies()
     }
 
-    fn splits(&self) -> Vec<Box<dyn Split>> {
+    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
         (**self).get_rdd_base().splits()
     }
 
     fn iterator_any<S: Split + ?Sized>(
         &self,
         split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         (**self).get_rdd_base().iterator_any(split)
     }
+    
 }
 
 impl<I: Rdd + ?Sized> Rdd for Arc<I> {
@@ -176,14 +176,14 @@ impl<I: Rdd + ?Sized> Rdd for Arc<I> {
         (**self).get_rdd()
     }
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base<RDD: RddBase>(&self) -> Arc<RDD> {
         (**self).get_rdd_base()
     }
 
     fn compute<S: Split + ?Sized>(
         &self,
         split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Self::Item>>> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         (**self).compute(split)
     }
 }
@@ -195,17 +195,17 @@ pub trait Rdd: RddBase + 'static {
 
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>>;
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase>;
+    fn get_rdd_base<RDD: RddBase>(&self) -> Arc<RDD>;
 
     fn compute<S: Split + ?Sized>(
         &self,
         split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Self::Item>>>;
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>>;
 
     fn iterator<S: Split + ?Sized>(
         &self,
         split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Self::Item>>> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         self.compute(split)
     }
 
@@ -865,7 +865,7 @@ pub trait Rdd: RddBase + 'static {
     fn union(
         &self,
         other: Arc<dyn Rdd<Item = Self::Item>>,
-    ) -> Result<Arc<dyn Rdd<Item = Self::Item>>>
+    ) -> Result<Arc<impl Rdd<Item = Self::Item>>>
     where
         Self: Clone,
     {
@@ -885,7 +885,7 @@ pub trait Rdd: RddBase + 'static {
         ))
     }
 
-    fn intersection<T>(&self, other: Arc<T>) -> Arc<dyn Rdd<Item = Self::Item>>
+    fn intersection<T>(&self, other: Arc<T>) -> Arc<impl Rdd<Item = Self::Item>>
     where
         Self: Clone,
         Self::Item: Data + Eq + Hash,
@@ -896,7 +896,7 @@ pub trait Rdd: RddBase + 'static {
 
     /// Example of subtract can be found in subtract.rs
     /// performs a full outer join followed by and intersection with self to get subtraction.
-    fn subtract<T>(&self, other: Arc<T>) -> Arc<dyn Rdd<Item = Self::Item>>
+    fn subtract<T>(&self, other: Arc<T>) -> Arc<impl Rdd<Item = Self::Item>>
     where
         Self: Clone,
         Self::Item: Data + Eq + Hash,
@@ -909,7 +909,7 @@ pub trait Rdd: RddBase + 'static {
         &self,
         other: Arc<T>,
         num_splits: usize,
-    ) -> Arc<dyn Rdd<Item = Self::Item>>
+    ) -> Arc<IndexMapResolver Rdd<Item = Self::Item>>
     where
         Self: Clone,
         Self::Item: Data + Eq + Hash,
@@ -962,7 +962,7 @@ pub trait Rdd: RddBase + 'static {
         &self,
         other: Arc<T>,
         num_splits: usize,
-    ) -> Arc<dyn Rdd<Item = Self::Item>>
+    ) -> Arc<impl Rdd<Item = Self::Item>>
     where
         Self: Clone,
         Self::Item: Data + Eq + Hash,
@@ -1018,7 +1018,7 @@ pub trait Rdd: RddBase + 'static {
     /// This operation may be very expensive. If you are grouping in order to perform an
     /// aggregation (such as a sum or average) over each key, using `aggregate_by_key`
     /// or `reduce_by_key` will provide much better performance.
-    fn group_by<K, F>(&self, func: F) -> Arc<dyn Rdd<Item = (K, Vec<Self::Item>)>>
+    fn group_by<K, F>(&self, func: F) -> Arc<impl Rdd<Item = (K, Vec<Self::Item>)>>
     where
         Self: Sized,
         K: Data + Hash + Eq,

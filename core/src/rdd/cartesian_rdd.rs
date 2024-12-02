@@ -28,7 +28,7 @@ where
     }
 }
 
-// #[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CartesianRdd<T: Data, U: Data, R1, R2, ND, SD> {
     vals: Arc<RddVals<ND, SD>>,
     rdd1: Arc<R1>,
@@ -85,10 +85,12 @@ where
     }
 }
 
-impl<T: Data, U: Data, R1, R2> RddBase for CartesianRdd<T, U, R1, R2> 
+impl<T: Data, U: Data, R1, R2, ND, SD> RddBase for CartesianRdd<T, U, R1, R2, ND, SD> 
 where
     R1: Rdd<Item = T>,
-    R2: Rdd<Item = U>
+    R2: Rdd<Item = U>,
+    ND: NarrowDependencyTrait + 'static,
+    SD: ShuffleDependencyTrait + 'static
 {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
@@ -98,7 +100,7 @@ where
         self.vals.context.upgrade().unwrap()
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency> {
+    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
         self.vals.dependencies.clone()
     }
 
@@ -136,8 +138,8 @@ impl<T: Data, U: Data, R1, R2, ND, SD> Rdd for CartesianRdd<T, U, R1, R2, ND, SD
 where
     R1: Rdd<Item = T>,
     R2: Rdd<Item = U>,
-    ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    ND: NarrowDependencyTrait + 'static,
+    SD: ShuffleDependencyTrait + 'static
 {
     type Item = (T, U);
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>>
@@ -151,7 +153,7 @@ where
         Arc::new(self.clone())
     }
 
-    fn compute<S: Split + Clone + dyn_clone::DynClone>(&self, split: Box<S>) -> Result<Box<impl Iterator<Item = Self::Item>>> {
+    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         let current_split: Box<CartesianSplit> = split
             .downcast::<CartesianSplit>()
             .or(Err(Error::DowncastFailure("CartesianSplit")))?;

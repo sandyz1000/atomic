@@ -81,7 +81,8 @@ impl<T: Data, U: Data, F, RDD, ND, SD> RddBase for MapperRdd<T, U, F, RDD, ND, S
 where
     F: SerFunc<T, Output = U>,
     ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    SD: ShuffleDependencyTrait + 'static,
+    RDD: Rdd<Item = T>,
 {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
@@ -119,14 +120,14 @@ where
     fn cogroup_iterator_any<S: Split + ?Sized>(
         &self,
         split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
     fn iterator_any<S: Split + ?Sized>(
         &self,
         split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any maprdd",);
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x)),
@@ -156,9 +157,12 @@ where
 impl<T: Data, U: Data, F, RDD, ND, SD> Rdd for MapperRdd<T, U, F, RDD, ND, SD>
 where
     F: SerFunc<T, Output = U> + 'static,
+    RDD: Rdd<Item = T>,
+    ND: NarrowDependencyTrait + 'static,
+    SD: ShuffleDependencyTrait + 'static,
 {
     type Item = U;
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<RDD> {
         Arc::new(self.clone())
     }
 
@@ -166,7 +170,7 @@ where
         Arc::new(self.clone())
     }
 
-    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<impl Iterator<Item = Self::Item>>> {
+    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         Ok(Box::new(self.prev.iterator(split)?.map(self.f.clone())))
     }
 }

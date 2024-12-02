@@ -6,53 +6,65 @@ use std::sync::Arc;
 
 // this is strange. see into this in more detail
 #[derive(Clone)]
-pub(crate) struct Stage {
+pub(crate) struct Stage<SD, RDD> {
     pub id: usize,
     pub num_partitions: usize,
-    pub shuffle_dependency: Option<Arc<dyn ShuffleDependencyTrait>>,
+    pub shuffle_dependency: Option<Arc<SD>>,
     pub is_shuffle_map: bool,
-    pub rdd: Arc<dyn RddBase>,
-    pub parents: Vec<Stage>,
+    pub rdd: Arc<RDD>,
+    pub parents: Vec<Stage<SD, RDD>>,
     pub output_locs: Vec<Vec<String>>,
     pub num_available_outputs: usize,
 }
 
-impl PartialOrd for Stage {
-    fn partial_cmp(&self, other: &Stage) -> Option<Ordering> {
+impl<SD: ShuffleDependencyTrait, RDD: RddBase> PartialOrd for Stage<SD, RDD> {
+    fn partial_cmp(&self, other: &Stage<SD, RDD>) -> Option<Ordering> {
         Some(self.id.cmp(&other.id))
     }
 }
 
-impl PartialEq for Stage {
-    fn eq(&self, other: &Stage) -> bool {
+impl<SD: ShuffleDependencyTrait, RDD: RddBase> PartialEq for Stage<SD, RDD> {
+    fn eq(&self, other: &Stage<SD, RDD>) -> bool {
         self.id == other.id
     }
 }
 
-impl Eq for Stage {}
+impl<SD, RDD> Eq for Stage<SD, RDD> 
+where 
+    SD: ShuffleDependencyTrait,
+    RDD: RddBase
+{}
 
-impl Ord for Stage {
-    fn cmp(&self, other: &Stage) -> Ordering {
+impl<SD, RDD> Ord for Stage<SD, RDD> 
+where 
+    SD: ShuffleDependencyTrait,
+    RDD: RddBase
+{
+    fn cmp(&self, other: &Stage<SD, RDD>) -> Ordering {
         self.id.cmp(&other.id)
     }
 }
 
-impl Display for Stage {
+impl<SD, RDD> Display for Stage<SD, RDD>
+where 
+    SD: ShuffleDependencyTrait,
+    RDD: RddBase
+{
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "Stage {}", self.id)
     }
 }
 
-impl Stage {
-    pub fn get_rdd(&self) -> Arc<dyn RddBase> {
+impl<SD, RDD> Stage<SD, RDD> {
+    pub fn get_rdd(&self) -> Arc<RDD> {
         self.rdd.clone()
     }
 
     pub fn new(
         id: usize,
-        rdd: Arc<dyn RddBase>,
-        shuffle_dependency: Option<Arc<dyn ShuffleDependencyTrait>>,
-        parents: Vec<Stage>,
+        rdd: Arc<RDD>,
+        shuffle_dependency: Option<Arc<SD>>,
+        parents: Vec<Stage<SD, RDD>>,
     ) -> Self {
         Stage {
             id,

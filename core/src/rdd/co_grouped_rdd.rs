@@ -144,13 +144,15 @@ where
             rdds,
             part,
             _marker: PhantomData,
+            _marker_d: PhantomData,
         }
     }
 }
 
-impl<K, RDD, PR, ND, SD> RddBase for CoGroupedRdd<K, RDD, PR, ND, SD>
+impl<K, D, RDD, PR, ND, SD> RddBase for CoGroupedRdd<K, D, RDD, PR, ND, SD>
 where
     K: Data + Eq + Hash,
+    D: AnyData,
     RDD: RddBase,
     PR: Partitioner,
     ND: NarrowDependencyTrait,
@@ -168,7 +170,7 @@ where
         self.vals.dependencies.clone()
     }
 
-    fn splits(&self) -> Vec<Box<impl Split>> {
+    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
         let mut splits = Vec::new();
         for i in 0..self.part.get_num_of_partitions() {
             splits.push(Box::new(CoGroupSplit::new(
@@ -197,15 +199,15 @@ where
         self.part.get_num_of_partitions()
     }
 
-    fn partitioner(&self) -> Option<Box<impl Partitioner>> {
-        let part = self.part.clone() as Box<dyn Partitioner>;
+    fn partitioner<P: Partitioner + ?Sized>(&self) -> Option<Box<P>> {
+        let part = self.part.clone();
         Some(part)
     }
 
-    fn iterator_any<S: Split + ?Sized>(
+    fn iterator_any<S: Split + ?Sized, AD: AnyData + serde::Serialize + serde::de::DeserializeOwned>(
         &self,
         split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<AD>>>> {
         Ok(Box::new(
             self.iterator(split)?
                 .map(|(k, v)| Box::new((k, Box::new(v)))),
@@ -229,7 +231,7 @@ where
         Arc::new(self.clone())
     }
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<RDD> {
         Arc::new(self.clone())
     }
 

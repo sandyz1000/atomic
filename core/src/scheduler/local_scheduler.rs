@@ -197,7 +197,7 @@ impl NativeScheduler for LocalScheduler {
         });
     }
 
-    fn next_executor_server(&self, _rdd: &dyn TaskBase) -> SocketAddrV4 {
+    fn next_executor_server<S: TaskBase>(&self, _rdd: &S) -> SocketAddrV4 {
         // Just point to the localhost
         SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)
     }
@@ -215,7 +215,7 @@ impl NativeScheduler for LocalScheduler {
         Ok(())
     }
 
-    async fn get_shuffle_map_stage(&self, shuf: Arc<dyn ShuffleDependencyTrait>) -> Result<Stage> {
+    async fn get_shuffle_map_stage<SD: ShuffleDependencyTrait>(&self, shuf: Arc<SD>) -> Result<Stage> {
         log::debug!("getting shuffle map stage");
         let stage = self.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
         match stage {

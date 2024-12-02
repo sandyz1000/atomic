@@ -65,16 +65,18 @@ where
     }
 }
 
-impl<K, V, C, F1, F2, F3> ShuffledRdd<K, V, C, F1, F2, F3> 
+impl<K, V, C, F1, F2, F3, RDD, PA, ND, SD> ShuffledRdd<K, V, C, F1, F2, F3, RDD, PA, ND, SD> 
 where
     K: Data + Eq + Hash,
+    RDD: Rdd<Item = (K, V)>,
     V: Data,
-    C: Data 
+    C: Data,
+    PA: Partitioner 
 {
     pub(crate) fn new(
-        parent: Arc<dyn Rdd<Item = (K, V)>>,
-        aggregator: Arc<Aggregator<K, V, C>>,
-        part: Box<dyn Partitioner>,
+        parent: Arc<RDD>,
+        aggregator: Arc<Aggregator<K, V, C, F1, F2, F3>>,
+        part: Box<PA>,
     ) -> Self {
         let ctx = parent.get_context();
         let shuffle_id = ctx.new_shuffle_id();
@@ -101,7 +103,14 @@ where
     }
 }
 
-impl<K: Data + Eq + Hash, V: Data, C: Data> RddBase for ShuffledRdd<K, V, C> {
+impl<K, V, C, F1, F2, F3, RDD, PA, ND, SD> RddBase for ShuffledRdd<K, V, C, F1, F2, F3, RDD, PA, ND, SD> 
+where
+    K: Data + Eq + Hash,
+    RDD: Rdd<Item = (K, V)>,
+    V: Data,
+    C: Data,
+    PA: Partitioner,
+{
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -110,11 +119,11 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> RddBase for ShuffledRdd<K, V, C> {
         self.vals.context.upgrade().unwrap()
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency> {
+    fn get_dependencies<D1: NarrowDependencyTrait, D2: ShuffleDependencyTrait>(&self) -> Vec<Dependency<D1, D2>> {
         self.vals.dependencies.clone()
     }
 
-    fn splits(&self) -> Vec<Box<dyn Split>> {
+    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
         (0..self.part.get_num_of_partitions())
             .map(|x| Box::new(ShuffledRddSplit::new(x)) as Box<dyn Split>)
             .collect()
@@ -124,44 +133,51 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> RddBase for ShuffledRdd<K, V, C> {
         self.part.get_num_of_partitions()
     }
 
-    fn partitioner(&self) -> Option<Box<dyn Partitioner>> {
+    fn partitioner<P: Partitioner + ?Sized>(&self) -> Option<Box<P>> {
         Some(self.part.clone())
     }
 
-    fn iterator_any(
+    fn iterator_any<S: Split + ?Sized>(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<S>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any shuffledrdd",);
         Ok(Box::new(
             self.iterator(split)?
-                .map(|(k, v)| Box::new((k, v)) as Box<dyn AnyData>),
+                .map(|(k, v)| Box::new((k, v))),
         ))
     }
 
-    fn cogroup_iterator_any(
+    fn cogroup_iterator_any<S: Split + ?Sized>(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<S>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside cogroup iterator_any shuffledrdd",);
         Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
+            Box::new((k, Box::new(v))) as Box<dyn AnyData>
         })))
     }
 }
 
-impl<K: Data + Eq + Hash, V: Data, C: Data, F1, F2, F3> Rdd for ShuffledRdd<K, V, C, F1, F2, F3> {
+impl<K, V, C, F1, F2, F3, RDD, PA, ND, SD> Rdd for ShuffledRdd<K, V, C, F1, F2, F3, RDD, PA, ND, SD> 
+where
+    K: Data + Eq + Hash,
+    RDD: Rdd<Item = (K, V)>,
+    V: Data,
+    C: Data,
+    PA: Partitioner,
+{
     type Item = (K, C);
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+    fn get_rdd_base<R: RddBase>(&self) -> Arc<R> {
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+    fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         log::debug!("compute inside shuffled rdd");
         let start = Instant::now();
 

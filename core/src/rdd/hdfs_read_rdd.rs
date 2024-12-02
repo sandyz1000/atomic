@@ -209,16 +209,16 @@ where
         self.rdd_vals.splits_.len()
     }
 
-    fn cogroup_iterator_any(
+    fn cogroup_iterator_any<S: Split + ?Sized>(
         &self,
-        split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<S>) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
-    fn iterator_any<S: Split + Clone>(
+    fn iterator_any<S: Split + ?Sized>(
         &self,
         split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any parallel collection",);
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x)),
@@ -226,7 +226,12 @@ where
     }
 }
 
-impl<ND, SD> Rdd for HdfsReadRdd<ND, SD> {
+impl<ND, SD> Rdd for HdfsReadRdd<ND, SD> 
+where
+    // RDD: Rdd<Item = T>,
+    ND: NarrowDependencyTrait + 'static,
+    SD: ShuffleDependencyTrait + 'static,
+{
     type Item = Vec<u8>;
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         Arc::new(HdfsReadRdd {
@@ -238,10 +243,10 @@ impl<ND, SD> Rdd for HdfsReadRdd<ND, SD> {
     }
 
     fn get_rdd_base(&self) -> Arc<impl RddBase> {
-        Arc::new(self.clone()) as Arc<dyn RddBase>
+        Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<impl Iterator<Item = Self::Item>>> {
+    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         if let Some(s) = split.downcast_ref::<HdfsReadRddSplit>() {
             Ok(s.iterator())
         } else {

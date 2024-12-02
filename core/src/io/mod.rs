@@ -12,7 +12,7 @@ pub use local_file_reader::{LocalFsReader, LocalFsReaderConfig};
 
 
 pub trait ReaderConfiguration<I: Data> {
-    fn make_reader<F, O>(self, context: Arc<Context>, decoder: F) -> Arc<dyn Rdd<Item = O>>
+    fn make_reader<F, O>(self, context: Arc<Context>, decoder: F) -> Arc<impl Rdd<Item = O>>
     where
         O: Data,
         F: SerFunc<I, Output = O>;

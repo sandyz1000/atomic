@@ -2,7 +2,7 @@ use crate::ser_data::SerFunc;
 pub struct Decoders {}
 
 impl Decoders {
-    pub fn to_utf8() -> impl SerFunc<Vec<u8>, Output = String> {
+    pub fn to_utf8<F: SerFunc<Vec<u8>, Output = String>>() -> F {
         let f = serde_closure::Fn!(|file: Vec<u8>| {
             String::from_utf8(file)
                 .unwrap()
@@ -10,7 +10,7 @@ impl Decoders {
         f
     }
 
-    pub fn to_utf8_lines() -> impl SerFunc<Vec<u8>, Output = String> {
+    pub fn to_utf8_lines<F: SerFunc<Vec<u8>, Output = String>>() -> F {
         let f = serde_closure::Fn!(|file: Vec<u8>| {
             String::from_utf8(file)
                 .unwrap()

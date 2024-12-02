@@ -101,10 +101,10 @@ where
         run_id: usize,
         final_stage: Stage,
         func: Arc<F>,
-        final_rdd: Arc<dyn Rdd<Item = T>>,
+        final_rdd: Arc<RDD>,
         output_parts: Vec<usize>,
         listener: L,
-    ) -> Arc<JobTracker<F, U, T, L>> {
+    ) -> Arc<Self> {
         let finished: Vec<bool> = (0..output_parts.len()).map(|_| false).collect();
         let pending_tasks: BTreeMap<Stage, BTreeSet<Box<dyn TaskBase>>> = BTreeMap::new();
         Arc::new(JobTracker {

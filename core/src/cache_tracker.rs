@@ -15,6 +15,7 @@ use crate::{Error, NetworkError, Result};
 // use capnp::message::ReaderOptions;
 // use capnp_futures::serialize as capnp_serialize;
 use dashmap::{DashMap, DashSet};
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_stream::StreamExt;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
@@ -25,7 +26,8 @@ use tokio::io::{AsyncWriteExt, AsyncReadExt};
 // };
 
 /// Cache tracker works by creating a server in master node and slave nodes acting as clients.
-// #[derive(Serialize, Deserialize)]
+
+#[derive(Serialize, Deserialize)]
 pub(crate) enum CacheTrackerMessage {
     AddedToCache {
         rdd_id: usize,
@@ -55,7 +57,7 @@ pub(crate) enum CacheTrackerMessage {
     StopCacheTracker,
 }
 
-// #[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum CacheTrackerMessageReply {
     CacheLocations(HashMap<usize, Vec<LinkedList<Ipv4Addr>>>),
     CacheStatus(Vec<(Ipv4Addr, usize, usize)>),
@@ -340,10 +342,10 @@ impl CacheTracker {
         }
     }
 
-    fn get_or_compute<T: Data>(
+    fn get_or_compute<T: Data, S: Split + ?Sized>(
         &self,
-        rdd: Arc<dyn Rdd<Item = T>>,
-        split: Box<dyn Split>,
+        rdd: Arc<impl Rdd<Item = T>>,
+        split: Box<S>,
     ) -> Box<dyn Iterator<Item = T>> {
         if let Some(cached_val) = self.cache.get(rdd.get_rdd_id(), split.get_index()) {
             let res: Vec<T> = bincode::deserialize(&cached_val).unwrap();

@@ -1,8 +1,8 @@
 use std::collections::{btree_set::BTreeSet, vec_deque::VecDeque, HashMap, HashSet};
 use std::iter::FromIterator;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::dependency::ShuffleDependencyTrait;
@@ -11,18 +11,8 @@ use crate::error::{Error, NetworkError, Result};
 use crate::map_output_tracker::MapOutputTracker;
 use crate::rdd::rdd::{Rdd, RddBase};
 use crate::scheduler::{
-    CompletionEvent, 
-    EventQueue, 
-    Job, 
-    LiveListenerBus, 
-    NativeScheduler,
-    ResultTask, 
-    Stage, 
-    TaskBase, 
-    TaskContext, 
-    TaskOption, 
-    TaskResult, 
-    TastEndReason,
+    CompletionEvent, EventQueue, Job, LiveListenerBus, NativeScheduler, ResultTask, Stage,
+    TaskBase, TaskContext, TaskOption, TaskResult, TastEndReason,
 };
 use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::shuffle::ShuffleMapTask;
@@ -31,8 +21,8 @@ use crate::shuffle::ShuffleMapTask;
 // use capnp_futures::serialize as capnp_serialize;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 // const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
 //     traversal_limit_in_words: std::u64::MAX,
@@ -225,7 +215,7 @@ impl NativeScheduler for DistributedScheduler {
     fn get_next_task_id(&self) -> usize {
         self.next_task_id.fetch_add(1, Ordering::SeqCst)
     }
-    /// This function is used to submit a task to remote executor 
+    /// This function is used to submit a task to remote executor
     fn submit_task<T: Data, U: Data, F>(
         &self,
         task: TaskOption,
@@ -265,7 +255,7 @@ impl NativeScheduler for DistributedScheduler {
                         //         .await
                         //         .map_err(Error::CapnpDeserialization)
                         //         .unwrap();
-                            
+
                         // });
                         // TODO: Serialized `task_bytes` and write `task_bytes` to writer
 
@@ -294,7 +284,7 @@ impl NativeScheduler for DistributedScheduler {
         });
     }
 
-    fn next_executor_server(&self, task: &dyn TaskBase) -> SocketAddrV4 {
+    fn next_executor_server<S: TaskBase>(&self, task: &S) -> SocketAddrV4 {
         if !task.is_pinned() {
             // pick the first available server
             let socket_addrs = self.server_uris.lock().pop_back().unwrap();
@@ -331,7 +321,10 @@ impl NativeScheduler for DistributedScheduler {
         Ok(())
     }
 
-    async fn get_shuffle_map_stage(&self, shuf: Arc<dyn ShuffleDependencyTrait>) -> Result<Stage> {
+    async fn get_shuffle_map_stage<SD: ShuffleDependencyTrait>(
+        &self,
+        shuf: Arc<SD>,
+    ) -> Result<Stage> {
         log::debug!("getting shuffle map stage");
         let stage = self.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
         match stage {
@@ -349,10 +342,13 @@ impl NativeScheduler for DistributedScheduler {
         }
     }
 
-    async fn get_missing_parent_stages(&'_ self, stage: Stage) -> Result<Vec<Stage>> {
+    async fn get_missing_parent_stages<SD: ShuffleDependencyTrait, RDD: RddBase>(
+        &'_ self,
+        stage: Stage<SD, RDD>,
+    ) -> Result<Vec<Stage<SD, RDD>>> {
         log::debug!("getting missing parent stages");
-        let mut missing: BTreeSet<Stage> = BTreeSet::new();
-        let mut visited: BTreeSet<Arc<dyn RddBase>> = BTreeSet::new();
+        let mut missing = BTreeSet::new();
+        let mut visited = BTreeSet::new();
         self.visit_for_missing_parent_stages(&mut missing, &mut visited, stage.get_rdd())
             .await?;
         Ok(missing.into_iter().collect())

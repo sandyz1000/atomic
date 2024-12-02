@@ -199,11 +199,11 @@ where
         self.rdd_vals.splits_.len()
     }
 
-    fn cogroup_iterator_any<S: Split + Clone>(&self, split: Box<S>) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+    fn cogroup_iterator_any<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
-    fn iterator_any<S: Split + Clone>(&self, split: Box<S>) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+    fn iterator_any<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any parallel collection",);
         Ok(Box::new(
             self.iterator(split)?

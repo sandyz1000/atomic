@@ -6,18 +6,16 @@ use serde_derive::{Serialize, Deserialize};
 use crate::env;
 use crate::rdd::rdd::Rdd;
 use crate::scheduler::{Task, TaskBase, TaskContext};
-use crate::ser_data::{AnyData, Data};
+use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::split::Split;
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ResultTask<T, U, F, R>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U
+    F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
         + Send
         + Sync
-        // + serde::ser::Serialize
-        // + serde::de::DeserializeOwned
         + Clone,
     T : Data,
     U : Data,
@@ -35,14 +33,12 @@ where
     _marker: PhantomData<T>,
 }
 
-impl<T, U, F> ResultTask<T, U, F, R>
+impl<T, U, F, R: Rdd<Item = T>> ResultTask<T, U, F, R>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U
+F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
         + Send
         + Sync
-        // + serde::Serialize
-        // + serde::Deserialize
         + Clone,
     T : Data,
     U : Data
@@ -50,29 +46,25 @@ where
     
 }
 
-impl<T: Data, U: Data, F> Display for ResultTask<T, U, F>
+impl<T: Data, U: Data, F, R: Rdd<Item = T>> Display for ResultTask<T, U, F, R>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U
+    F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
         + Send
         + Sync
-        // + Serialize
-        // + Deserialize
-        + Clone,
+        + Clone
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ResultTask({}, {})", self.stage_id, self.partition)
     }
 }
 
-impl<T: Data, U: Data, F> ResultTask<T, U, F>
+impl<T: Data, U: Data, F, R: Rdd<Item = T>> ResultTask<T, U, F, R>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U
+    F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
         + Send
         + Sync
-        // + Serialize
-        // + Deserialize
         + Clone,
 {
     pub fn clone(&self) -> Self {
@@ -91,9 +83,9 @@ where
     }
 }
 
-impl<T: Data, U: Data, F> ResultTask<T, U, F>
+impl<T: Data, U: Data, F, R: Rdd<Item = T>> ResultTask<T, U, F, R>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U
+    F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
         + Send
         + Sync
@@ -105,7 +97,7 @@ where
         task_id: usize,
         run_id: usize,
         stage_id: usize,
-        rdd: Arc<dyn Rdd<Item = T>>,
+        rdd: Arc<R>,
         func: Arc<F>,
         partition: usize,
         locs: Vec<Ipv4Addr>,
@@ -126,14 +118,12 @@ where
     }
 }
 
-impl<T: Data, U: Data, F> TaskBase for ResultTask<T, U, F>
+impl<T: Data, U: Data, F, R: Rdd<Item = T>> TaskBase for ResultTask<T, U, F, R>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U
+    F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
         + Send
         + Sync
-        // + Serialize
-        // + Deserialize
         + Clone,
 {
     fn get_run_id(&self) -> usize {
@@ -161,9 +151,9 @@ where
     }
 }
 
-impl<T: Data, U: Data, F> Task for ResultTask<T, U, F>
+impl<T: Data, U: Data, F, R: Rdd<Item = T>> Task for ResultTask<T, U, F, R>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U
+    F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
         + Send
         + Sync

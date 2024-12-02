@@ -33,9 +33,9 @@ pub(crate) use self::task::{Task, TaskBase, TaskOption, TaskResult};
 pub trait Scheduler {
     fn start(&self);
     fn wait_for_register(&self);
-    fn run_job<T: Data, U: Data, F>(
+    fn run_job<T: Data, U: Data, F, R: Rdd<Item = T>>(
         &self,
-        rdd: &dyn Rdd<Item = T>,
+        rdd: &R,
         func: F,
         partitions: Vec<i64>,
         allow_local: bool,

@@ -1,3 +1,4 @@
+use crate::dependency::{NarrowDependencyTrait, ShuffleDependencyTrait};
 use crate::error::{Error, Result};
 use crate::io::*;
 use crate::rdd::rdd::HdfsReadRdd;
@@ -49,12 +50,12 @@ impl HdfsIO {
         Ok(buf)
     }
 
-    pub fn read_to_rdd(
+    pub fn read_to_rdd<ND: NarrowDependencyTrait, SD: ShuffleDependencyTrait>(
         &mut self,
         path: &str,
         context: &Arc<Context>,
         num_slices: usize,
-    ) -> HdfsReadRdd
+    ) -> HdfsReadRdd<ND, SD>
     {
         let rdd = HdfsReadRdd::new(context.clone(), self.nn.clone(), path.to_string(), num_slices);
         rdd
@@ -66,7 +67,7 @@ impl HdfsIO {
         context: &Arc<Context>,
         num_slices: usize,
         decoder: F,
-    ) -> Arc<dyn Rdd<Item = U>>
+    ) -> Arc<impl Rdd<Item = U>>
     where
         F: SerFunc<Vec<u8>, Output = U>,
         U: Data,

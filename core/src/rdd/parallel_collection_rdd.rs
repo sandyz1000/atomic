@@ -99,7 +99,7 @@ where
             rdd_vals: Arc::new(ParallelCollectionVals {
                 context: Arc::downgrade(&context),
                 vals: Arc::new(RddVals::new(context.clone())),
-                splits_: ParallelCollection::slice(data, num_slices),
+                splits_: ParallelCollection::<T, ND, SD>::slice(data, num_slices),
                 num_slices,
             }),
         }
@@ -172,7 +172,7 @@ where
 impl<T: Data, ND, SD> RddBase for ParallelCollection<T, ND, SD> 
 where
     ND: NarrowDependencyTrait, 
-    SD: ShuffleDependencyTrait
+    SD: ShuffleDependencyTrait + 'static
 {
     fn get_rdd_id(&self) -> usize {
         self.rdd_vals.vals.id

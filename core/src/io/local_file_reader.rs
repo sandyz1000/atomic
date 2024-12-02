@@ -55,7 +55,7 @@ impl LocalFsReaderConfig {
 }
 
 impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
-    fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> Arc<dyn Rdd<Item = U>>
+    fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> Arc<impl Rdd<Item = U>>
     where
         F: SerFunc<Vec<u8>, Output = U>,
         U: Data,
@@ -92,7 +92,7 @@ impl ReaderConfiguration<PathBuf> for LocalFsReaderConfig {
             }
         );
         let files_per_executor = Arc::new(
-            MapPartitionsRdd::new(Arc::new(reader) as Arc<dyn Rdd<Item = _>>, read_files).pin(),
+            MapPartitionsRdd::new(Arc::new(reader), read_files).pin(),
         );
         let decoder = MapperRdd::new(files_per_executor, decoder).pin();
         decoder.register_op_name("local_fs_reader<files>");
@@ -325,7 +325,7 @@ macro_rules! impl_common_lfs_rddb_funcs {
         fn iterator_any<S: Split + ?Sized>(
             &self,
             split: Box<S>,
-        ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+        ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
             Ok(Box::new(
                 self.iterator(split)?.map(|x| Box::new(x)),
             ))

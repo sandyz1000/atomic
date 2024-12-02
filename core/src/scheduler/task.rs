@@ -4,7 +4,9 @@ use std::net::Ipv4Addr;
 use crate::scheduler::ResultTask;
 use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::shuffle::ShuffleMapTask;
+use crate::Rdd;
 use downcast_rs::{impl_downcast, Downcast};
+use serde::{Deserialize, Serialize};
 
 
 pub struct TaskContext {
@@ -61,7 +63,7 @@ impl Ord for dyn TaskBase {
 }
 
 pub(crate) trait Task: TaskBase + Send + Sync + Downcast {
-    fn run(&self, id: usize) -> Box<dyn AnyData>;
+    fn run(&self, id: usize) -> Box<impl AnyData>;
 }
 
 impl_downcast!(Task);
@@ -91,11 +93,12 @@ pub enum TaskOption {
     ShuffleMapTask(Box<dyn TaskBox>),
 }
 
-impl<T: Data, U: Data, F> From<ResultTask<T, U, F>> for TaskOption
+impl<T: Data, U: Data, F, R> From<ResultTask<T, U, F, R>> for TaskOption
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output =  U>,
+    R: Rdd<Item = T>
 {
-    fn from(t: ResultTask<T, U, F>) -> Self {
+    fn from(t: ResultTask<T, U, F, R>) -> Self {
         TaskOption::ResultTask(Box::new(t) as Box<dyn TaskBox>)
     }
 }
