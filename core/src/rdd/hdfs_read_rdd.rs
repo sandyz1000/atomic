@@ -166,11 +166,16 @@ where
     }
 }
 
-impl<ND, SD> RddBase for HdfsReadRdd<ND, SD> 
+impl<N, S> RddBase for HdfsReadRdd<N, S> 
 where 
-    ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    N: NarrowDependencyTrait,
+    S: ShuffleDependencyTrait
 {
+    type Split = Self::Split;
+    type Partitioner = Self::Partitioner;
+    type ShuffleDeps = S;
+    type NarrowDeps = N;
+
     fn get_rdd_id(&self) -> usize {
         self.rdd_vals.vals.id
     }
@@ -188,11 +193,11 @@ where
         *own_name = name.to_owned();
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
+    fn get_dependencies(&self) -> Vec<Dependency<Self::NarrowDeps, Self::ShuffleDeps>> {
         self.rdd_vals.vals.dependencies.clone()
     }
 
-    fn splits(&self) -> Vec<Box<impl Split>> {
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         (0..self.rdd_vals.splits_.len())
             .map(|i| {
                 Box::new(HdfsReadRddSplit::new(
@@ -209,30 +214,34 @@ where
         self.rdd_vals.splits_.len()
     }
 
-    fn cogroup_iterator_any<S: Split + ?Sized>(
+    fn cogroup_iterator_any(
         &self,
-        split: Box<S>) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
+        split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
-    fn iterator_any<S: Split + ?Sized>(
+    fn iterator_any(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any parallel collection",);
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x)),
         ))
     }
+    
+    
 }
 
-impl<ND, SD> Rdd for HdfsReadRdd<ND, SD> 
+impl<N, S> Rdd for HdfsReadRdd<N, S> 
 where
     // RDD: Rdd<Item = T>,
-    ND: NarrowDependencyTrait + 'static,
-    SD: ShuffleDependencyTrait + 'static,
+    N: NarrowDependencyTrait + 'static,
+    S: ShuffleDependencyTrait + 'static,
 {
     type Item = Vec<u8>;
+    type RddBase = Self;
+
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         Arc::new(HdfsReadRdd {
             name: Mutex::new(self.name.lock().clone()),
@@ -242,15 +251,16 @@ where
         })
     }
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<Self::RddBase> {
         Arc::new(self.clone())
     }
 
-    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         if let Some(s) = split.downcast_ref::<HdfsReadRddSplit>() {
             Ok(s.iterator())
         } else {
             panic!("Got split object from different concrete type other than HdfsReadRddSplit")
         }
     }
+    
 }

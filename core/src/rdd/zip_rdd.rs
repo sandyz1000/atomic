@@ -64,6 +64,11 @@ where
     ND: NarrowDependencyTrait + 'static,
     SD: ShuffleDependencyTrait + 'static,
 {
+    type Split = R1::Split;
+    type Partitioner = R1::Partitioner;
+    type ShuffleDeps = SD;
+    type NarrowDeps = ND;
+
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -76,7 +81,7 @@ where
         self.vals.dependencies.clone()
     }
 
-    fn splits(&self) -> Vec<Box<impl Split>> {
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         let mut arr = Vec::with_capacity(min(
             self.first.number_of_splits(),
             self.second.number_of_splits(),
@@ -103,20 +108,20 @@ where
 
     fn iterator_any(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
+            self.iterator(split)?.map(|x| Box::new(x)),
         ))
     }
 
     fn cogroup_iterator_any(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
+    
 }
 
 impl<F, S, R1, R2, ND, SD> Rdd for ZippedPartitionsRdd<F, S, R1, R2, ND, SD>
@@ -129,19 +134,20 @@ where
     SD: ShuffleDependencyTrait + 'static,
 {
     type Item = (F, S);
+    type RddBase = R1; // TODO: FixMe - 
 
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         Arc::new(self.clone())
     }
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<Self::RddBase> {
         Arc::new(self.clone())
     }
 
-    fn compute<SC: Split + Clone + dyn_clone::DynClone>(
+    fn compute(
         &self,
-        split: Box<SC>,
-    ) -> Result<Box<impl Iterator<Item = Self::Item>>> {
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         let current_split = split
             .downcast::<ZippedPartitionsSplit>()
             .or(Err(Error::DowncastFailure("ZippedPartitionsSplit")))?;
@@ -151,12 +157,13 @@ where
         Ok(Box::new(fst_iter.zip(sec_iter)))
     }
 
-    fn iterator<SC: Split + Clone + dyn_clone::DynClone>(
+    fn iterator(
         &self,
-        split: Box<SC>,
-    ) -> Result<Box<impl Iterator<Item = Self::Item>>> {
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         self.compute(split.clone())
     }
+    
 }
 
 impl<F, S, R1, R2, ND, SD> ZippedPartitionsRdd<F, S, R1, R2, ND, SD>

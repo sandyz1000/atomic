@@ -2,7 +2,6 @@ use crate::aggregator::Aggregator;
 use crate::partitioner::Partitioner;
 use crate::rdd::rdd::RddBase;
 use crate::ser_data::{Data, SerFunc};
-use crate::split::Split;
 use crate::{env, Rdd};
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,14 +11,16 @@ use std::sync::Arc;
 // Revise if enum is good choice. Considering enum since down casting one trait
 // object to another trait object is difficult.
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub enum Dependency<ND, SD> {
-    NarrowDependency(Arc<ND>),
-    ShuffleDependency(Arc<SD>),
+pub enum Dependency<N, S> {
+    NarrowDependency(Arc<N>),
+    ShuffleDependency(Arc<S>),
 }
 
 pub trait NarrowDependencyTrait: Send + Sync {
+    type R: RddBase;
+
     fn get_parents(&self, partition_id: usize) -> Vec<usize>;
-    fn get_rdd_base(&self) -> Arc<impl RddBase>;
+    fn get_rdd_base(&self) -> Arc<Self::R>;
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -34,13 +35,16 @@ impl<RDD: RddBase> OneToOneDependency<RDD> {
 }
 
 impl<RDD: RddBase> NarrowDependencyTrait for OneToOneDependency<RDD> {
+    type R = RDD;
+
     fn get_parents(&self, partition_id: usize) -> Vec<usize> {
         vec![partition_id]
     }
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<Self::R> {
         self.rdd_base.clone()
     }
+    
 }
 
 /// Represents a one-to-one dependency between ranges of partitions in the parent and child RDDs.
@@ -67,6 +71,7 @@ impl<RDD: RddBase> RangeDependency<RDD> {
 }
 
 impl<RDD: RddBase> NarrowDependencyTrait for RangeDependency<RDD> {
+    type R = RDD;
     fn get_parents(&self, partition_id: usize) -> Vec<usize> {
         if partition_id >= self.out_start && partition_id < self.out_start + self.length {
             vec![partition_id - self.out_start + self.in_start]
@@ -75,16 +80,20 @@ impl<RDD: RddBase> NarrowDependencyTrait for RangeDependency<RDD> {
         }
     }
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<Self::R> {
         self.rdd_base.clone()
     }
+    
+    
 }
 
 pub trait ShuffleDependencyTrait: Send + Sync {
+    type R: RddBase;
+
     fn get_shuffle_id(&self) -> usize;
-    fn get_rdd_base(&self) -> Arc<impl RddBase>;
+    fn get_rdd_base(&self) -> Arc<Self::R>;
     fn is_shuffle(&self) -> bool;
-    fn do_shuffle_task(&self, rdd_base: Arc<impl RddBase>, partition: usize) -> String;
+    fn do_shuffle_task(&self, rdd_base: Arc<Self::R>, partition: usize) -> String;
 }
 
 // impl PartialOrd for dyn ShuffleDependencyTrait {
@@ -155,6 +164,8 @@ where
     F2: SerFunc<(C, V), Output = C>,
     F3: SerFunc<(C, C), Output = C>,
 {
+    type R = RDD;
+
     fn get_shuffle_id(&self) -> usize {
         self.shuffle_id
     }
@@ -163,7 +174,7 @@ where
         self.is_shuffle
     }
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<Self::R> {
         self.rdd_base.clone()
     }
 
@@ -202,7 +213,7 @@ where
     /// // execute the shuffle map task for partition 0
     /// let server_uri = shuffle_map_task.do_shuffle_task(Arc::new(rdd), 0);
     /// ```
-    fn do_shuffle_task(&self, rdd_base: Arc<RDD>, partition: usize) -> String {
+    fn do_shuffle_task(&self, rdd_base: Arc<Self::R>, partition: usize) -> String {
         log::debug!(
             "executing shuffle task #{} for partition #{}",
             self.shuffle_id,
@@ -268,4 +279,5 @@ where
         );
         env::Env::get().shuffle_manager.get_server_uri()
     }
+    
 }

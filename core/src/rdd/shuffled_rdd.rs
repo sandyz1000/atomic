@@ -33,15 +33,15 @@ impl Split for ShuffledRddSplit {
 
 // #[derive(Serialize, Deserialize)]
 #[derive(Serialize)]
-pub struct ShuffledRdd<K: Data + Eq + Hash, V: Data, C: Data, F1, F2, F3, RDD, PA, ND, SD> {
+pub struct ShuffledRdd<K: Data + Eq + Hash, V: Data, C: Data, F1, F2, F3, RDD, Pa, N, S> {
     parent: Arc<RDD>,
     aggregator: Arc<Aggregator<K, V, C, F1, F2, F3>>,
-    vals: Arc<RddVals<ND, SD>>,
-    part: Box<PA>,
+    vals: Arc<RddVals<N, S>>,
+    part: Box<Pa>,
     shuffle_id: usize,
 }
 
-impl<K, V, C, F1, F2, F3, RDD, PA, ND, SD> Clone for ShuffledRdd<K, V, C, F1, F2, F3, RDD, PA, ND, SD> 
+impl<K, V, C, F1, F2, F3, RDD, Pa, N, S> Clone for ShuffledRdd<K, V, C, F1, F2, F3, RDD, Pa, N, S> 
 where 
     K: Data + Eq + Hash,
     V: Data,
@@ -50,9 +50,9 @@ where
     F1: SerFunc<V, Output = C>,
     F2: SerFunc<(C, V), Output = C>,
     F3: SerFunc<(C, C), Output = C>,
-    PA: Partitioner,
-    ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    Pa: Partitioner,
+    N: NarrowDependencyTrait,
+    S: ShuffleDependencyTrait
 {
     fn clone(&self) -> Self {
         ShuffledRdd {
@@ -65,18 +65,21 @@ where
     }
 }
 
-impl<K, V, C, F1, F2, F3, RDD, PA, ND, SD> ShuffledRdd<K, V, C, F1, F2, F3, RDD, PA, ND, SD> 
+impl<K, V, C, F1, F2, F3, RDD, Pa, N, S> ShuffledRdd<K, V, C, F1, F2, F3, RDD, Pa, N, S> 
 where
     K: Data + Eq + Hash,
     RDD: Rdd<Item = (K, V)>,
     V: Data,
     C: Data,
-    PA: Partitioner 
+    Pa: Partitioner ,
+    F1: SerFunc<V, Output = C>,
+    F2: SerFunc<(C, V), Output = C>,
+    F3: SerFunc<(C, C), Output = C>,
 {
     pub(crate) fn new(
         parent: Arc<RDD>,
         aggregator: Arc<Aggregator<K, V, C, F1, F2, F3>>,
-        part: Box<PA>,
+        part: Box<Pa>,
     ) -> Self {
         let ctx = parent.get_context();
         let shuffle_id = ctx.new_shuffle_id();
@@ -103,14 +106,24 @@ where
     }
 }
 
-impl<K, V, C, F1, F2, F3, RDD, PA, ND, SD> RddBase for ShuffledRdd<K, V, C, F1, F2, F3, RDD, PA, ND, SD> 
+impl<K, V, C, F1, F2, F3, RDD, P, N, S> RddBase for ShuffledRdd<K, V, C, F1, F2, F3, RDD, P, N, S> 
 where
     K: Data + Eq + Hash,
     RDD: Rdd<Item = (K, V)>,
     V: Data,
     C: Data,
-    PA: Partitioner,
+    P: Partitioner,
+    F1: SerFunc<V, Output = C>,
+    F2: SerFunc<(C, V), Output = C>,
+    F3: SerFunc<(C, C), Output = C>,
+    N: NarrowDependencyTrait + 'static,
+    S: ShuffleDependencyTrait + 'static
 {
+    type Split = RDD::Split;
+    type Partitioner = P;
+    type ShuffleDeps = S;
+    type NarrowDeps = N;
+
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -119,13 +132,13 @@ where
         self.vals.context.upgrade().unwrap()
     }
 
-    fn get_dependencies<D1: NarrowDependencyTrait, D2: ShuffleDependencyTrait>(&self) -> Vec<Dependency<D1, D2>> {
+    fn get_dependencies(&self) -> Vec<Dependency<Self::NarrowDeps, Self::ShuffleDeps>> {
         self.vals.dependencies.clone()
     }
 
-    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         (0..self.part.get_num_of_partitions())
-            .map(|x| Box::new(ShuffledRddSplit::new(x)) as Box<dyn Split>)
+            .map(|x| Box::new(ShuffledRddSplit::new(x)))
             .collect()
     }
 
@@ -133,13 +146,13 @@ where
         self.part.get_num_of_partitions()
     }
 
-    fn partitioner<P: Partitioner + ?Sized>(&self) -> Option<Box<P>> {
+    fn partitioner(&self) -> Option<Box<Self::Partitioner>> {
         Some(self.part.clone())
     }
 
-    fn iterator_any<S: Split + ?Sized>(
+    fn iterator_any(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any shuffledrdd",);
         Ok(Box::new(
@@ -148,36 +161,44 @@ where
         ))
     }
 
-    fn cogroup_iterator_any<S: Split + ?Sized>(
+    fn cogroup_iterator_any(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside cogroup iterator_any shuffledrdd",);
         Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v))) as Box<dyn AnyData>
+            Box::new((k, Box::new(v)))
         })))
     }
+    
 }
 
-impl<K, V, C, F1, F2, F3, RDD, PA, ND, SD> Rdd for ShuffledRdd<K, V, C, F1, F2, F3, RDD, PA, ND, SD> 
+impl<K, V, C, F1, F2, F3, RDD, Pa, N, S> Rdd for ShuffledRdd<K, V, C, F1, F2, F3, RDD, Pa, N, S> 
 where
     K: Data + Eq + Hash,
     RDD: Rdd<Item = (K, V)>,
     V: Data,
     C: Data,
-    PA: Partitioner,
+    Pa: Partitioner,
+    F1: SerFunc<V, Output = C>,
+    F2: SerFunc<(C, V), Output = C>,
+    F3: SerFunc<(C, C), Output = C>,
+    N: NarrowDependencyTrait + 'static,
+    S: ShuffleDependencyTrait + 'static
+
 {
     type Item = (K, C);
+    type RddBase = RDD;
 
-    fn get_rdd_base<R: RddBase>(&self) -> Arc<R> {
-        Arc::new(self.clone()) as Arc<dyn RddBase>
+    fn get_rdd_base(&self) -> Arc<Self::RddBase> {
+        Arc::new(self.clone())
     }
 
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         Arc::new(self.clone())
     }
 
-    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         log::debug!("compute inside shuffled rdd");
         let start = Instant::now();
 
@@ -203,4 +224,5 @@ where
             combiners.into_iter().map(|(k, v)| (k, v.unwrap())),
         ))
     }
+    
 }

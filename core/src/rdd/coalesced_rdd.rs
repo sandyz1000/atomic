@@ -131,7 +131,7 @@ where
     /// ## Arguments
     ///
     /// max_partitions: number of desired partitions in the coalesced RDD
-    pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, max_partitions: usize) -> Self {
+    pub(crate) fn new(prev: Arc<RDD>, max_partitions: usize) -> Self {
         let vals = RddVals::new(prev.get_context());
         CoalescedRdd {
             vals: Arc::new(vals),
@@ -142,13 +142,18 @@ where
     }
 }
 
-impl<T: Data, RDD, ND, SD> RddBase for CoalescedRdd<T, RDD, ND, SD> 
+impl<T: Data, RDD, N, S> RddBase for CoalescedRdd<T, RDD, N, S> 
 where
     RDD: Rdd<Item = T>,
-    ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    N: NarrowDependencyTrait + 'static,
+    S: ShuffleDependencyTrait + 'static
 {
-    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
+    type Split = RDD::Split;
+    type Partitioner = RDD::Partitioner;
+    type ShuffleDeps = S;
+    type NarrowDeps = N;
+
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         let partition_coalescer = DefaultPartitionCoalescer::default();
         partition_coalescer
             .coalesce(self.max_partitions, self.parent.get_rdd_base())
@@ -174,7 +179,7 @@ where
         self.vals.context.upgrade().unwrap()
     }
 
-    fn get_dependencies<D1, D2>(&self) -> Vec<Dependency<D1, D2>> {
+    fn get_dependencies(&self) -> Vec<Dependency<Self::NarrowDeps, Self::ShuffleDeps>> {
         vec![Dependency::NarrowDependency(
             Arc::new(CoalescedSplitDep::new(
                 self.get_rdd_base(),
@@ -185,7 +190,7 @@ where
 
     /// Returns the preferred machine for the partition. If split is of type CoalescedRddSplit,
     /// then the preferred machine will be one which most parent splits prefer too.
-    fn preferred_locations<S: Split + ?Sized>(&self, split: Box<S>) -> Vec<Ipv4Addr> {
+    fn preferred_locations(&self, split: Box<Self::Split>) -> Vec<Ipv4Addr> {
         let split = CoalescedRddSplit::downcasting(split);
         if let Some(loc) = split.preferred_location {
             vec![loc.into()]
@@ -196,21 +201,23 @@ where
 
     fn iterator_any(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         Ok(Box::new(
             self.iterator(split)?
                 .map(|x| Box::new(x) as Box<dyn AnyData>),
         ))
     }
+    
 }
 
-impl<T: Data, RDD, ND, SD> Rdd for CoalescedRdd<T, RDD, ND, SD> 
+impl<T: Data, RDD, N, S> Rdd for CoalescedRdd<T, RDD, N, S> 
 where
     RDD: Rdd<Item = T>,
-    ND: NarrowDependencyTrait + 'static,
-    SD: ShuffleDependencyTrait + 'static,
+    N: NarrowDependencyTrait + 'static,
+    S: ShuffleDependencyTrait + 'static,
 {
+    type RddBase = RDD;
     type Item = T;
     
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>>
@@ -221,11 +228,11 @@ where
         todo!()
     }
 
-    fn get_rdd_base<RDB: RddBase>(&self) -> Arc<RDB> {
+    fn get_rdd_base(&self) -> Arc<Self::RddBase> {
         Arc::new(self.clone())
     }
 
-    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         let split = CoalescedRddSplit::downcasting(split);
         let mut iter = Vec::new();
         for (_, p) in self
@@ -240,6 +247,7 @@ where
         }
         Ok(Box::new(iter.into_iter().flatten()) as Box<dyn Iterator<Item = Self::Item>>)
     }
+    
 }
 
 type SplitIdx = usize;
@@ -360,7 +368,7 @@ struct PartitionLocations<S> {
 }
 
 impl<S: Split> PartitionLocations<S> {
-    fn new<RDB: RddBase>(prev: Arc<RDB>) -> Self {
+    fn new<R: RddBase>(prev: Arc<R>) -> Self {
         // Gets all the preferred locations of the previous RDD and splits them into partitions
         // with preferred locations and ones without
         let mut tmp_parts_with_loc: Vec<(Box<S>, Vec<Ipv4Addr>)> = Vec::new();
@@ -392,7 +400,7 @@ impl<S: Split> PartitionLocations<S> {
     }
 
     /// Gets the *current* preferred locations from the DAGScheduler (as opposed to the static ones).
-    fn current_pref_locs(part: Box<dyn Split>, prev: &dyn RddBase) -> Vec<Ipv4Addr> {
+    fn current_pref_locs<R: RddBase>(part: Box<S>, prev: &R) -> Vec<Ipv4Addr> {
         // TODO: this is inefficient and likely to happen in more places,
         //we should add a preferred_locs method that takes split by ref (&dyn Split) not by value
         prev.preferred_locations(part)
@@ -632,10 +640,10 @@ impl<S: Split> DefaultPartitionCoalescer<S> {
         }
     }
 
-    fn throw_balls(
+    fn throw_balls<RDD: RddBase>(
         &mut self,
         max_partitions: usize,
-        prev: Arc<dyn RddBase>,
+        prev: Arc<RDD>,
         balance_slack: f64,
         mut partition_locs: PartitionLocations<S>,
     ) {

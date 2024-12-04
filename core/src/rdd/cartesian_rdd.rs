@@ -19,9 +19,9 @@ pub struct CartesianSplit<S: Split> {
     s2: Box<S>,
 }
 
-impl<S> Split for CartesianSplit<S> 
+impl<S> Split for CartesianSplit<S>
 where
-    S: Split + Clone
+    S: Split + Clone,
 {
     fn get_index(&self) -> usize {
         self.idx
@@ -38,19 +38,16 @@ pub struct CartesianRdd<T: Data, U: Data, R1, R2, ND, SD> {
     _market_u: PhantomData<U>,
 }
 
-impl<T, U, R1, R2, ND, SD> CartesianRdd<T, U, R1, R2, ND, SD> 
+impl<T, U, R1, R2, ND, SD> CartesianRdd<T, U, R1, R2, ND, SD>
 where
-    ND:NarrowDependencyTrait, 
+    ND: NarrowDependencyTrait,
     SD: ShuffleDependencyTrait,
-    T: Data, 
+    T: Data,
     U: Data,
     R1: Rdd<Item = T>,
-    R2: Rdd<Item = U>
+    R2: Rdd<Item = U>,
 {
-    pub(crate) fn new(
-        rdd1: Arc<R1>,
-        rdd2: Arc<R2>,
-    ) -> Self {
+    pub(crate) fn new(rdd1: Arc<R1>, rdd2: Arc<R2>) -> Self {
         let vals = Arc::new(RddVals::new(rdd1.get_context()));
         let num_partitions_in_rdd2 = rdd2.number_of_splits();
         CartesianRdd {
@@ -64,14 +61,14 @@ where
     }
 }
 
-impl<T, U, R1, R2, ND, SD> Clone for CartesianRdd<T, U, R1, R2, ND, SD> 
+impl<T, U, R1, R2, N, S> Clone for CartesianRdd<T, U, R1, R2, N, S>
 where
-    ND:NarrowDependencyTrait, 
-    SD: ShuffleDependencyTrait,
-    T: Data, 
+    N: NarrowDependencyTrait,
+    S: ShuffleDependencyTrait,
+    T: Data,
     U: Data,
     R1: Rdd<Item = T>,
-    R2: Rdd<Item = U>
+    R2: Rdd<Item = U>,
 {
     fn clone(&self) -> Self {
         CartesianRdd {
@@ -85,13 +82,20 @@ where
     }
 }
 
-impl<T: Data, U: Data, R1, R2, ND, SD> RddBase for CartesianRdd<T, U, R1, R2, ND, SD> 
+impl<T: Data, U: Data, R1, R2, N, S> RddBase for CartesianRdd<T, U, R1, R2, N, S>
 where
     R1: Rdd<Item = T>,
     R2: Rdd<Item = U>,
-    ND: NarrowDependencyTrait + 'static,
-    SD: ShuffleDependencyTrait + 'static
+    N: NarrowDependencyTrait + 'static,
+    S: ShuffleDependencyTrait + 'static,
 {
+    // TODO: Fix this type 
+    type Split = R1::Split;
+    type Partitioner = R2::Partitioner;
+
+    type ShuffleDeps = S;
+    type NarrowDeps = N;
+
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -100,11 +104,11 @@ where
         self.vals.context.upgrade().unwrap()
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
+    fn get_dependencies(&self) -> Vec<Dependency<N, S>> {
         self.vals.dependencies.clone()
     }
 
-    fn splits(&self) -> Vec<Box<dyn Split>> {
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         // create the cross product split
         let mut array =
             Vec::with_capacity(self.rdd1.number_of_splits() + self.rdd2.number_of_splits());
@@ -118,30 +122,33 @@ where
                 s2_idx,
                 s1: s1.clone(),
                 s2: s2.clone(),
-            }) as Box<dyn Split>);
+            }));
         }
         array
     }
 
     fn iterator_any(
         &self,
-        split: Box<dyn Split>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
         Ok(Box::new(
             self.iterator(split)?
                 .map(|x| Box::new(x) as Box<dyn AnyData>),
         ))
     }
+    
 }
 
-impl<T: Data, U: Data, R1, R2, ND, SD> Rdd for CartesianRdd<T, U, R1, R2, ND, SD> 
+impl<T: Data, U: Data, R1, R2, N, S> Rdd for CartesianRdd<T, U, R1, R2, N, S>
 where
     R1: Rdd<Item = T>,
     R2: Rdd<Item = U>,
-    ND: NarrowDependencyTrait + 'static,
-    SD: ShuffleDependencyTrait + 'static
+    N: NarrowDependencyTrait + 'static,
+    S: ShuffleDependencyTrait + 'static,
 {
     type Item = (T, U);
+    type RddBase = Self;
+
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>>
     where
         Self: Sized,
@@ -149,11 +156,14 @@ where
         Arc::new(self.clone())
     }
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<Self::RddBase> {
         Arc::new(self.clone())
     }
 
-    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(
+        &self,
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         let current_split: Box<CartesianSplit> = split
             .downcast::<CartesianSplit>()
             .or(Err(Error::DowncastFailure("CartesianSplit")))?;

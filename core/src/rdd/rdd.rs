@@ -38,9 +38,9 @@ use std::time::Duration;
 
 // Values which are needed for all RDDs
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RddVals<ND, SD> {
+pub struct RddVals<N, S> {
     pub id: usize,
-    pub dependencies: Vec<Dependency<ND, SD>>,
+    pub dependencies: Vec<Dependency<N, S>>,
     should_cache: bool,
     #[serde(skip_serializing, skip_deserializing)]
     pub context: Weak<Context>,
@@ -71,6 +71,11 @@ where
 // Another separate Rdd containing generic methods like map, etc.,
 pub trait RddBase: Send + Sync + 'static {
 
+    type Split: Split + ?Sized;
+    type Partitioner: Partitioner + ?Sized;
+    type ShuffleDeps: ShuffleDependencyTrait;
+    type NarrowDeps: NarrowDependencyTrait;
+
     fn get_rdd_id(&self) -> usize;
 
     fn get_context(&self) -> Arc<Context>;
@@ -83,32 +88,32 @@ pub trait RddBase: Send + Sync + 'static {
         log::debug!("couldn't register op name")
     }
 
-    fn get_dependencies<SD: ShuffleDependencyTrait, ND: NarrowDependencyTrait>(&self) -> Vec<Dependency<ND, SD>>;
+    fn get_dependencies(&self) -> Vec<Dependency<Self::NarrowDeps, Self::ShuffleDeps>>;
 
-    fn preferred_locations<S: Split + ?Sized>(&self, _split: Box<S>) -> Vec<Ipv4Addr> {
+    fn preferred_locations(&self, _split: Box<Self::Split>) -> Vec<Ipv4Addr> {
         Vec::new()
     }
 
-    fn partitioner<P: Partitioner + ?Sized>(&self) -> Option<Box<P>> {
+    fn partitioner(&self) -> Option<Box<Self::Partitioner>> {
         None
     }
 
-    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>>;
+    fn splits(&self) -> Vec<Box<Self::Split>>;
 
-    fn number_of_splits<S: Split + ?Sized>(&self) -> usize {
+    fn number_of_splits(&self) -> usize {
         self.splits().len()
     }
 
     /// Analyse whether this is required or not. It requires downcasting while executing
     /// tasks which could hurt performance.
-    fn iterator_any<S: Split + ?Sized>(
+    fn iterator_any(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>>;
 
-    fn cogroup_iterator_any<S: Split + ?Sized>(
+    fn cogroup_iterator_any(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
@@ -138,8 +143,15 @@ pub trait RddBase: Send + Sync + 'static {
 //     }
 // }
 
-impl<I: Rdd + ?Sized> RddBase for Arc<I> {
+impl<I: Rdd<RddBase = I>> RddBase for Arc<I>  {
+    type Split = I::Split;
     
+    type Partitioner = I::Partitioner;
+    
+    type ShuffleDeps = I::ShuffleDeps;
+    
+    type NarrowDeps = I::NarrowDeps;
+
     fn get_rdd_id(&self) -> usize {
         (**self).get_rdd_base().get_rdd_id()
     }
@@ -148,43 +160,45 @@ impl<I: Rdd + ?Sized> RddBase for Arc<I> {
         (**self).get_rdd_base().get_context()
     }
 
-    fn get_dependencies<SD, ND>(&self) -> Vec<Dependency<SD, ND>>
-    where
-        ND: NarrowDependencyTrait,
-        SD: ShuffleDependencyTrait,
-    {
+    fn get_dependencies(&self) -> Vec<Dependency<Self::NarrowDeps, Self::ShuffleDeps>> {
         (**self).get_rdd_base().get_dependencies()
+        // todo!()
     }
 
-    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         (**self).get_rdd_base().splits()
     }
 
-    fn iterator_any<S: Split + ?Sized>(
+    fn iterator_any(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
-        (**self).get_rdd_base().iterator_any(split)
+        // (**self).get_rdd_base().iterator_any(split)
+
+        todo!()
     }
     
-}
+} 
 
-impl<I: Rdd + ?Sized> Rdd for Arc<I> {
+
+impl<I: Rdd> Rdd for Arc<I> {
     type Item = I::Item;
+    type RddBase = I;
 
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         (**self).get_rdd()
     }
 
-    fn get_rdd_base<RDD: RddBase>(&self) -> Arc<RDD> {
+    fn get_rdd_base(&self) -> Arc<Self::RddBase> {
         (**self).get_rdd_base()
     }
 
-    fn compute<S: Split + ?Sized>(
+    fn compute(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        (**self).compute(split)
+        // (**self).compute(split)
+        todo!()
     }
 }
 
@@ -192,19 +206,20 @@ impl<I: Rdd + ?Sized> Rdd for Arc<I> {
 // Rename it to RddOps..
 pub trait Rdd: RddBase + 'static {
     type Item: Data;
+    type RddBase: RddBase;
 
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>>;
 
-    fn get_rdd_base<RDD: RddBase>(&self) -> Arc<RDD>;
+    fn get_rdd_base(&self) -> Arc<Self::RddBase>;
 
-    fn compute<S: Split + ?Sized>(
+    fn compute(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Self::Item>>>;
 
-    fn iterator<S: Split + ?Sized>(
+    fn iterator(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         self.compute(split)
     }
@@ -864,18 +879,18 @@ pub trait Rdd: RddBase + 'static {
 
     fn union(
         &self,
-        other: Arc<dyn Rdd<Item = Self::Item>>,
+        other: Arc<impl Rdd<Item = Self::Item>>,
     ) -> Result<Arc<impl Rdd<Item = Self::Item>>>
     where
         Self: Clone,
     {
         Ok(Arc::new(Context::union(&[
-            Arc::new(self.clone()) as Arc<dyn Rdd<Item = Self::Item>>,
+            Arc::new(self.clone()),
             other,
         ])?))
     }
 
-    fn zip<S: Data>(&self, second: Arc<dyn Rdd<Item = S>>) -> Arc<dyn Rdd<Item = (Self::Item, S)>>
+    fn zip<S: Data>(&self, second: Arc<impl Rdd<Item = S>>) -> Arc<dyn Rdd<Item = (Self::Item, S)>>
     where
         Self: Clone,
     {

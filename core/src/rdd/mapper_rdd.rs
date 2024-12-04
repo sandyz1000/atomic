@@ -3,7 +3,9 @@ use std::net::Ipv4Addr;
 use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, Arc};
 
 use crate::context::Context;
-use crate::dependency::{Dependency, NarrowDependencyTrait, OneToOneDependency, ShuffleDependencyTrait};
+use crate::dependency::{
+    Dependency, NarrowDependencyTrait, OneToOneDependency, ShuffleDependencyTrait,
+};
 use crate::error::Result;
 use crate::rdd::rdd::{Rdd, RddBase, RddVals};
 use crate::ser_data::{AnyData, Data, SerFunc};
@@ -20,7 +22,7 @@ pub struct MapperRdd<T: Data, U: Data, F, RDD, ND, SD> {
     f: F,
     pinned: AtomicBool,
     _marker_t: PhantomData<T>, // phantom data is necessary because of type parameter T
-    _marker_u: PhantomData<U>
+    _marker_u: PhantomData<U>,
 }
 
 // Can't derive clone automatically
@@ -29,7 +31,7 @@ where
     F: Fn(T) -> U + Clone,
     RDD: Rdd<Item = T>,
     ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    SD: ShuffleDependencyTrait,
 {
     fn clone(&self) -> Self {
         MapperRdd {
@@ -49,10 +51,10 @@ where
     F: SerFunc<T, Output = U>,
     RDD: Rdd<Item = T>,
     ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    SD: ShuffleDependencyTrait,
 {
     /// TODO: Add Docs
-    /// 
+    ///
     pub(crate) fn new(prev: Arc<RDD>, f: F) -> Self {
         let mut vals = RddVals::new(prev.get_context());
         vals.dependencies
@@ -80,10 +82,18 @@ where
 impl<T: Data, U: Data, F, RDD, ND, SD> RddBase for MapperRdd<T, U, F, RDD, ND, SD>
 where
     F: SerFunc<T, Output = U>,
-    ND: NarrowDependencyTrait,
+    ND: NarrowDependencyTrait + 'static,
     SD: ShuffleDependencyTrait + 'static,
     RDD: Rdd<Item = T>,
 {
+    type Split = RDD::Split;
+
+    type Partitioner = RDD::Partitioner;
+
+    type ShuffleDeps = SD;
+
+    type NarrowDeps = ND;
+
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -101,15 +111,15 @@ where
         *own_name = name.to_owned();
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
+    fn get_dependencies(&self) -> Vec<Dependency<Self::NarrowDeps, Self::ShuffleDeps>> {
         self.vals.dependencies.clone()
     }
 
-    fn preferred_locations<S: Split + ?Sized>(&self, split: Box<S>) -> Vec<Ipv4Addr> {
+    fn preferred_locations(&self, split: Box<Self::Split>) -> Vec<Ipv4Addr> {
         self.prev.preferred_locations(split)
     }
 
-    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         self.prev.splits()
     }
 
@@ -117,21 +127,19 @@ where
         self.prev.number_of_splits()
     }
 
-    fn cogroup_iterator_any<S: Split + ?Sized>(
+    fn cogroup_iterator_any(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
-    fn iterator_any<S: Split + ?Sized>(
+    fn iterator_any(
         &self,
-        split: Box<S>,
+        split: Box<Self::Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any maprdd",);
-        Ok(Box::new(
-            self.iterator(split)?.map(|x| Box::new(x)),
-        ))
+        Ok(Box::new(self.iterator(split)?.map(|x| Box::new(x))))
     }
 
     fn is_pinned(&self) -> bool {
@@ -145,11 +153,11 @@ where
 // {
 //     fn cogroup_iterator_any(
 //         &self,
-//         split: Box<dyn Split>,
-//     ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+//         split: Box<Self::Split>,
+//     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
 //         log::debug!("inside iterator_any maprdd",);
 //         Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-//             Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
+//             Box::new((k, Box::new(v)))
 //         })))
 //     }
 // }
@@ -162,6 +170,9 @@ where
     SD: ShuffleDependencyTrait + 'static,
 {
     type Item = U;
+    type RddBase = RDD;
+    type Split = RDD::Split;
+
     fn get_rdd_base(&self) -> Arc<RDD> {
         Arc::new(self.clone())
     }
@@ -170,7 +181,7 @@ where
         Arc::new(self.clone())
     }
 
-    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         Ok(Box::new(self.prev.iterator(split)?.map(self.f.clone())))
     }
 }

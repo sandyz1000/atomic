@@ -30,7 +30,7 @@ where
 }
 
 // DynClone is used for cloning trait object
-pub trait AnyData: dyn_clone::DynClone + std::any::Any + Send + Sync + std::fmt::Debug + 'static 
+pub trait AnyData: dyn_clone::DynClone + std::any::Any + Send + Sync + std::fmt::Debug + 'static
 {
     fn as_any(&self) -> &dyn std::any::Any;
     /// Convert to a `&mut std::any::Any`.

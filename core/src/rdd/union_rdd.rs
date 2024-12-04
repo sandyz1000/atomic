@@ -118,7 +118,13 @@ where
     }
 }
 
-impl<T: Data, RDD, SD, ND, PR> UnionVariants<T, RDD, SD, ND, PR> {
+impl<T: Data, RDD, S, N, Pr> UnionVariants<T, RDD, S, N, Pr> 
+where 
+    RDD: Rdd<Item = T>,
+    S: ShuffleDependencyTrait + 'static,
+    N: NarrowDependencyTrait + 'static,
+    Pr: Partitioner
+{
     fn new(rdds: &[Arc<RDD>]) -> Result<Self> {
         let context = rdds[0].get_context();
         let mut vals = RddVals::new(context);
@@ -171,7 +177,7 @@ impl<T: Data, RDD, SD, ND, PR> UnionVariants<T, RDD, SD, ND, PR> {
     fn has_unique_partitioner(rdds: &[Arc<RDD>]) -> bool {
         rdds.iter()
             .map(|p| p.partitioner())
-            .try_fold(None, |prev: Option<Box<PR>>, p| {
+            .try_fold(None, |prev: Option<Box<Pr>>, p| {
                 if let Some(partitioner) = p {
                     if let Some(prev_partitioner) = prev {
                         if prev_partitioner.equals((&*partitioner).as_any()) {
@@ -191,10 +197,10 @@ impl<T: Data, RDD, SD, ND, PR> UnionVariants<T, RDD, SD, ND, PR> {
             .is_ok()
     }
 
-    fn current_pref_locs<'a, S: Split + ?Sized>(
+    fn current_pref_locs<'a, Sp: Split + ?Sized>(
         &'a self,
         rdd: Arc<RDD>,
-        split: &S,
+        split: &Sp,
         context: Arc<Context>,
     ) -> impl Iterator<Item = std::net::Ipv4Addr> + 'a {
         context
@@ -203,7 +209,18 @@ impl<T: Data, RDD, SD, ND, PR> UnionVariants<T, RDD, SD, ND, PR> {
     }
 }
 
-impl<T: Data, RDD, SD, ND, PR> RddBase for UnionRdd<T, RDD, SD, ND, PR> {
+impl<T: Data, RDD, S, N, Pr> RddBase for UnionRdd<T, RDD, S, N, Pr> 
+where 
+    RDD: Rdd<Item = T>,
+    S: ShuffleDependencyTrait + 'static,
+    N: NarrowDependencyTrait + 'static,
+    Pr: Partitioner
+{
+    type Split = RDD::Split;
+    type Partitioner = Pr;
+    type ShuffleDeps = S;
+    type NarrowDeps = N;
+
     fn get_rdd_id(&self) -> usize {
         match &self.0 {
             NonUniquePartitioner { vals, .. } => vals.id,
@@ -222,14 +239,14 @@ impl<T: Data, RDD, SD, ND, PR> RddBase for UnionRdd<T, RDD, SD, ND, PR> {
         }
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
+    fn get_dependencies(&self) -> Vec<Dependency<N, S>> {
         match &self.0 {
             NonUniquePartitioner { vals, .. } => vals.dependencies.clone(),
             PartitionerAware { vals, .. } => vals.dependencies.clone(),
         }
     }
 
-    fn preferred_locations<S: Split + ?Sized>(&self, split: Box<S>) -> Vec<Ipv4Addr> {
+    fn preferred_locations(&self, split: Box<Self::Split>) -> Vec<Ipv4Addr> {
         match &self.0 {
             NonUniquePartitioner { .. } => Vec::new(),
             PartitionerAware { rdds, .. } => {
@@ -274,7 +291,7 @@ impl<T: Data, RDD, SD, ND, PR> RddBase for UnionRdd<T, RDD, SD, ND, PR> {
         }
     }
 
-    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         match &self.0 {
             NonUniquePartitioner { rdds, .. } => rdds
                 .iter()
@@ -307,21 +324,22 @@ impl<T: Data, RDD, SD, ND, PR> RddBase for UnionRdd<T, RDD, SD, ND, PR> {
 
     fn iterator_any(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any union_rdd",);
         Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
+            self.iterator(split)?.map(|x| Box::new(x)),
         ))
     }
 
-    fn partitioner(&self) -> Option<Box<dyn Partitioner>> {
+    fn partitioner(&self) -> Option<Box<Self::Partitioner>> {
         match &self.0 {
             NonUniquePartitioner { .. } => None,
             PartitionerAware { part, .. } => Some(part.clone()),
         }
     }
+    
+    
 }
 
 impl<T: Data, RDD, SD, ND, PR> Rdd for UnionRdd<T, RDD, SD, ND, PR> 
@@ -332,8 +350,9 @@ where
     PR: Partitioner
 {
     type Item = T;
+    type RddBase = RDD;
 
-    fn get_rdd_base<RDB: RddBase>(&self) -> Arc<RDB> {
+    fn get_rdd_base(&self) -> Arc<Self::RddBase> {
         Arc::new(UnionRdd(self.0.clone()))
     }
 
@@ -341,7 +360,7 @@ where
         Arc::new(UnionRdd(self.0.clone()))
     }
 
-    fn compute<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = T>>> {
+    fn compute(&self, split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = T>>> {
         match &self.0 {
             NonUniquePartitioner { rdds, .. } => {
                 let part = &*split
@@ -363,4 +382,5 @@ where
             }
         }
     }
+    
 }

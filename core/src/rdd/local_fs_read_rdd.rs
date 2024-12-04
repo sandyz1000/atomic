@@ -92,10 +92,10 @@ where
 /// 接收一个context, 一个路径path和分区数量num_slices
 /// 产生一个LocalFsReadRdd对象
 ///
-impl<ND, SD> LocalFsReadRdd<ND, SD> 
+impl<N, S> LocalFsReadRdd<N, S> 
 where
-    ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    N: NarrowDependencyTrait,
+    S: ShuffleDependencyTrait
 {
     pub fn new(context: Arc<Context>, path: String, num_slices: usize) -> Self {
 
@@ -157,11 +157,16 @@ where
     }
 }
 
-impl<ND, SD> RddBase for LocalFsReadRdd<ND, SD> 
+impl<Nd, Sd> RddBase for LocalFsReadRdd<Nd, Sd> 
 where
-    ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    Nd: NarrowDependencyTrait,
+    Sd: ShuffleDependencyTrait
 {
+    type Split = Self;
+    type Partitioner = Self;
+    type ShuffleDeps = Sd;
+    type NarrowDeps = Nd;
+
     fn get_rdd_id(&self) -> usize {
         self.rdd_vals.vals.id
     }
@@ -179,11 +184,11 @@ where
         *own_name = name.to_owned();
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
+    fn get_dependencies(&self) -> Vec<Dependency<Nd, Sd>> {
         self.rdd_vals.vals.dependencies.clone()
     }
 
-    fn splits(&self) -> Vec<Box<impl Split>> {
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         (0..self.rdd_vals.splits_.len())
             .map(|i| {
                 Box::new(LocalFsReadRddSplit::new(
@@ -199,25 +204,28 @@ where
         self.rdd_vals.splits_.len()
     }
 
-    fn cogroup_iterator_any<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
+    fn cogroup_iterator_any(&self, split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
-    fn iterator_any<S: Split + ?Sized>(&self, split: Box<S>) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
+    fn iterator_any(&self, split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any parallel collection",);
         Ok(Box::new(
             self.iterator(split)?
                 .map(|x| Box::new(x)),
         ))
     }
+    
 }
 
-impl<ND, SD> Rdd for LocalFsReadRdd<ND, SD> 
+impl<N, S> Rdd for LocalFsReadRdd<N, S> 
 where
-    ND: NarrowDependencyTrait + 'static,
-    SD: ShuffleDependencyTrait + 'static
+    N: NarrowDependencyTrait + 'static,
+    S: ShuffleDependencyTrait + 'static
 {
     type Item = Vec<u8>;
+    type RddBase = (); // TODO: FixMe - Define a right rdd base here
+
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         Arc::new(LocalFsReadRdd {
             name: Mutex::new(self.name.lock().clone()),
@@ -226,15 +234,16 @@ where
         })
     }
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<Self::RddBase> {
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         if let Some(s) = split.downcast_ref::<LocalFsReadRddSplit>() {
             Ok(s.iterator())
         } else {
             panic!("Got split object from different concrete type other than LocalFsReadRddSplit")
         }
     }
+    
 }

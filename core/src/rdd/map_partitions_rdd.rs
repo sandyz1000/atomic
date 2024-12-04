@@ -71,13 +71,18 @@ where
     }
 }
 
-impl<T: Data, U: Data, F, RDD, ND, SD> RddBase for MapPartitionsRdd<T, U, F, RDD, ND, SD>
+impl<T: Data, U: Data, F, RDD, N, S> RddBase for MapPartitionsRdd<T, U, F, RDD, N, S>
 where
     RDD: Rdd<Item = T>,
     F: SerFunc<(usize, Box<dyn Iterator<Item = T>>), Output = Box<dyn Iterator<Item = U>>>,
-    ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    N: NarrowDependencyTrait + 'static,
+    S: ShuffleDependencyTrait + 'static
 {
+    type Split = RDD::Split;
+    type Partitioner = RDD::Partitioner;
+    type ShuffleDeps = S;
+    type NarrowDeps = N;
+
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -95,15 +100,15 @@ where
         *own_name = name.to_owned();
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
+    fn get_dependencies(&self) -> Vec<Dependency<N, S>> {
         self.vals.dependencies.clone()
     }
 
-    fn preferred_locations(&self, split: Box<dyn Split>) -> Vec<Ipv4Addr> {
+    fn preferred_locations(&self, split: Box<Self::Split>) -> Vec<Ipv4Addr> {
         self.prev.preferred_locations(split)
     }
 
-    fn splits(&self) -> Vec<Box<dyn Split>> {
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         self.prev.splits()
     }
 
@@ -113,25 +118,25 @@ where
 
     fn cogroup_iterator_any(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
     fn iterator_any(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any map_partitions_rdd",);
         Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
+            self.iterator(split)?.map(|x| Box::new(x)),
         ))
     }
 
     fn is_pinned(&self) -> bool {
         self.pinned.load(SeqCst)
     }
+    
 }
 
 // impl<T: Data, V: Data, U: Data, F> RddBase for MapPartitionsRdd<T, (V, U), F>
@@ -140,11 +145,11 @@ where
 // {
 //     fn cogroup_iterator_any(
 //         &self,
-//         split: Box<dyn Split>,
-//     ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+//         split: Box<Self::Split>,
+//     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
 //         log::debug!("inside iterator_any map_partitions_rdd",);
 //         Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-//             Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
+//             Box::new((k, Box::new(v)))
 //         })))
 //     }
 // }
@@ -157,6 +162,8 @@ where
     SD: ShuffleDependencyTrait + 'static
 {
     type Item = U;
+    type RddBase = RDD;
+
     fn get_rdd_base(&self) -> Arc<RDD> {
         Arc::new(self.clone())
     }
@@ -165,8 +172,9 @@ where
         Arc::new(self.clone())
     }
     
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         let f_result = self.f.clone()(split.get_index(), self.prev.iterator(split)?);
         Ok(Box::new(f_result))
     }
+    
 }

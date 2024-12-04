@@ -159,21 +159,25 @@ where
 // impl<K: Data, V: Data> RddBase for ParallelCollection<(K, V)> {
 //     fn cogroup_iterator_any(
 //         &self,
-//         split: Box<dyn Split>,
-//     ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+//         split: Box<Self::Split>,
+//     ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
 //         log::debug!("inside iterator_any parallel collection",);
 //         Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-//             Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
+//             Box::new((k, Box::new(v)))
 //         })))
 //     }
 // }
 
-// #[typetag::serde]
-impl<T: Data, ND, SD> RddBase for ParallelCollection<T, ND, SD> 
+impl<T: Data, Nd, Sd> RddBase for ParallelCollection<T, Nd, Sd> 
 where
-    ND: NarrowDependencyTrait, 
-    SD: ShuffleDependencyTrait + 'static
+    Nd: NarrowDependencyTrait + 'static, 
+    Sd: ShuffleDependencyTrait + 'static
 {
+    type Split = Self::Split;
+    type Partitioner = Self::Partitioner;
+    type ShuffleDeps = Sd;
+    type NarrowDeps = Nd;
+
     fn get_rdd_id(&self) -> usize {
         self.rdd_vals.vals.id
     }
@@ -191,11 +195,11 @@ where
         *own_name = name.to_owned();
     }
 
-    fn get_dependencies(&self) -> Vec<Dependency<ND, SD>> {
+    fn get_dependencies(&self) -> Vec<Dependency<Nd, Sd>> {
         self.rdd_vals.vals.dependencies.clone()
     }
 
-    fn splits<S: Split + ?Sized>(&self) -> Vec<Box<S>> {
+    fn splits(&self) -> Vec<Box<Self::Split>> {
         (0..self.rdd_vals.splits_.len())
             .map(|i| {
                 Box::new(ParallelCollectionSplit::new(
@@ -211,22 +215,23 @@ where
         self.rdd_vals.splits_.len()
     }
 
-    fn cogroup_iterator_any<S: Split + ?Sized>(
+    fn cogroup_iterator_any(
         &self,
-        split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         self.iterator_any(split)
     }
 
-    fn iterator_any<S: Split + ?Sized>(
+    fn iterator_any(
         &self,
-        split: Box<S>,
-    ) -> Result<Box<impl Iterator<Item = Box<impl AnyData>>>> {
+        split: Box<Self::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<impl AnyData>>>> {
         log::debug!("inside iterator_any parallel collection",);
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x)),
         ))
     }
+    
 }
 
 impl<T: Data, ND, SD> Rdd for ParallelCollection<T, ND, SD> 
@@ -235,6 +240,8 @@ where
     SD: ShuffleDependencyTrait + 'static
 {
     type Item = T;
+    type RddBase = Self;
+
     fn get_rdd(&self) -> Arc<impl Rdd<Item = Self::Item>> {
         let par = ParallelCollection {
             name: Mutex::new(self.name.lock().clone()),
@@ -244,11 +251,11 @@ where
         Arc::new(par)
     }
 
-    fn get_rdd_base(&self) -> Arc<impl RddBase> {
+    fn get_rdd_base(&self) -> Arc<Self::RddBase> {
         Arc::new(self.clone())
     }
 
-    fn compute<S: Split + ?Sized >(&self, split: Box<S>) -> Result<Box<impl Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<Self::Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         if let Some(s) = split.downcast_ref::<ParallelCollectionSplit<T>>() {
             Ok(s.iterator())
         } else {
@@ -257,4 +264,5 @@ where
             )
         }
     }
+    
 }
