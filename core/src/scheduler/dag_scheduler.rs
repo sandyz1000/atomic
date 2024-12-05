@@ -4,6 +4,7 @@ use std::error::Error;
 
 use crate::scheduler::{Scheduler, TaskBase};
 use crate::ser_data::{AnyData, Data};
+use crate::Rdd;
 
 #[derive(Debug, Clone)]
 pub struct FetchFailedVals {
@@ -71,16 +72,18 @@ impl Scheduler for DAGScheduler {
         todo!()
     }
 
-    fn run_job<T: Data, U: Data, F>(
+    fn run_job<T: Data, U: Data, F, R>(
         &self,
-        rdd: &dyn crate::Rdd<Item = T>,
+        rdd: &R,
         func: F,
         partitions: Vec<i64>,
         allow_local: bool,
     ) -> Vec<U>
     where
         Self: Sized,
-        F: Fn(Box<dyn Iterator<Item = T>>) -> U {
+        F: Fn(Box<dyn Iterator<Item = T>>) -> U,
+        R: Rdd<Item = T>    
+    {
         todo!()
     }
 

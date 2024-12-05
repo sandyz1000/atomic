@@ -1,14 +1,16 @@
-use std::sync::{
+use std::{marker::PhantomData, sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
-};
+}};
 
 use crate::scheduler::listener::ListenerEvent;
 use crate::{Error, Result};
 use parking_lot::{Mutex, RwLock};
 
-trait AsyncEventQueue: Send + Sync {
-    fn post(&mut self, event: Arc<dyn ListenerEvent>);
+pub trait AsyncEventQueue: Send + Sync {
+    type Event: ListenerEvent;
+    
+    fn post(&mut self, event: Arc<Self::Event>);
     fn start(&mut self);
     fn stop(&mut self);
 }
@@ -21,22 +23,23 @@ type QueueBuffer = Option<Arc<Mutex<Vec<Arc<dyn ListenerEvent>>>>>;
 /// has started will events be actually propagated to all attached listeners. This listener bus
 /// is stopped when `stop()` is called, and it will drop further events after stopping.
 #[derive(Clone)]
-pub(in crate::scheduler) struct LiveListenerBus {
+pub struct LiveListenerBus<AeQ: AsyncEventQueue> {
     /// Indicate if `start()` is called
     started: Arc<AtomicBool>,
     /// Indicate if `stop()` is called
     stopped: Arc<AtomicBool>,
     queued_events: QueueBuffer,
-    queues: Arc<RwLock<Vec<Box<dyn AsyncEventQueue>>>>,
+    queues: Arc<RwLock<Vec<Box<AeQ>>>>,
 }
 
-impl Default for LiveListenerBus {
+impl<AeQ: AsyncEventQueue> Default for LiveListenerBus<AeQ> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl LiveListenerBus {
+impl<AeQ: AsyncEventQueue> LiveListenerBus<AeQ> {
+
     pub fn new() -> Self {
         LiveListenerBus {
             started: Arc::new(AtomicBool::new(false)),
@@ -47,7 +50,7 @@ impl LiveListenerBus {
     }
 
     /// Post an event to all queues.
-    pub fn post(&self, event: Box<dyn ListenerEvent>) {
+    pub fn post<Event: ListenerEvent>(&self, event: Box<Event>) {
         if self.stopped.load(Ordering::SeqCst) {
             return;
         }
@@ -74,8 +77,8 @@ impl LiveListenerBus {
         }
     }
 
-    fn post_to_queues(&self, event: Box<dyn ListenerEvent>) {
-        let event: Arc<dyn ListenerEvent> = Arc::from(event);
+    fn post_to_queues<Event: ListenerEvent>(&self, event: Box<Event>) {
+        let event = Arc::from(event);
         for queue in &mut *self.queues.write() {
             queue.post(event.clone());
         }

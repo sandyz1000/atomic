@@ -63,13 +63,13 @@ impl Split for PartitionerAwareUnionSplit {
 #[derive(Serialize, Deserialize)]
 pub struct UnionRdd<T: 'static, RDD, SD, ND, PR>(UnionVariants<T, RDD, SD, ND, PR>);
 
-impl<T, RDD, SD, ND, PR> UnionRdd<T, RDD, SD, ND, PR>
+impl<T, RDD, Sd, Nd, Pr> UnionRdd<T, RDD, Sd, Nd, Pr>
 where
     T: Data,
     RDD: Rdd<Item = T>,
-    SD: ShuffleDependencyTrait,
-    ND: NarrowDependencyTrait,
-    PR: Partitioner
+    Sd: ShuffleDependencyTrait,
+    Nd: NarrowDependencyTrait,
+    Pr: Partitioner
 {
     pub(crate) fn new(rdds: &[Arc<RDD>]) -> Result<Self> {
         Ok(UnionRdd(UnionVariants::new(rdds)?))

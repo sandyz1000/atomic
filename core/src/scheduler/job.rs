@@ -5,6 +5,8 @@ use std::marker::PhantomData;
 use std::option::Option;
 use std::sync::Arc;
 
+use crate::dependency::ShuffleDependencyTrait;
+use crate::rdd::rdd::RddBase;
 use crate::scheduler::{JobListener, NativeScheduler, Stage, TaskBase, TaskContext};
 use crate::ser_data::{Data, SerFunc};
 use crate::{Rdd, Result};
@@ -43,45 +45,48 @@ impl Ord for Job {
     }
 }
 
-type PendingTasks = BTreeMap<Stage, BTreeSet<Box<dyn TaskBase>>>;
+type PendingTasks<S, RDD> = BTreeMap<Stage<S, RDD>, BTreeSet<Box<dyn TaskBase>>>;
 
 /// Contains all the necessary types to run and track a job progress
-pub(crate) struct JobTracker<F, U: Data, T: Data, L, RDD>
+pub(crate) struct JobTracker<F, U: Data, T: Data, L, RDD, S>
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
     L: JobListener,
+    S: ShuffleDependencyTrait,
+    RDD: RddBase
 {
     pub output_parts: Vec<usize>,
     pub num_output_parts: usize,
-    pub final_stage: Stage,
+    pub final_stage: Stage<S, RDD>,
     pub func: Arc<F>,
     pub final_rdd: Arc<RDD>,
     pub run_id: usize,
-    pub waiting: Mutex<BTreeSet<Stage>>,
-    pub running: Mutex<BTreeSet<Stage>>,
-    pub failed: Mutex<BTreeSet<Stage>>,
+    pub waiting: Mutex<BTreeSet<Stage<S, RDD>>>,
+    pub running: Mutex<BTreeSet<Stage<S, RDD>>>,
+    pub failed: Mutex<BTreeSet<Stage<S, RDD>>>,
     pub finished: Mutex<Vec<bool>>,
-    pub pending_tasks: Mutex<PendingTasks>,
+    pub pending_tasks: Mutex<PendingTasks<S, RDD>>,
     pub listener: L,
     _marker_t: PhantomData<T>,
     _marker_u: PhantomData<U>,
 }
 
-impl<F, U: Data, T: Data, L, RDD> JobTracker<F, U, T, L, RDD>
+impl<F, U: Data, T: Data, L, RDD, S> JobTracker<F, U, T, L, RDD, S>
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
     L: JobListener,
-    RDD: Rdd<Item = T>
+    RDD: Rdd<Item = T> + RddBase,
+    S: ShuffleDependencyTrait
 {
-    pub async fn from_scheduler<S>(
-        scheduler: &S,
+    pub async fn from_scheduler<Ns>(
+        scheduler: &Ns,
         func: Arc<F>,
         final_rdd: Arc<RDD>,
         output_parts: Vec<usize>,
         listener: L,
     ) -> Result<Arc<Self>>
     where
-        S: NativeScheduler + ?Sized,
+        Ns: NativeScheduler + ?Sized,
     {
         let run_id = scheduler.get_next_job_id();
         let final_stage = scheduler
@@ -99,7 +104,7 @@ where
 
     fn new(
         run_id: usize,
-        final_stage: Stage,
+        final_stage: Stage<S, RDD>,
         func: Arc<F>,
         final_rdd: Arc<RDD>,
         output_parts: Vec<usize>,
@@ -114,12 +119,12 @@ where
             func,
             final_rdd,
             run_id,
+            listener,
             waiting: Mutex::new(BTreeSet::new()),
             running: Mutex::new(BTreeSet::new()),
             failed: Mutex::new(BTreeSet::new()),
             finished: Mutex::new(finished),
             pending_tasks: Mutex::new(pending_tasks),
-            listener: listener,
             _marker_t: PhantomData,
             _marker_u: PhantomData,
         })

@@ -24,7 +24,6 @@ pub(self) use self::stage::Stage;
 pub(crate) use self::base_scheduler::NativeScheduler;
 pub(crate) use self::distributed_scheduler::DistributedScheduler;
 pub(crate) use self::job_listener::JobListener;
-pub(crate) use self::dag_scheduler::DAGScheduler;
 pub(crate) use self::local_scheduler::LocalScheduler;
 pub(crate) use self::result_task::ResultTask;
 pub(crate) use self::task::TaskContext;
@@ -33,7 +32,7 @@ pub(crate) use self::task::{Task, TaskBase, TaskOption, TaskResult};
 pub trait Scheduler {
     fn start(&self);
     fn wait_for_register(&self);
-    fn run_job<T: Data, U: Data, F, R: Rdd<Item = T>>(
+    fn run_job<T: Data, U: Data, F, R>(
         &self,
         rdd: &R,
         func: F,
@@ -42,6 +41,7 @@ pub trait Scheduler {
     ) -> Vec<U>
     where
         Self: Sized,
+        R: Rdd<Item = T>,
         F: Fn(Box<dyn Iterator<Item = T>>) -> U;
     fn stop(&self);
     fn default_parallelism(&self) -> i64;

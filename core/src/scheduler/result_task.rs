@@ -10,7 +10,7 @@ use crate::ser_data::{AnyData, Data, SerFunc};
 
 // #[derive(Serialize, Deserialize)]
 #[derive(Serialize)]
-pub(crate) struct ResultTask<T, U, F, R>
+pub(crate) struct ResultTask<T, U, F, R, Ad>
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
@@ -19,7 +19,8 @@ where
         + Clone,
     T : Data,
     U : Data,
-    R: Rdd<Item = T>
+    R: Rdd<Item = T>,
+    Ad: AnyData
 {
     pub task_id: usize,
     pub run_id: usize,
@@ -31,9 +32,10 @@ where
     pub locs: Vec<Ipv4Addr>,
     pub output_id: usize,
     _marker: PhantomData<T>,
+    _marker_d: PhantomData<Ad>
 }
 
-impl<T, U, F, R> ResultTask<T, U, F, R>
+impl<T, U, F, R, Ad: AnyData> ResultTask<T, U, F, R, Ad>
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
@@ -47,7 +49,7 @@ where
     
 }
 
-impl<T: Data, U: Data, F, R> Display for ResultTask<T, U, F, R>
+impl<T: Data, U: Data, F, R, Ad: AnyData> Display for ResultTask<T, U, F, R, Ad>
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
@@ -61,7 +63,7 @@ where
     }
 }
 
-impl<T: Data, U: Data, F, R> ResultTask<T, U, F, R>
+impl<T: Data, U: Data, F, R, Ad: AnyData> ResultTask<T, U, F, R, Ad>
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
@@ -82,11 +84,12 @@ where
             locs: self.locs.clone(),
             output_id: self.output_id,
             _marker: PhantomData,
+            _marker_d: PhantomData,
         }
     }
 }
 
-impl<T: Data, U: Data, F, R> ResultTask<T, U, F, R>
+impl<T: Data, U: Data, F, R, Ad: AnyData> ResultTask<T, U, F, R, Ad>
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
@@ -118,11 +121,12 @@ where
             locs,
             output_id,
             _marker: PhantomData,
+            _marker_d: PhantomData,
         }
     }
 }
 
-impl<T: Data, U: Data, F, R> TaskBase for ResultTask<T, U, F, R>
+impl<T: Data, U: Data, F, R, Ad: AnyData> TaskBase for ResultTask<T, U, F, R, Ad>
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
@@ -156,7 +160,7 @@ where
     }
 }
 
-impl<T: Data, U: Data, F, R> Task for ResultTask<T, U, F, R>
+impl<T: Data, U: Data, F, R, Ad> Task for ResultTask<T, U, F, R, Ad>
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output=U>
         + 'static
@@ -165,10 +169,13 @@ where
         // + Serialize
         // + Deserialize
         + Clone,
-    R: Rdd<Item = T>
+    R: Rdd<Item = T>,
+    Ad: AnyData
 {
+    type Data = Ad;  // TODO: Fix Me
+
     /// NOTE: This method run the actual defined task in executor
-    fn run(&self, id: usize) -> Box<impl AnyData> {
+    fn run(&self, id: usize) -> Box<Self::Data> {
         let split = self.rdd.splits()[self.partition].clone();
         let context: TaskContext = TaskContext::new(self.stage_id, self.partition, id);
         Box::new((self.func)((context, self.rdd.iterator(split).unwrap())))

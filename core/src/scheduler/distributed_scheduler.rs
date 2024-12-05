@@ -1,13 +1,6 @@
-use std::collections::{btree_set::BTreeSet, vec_deque::VecDeque, HashMap, HashSet};
-use std::iter::FromIterator;
-use std::net::{Ipv4Addr, SocketAddrV4};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
-
 use crate::dependency::ShuffleDependencyTrait;
 use crate::env;
-use crate::error::{Error, NetworkError, Result};
+use crate::error::Result;
 use crate::map_output_tracker::MapOutputTracker;
 use crate::rdd::rdd::{Rdd, RddBase};
 use crate::scheduler::{
@@ -16,6 +9,13 @@ use crate::scheduler::{
 };
 use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::shuffle::ShuffleMapTask;
+use async_trait::async_trait;
+use std::collections::{btree_set::BTreeSet, vec_deque::VecDeque, HashMap, HashSet};
+use std::iter::FromIterator;
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 // use capnp::message::ReaderOptions;
 // use crate::serialized_data_capnp::serialized_data;
 // use capnp_futures::serialize as capnp_serialize;
@@ -23,6 +23,9 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+use super::live_listener_bus::AsyncEventQueue;
+use super::task::TaskBox;
 
 // const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
 //     traversal_limit_in_words: std::u64::MAX,
@@ -32,7 +35,11 @@ use tokio::net::TcpStream;
 // Just for now, creating an entire scheduler functions without dag scheduler trait.
 // Later change it to extend from dag scheduler.
 #[derive(Clone, Default)]
-pub(crate) struct DistributedScheduler {
+pub(crate) struct DistributedScheduler<
+    S: ShuffleDependencyTrait,
+    RDD: RddBase,
+    AeQ: AsyncEventQueue,
+> {
     max_failures: usize,
     attempt_id: Arc<AtomicUsize>,
     resubmit_timeout: u128,
@@ -42,8 +49,8 @@ pub(crate) struct DistributedScheduler {
     next_run_id: Arc<AtomicUsize>,
     next_task_id: Arc<AtomicUsize>,
     next_stage_id: Arc<AtomicUsize>,
-    stage_cache: Arc<DashMap<usize, Stage>>,
-    shuffle_to_map_stage: Arc<DashMap<usize, Stage>>,
+    stage_cache: Arc<DashMap<usize, Stage<S, RDD>>>,
+    shuffle_to_map_stage: Arc<DashMap<usize, Stage<S, RDD>>>,
     cache_locs: Arc<DashMap<usize, Vec<Vec<Ipv4Addr>>>>,
     master: bool,
     framework_name: String,
@@ -59,10 +66,15 @@ pub(crate) struct DistributedScheduler {
     map_output_tracker: MapOutputTracker,
     // TODO: fix proper locking mechanism
     scheduler_lock: Arc<Mutex<bool>>,
-    live_listener_bus: LiveListenerBus,
+    live_listener_bus: LiveListenerBus<AeQ>,
 }
 
-impl DistributedScheduler {
+impl<S, RDD, AeQ> DistributedScheduler<S, RDD, AeQ>
+where
+    S: ShuffleDependencyTrait,
+    RDD: RddBase,
+    AeQ: AsyncEventQueue,
+{
     pub fn new(
         max_failures: usize,
         master: bool,
@@ -110,10 +122,10 @@ impl DistributedScheduler {
         }
     }
 
-    async fn receive_results<T: Data, U: Data, F, R>(
+    async fn receive_results<T: Data, U: Data, F, R, Tb: TaskBox>(
         event_queues: Arc<DashMap<usize, VecDeque<CompletionEvent>>>,
         receiver: R,
-        task: TaskOption,
+        task: TaskOption<Tb>,
         target_port: u16,
     ) where
         F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
@@ -194,8 +206,16 @@ impl DistributedScheduler {
     }
 }
 
-#[async_trait::async_trait]
-impl NativeScheduler for DistributedScheduler {
+#[async_trait]
+impl<S, RDD, AeQ> NativeScheduler for DistributedScheduler<S, RDD, AeQ>
+where
+    S: ShuffleDependencyTrait,
+    RDD: RddBase,
+    AeQ: AsyncEventQueue
+{
+    type RDD = RDD;
+    type SDT = S;
+
     #[inline]
     fn get_event_queue(&self) -> &Arc<DashMap<usize, VecDeque<CompletionEvent>>> {
         &self.event_queues
@@ -216,9 +236,9 @@ impl NativeScheduler for DistributedScheduler {
         self.next_task_id.fetch_add(1, Ordering::SeqCst)
     }
     /// This function is used to submit a task to remote executor
-    fn submit_task<T: Data, U: Data, F>(
+    fn submit_task<T: Data, U: Data, F, Tb: TaskBox>(
         &self,
-        task: TaskOption,
+        task: TaskOption<Tb>,
         _id_in_job: usize,
         target_executor: SocketAddrV4,
     ) where
@@ -284,7 +304,7 @@ impl NativeScheduler for DistributedScheduler {
         });
     }
 
-    fn next_executor_server<S: TaskBase>(&self, task: &S) -> SocketAddrV4 {
+    fn next_executor_server<Tb: TaskBase>(&self, task: &Tb) -> SocketAddrV4 {
         if !task.is_pinned() {
             // pick the first available server
             let socket_addrs = self.server_uris.lock().pop_back().unwrap();
@@ -321,10 +341,10 @@ impl NativeScheduler for DistributedScheduler {
         Ok(())
     }
 
-    async fn get_shuffle_map_stage<SD: ShuffleDependencyTrait>(
+    async fn get_shuffle_map_stage(
         &self,
-        shuf: Arc<SD>,
-    ) -> Result<Stage> {
+        shuf: Arc<Self::SDT>,
+    ) -> Result<Stage<Self::SDT, Self::RDD>> {
         log::debug!("getting shuffle map stage");
         let stage = self.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
         match stage {
@@ -342,10 +362,10 @@ impl NativeScheduler for DistributedScheduler {
         }
     }
 
-    async fn get_missing_parent_stages<SD: ShuffleDependencyTrait, RDD: RddBase>(
+    async fn get_missing_parent_stages(
         &'_ self,
-        stage: Stage<SD, RDD>,
-    ) -> Result<Vec<Stage<SD, RDD>>> {
+        stage: Stage<Self::SDT, Self::RDD>,
+    ) -> Result<Vec<Stage<Self::SDT, Self::RDD>>> {
         log::debug!("getting missing parent stages");
         let mut missing = BTreeSet::new();
         let mut visited = BTreeSet::new();
@@ -355,7 +375,12 @@ impl NativeScheduler for DistributedScheduler {
     }
 }
 
-impl Drop for DistributedScheduler {
+impl<S, RDD, AeQ> Drop for DistributedScheduler<S, RDD, AeQ>
+where
+    S: ShuffleDependencyTrait,
+    RDD: RddBase,
+    AeQ: AsyncEventQueue,
+{
     fn drop(&mut self) {
         self.live_listener_bus.stop().unwrap();
     }

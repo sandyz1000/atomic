@@ -17,10 +17,10 @@ pub enum Dependency<N, S> {
 }
 
 pub trait NarrowDependencyTrait: Send + Sync {
-    type R: RddBase;
+    type Rdb: RddBase;
 
     fn get_parents(&self, partition_id: usize) -> Vec<usize>;
-    fn get_rdd_base(&self) -> Arc<Self::R>;
+    fn get_rdd_base(&self) -> Arc<Self::Rdb>;
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -35,16 +35,15 @@ impl<RDD: RddBase> OneToOneDependency<RDD> {
 }
 
 impl<RDD: RddBase> NarrowDependencyTrait for OneToOneDependency<RDD> {
-    type R = RDD;
+    type Rdb = RDD;
 
     fn get_parents(&self, partition_id: usize) -> Vec<usize> {
         vec![partition_id]
     }
 
-    fn get_rdd_base(&self) -> Arc<Self::R> {
+    fn get_rdd_base(&self) -> Arc<Self::Rdb> {
         self.rdd_base.clone()
     }
-    
 }
 
 /// Represents a one-to-one dependency between ranges of partitions in the parent and child RDDs.
@@ -71,7 +70,7 @@ impl<RDD: RddBase> RangeDependency<RDD> {
 }
 
 impl<RDD: RddBase> NarrowDependencyTrait for RangeDependency<RDD> {
-    type R = RDD;
+    type Rdb = RDD;
     fn get_parents(&self, partition_id: usize) -> Vec<usize> {
         if partition_id >= self.out_start && partition_id < self.out_start + self.length {
             vec![partition_id - self.out_start + self.in_start]
@@ -80,11 +79,9 @@ impl<RDD: RddBase> NarrowDependencyTrait for RangeDependency<RDD> {
         }
     }
 
-    fn get_rdd_base(&self) -> Arc<Self::R> {
+    fn get_rdd_base(&self) -> Arc<Self::Rdb> {
         self.rdd_base.clone()
     }
-    
-    
 }
 
 pub trait ShuffleDependencyTrait: Send + Sync {
@@ -279,5 +276,4 @@ where
         );
         env::Env::get().shuffle_manager.get_server_uri()
     }
-    
 }

@@ -1,43 +1,27 @@
 use std::fmt::Display;
-use std::marker::PhantomData;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-
-use crate::dependency::{NarrowDependencyTrait, ShuffleDependencyTrait};
 use crate::env;
-use crate::partitioner::Partitioner;
 use crate::rdd::rdd::RddBase;
 use crate::scheduler::{Task, TaskBase};
 use crate::ser_data::AnyData;
-use crate::shuffle::*;
 use crate::split::Split;
 use serde::{Deserialize, Serialize};
 
 
 #[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct ShuffleMapTask<RDB, S, P, ND, SD> {
+pub(crate) struct ShuffleMapTask<RDD, S> {
     pub task_id: usize,
     pub run_id: usize,
     pub stage_id: usize,
-    pub rdd: Arc<RDB>,
+    pub rdd: Arc<RDD>,
     pinned: bool,
     pub dep: Arc<S>,
     pub partition: usize,
     pub locs: Vec<Ipv4Addr>,
-    _marker_p: PhantomData<P>,
-    _marker_nd: PhantomData<ND>,
-    _marker_sd: PhantomData<SD>,
 }
 
-impl<RDB, S, P, ND, SD> ShuffleMapTask<RDB, S, P, ND, SD>  
-where 
-    S: Split,
-    RDB: RddBase<ND, SD, S, P>,
-    P: Partitioner,
-    ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
-
-{
+impl<RDB: RddBase, S: Split> ShuffleMapTask<RDB, S>  {
     pub fn new(
         task_id: usize,
         run_id: usize,
@@ -56,20 +40,14 @@ where
             dep,
             partition,
             locs,
-            _marker_p: PhantomData,
-            _marker_nd: PhantomData,
-            _marker_sd: PhantomData,
         }
     }
 }
 
-impl<RDB, S, P, ND, SD>  Display for ShuffleMapTask<RDB, S, P, ND, SD> 
+impl<RDB, S>  Display for ShuffleMapTask<RDB, S> 
 where 
     S: Split,
-    RDB: RddBase<ND, SD, S, P>,
-    P: Partitioner,
-    ND: NarrowDependencyTrait,
-    SD: ShuffleDependencyTrait
+    RDB: RddBase,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -80,13 +58,10 @@ where
     }
 }
 
-impl<RDB, S, P, ND, SD> TaskBase for ShuffleMapTask<RDB, S, P, ND, SD> 
+impl<RDB, S> TaskBase for ShuffleMapTask<RDB, S> 
 where 
     S: Split,
-    RDB: RddBase<ND, SD, S, P>,
-    P: Partitioner,
-    ND: NarrowDependencyTrait + 'static,
-    SD: ShuffleDependencyTrait + 'static
+    RDB: RddBase,
 {
     fn get_run_id(&self) -> usize {
         self.run_id
@@ -113,13 +88,10 @@ where
     }
 }
 
-impl<RDB, S, P, ND, SD> Task for ShuffleMapTask<RDB, S, P, ND, SD> 
+impl<RDB, S> Task for ShuffleMapTask<RDB, S> 
 where 
     S: Split,
-    RDB: RddBase<ND, SD, S, P>,
-    P: Partitioner,
-    ND: NarrowDependencyTrait + 'static,
-    SD: ShuffleDependencyTrait + 'static
+    RDB: RddBase,
 {
     fn run(&self, _id: usize) -> Box<impl AnyData> {
         Box::new(self.dep.do_shuffle_task(self.rdd.clone(), self.partition))

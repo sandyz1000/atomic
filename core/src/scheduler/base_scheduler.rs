@@ -18,15 +18,20 @@ use std::option::Option;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use async_trait::async_trait;
 
+use super::task::TaskBox;
 pub(crate) type EventQueue = Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
 
 /// Functionality of the library built-in schedulers
-#[async_trait::async_trait]
+#[async_trait]
 pub(crate) trait NativeScheduler: Send + Sync {
+    type RDD: RddBase;
+    type SDT: ShuffleDependencyTrait;
+
     /// Fast path for execution. Runs the DD in the driver main thread if possible.
-    fn local_execution<T: Data, U: Data, F, L, RDD>(
-        jt: Arc<JobTracker<F, U, T, L, RDD>>,
+    fn local_execution<T: Data, U: Data, F, L>(
+        jt: Arc<JobTracker<F, U, T, L, Self::RDD, Self::SDT>>,
     ) -> Result<Option<Vec<U>>>
     where
         F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
@@ -46,9 +51,9 @@ pub(crate) trait NativeScheduler: Send + Sync {
 
     async fn new_stage(
         &self,
-        rdd_base: Arc<impl RddBase>,
-        shuffle_dependency: Option<Arc<impl ShuffleDependencyTrait>>,
-    ) -> Result<Stage> {
+        rdd_base: Arc<Self::RDD>,
+        shuffle_dependency: Option<Arc<Self::SDT>>,
+    ) -> Result<Stage<Self::SDT, Self::RDD>> {
         log::debug!("creating new stage");
         env::Env::get()
             .cache_tracker
@@ -74,9 +79,9 @@ pub(crate) trait NativeScheduler: Send + Sync {
 
     async fn visit_for_missing_parent_stages<'s, 'a: 's>(
         &'s self,
-        missing: &'a mut BTreeSet<Stage>,
-        visited: &'a mut BTreeSet<Arc<impl RddBase>>,
-        rdd: Arc<impl RddBase>,
+        missing: &'a mut BTreeSet<Stage<Self::SDT, Self::RDD>>,
+        visited: &'a mut BTreeSet<Arc<Self::RDD>>,
+        rdd: Arc<Self::RDD>,
     ) -> Result<()> {
         log::debug!(
             "missing stages: {:?}",
@@ -124,11 +129,11 @@ pub(crate) trait NativeScheduler: Send + Sync {
         Ok(())
     }
 
-    async fn visit_for_parent_stages<'s, 'a: 's, RDD: RddBase>(
+    async fn visit_for_parent_stages<'s, 'a: 's>(
         &'s self,
-        parents: &'a mut BTreeSet<Stage>,
-        visited: &'a mut BTreeSet<Arc<RDD>>,
-        rdd: Arc<RDD>,
+        parents: &'a mut BTreeSet<Stage<Self::SDT, Self::RDD>>,
+        visited: &'a mut BTreeSet<Arc<Self::RDD>>,
+        rdd: Arc<Self::RDD>,
     ) -> Result<()> {
         log::debug!(
             "parent stages: {:?}",
@@ -159,7 +164,7 @@ pub(crate) trait NativeScheduler: Send + Sync {
         Ok(())
     }
 
-    async fn get_parent_stages<RDD: RddBase>(&self, rdd: Arc<RDD>) -> Result<Vec<Stage>> {
+    async fn get_parent_stages(&self, rdd: Arc<Self::RDD>) -> Result<Vec<Stage<Self::SDT, Self::RDD>>> {
         log::debug!("inside get parent stages");
         let mut parents: BTreeSet<Stage> = BTreeSet::new();
         let mut visited = BTreeSet::new();
@@ -172,9 +177,9 @@ pub(crate) trait NativeScheduler: Send + Sync {
         Ok(parents.into_iter().collect())
     }
 
-    async fn on_event_failure<T: Data, U: Data, F, L, RDD>(
+    async fn on_event_failure<T: Data, U: Data, F, L>(
         &self,
-        jt: Arc<JobTracker<F, U, T, L, RDD>>,
+        jt: Arc<JobTracker<F, U, T, L, Self::RDD, Self::SDT>>,
         failed_vals: FetchFailedVals,
         stage_id: usize,
     ) where
@@ -202,12 +207,12 @@ pub(crate) trait NativeScheduler: Send + Sync {
             .insert(self.fetch_from_shuffle_to_cache(shuffle_id));
     }
 
-    async fn on_event_success<T: Data, U: Data, F, L, RDD>(
+    async fn on_event_success<T: Data, U: Data, F, L>(
         &self,
         mut completed_event: CompletionEvent,
         results: &mut Vec<Option<U>>,
         num_finished: &mut usize,
-        jt: Arc<JobTracker<F, U, T, L, RDD>>,
+        jt: Arc<JobTracker<F, U, T, L, Self::RDD, Self::SDT>>,
     ) -> Result<()>
     where
         F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
@@ -349,8 +354,8 @@ pub(crate) trait NativeScheduler: Send + Sync {
 
     async fn submit_stage<T: Data, U: Data, F, L, RDD>(
         &self,
-        stage: Stage,
-        jt: Arc<JobTracker<F, U, T, L, RDD>>,
+        stage: Stage<Self::SDT, Self::RDD>,
+        jt: Arc<JobTracker<F, U, T, L, Self::RDD, Self::SDT>>,
     ) -> Result<()>
     where
         F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
@@ -378,10 +383,10 @@ pub(crate) trait NativeScheduler: Send + Sync {
     }
 
     /// NOTE: This method submit the actual task to executor
-    async fn submit_missing_tasks<T: Data, U: Data, F, L, RDD>(
+    async fn submit_missing_tasks<T: Data, U: Data, F, L>(
         &self,
-        stage: Stage,
-        jt: Arc<JobTracker<F, U, T, L, RDD>>,
+        stage: Stage<Self::SDT, Self::RDD>,
+        jt: Arc<JobTracker<F, U, T, L, Self::RDD, Self::SDT>>,
     ) -> Result<()>
     where
         F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
@@ -472,9 +477,9 @@ pub(crate) trait NativeScheduler: Send + Sync {
         self.get_event_queue().get_mut(&run_id)?.pop_front()
     }
 
-    fn submit_task<T: Data, U: Data, F>(
+    fn submit_task<T: Data, U: Data, F, Tb: TaskBox>(
         &self,
-        task: TaskOption,
+        task: TaskOption<Tb>,
         id_in_job: usize,
         target_executor: SocketAddrV4,
     ) where
@@ -484,10 +489,10 @@ pub(crate) trait NativeScheduler: Send + Sync {
 
     fn get_event_queue(&self) -> &Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
 
-    async fn get_missing_parent_stages<'a, SD: ShuffleDependencyTrait, RDD: RddBase>(
+    async fn get_missing_parent_stages<'a>(
         &'a self,
-        stage: Stage<SD, RDD>,
-    ) -> Result<Vec<Stage<SD, RDD>>>;
+        stage: Stage<Self::SDT, Self::RDD>,
+    ) -> Result<Vec<Stage<Self::SDT, Self::RDD>>>;
 
     fn get_next_job_id(&self) -> usize;
 
@@ -497,7 +502,7 @@ pub(crate) trait NativeScheduler: Send + Sync {
 
     fn next_executor_server<S: TaskBase>(&self, rdd: &S) -> SocketAddrV4;
 
-    fn get_preferred_locs<RDD: RddBase>(&self, rdd: Arc<RDD>, partition: usize) -> Vec<Ipv4Addr> {
+    fn get_preferred_locs(&self, rdd: Arc<Self::RDD>, partition: usize) -> Vec<Ipv4Addr> {
         // TODO: have to implement this completely
         if let Some(cached) = self.get_cache_locs(rdd.clone()) {
             if let Some(cached) = cached.get(partition) {
@@ -528,10 +533,10 @@ pub(crate) trait NativeScheduler: Send + Sync {
         }
     }
 
-    async fn get_shuffle_map_stage<SD: ShuffleDependencyTrait>(
+    async fn get_shuffle_map_stage(
         &self,
-        shuf: Arc<SD>,
-    ) -> Result<Stage>;
+        shuf: Arc<Self::SDT>,
+    ) -> Result<Stage<Self::SDT, Self::RDD>>;
 
     /// Run an approximate job on the given RDD and pass all the results to an ApproximateEvaluator
     /// as they arrive. Returns a partial result object from the evaluator.
@@ -612,7 +617,7 @@ pub(crate) trait NativeScheduler: Send + Sync {
                     func,
                     final_rdd.clone(),
                     partitions,
-                    NoOpListener,
+                    NoOpListener::new(),
                 )
                 .await?;
                 self.event_process_loop(allow_local, jt).await
@@ -624,7 +629,7 @@ pub(crate) trait NativeScheduler: Send + Sync {
     async fn event_process_loop<T: Data, U: Data, F, L>(
         self: Arc<Self>,
         allow_local: bool,
-        jt: Arc<JobTracker<F, U, T, L>>,
+        jt: Arc<JobTracker<F, U, T, L, Self::RDD, Self::SDT>>,
     ) -> Result<Vec<U>>
     where
         F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output = U>,
@@ -726,17 +731,17 @@ pub(crate) trait NativeScheduler: Send + Sync {
 
     // mutators:
     #[inline]
-    fn insert_into_stage_cache(&self, id: usize, stage: Stage) {
+    fn insert_into_stage_cache(&self, id: usize, stage: Stage<Self::SDT, Self::RDD>) {
         self.stage_cache.insert(id, stage.clone());
     }
 
     #[inline]
-    fn fetch_from_stage_cache(&self, id: usize) -> Stage {
+    fn fetch_from_stage_cache(&self, id: usize) -> Stage<Self::SDT, Self::RDD> {
         self.stage_cache.get(&id).unwrap().clone()
     }
 
     #[inline]
-    fn fetch_from_shuffle_to_cache(&self, id: usize) -> Stage {
+    fn fetch_from_shuffle_to_cache(&self, id: usize) -> Stage<Self::SDT, Self::RDD> {
         self.shuffle_to_map_stage.get(&id).unwrap().clone()
     }
 
@@ -767,7 +772,7 @@ pub(crate) trait NativeScheduler: Send + Sync {
     }
 
     #[inline]
-    fn get_cache_locs(&self, rdd: Arc<dyn RddBase>) -> Option<Vec<Vec<Ipv4Addr>>> {
+    fn get_cache_locs(&self, rdd: Arc<Self::RDD>) -> Option<Vec<Vec<Ipv4Addr>>> {
         let locs_opt = self.cache_locs.get(&rdd.get_rdd_id());
         locs_opt.map(|l| l.clone())
     }

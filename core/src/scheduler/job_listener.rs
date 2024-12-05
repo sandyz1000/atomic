@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use crate::ser_data::AnyData;
 use crate::{Error, Result};
 
@@ -6,7 +8,9 @@ use crate::{Error, Result};
 /// job fails (and no further taskSucceeded events will happen).
 #[async_trait::async_trait]
 pub(crate) trait JobListener: Send + Sync {
-    async fn task_succeeded(&self, _index: usize, _result: &dyn AnyData) -> Result<()> {
+    type Data: AnyData;
+
+    async fn task_succeeded(&self, _index: usize, _result: &Self::Data) -> Result<()> {
         Ok(())
     }
     async fn job_failed(&self, err: Error) {
@@ -15,5 +19,14 @@ pub(crate) trait JobListener: Send + Sync {
 }
 
 /// A listener which produces no action whatsoever.
-pub(super) struct NoOpListener;
-impl JobListener for NoOpListener {}
+pub(super) struct NoOpListener<T: AnyData>(PhantomData<T>);
+
+impl<T: AnyData> NoOpListener<T> {
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T: AnyData> JobListener for NoOpListener<T> {
+    type Data = T;
+}

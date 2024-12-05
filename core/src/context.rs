@@ -562,7 +562,7 @@ impl Context {
         }
     }
 
-    pub fn union<T: Data>(rdds: &[Arc<impl Rdd<Item = T>>]) -> Result<impl Rdd<Item = T>> {
+    pub fn union<T: Data, S: ShuffleDependencyTrait>(rdds: &[Arc<impl Rdd<Item = T>>]) -> Result<impl Rdd<Item = T>> {
         UnionRdd::new(rdds)
     }
 }

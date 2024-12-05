@@ -6,7 +6,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-
+use async_trait::async_trait;
 use crate::dependency::ShuffleDependencyTrait;
 use crate::map_output_tracker::MapOutputTracker;
 use crate::rdd::rdd::{Rdd, RddBase};
@@ -29,9 +29,16 @@ use crate::shuffle::ShuffleMapTask;
 use crate::{env, Result};
 use dashmap::DashMap;
 use parking_lot::Mutex;
+use super::live_listener_bus::AsyncEventQueue;
+use super::task::TaskBox;
 
 #[derive(Clone, Default)]
-pub(crate) struct LocalScheduler {
+pub(crate) struct LocalScheduler<S, RDD, AeQ> 
+where 
+    S: ShuffleDependencyTrait,
+    RDD: RddBase,
+    AeQ: AsyncEventQueue
+{
     max_failures: usize,
     attempt_id: Arc<AtomicUsize>,
     resubmit_timeout: u128,
@@ -41,8 +48,8 @@ pub(crate) struct LocalScheduler {
     next_run_id: Arc<AtomicUsize>,
     next_task_id: Arc<AtomicUsize>,
     next_stage_id: Arc<AtomicUsize>,
-    stage_cache: Arc<DashMap<usize, Stage>>,
-    shuffle_to_map_stage: Arc<DashMap<usize, Stage>>,
+    stage_cache: Arc<DashMap<usize, Stage<S, RDD>>>,
+    shuffle_to_map_stage: Arc<DashMap<usize, Stage<S, RDD>>>,
     cache_locs: Arc<DashMap<usize, Vec<Vec<Ipv4Addr>>>>,
     master: bool,
     framework_name: String,
@@ -56,10 +63,15 @@ pub(crate) struct LocalScheduler {
     map_output_tracker: MapOutputTracker,
     // TODO: fix proper locking mechanism
     scheduler_lock: Arc<Mutex<()>>,
-    live_listener_bus: LiveListenerBus,
+    live_listener_bus: LiveListenerBus<AeQ>,
 }
 
-impl LocalScheduler {
+impl<S, RDD, AeQ> LocalScheduler<S, RDD, AeQ> 
+where 
+    S: ShuffleDependencyTrait,
+    RDD: RddBase,
+    AeQ: AsyncEventQueue
+{
     pub fn new(max_failures: usize, master: bool) -> Self {
         let mut live_listener_bus = LiveListenerBus::new();
         live_listener_bus.start().unwrap();
@@ -156,8 +168,16 @@ impl LocalScheduler {
     }
 }
 
-#[async_trait::async_trait]
-impl NativeScheduler for LocalScheduler {
+#[async_trait]
+impl<S, RDD, AeQ> NativeScheduler for LocalScheduler<S, RDD, AeQ> 
+where 
+    S: ShuffleDependencyTrait,
+    RDD: RddBase,
+    AeQ: AsyncEventQueue
+{
+    type RDD = RDD;
+    type SDT = S;
+
     #[inline]
     fn get_event_queue(&self) -> &Arc<DashMap<usize, VecDeque<CompletionEvent>>> {
         &self.event_queues
@@ -179,9 +199,9 @@ impl NativeScheduler for LocalScheduler {
     }
 
     /// Every single task is run in the local thread pool
-    fn submit_task<T: Data, U: Data, F>(
+    fn submit_task<T: Data, U: Data, F, Tb: TaskBox>(
         &self,
-        task: TaskOption,
+        task: TaskOption<Tb>,
         id_in_job: usize,
         _server_address: SocketAddrV4,
     ) where
@@ -197,7 +217,7 @@ impl NativeScheduler for LocalScheduler {
         });
     }
 
-    fn next_executor_server<S: TaskBase>(&self, _rdd: &S) -> SocketAddrV4 {
+    fn next_executor_server<Tb: TaskBase>(&self, _rdd: &Tb) -> SocketAddrV4 {
         // Just point to the localhost
         SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)
     }
@@ -215,7 +235,7 @@ impl NativeScheduler for LocalScheduler {
         Ok(())
     }
 
-    async fn get_shuffle_map_stage<SD: ShuffleDependencyTrait>(&self, shuf: Arc<SD>) -> Result<Stage> {
+    async fn get_shuffle_map_stage(&self, shuf: Arc<Self::SDT>) -> Result<Stage<Self::SDT, Self::RDD>> {
         log::debug!("getting shuffle map stage");
         let stage = self.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
         match stage {
@@ -233,17 +253,23 @@ impl NativeScheduler for LocalScheduler {
         }
     }
 
-    async fn get_missing_parent_stages(&'_ self, stage: Stage) -> Result<Vec<Stage>> {
+    async fn get_missing_parent_stages(&'_ self, stage: Stage<Self::SDT, Self::RDD>) -> Result<Vec<Stage<Self::SDT, Self::RDD>>> {
         log::debug!("getting missing parent stages");
-        let mut missing: BTreeSet<Stage> = BTreeSet::new();
+        let mut missing = BTreeSet::new();
         let mut visited: BTreeSet<Arc<dyn RddBase>> = BTreeSet::new();
         self.visit_for_missing_parent_stages(&mut missing, &mut visited, stage.get_rdd())
             .await?;
         Ok(missing.into_iter().collect())
     }
+    
 }
 
-impl Drop for LocalScheduler {
+impl<S, RDD, AeQ> Drop for LocalScheduler<S, RDD, AeQ> 
+where 
+    S: ShuffleDependencyTrait,
+    RDD: RddBase,
+    AeQ: AsyncEventQueue
+{
     fn drop(&mut self) {
         self.live_listener_bus.stop().unwrap();
     }

@@ -1,9 +1,11 @@
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
 
+use crate::rdd::rdd::RddBase;
 use crate::scheduler::ResultTask;
 use crate::ser_data::{AnyData, Data, SerFunc};
 use crate::shuffle::ShuffleMapTask;
+use crate::split::Split;
 use crate::Rdd;
 use downcast_rs::{impl_downcast, Downcast};
 use serde::{Deserialize, Serialize};
@@ -63,10 +65,11 @@ impl Ord for dyn TaskBase {
 }
 
 pub(crate) trait Task: TaskBase + Send + Sync + Downcast {
-    fn run(&self, id: usize) -> Box<impl AnyData>;
+    type Data: AnyData;
+    fn run(&self, id: usize) -> Box<Self::Data>;
 }
 
-impl_downcast!(Task);
+// impl_downcast!(Task);
 
 // pub(crate) trait TaskBox: Task + serde::Serialize + serde::de::Deserialize<'de> + 'static + Downcast {
 // }
@@ -84,27 +87,32 @@ impl<K> TaskBox for K
 {
 }
 
-impl_downcast!(TaskBox);
+// impl_downcast!(TaskBox);
 
 #[derive(Serialize, Deserialize)]
-pub enum TaskOption {
-    ResultTask(Box<dyn TaskBox>),
-    
-    ShuffleMapTask(Box<dyn TaskBox>),
+pub enum TaskOption<T: TaskBox> {
+    ResultTask(Box<T>),
+    ShuffleMapTask(Box<T>),
 }
 
-impl<T: Data, U: Data, F, R> From<ResultTask<T, U, F, R>> for TaskOption
+impl<T: Data, U: Data, F, R, Tb, Ad> From<ResultTask<T, U, F, R, Ad>> for TaskOption<Tb>
 where
     F: SerFunc<(TaskContext, Box<dyn Iterator<Item = T>>), Output =  U>,
-    R: Rdd<Item = T>
+    R: Rdd<Item = T>,
+    Tb: TaskBox,
+    Ad: AnyData
 {
-    fn from(t: ResultTask<T, U, F, R>) -> Self {
+    fn from(t: ResultTask<T, U, F, R, Ad>) -> Self {
         TaskOption::ResultTask(Box::new(t) as Box<dyn TaskBox>)
     }
 }
 
-impl From<ShuffleMapTask> for TaskOption {
-    fn from(t: ShuffleMapTask) -> Self {
+impl<Tb: TaskBox, RDD, S> From<ShuffleMapTask<RDD, S>> for TaskOption<Tb> 
+where 
+    S: Split,
+    RDD: RddBase,
+{
+    fn from(t: ShuffleMapTask<RDD, S>) -> Self {
         TaskOption::ResultTask(Box::new(t))
     }
 }
@@ -115,7 +123,7 @@ pub enum TaskResult {
     ShuffleTask(Box<dyn AnyData>),
 }
 
-impl TaskOption {
+impl<Tb: TaskBox> TaskOption<Tb> {
     pub fn run(&self, id: usize) -> TaskResult {
         match self {
             TaskOption::ResultTask(tsk) => TaskResult::ResultTask(tsk.run(id)),
