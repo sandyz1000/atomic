@@ -1,0 +1,317 @@
+use bincode::Encode;
+
+use crate::aggregator::Aggregator;
+use crate::data::Data;
+// use crate::env;
+use crate::partitioner::Partitioner;
+use crate::rdd::RddBase;
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::sync::Arc;
+
+/// Type of dependency between RDDs
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DependencyType {
+    /// Narrow dependency where each partition depends on a known subset of parent partitions
+    Narrow,
+    /// Shuffle dependency where data needs to be redistributed across partitions
+    Shuffle,
+}
+
+/// Dependency between RDDs
+#[derive(Clone)]
+pub enum Dependency {
+    /// One-to-one narrow dependency where each partition depends on exactly one parent partition
+    OneToOne { rdd_base: Arc<dyn RddBase> },
+    /// Range narrow dependency between ranges of partitions in parent and child RDDs
+    Range {
+        rdd_base: Arc<dyn RddBase>,
+        /// the start of the range in the parent RDD
+        in_start: usize,
+        /// the start of the range in the child RDD
+        out_start: usize,
+        /// the length of the range
+        length: usize,
+    },
+    /// Shuffle dependency representing a shuffle operation
+    /// Uses trait object to allow heterogeneous shuffle dependencies with different type parameters
+    Shuffle(Arc<dyn ShuffleDependencyTrait>),
+}
+
+impl Dependency {
+    /// Create a new one-to-one dependency
+    pub fn new_one_to_one(rdd_base: Arc<dyn RddBase>) -> Self {
+        Dependency::OneToOne { rdd_base }
+    }
+
+    /// Create a new range dependency
+    pub fn new_range(
+        rdd_base: Arc<dyn RddBase>,
+        in_start: usize,
+        out_start: usize,
+        length: usize,
+    ) -> Self {
+        Dependency::Range {
+            rdd_base,
+            in_start,
+            out_start,
+            length,
+        }
+    }
+
+    /// Get parent partition IDs for a given partition (for narrow dependencies)
+    pub fn get_parents(&self, partition_id: usize) -> Vec<usize> {
+        match self {
+            Dependency::OneToOne { .. } => vec![partition_id],
+            Dependency::Range {
+                in_start,
+                out_start,
+                length,
+                ..
+            } => {
+                if partition_id >= *out_start && partition_id < out_start + length {
+                    vec![partition_id - out_start + in_start]
+                } else {
+                    Vec::new()
+                }
+            }
+            Dependency::Shuffle(_) => Vec::new(),
+        }
+    }
+
+    /// Get the RDD base for this dependency
+    pub fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+        match self {
+            Dependency::OneToOne { rdd_base } => rdd_base.clone(),
+            Dependency::Range { rdd_base, .. } => rdd_base.clone(),
+            Dependency::Shuffle(dep) => dep.get_rdd_base(),
+        }
+    }
+
+    /// Check if this is a shuffle dependency
+    pub fn is_shuffle(&self) -> bool {
+        matches!(self, Dependency::Shuffle(_))
+    }
+
+    /// Get the dependency type
+    pub fn dependency_type(&self) -> DependencyType {
+        match self {
+            Dependency::OneToOne { .. } | Dependency::Range { .. } => DependencyType::Narrow,
+            Dependency::Shuffle(_) => DependencyType::Shuffle,
+        }
+    }
+
+    /// Get shuffle ID (only for shuffle dependencies)
+    pub fn get_shuffle_id(&self) -> Option<usize> {
+        match self {
+            Dependency::Shuffle(dep) => Some(dep.get_shuffle_id()),
+            _ => None,
+        }
+    }
+
+    /// Get shuffle dependency trait object (only for shuffle dependencies)
+    pub fn get_shuffle_deps(&self) -> Option<Arc<dyn ShuffleDependencyTrait>> {
+        match self {
+            Dependency::Shuffle(dep) => Some(dep.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// Trait for type-erased shuffle dependencies
+/// This allows the Dependency enum to store different ShuffleDependency<K, V, C> types
+pub trait ShuffleDependencyTrait: Send + Sync {
+    /// Get the shuffle ID
+    fn get_shuffle_id(&self) -> usize;
+
+    /// Get the RDD base (type-erased)
+    fn get_rdd_base(&self) -> Arc<dyn RddBase>;
+
+    /// Check if this is a cogroup operation
+    fn is_cogroup(&self) -> bool;
+
+    /// Execute the shuffle task for a given partition
+    /// Returns the server URI where shuffle data is stored
+    fn do_shuffle_task(&self, partition: usize) -> String;
+
+    /// Get the number of output partitions
+    fn num_output_partitions(&self) -> usize;
+}
+
+impl PartialOrd for dyn ShuffleDependencyTrait {
+    fn partial_cmp(&self, other: &dyn ShuffleDependencyTrait) -> Option<Ordering> {
+        Some(self.get_shuffle_id().cmp(&other.get_shuffle_id()))
+    }
+}
+
+impl PartialEq for dyn ShuffleDependencyTrait {
+    fn eq(&self, other: &dyn ShuffleDependencyTrait) -> bool {
+        self.get_shuffle_id() == other.get_shuffle_id()
+    }
+}
+
+impl Eq for dyn ShuffleDependencyTrait {}
+
+impl Ord for dyn ShuffleDependencyTrait {
+    fn cmp(&self, other: &dyn ShuffleDependencyTrait) -> Ordering {
+        self.get_shuffle_id().cmp(&other.get_shuffle_id())
+    }
+}
+
+/// Generic shuffle dependency with full type information
+/// This struct is fully typed and doesn't require iterator_any or unsafe downcasting
+pub struct ShuffleDependency<K, V, C>
+where
+    K: Data + Clone,
+    V: Data + Clone,
+    C: Data + Clone,
+{
+    shuffle_id: usize,
+    is_cogroup_flag: bool,
+    /// Typed RDD - we know it produces (K, V) tuples
+    rdd: Arc<dyn crate::rdd::Rdd<Item = (K, V)>>,
+    /// Typed aggregator
+    aggregator: Arc<Aggregator<K, V, C>>,
+    /// Partitioner for determining output partitions
+    partitioner: Box<dyn Partitioner>,
+    _phantom: std::marker::PhantomData<(K, V, C)>,
+}
+
+impl<K, V, C> ShuffleDependency<K, V, C>
+where
+    K: Data + Clone + Eq + Hash + Encode,
+    V: Data + Clone,
+    C: Data + Clone + Encode,
+{
+    /// Create a new shuffle dependency
+    pub fn new(
+        shuffle_id: usize,
+        is_cogroup: bool,
+        rdd: Arc<dyn crate::rdd::Rdd<Item = (K, V)>>,
+        aggregator: Arc<Aggregator<K, V, C>>,
+        partitioner: Box<dyn Partitioner>,
+    ) -> Arc<Self> {
+        Arc::new(ShuffleDependency {
+            shuffle_id,
+            is_cogroup_flag: is_cogroup,
+            rdd,
+            aggregator,
+            partitioner,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
+    /// Execute shuffle task with full type information - NO unsafe code needed!
+    fn do_shuffle_task_typed(&self, partition: usize) -> String {
+        log::debug!(
+            "executing shuffle task #{} for partition #{}",
+            self.shuffle_id,
+            partition
+        );
+
+        let splits = self.rdd.get_rdd_base().splits();
+        let split = splits[partition].clone();
+        let num_output_splits = self.partitioner.get_num_of_partitions();
+
+        log::debug!("is cogroup rdd: {}", self.is_cogroup_flag);
+        log::debug!("number of output splits: {}", num_output_splits);
+
+        let mut buckets: Vec<HashMap<K, C>> =
+            (0..num_output_splits).map(|_| HashMap::new()).collect();
+
+        log::debug!(
+            "before iterating while executing shuffle map task for partition #{}",
+            partition
+        );
+
+        // ✅ Use typed compute() - no iterator_any, no unsafe downcasting!
+        match self.rdd.compute(split) {
+            Ok(iter) => {
+                for (count, (k, v)) in iter.enumerate() {
+                    if count == 0 {
+                        log::debug!(
+                            "iterating inside dependency map task: key: {:?}, value: {:?}",
+                            k,
+                            v
+                        );
+                    }
+
+                    let bucket_id = self.partitioner.get_partition(&k);
+                    let bucket = &mut buckets[bucket_id];
+
+                    if let Some(old_v) = bucket.get_mut(&k) {
+                        let output = (self.aggregator.merge_value)((old_v.clone(), v));
+                        *old_v = output;
+                    } else {
+                        bucket.insert(k, (self.aggregator.create_combiner)(v));
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Error computing RDD partition: {:?}", e);
+                return "".to_string();
+            }
+        }
+
+        // Serialize and store shuffle data
+        for (i, bucket) in buckets.into_iter().enumerate() {
+            let set: Vec<(K, C)> = bucket.into_iter().collect();
+            let config = bincode::config::standard();
+            match bincode::encode_to_vec(&set, config) {
+                Ok(ser_bytes) => {
+                    log::debug!(
+                        "shuffle dependency map task set from bucket #{} in shuffle id #{}, partition #{}: {:?}",
+                        i,
+                        self.shuffle_id,
+                        partition,
+                        set.first()
+                    );
+                    // TODO: Resolve the import of env here
+                    // env::SHUFFLE_CACHE.insert((self.shuffle_id, partition, i), ser_bytes);
+                }
+                Err(e) => {
+                    log::error!("Error serializing shuffle data: {:?}", e);
+                }
+            }
+        }
+
+        log::debug!(
+            "returning shuffle address for shuffle task #{}",
+            self.shuffle_id
+        );
+
+        // TODO: Resolve the import of env here
+        // env::Env::get().shuffle_manager.get_server_uri()
+        "".to_string()
+    }
+}
+
+/// Implement the trait for type erasure at the boundary
+impl<K, V, C> ShuffleDependencyTrait for ShuffleDependency<K, V, C>
+where
+    K: Data + Clone + Eq + Hash + Encode,
+    V: Data + Clone,
+    C: Data + Clone + Encode,
+{
+    fn get_shuffle_id(&self) -> usize {
+        self.shuffle_id
+    }
+
+    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+        self.rdd.get_rdd_base()
+    }
+
+    fn is_cogroup(&self) -> bool {
+        self.is_cogroup_flag
+    }
+
+    fn do_shuffle_task(&self, partition: usize) -> String {
+        // Delegate to typed implementation
+        self.do_shuffle_task_typed(partition)
+    }
+
+    fn num_output_partitions(&self) -> usize {
+        self.partitioner.get_num_of_partitions()
+    }
+}

@@ -1,0 +1,10 @@
+[package]
+name = "ember-utils"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rand={ workspace = true }
+rand_pcg={ workspace = true }
+log={ workspace = true }
+rand_distr={ workspace = true }
