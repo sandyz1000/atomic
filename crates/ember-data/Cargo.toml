@@ -1,0 +1,13 @@
+[package]
+name = "ember-data"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+rustc-hash ={ workspace = true }
+log = { workspace = true }
+ember-utils = { path = "../ember-utils" }
+thiserror = { workspace = true }
+dyn-clone = { workspace = true }
+bincode ={ workspace = true }

@@ -1,0 +1,6 @@
+[package]
+name = "ember-scheduler"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

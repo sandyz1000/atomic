@@ -1,0 +1,12 @@
+[package]
+name = "ember-compute"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+ember-data = { path = "../ember-data" }
+ember-utils = { path = "../ember-utils" }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+statrs = { workspace = true }
