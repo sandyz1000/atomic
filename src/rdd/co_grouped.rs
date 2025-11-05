@@ -10,6 +10,7 @@ use crate::context::Context;
 use crate::dependency::{Dependency, NarrowDependencyTrait, OneToOneDependency, ShuffleDependency};
 use crate::error::Result;
 use crate::partitioner::Partitioner;
+use crate::rdd::rdd_val::RddVals;
 use crate::rdd::*;
 use crate::shuffle::ShuffleFetcher;
 use crate::split::Split;

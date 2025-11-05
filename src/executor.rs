@@ -12,7 +12,7 @@ use crate::task::TaskOption;
 // };
 // use capnp_futures::serialize as capnp_serialize;
 use crossbeam::{channel::bounded, Receiver, Sender};
-use serde::{Deserialize, Serialize};
+// use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
     stream::StreamExt,
@@ -215,7 +215,7 @@ impl Executor {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub(crate) enum Signal {
     ShutDownError,
     ShutDownGracefully,
@@ -227,9 +227,10 @@ mod tests {
     #![allow(unused_must_use)]
 
     use super::*;
-    use crate::scheduler::{TaskContext, TaskResult};
-    use crate::utils::{get_dynamic_port, test_utils::create_test_task};
+    use ember_data::{TaskContext, TaskResult};
+    use ember_utils::get_dynamic_port;
     use crossbeam::channel::{unbounded, Receiver, Sender};
+    use core::time;
     use std::io::Write;
     use std::thread;
     use std::time::Duration;
@@ -256,7 +257,7 @@ mod tests {
             if let Ok(stream) = TcpStream::connect(addr) {
                 return Ok(stream);
             }
-            thread::sleep_ms(10);
+            thread::sleep(time::Duration::from_millis(10));
             i += 1;
             if i > 10 {
                 break;
@@ -304,7 +305,7 @@ mod tests {
                     send_shutdown_signal_msg(&mut stream)?;
                     return Ok(());
                 }
-                thread::sleep_ms(5);
+                thread::sleep(time::Duration::from_millis(5));
             }
             Err(Error::Other)
         }
@@ -378,7 +379,7 @@ mod tests {
                         return Err(Error::Other);
                     }
                 }
-                thread::sleep_ms(5);
+                thread::sleep(time::Duration::from_millis(5));
             }
             Err(Error::Other)
         };

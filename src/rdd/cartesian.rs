@@ -1,4 +1,4 @@
-use crate::error::Error;
+use crate::{error::Error, rdd::rdd_val::RddVals};
 use ember_data::{data::Data, dependency::Dependency, rdd::{Rdd, RddBase}};
 
 use crate::context::Context;

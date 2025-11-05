@@ -1,10 +1,10 @@
 use crate::context::Context;
-use crate::dependency::{Dependency, NarrowDependencyTrait};
+use crate::rdd::rdd_val::RddVals;
+use ember_data::dependency::Dependency;
 use crate::error::{Error, Result};
 use crate::rdd::*;
-use crate::rdd::{Rdd, RddBase, RddVals};
-use crate::split::Split;
-use crate::utils;
+use crate::rdd::{Rdd, RddBase};
+use ember_data::split::Split;
 use parking_lot::Mutex;
 use rand::Rng;
 use std::cmp::Ordering;
@@ -13,63 +13,63 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as SyncOrd};
 
-/// Class that captures a coalesced RDD by essentially keeping track of parent partitions.
-#[derive(Clone)]
-struct CoalescedRddSplit {
-    index: usize,
-    rdd: Arc<dyn RddBase>,
-    parent_indices: Vec<usize>,
-    preferred_location: Option<PrefLoc>,
-}
+// /// Class that captures a coalesced RDD by essentially keeping track of parent partitions.
+// #[derive(Clone)]
+// struct CoalescedRddSplit {
+//     index: usize,
+//     rdd: Arc<dyn RddBase>,
+//     parent_indices: Vec<usize>,
+//     preferred_location: Option<PrefLoc>,
+// }
 
-impl CoalescedRddSplit {
-    fn new(
-        index: usize,
-        preferred_location: Option<PrefLoc>,
-        rdd: Arc<dyn RddBase>,
-        parent_indices: Vec<usize>,
-    ) -> Self {
-        CoalescedRddSplit {
-            index,
-            preferred_location,
-            rdd,
-            parent_indices,
-        }
-    }
+// impl CoalescedRddSplit {
+//     fn new(
+//         index: usize,
+//         preferred_location: Option<PrefLoc>,
+//         rdd: Arc<dyn RddBase>,
+//         parent_indices: Vec<usize>,
+//     ) -> Self {
+//         CoalescedRddSplit {
+//             index,
+//             preferred_location,
+//             rdd,
+//             parent_indices,
+//         }
+//     }
 
-    /// Computes the fraction of the parents partitions containing preferred_location within
-    /// their preferred_locs.
-    ///
-    /// Returns locality of this coalesced partition between 0 and 1.
-    fn local_fraction(&self) -> f64 {
-        if self.parent_indices.is_empty() {
-            0.0
-        } else {
-            let mut loc = 0u32;
-            let pl: Ipv4Addr = self.preferred_location.unwrap().into();
-            for p in self.rdd.splits() {
-                let parent_pref_locs = self.rdd.preferred_locations(p);
-                if parent_pref_locs.contains(&pl) {
-                    loc += 1;
-                }
-            }
-            loc as f64 / self.parent_indices.len() as f64
-        }
-    }
+//     /// Computes the fraction of the parents partitions containing preferred_location within
+//     /// their preferred_locs.
+//     ///
+//     /// Returns locality of this coalesced partition between 0 and 1.
+//     fn local_fraction(&self) -> f64 {
+//         if self.parent_indices.is_empty() {
+//             0.0
+//         } else {
+//             let mut loc = 0u32;
+//             let pl: Ipv4Addr = self.preferred_location.unwrap().into();
+//             for p in self.rdd.splits() {
+//                 let parent_pref_locs = self.rdd.preferred_locations(p);
+//                 if parent_pref_locs.contains(&pl) {
+//                     loc += 1;
+//                 }
+//             }
+//             loc as f64 / self.parent_indices.len() as f64
+//         }
+//     }
 
-    fn downcasting(split: Box<dyn Split>) -> Box<CoalescedRddSplit> {
-        split
-            .downcast::<CoalescedRddSplit>()
-            .or(Err(Error::DowncastFailure("CoalescedRddSplit")))
-            .unwrap()
-    }
-}
+//     fn downcasting(split: Box<dyn Split>) -> Box<CoalescedRddSplit> {
+//         split
+//             .downcast::<CoalescedRddSplit>()
+//             .or(Err(Error::DowncastFailure("CoalescedRddSplit")))
+//             .unwrap()
+//     }
+// }
 
-impl Split for CoalescedRddSplit {
-    fn get_index(&self) -> usize {
-        self.index
-    }
-}
+// impl Split for CoalescedRddSplit {
+//     fn get_index(&self) -> usize {
+//         self.index
+//     }
+// }
 
 /// Dependency information for a coalesced split.
 ///
@@ -242,20 +242,20 @@ pub trait PartitionCoalescer: Send + Sync {
     fn coalesce(self, max_partitions: usize, parent: Arc<dyn RddBase>) -> Vec<PartitionGroup>;
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PrefLoc(u32);
+// #[derive(Debug, Clone, Copy)]
+// struct PrefLoc(u32);
 
-impl Into<Ipv4Addr> for PrefLoc {
-    fn into(self) -> Ipv4Addr {
-        Ipv4Addr::from(self.0)
-    }
-}
+// impl Into<Ipv4Addr> for PrefLoc {
+//     fn into(self) -> Ipv4Addr {
+//         Ipv4Addr::from(self.0)
+//     }
+// }
 
-impl From<Ipv4Addr> for PrefLoc {
-    fn from(other: Ipv4Addr) -> PrefLoc {
-        PrefLoc(other.into())
-    }
-}
+// impl From<Ipv4Addr> for PrefLoc {
+//     fn from(other: Ipv4Addr) -> PrefLoc {
+//         PrefLoc(other.into())
+//     }
+// }
 
 pub struct PartitionGroup {
     id: usize,

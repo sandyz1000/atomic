@@ -5,13 +5,13 @@ use crate::job::JobTracker;
 use crate::listener::JobListener;
 use crate::stage::Stage;
 use dashmap::DashMap;
-use ember_data::task_context::TaskContext;
 use ember_data::data::Data;
 use ember_data::dependency::{Dependency, ShuffleDependencyBox};
 use ember_data::rdd::RddBase;
 use ember_data::task::TaskOption;
 use ember_data::task::result::ResultTask;
 use ember_data::task::shuffle_map::ShuffleMapTask;
+use ember_data::task_context::TaskContext;
 use ember_shuffle::MapOutputTracker;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -109,7 +109,11 @@ pub trait NativeScheduler: Send + Sync {
                                 }
                             }
                             Dependency::OneToOne { rdd_base }
-                            | Dependency::Range { rdd_base, .. } => {
+                            | Dependency::Range { rdd_base, .. }
+                            | Dependency::CoalescedSplitDep {
+                                rdd: rdd_base,
+                                prev,
+                            } => {
                                 log::debug!("narrow stage in missing stages");
                                 self.visit_for_missing_parent_stages(missing, visited, rdd_base)
                                     .await?;
@@ -142,7 +146,12 @@ pub trait NativeScheduler: Send + Sync {
                     Dependency::Shuffle(shuf_dep) => {
                         parents.insert(self.get_shuffle_map_stage(shuf_dep.clone()).await?);
                     }
-                    Dependency::OneToOne { rdd_base } | Dependency::Range { rdd_base, .. } => {
+                    Dependency::OneToOne { rdd_base }
+                    | Dependency::Range { rdd_base, .. }
+                    | Dependency::CoalescedSplitDep {
+                        rdd: rdd_base,
+                        prev,
+                    } => {
                         self.visit_for_parent_stages(parents, visited, rdd_base)
                             .await?;
                     }
@@ -519,7 +528,7 @@ pub trait NativeScheduler: Send + Sync {
             }
             for dep in rdd.get_dependencies().iter() {
                 match dep {
-                    Dependency::OneToOne { .. } | Dependency::Range { .. } => {
+                    Dependency::OneToOne { .. } | Dependency::Range { .. } | Dependency::CoalescedSplitDep { .. }=> {
                         for in_part in dep.get_parents(partition) {
                             let locs = self.get_preferred_locs(dep.get_rdd_base(), in_part);
                             if !locs.is_empty() {
