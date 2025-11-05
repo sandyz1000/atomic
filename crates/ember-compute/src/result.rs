@@ -34,10 +34,10 @@ where
     _get_final_value: Arc<dyn Fn(Arc<PartialResult<R>>) -> Result<R> + Send + Sync>,
     /// Set a handler to be called when this PartialResult completes. Only one completion handler
     /// is supported per PartialResult.
-    on_complete: OnComplete<R>,
+    pub on_complete: OnComplete<R>,
     /// Set a handler to be called if this PartialResult's job fails. Only one failure handler
     /// is supported per PartialResult
-    on_fail: OnFail<R>,
+    pub on_fail: OnFail<R>,
 }
 
 #[inline(always)]
@@ -107,7 +107,7 @@ impl<R> PartialResult<R>
 where
     R: Clone + Debug + Send + Sync + 'static,
 {
-    pub(crate) fn new(initial_value: R, is_final: bool) -> PartialResult<R> {
+    pub fn new(initial_value: R, is_final: bool) -> PartialResult<R> {
         let _get_final_value = Arc::new(|this: Arc<PartialResult<R>>| -> Result<R> {
             _internal_get_final_value(this)
         });

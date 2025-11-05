@@ -61,6 +61,15 @@ pub enum NetworkError {
 
     #[error("failed to find free port {0}, tried {1} times")]
     FreePortNotFound(u16, usize),
+
+    #[error("bincode serialization error: {0}")]
+    BincodeError(String),
+
+    #[error("HTTP error: {0}")]
+    HttpError(String),
+
+    #[error("invalid URI: {0}")]
+    InvalidUri(String),
 }
 
 impl From<ShuffleError> for Response<Body> {

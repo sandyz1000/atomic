@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 /// This type assumes that the action is performed on an entire `Rdd<Item=T>` via a function that computes
 /// a result of type U for each partition, and that the action returns a partial or complete result
 /// of type R. Note that the type R must include any error bars on it (e.g. see BoundedInt).
-pub(crate) struct ApproximateActionListener<U, R, E>
+pub struct ApproximateActionListener<U, R, E>
 where
     E: ApproximateEvaluator<U, R>,
     R: Clone + Debug + Send + Sync + 'static,

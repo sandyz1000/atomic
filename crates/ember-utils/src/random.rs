@@ -11,7 +11,7 @@ use rand_pcg::Pcg64;
 /// most cases, as an initial guess.
 // TODO: tune for PCG64, performance is similar and around same order of magnitude
 // of XORShift so shouldn't be too far off
-const DEFAULT_MAX_GAP_SAMPLING_FRACTION: f64 = 0.4;
+pub const DEFAULT_MAX_GAP_SAMPLING_FRACTION: f64 = 0.4;
 
 /// Default epsilon for floating point numbers sampled from the RNG.
 /// The gap-sampling compute logic requires taking log(x), where x is sampled from an RNG.
@@ -20,30 +20,30 @@ const DEFAULT_MAX_GAP_SAMPLING_FRACTION: f64 = 0.4;
 /// point value returned by for the RNG being used.
 // TODO: this is a straight port, it may not apply exactly to pcg64 rng but should be mostly fine;
 // double check; Apache Spark(tm) uses XORShift by default
-const RNG_EPSILON: f64 = 5e-11;
+pub const RNG_EPSILON: f64 = 5e-11;
 
 /// Sampling fraction arguments may be results of computation, and subject to floating
 /// point jitter.  I check the arguments with this epsilon slop factor to prevent spurious
 /// warnings for cases such as summing some numbers to get a sampling fraction of 1.000000001
-const ROUNDING_EPSILON: f64 = 1e-6;
+pub const ROUNDING_EPSILON: f64 = 1e-6;
 
-type RSamplerFunc<T> =
+pub type RSamplerFunc<T> =
     Box<dyn Fn(Box<dyn Iterator<Item = T>>) -> Box<dyn Iterator<Item = T>> + 'static>;
 
-pub(crate) trait RandomSampler<T>: Send + Sync {
+pub trait RandomSampler<T>: Send + Sync {
     /// Returns a function which returns random samples,
     /// the sampler is thread-safe as the RNG is seeded with random seeds per thread.
     fn get_sampler(&self, seed: Option<u64>) -> RSamplerFunc<T>;
 }
 
-pub(crate) fn get_default_rng() -> Pcg64 {
+pub fn get_default_rng() -> Pcg64 {
     Pcg64::new(
         0xcafe_f00d_d15e_a5e5,
         0x0a02_bdbf_7bb3_c0a7_ac28_fa16_a64a_bf96,
     )
 }
 
-pub(crate) fn get_default_rng_from_seed(seed: u64) -> Pcg64 {
+pub fn get_default_rng_from_seed(seed: u64) -> Pcg64 {
     Pcg64::seed_from_u64(seed)
 }
 
@@ -53,7 +53,7 @@ fn get_rng_with_random_seed() -> Pcg64 {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct PoissonSampler {
+pub struct PoissonSampler {
     fraction: f64,
     use_gap_sampling_if_possible: bool,
     prob: f64,
@@ -119,7 +119,7 @@ impl<T: Clone + 'static> RandomSampler<T> for PoissonSampler {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct BernoulliSampler {
+pub struct BernoulliSampler {
     fraction: f64,
 }
 
@@ -166,7 +166,7 @@ impl<T: 'static> RandomSampler<T> for BernoulliSampler {
 
 /// A sampler based on Bernoulli trials for partitioning a data sequence.
 #[derive(Clone, Copy)]
-pub(crate) struct BernoulliCellSampler {
+pub struct BernoulliCellSampler {
     /// lower bound of the acceptance range
     lb: f64,
     /// upper bound of the acceptance range
@@ -317,7 +317,7 @@ impl GapSamplingReplacement {
 ///
 /// The smallest sampling rate supported is 1e-10 (in order to avoid running into the limit of the
 /// RNG's resolution).
-pub(crate) fn compute_fraction_for_sample_size(
+pub fn compute_fraction_for_sample_size(
     sample_size_lower_bound: u64,
     total: u64,
     with_replacement: bool,

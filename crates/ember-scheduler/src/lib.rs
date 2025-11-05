@@ -1,7 +1,40 @@
+pub mod base;
+pub mod dag;
+pub mod distributed;
+pub mod error;
+pub mod job;
+pub mod listener;
+pub mod local;
+pub mod stage;
+
+use ember_compute::{ApproximateEvaluator, result::PartialResult};
+use ember_data::{context::TaskContext, data::Data, rdd::Rdd};
 use std::sync::Arc;
 
+use crate::{distributed::DistributedScheduler, error::LibResult, local::LocalScheduler};
+
+pub trait Scheduler {
+    fn start(&self);
+
+    fn wait_for_register(&self);
+
+    fn run_job<T: Data, U: Data, F>(
+        &self,
+        rdd: &dyn Rdd<Item = T>,
+        func: F,
+        partitions: Vec<i64>,
+        allow_local: bool,
+    ) -> Vec<U>
+    where
+        F: Fn(Box<dyn Iterator<Item = T>>) -> U;
+
+    fn stop(&self);
+
+    fn default_parallelism(&self) -> i64;
+}
+
 pub enum Sequence<T> {
-    Range(Range<T>),
+    Range(std::ops::Range<T>),
     Vec(Vec<T>),
 }
 
@@ -18,21 +51,21 @@ impl Default for Schedulers {
 }
 
 impl Schedulers {
-    fn run_job<T: Data, U: Data, F>(
+    fn run_job<T: Data, U: Data + Clone, F>(
         &self,
         func: Arc<F>,
         final_rdd: Arc<dyn Rdd<Item = T>>,
         partitions: Vec<usize>,
         allow_local: bool,
-    ) -> Result<Vec<U>>
+    ) -> LibResult<Vec<U>>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
     {
         let op_name = final_rdd.get_op_name();
         log::info!("starting `{}` job", op_name);
-        let start = Instant::now();
+        let start = std::time::Instant::now();
         match self {
-            Distributed(distributed) => {
+            Schedulers::Distributed(distributed) => {
                 let res = distributed
                     .clone()
                     .run_job(func, final_rdd, partitions, allow_local);
@@ -43,7 +76,7 @@ impl Schedulers {
                 );
                 res
             }
-            Local(local) => {
+            Schedulers::Local(local) => {
                 let res = local
                     .clone()
                     .run_job(func, final_rdd, partitions, allow_local);
@@ -57,26 +90,26 @@ impl Schedulers {
         }
     }
 
-    fn run_approximate_job<T: Data, U: Data, R, F, E>(
+    fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
         &self,
         func: Arc<F>,
         final_rdd: Arc<dyn Rdd<Item = T>>,
         evaluator: E,
-        timeout: Duration,
-    ) -> Result<PartialResult<R>>
+        timeout: std::time::Duration,
+    ) -> LibResult<PartialResult<R>>
     where
-        F: SerFunc((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
-        R: Clone + Debug + Send + Sync + 'static,
+        R: Clone + std::fmt::Debug + Send + Sync + 'static,
     {
         let op_name = final_rdd.get_op_name();
         log::info!("starting `{}` job", op_name);
-        let start = Instant::now();
+        let start = std::time::Instant::now();
         let res = match self {
-            Distributed(distributed) => distributed
+            Schedulers::Distributed(distributed) => distributed
                 .clone()
                 .run_approximate_job(func, final_rdd, evaluator, timeout),
-            Local(local) => local
+            Schedulers::Local(local) => local
                 .clone()
                 .run_approximate_job(func, final_rdd, evaluator, timeout),
         };
@@ -88,4 +121,3 @@ impl Schedulers {
         res
     }
 }
-

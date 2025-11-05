@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{context::Context, rdd::AnyData};
-use crate::rdd::Rdd;
+use ember_data::rdd::Rdd;
 
 
 

@@ -6,4 +6,4 @@ pub mod error;
 pub mod partitioner;
 pub mod rdd;
 pub mod split;
-
+pub mod task;

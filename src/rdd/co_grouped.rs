@@ -7,10 +7,7 @@ use std::sync::Arc;
 
 use crate::aggregator::Aggregator;
 use crate::context::Context;
-use crate::dependency::{
-    Dependency, NarrowDependencyTrait, OneToOneDependency, ShuffleDependency,
-    ShuffleDependencyTrait,
-};
+use crate::dependency::{Dependency, NarrowDependencyTrait, OneToOneDependency, ShuffleDependency};
 use crate::error::Result;
 use crate::partitioner::Partitioner;
 use crate::rdd::*;
@@ -105,14 +102,15 @@ impl<K: Data + Eq + Hash> CoGroupedRdd<K> {
             } else {
                 let rdd_base = rdd.clone().into();
                 log::debug!("creating aggregator inside cogrouprdd");
-                deps.push(Dependency::ShuffleDependency(
-                    Arc::new(ShuffleDependency::new(
+                deps.push(Dependency::Shuffle(
+                    ShuffleDependency::new(
                         context.new_shuffle_id(),
                         true,
                         rdd_base,
                         aggr.clone(),
                         part,
-                    )) as Arc<dyn ShuffleDependencyTrait>,
+                    )
+                    .into(), // Convert Arc<ShuffleDependency> to ShuffleDependencyBox
                 ))
             }
         }

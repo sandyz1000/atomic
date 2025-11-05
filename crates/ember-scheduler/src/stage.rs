@@ -1,15 +1,16 @@
-use crate::dependency::ShuffleDependencyTrait;
-use crate::rdd::RddBase;
+use ember_data::dependency::ShuffleDependencyBox;
+use ember_data::rdd::RddBase;
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::sync::Arc;
 
-// this is strange. see into this in more detail
+/// Stage in the DAG scheduler
+/// Simplified: now uses concrete ShuffleDependencyBox instead of trait object
 #[derive(Clone)]
 pub(crate) struct Stage {
     pub id: usize,
     pub num_partitions: usize,
-    pub shuffle_dependency: Option<Arc<dyn ShuffleDependencyTrait>>,
+    pub shuffle_dependency: Option<ShuffleDependencyBox>,
     pub is_shuffle_map: bool,
     pub rdd: Arc<dyn RddBase>,
     pub parents: Vec<Stage>,
@@ -49,7 +50,7 @@ impl Stage {
     pub fn new(
         id: usize,
         rdd: Arc<dyn RddBase>,
-        shuffle_dependency: Option<Arc<dyn ShuffleDependencyTrait>>,
+        shuffle_dependency: Option<ShuffleDependencyBox>,
         parents: Vec<Stage>,
     ) -> Self {
         Stage {

@@ -25,3 +25,5 @@ statrs = { workspace = true }
 parking_lot = { workspace = true }
 rustc-hash ={ workspace = true }
 rand = { workspace = true }
+tokio-util = { workspace = true }
+dashmap = { workspace = true }

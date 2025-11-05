@@ -35,8 +35,8 @@ pub enum Dependency {
         length: usize,
     },
     /// Shuffle dependency representing a shuffle operation
-    /// Uses trait object to allow heterogeneous shuffle dependencies with different type parameters
-    Shuffle(Arc<dyn ShuffleDependencyTrait>),
+    /// Uses type-erased box to allow heterogeneous shuffle dependencies with different type parameters
+    Shuffle(ShuffleDependencyBox),
 }
 
 impl Dependency {
@@ -110,52 +110,72 @@ impl Dependency {
         }
     }
 
-    /// Get shuffle dependency trait object (only for shuffle dependencies)
-    pub fn get_shuffle_deps(&self) -> Option<Arc<dyn ShuffleDependencyTrait>> {
+    /// Get shuffle dependency box (only for shuffle dependencies)
+    pub fn get_shuffle_dep(&self) -> Option<&ShuffleDependencyBox> {
         match self {
-            Dependency::Shuffle(dep) => Some(dep.clone()),
+            Dependency::Shuffle(dep) => Some(dep),
             _ => None,
         }
     }
 }
 
-/// Trait for type-erased shuffle dependencies
-/// This allows the Dependency enum to store different ShuffleDependency<K, V, C> types
-pub trait ShuffleDependencyTrait: Send + Sync {
+/// Type-erased wrapper for ShuffleDependency that can be cloned and stored
+/// This eliminates the need for ShuffleDependencyTrait and follows the same pattern as ResultTaskBox
+#[derive(Clone)]
+pub struct ShuffleDependencyBox {
+    pub shuffle_id: usize,
+    pub rdd_base: Arc<dyn RddBase>,
+    pub is_cogroup: bool,
+    pub num_output_partitions: usize,
+    // Type-erased executor: stores a closure that runs the actual shuffle task
+    do_shuffle: Arc<dyn Fn(usize) -> String + Send + Sync>,
+}
+
+impl ShuffleDependencyBox {
     /// Get the shuffle ID
-    fn get_shuffle_id(&self) -> usize;
+    pub fn get_shuffle_id(&self) -> usize {
+        self.shuffle_id
+    }
 
     /// Get the RDD base (type-erased)
-    fn get_rdd_base(&self) -> Arc<dyn RddBase>;
+    pub fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+        self.rdd_base.clone()
+    }
 
     /// Check if this is a cogroup operation
-    fn is_cogroup(&self) -> bool;
+    pub fn is_cogroup(&self) -> bool {
+        self.is_cogroup
+    }
 
     /// Execute the shuffle task for a given partition
     /// Returns the server URI where shuffle data is stored
-    fn do_shuffle_task(&self, partition: usize) -> String;
+    pub fn do_shuffle_task(&self, partition: usize) -> String {
+        (self.do_shuffle)(partition)
+    }
 
     /// Get the number of output partitions
-    fn num_output_partitions(&self) -> usize;
-}
-
-impl PartialOrd for dyn ShuffleDependencyTrait {
-    fn partial_cmp(&self, other: &dyn ShuffleDependencyTrait) -> Option<Ordering> {
-        Some(self.get_shuffle_id().cmp(&other.get_shuffle_id()))
+    pub fn get_num_output_partitions(&self) -> usize {
+        self.num_output_partitions
     }
 }
 
-impl PartialEq for dyn ShuffleDependencyTrait {
-    fn eq(&self, other: &dyn ShuffleDependencyTrait) -> bool {
-        self.get_shuffle_id() == other.get_shuffle_id()
+impl PartialOrd for ShuffleDependencyBox {
+    fn partial_cmp(&self, other: &ShuffleDependencyBox) -> Option<Ordering> {
+        Some(self.shuffle_id.cmp(&other.shuffle_id))
     }
 }
 
-impl Eq for dyn ShuffleDependencyTrait {}
+impl PartialEq for ShuffleDependencyBox {
+    fn eq(&self, other: &ShuffleDependencyBox) -> bool {
+        self.shuffle_id == other.shuffle_id
+    }
+}
 
-impl Ord for dyn ShuffleDependencyTrait {
-    fn cmp(&self, other: &dyn ShuffleDependencyTrait) -> Ordering {
-        self.get_shuffle_id().cmp(&other.get_shuffle_id())
+impl Eq for ShuffleDependencyBox {}
+
+impl Ord for ShuffleDependencyBox {
+    fn cmp(&self, other: &ShuffleDependencyBox) -> Ordering {
+        self.shuffle_id.cmp(&other.shuffle_id)
     }
 }
 
@@ -287,31 +307,22 @@ where
     }
 }
 
-/// Implement the trait for type erasure at the boundary
-impl<K, V, C> ShuffleDependencyTrait for ShuffleDependency<K, V, C>
+/// Convert typed ShuffleDependency to type-erased ShuffleDependencyBox
+impl<K, V, C> From<Arc<ShuffleDependency<K, V, C>>> for ShuffleDependencyBox
 where
     K: Data + Clone + Eq + Hash + Encode,
     V: Data + Clone,
     C: Data + Clone + Encode,
 {
-    fn get_shuffle_id(&self) -> usize {
-        self.shuffle_id
-    }
+    fn from(dep: Arc<ShuffleDependency<K, V, C>>) -> Self {
+        let cloned = Arc::clone(&dep);
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        self.rdd.get_rdd_base()
-    }
-
-    fn is_cogroup(&self) -> bool {
-        self.is_cogroup_flag
-    }
-
-    fn do_shuffle_task(&self, partition: usize) -> String {
-        // Delegate to typed implementation
-        self.do_shuffle_task_typed(partition)
-    }
-
-    fn num_output_partitions(&self) -> usize {
-        self.partitioner.get_num_of_partitions()
+        ShuffleDependencyBox {
+            shuffle_id: dep.shuffle_id,
+            rdd_base: dep.rdd.get_rdd_base(),
+            is_cogroup: dep.is_cogroup_flag,
+            num_output_partitions: dep.partitioner.get_num_of_partitions(),
+            do_shuffle: Arc::new(move |partition| cloned.do_shuffle_task_typed(partition)),
+        }
     }
 }

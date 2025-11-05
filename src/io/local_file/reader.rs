@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::context::Context;
-use crate::dependency::Dependency;
+use ember_data::dependency::Dependency;
 use crate::error::{Error, Result};
 use crate::io::*;
 use crate::rdd::{MapPartitionsRdd, MapperRdd, Rdd, RddBase};
