@@ -4,3 +4,16 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+ember-utils = { workspace = true }
+ember-data = { workspace = true }
+ember-shuffle = { path = "../ember-shuffle" }
+ember-compute = { path = "../ember-compute" }
+log = { workspace = true }
+async-trait = { workspace = true }
+dashmap = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+bincode = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true }

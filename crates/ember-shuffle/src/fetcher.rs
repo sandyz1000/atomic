@@ -1,5 +1,5 @@
 use super::error::ShuffleError;
-use crate::tracker::MapOutputTracker;
+use crate::map_output::MapOutputTracker;
 use ember_data::data::Data;
 use futures::future;
 use http_body_util::{BodyExt, Full};
@@ -15,13 +15,13 @@ type Body = Full<Bytes>;
 type LibResult<T> = Result<T, ShuffleError>;
 
 /// Parallel shuffle fetcher.
-pub(crate) struct ShuffleFetcher {
-    tracker: Arc<dyn MapOutputTracker>,
+pub struct ShuffleFetcher {
+    tracker: Arc<MapOutputTracker>,
 }
 
 impl ShuffleFetcher {
     /// Create a new ShuffleFetcher with dependency injection
-    pub fn new(tracker: Arc<dyn MapOutputTracker>) -> Self {
+    pub fn new(tracker: Arc<MapOutputTracker>) -> Self {
         Self { tracker }
     }
 
@@ -36,23 +36,21 @@ impl ShuffleFetcher {
     {
         log::debug!("inside fetch function");
         let mut inputs_by_uri = HashMap::new();
-        let server_uris: Vec<Option<String>> = self
+        let server_uris: Vec<String> = self
             .tracker
             .get_server_uris(shuffle_id)
             .await
-            .map_err(|err| ShuffleError::FailFetchingShuffleUris { source: err })?;
+            .map_err(|err| ShuffleError::FailFetchingShuffleUris { source: Box::new(err) })?;
         log::debug!(
             "server uris for shuffle id #{}: {:?}",
             shuffle_id,
             server_uris
         );
-        for (index, server_uri_opt) in server_uris.into_iter().enumerate() {
-            if let Some(server_uri) = server_uri_opt {
-                inputs_by_uri
-                    .entry(server_uri)
-                    .or_insert_with(Vec::new)
-                    .push(index);
-            }
+        for (index, server_uri) in server_uris.into_iter().enumerate() {
+            inputs_by_uri
+                .entry(server_uri)
+                .or_insert_with(Vec::new)
+                .push(index);
         }
         let mut server_queue = Vec::new();
         let mut total_results = 0;

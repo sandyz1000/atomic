@@ -6,26 +6,23 @@ use std::thread;
 use std::time;
 
 use crate::cache::{BoundedMemoryCache, CachePutResponse, KeySpace};
-use crate::env;
-use crate::rdd::Rdd;
-use crate::serializable_traits::Data;
-use crate::serialized_data_capnp::serialized_data;
-use crate::split::Split;
-use crate::{Error, NetworkError, Result};
-use capnp::message::ReaderOptions;
-use capnp_futures::serialize as capnp_serialize;
+use ember_data::rdd::Rdd;
+// use crate::serializable_traits::Data;
+// use crate::serialized_data_capnp::serialized_data;
+use ember_data::split::Split;
+use ember_shuffle::error::NetworkError;
+// use capnp::message::ReaderOptions;
+// use capnp_futures::serialize as capnp_serialize;
 use dashmap::{DashMap, DashSet};
-use serde_derive::{Deserialize, Serialize};
 use tokio::{net::TcpListener, stream::StreamExt};
 use tokio_util::compat::{Tokio02AsyncReadCompatExt, Tokio02AsyncWriteCompatExt};
 
-const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
-    traversal_limit_in_words: std::u64::MAX,
-    nesting_limit: 64,
-};
+// const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
+//     traversal_limit_in_words: std::u64::MAX,
+//     nesting_limit: 64,
+// };
 
 /// Cache tracker works by creating a server in master node and slave nodes acting as clients.
-#[derive(Serialize, Deserialize)]
 pub(crate) enum CacheTrackerMessage {
     AddedToCache {
         rdd_id: usize,
@@ -55,7 +52,7 @@ pub(crate) enum CacheTrackerMessage {
     StopCacheTracker,
 }
 
-#[derive(Serialize, Deserialize)]
+
 pub(crate) enum CacheTrackerMessageReply {
     CacheLocations(HashMap<usize, Vec<LinkedList<Ipv4Addr>>>),
     CacheStatus(Vec<(Ipv4Addr, usize, usize)>),

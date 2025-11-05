@@ -77,13 +77,14 @@ pub trait Rdd: RddBase + 'static {
     fn get_rdd_base(&self) -> Arc<dyn RddBase>;
 
     fn compute(&self, split: Box<dyn Split>) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>>;
-}
 
-pub trait RddOperation: Rdd {
     fn iterator(&self, split: Box<dyn Split>) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>> {
         self.compute(split)
     }
+}
 
+pub trait RddOperation: Rdd {
+    
     /// Return a new RDD containing only the elements that satisfy a predicate.
     fn filter<F>(&self, predicate: F) -> Arc<dyn Rdd<Item = Self::Item>>;
 

@@ -137,21 +137,6 @@ impl ShuffleManager {
         Ok((server_uri, port))
     }
 
-    // fn launch_async_server(conn: TcpListener) -> Result<()> {
-    //     let (s, r) = cb_channel::bounded::<Result<()>>(1);
-    //     tokio::spawn(async move {
-    //         Server::from_tcp(conn)?.serve(ShuffleSvcMaker).await?;
-    //         s.send(Err(ShuffleError::FailedToStart)).unwrap();
-    //         Err::<(), _>(ShuffleError::FailedToStart)
-    //     });
-    //     cb_channel::select! {
-    //         recv(r) -> msg => { msg.map_err(|_| ShuffleError::FailedToStart)??; }
-    //         // wait a prudential time to check that initialization is ok and the move on
-    //         default(Duration::from_millis(25)) => log::debug!("started shuffle server"),
-    //     };
-    //     Ok(())
-    // }
-
     fn launch_async_server(conn: TcpListener, cache: Arc<dyn ShuffleCache>) -> LibResult<()> {
         use hyper::server::conn::http1;
         let (s, r) = cb_channel::bounded::<LibResult<()>>(1);

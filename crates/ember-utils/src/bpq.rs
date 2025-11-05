@@ -4,7 +4,7 @@ use std::collections::BinaryHeap;
 /// struct and modifies it such that only the top K elements are retained.
 /// The top K elements are defined by `T: Ord`
 #[derive(Clone, Debug)]
-pub(crate) struct BoundedPriorityQueue<T: Ord> {
+pub struct BoundedPriorityQueue<T: Ord> {
     max_size: usize,
     underlying: BinaryHeap<T>,
 }

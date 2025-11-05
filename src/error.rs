@@ -81,7 +81,7 @@ pub enum Error {
     },
 
     #[error(transparent)]
-    PartialJobError(#[from] crate::partial::error::PartialJobError),
+    PartialJobError(#[from] PartialJobError),
 
     #[error("failed to convert {} to a String", .0.display())]
     PathToString(PathBuf),
@@ -93,7 +93,7 @@ pub enum Error {
     InputRead(#[source] std::io::Error),
 
     #[error(transparent)]
-    ShuffleError(#[from] crate::shuffle::error::ShuffleError),
+    ShuffleError(#[from] ShuffleError),
 
     #[error("operation not supported: {0}")]
     UnsupportedOperation(&'static str),
@@ -114,24 +114,24 @@ impl Error {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum NetworkError {
-    #[error("disconnected from address")]
-    ConnectionFailure,
+// #[derive(Debug, Error)]
+// pub enum NetworkError {
+//     #[error("disconnected from address")]
+//     ConnectionFailure,
 
-    #[error("failed to find free port {0}, tried {1} times")]
-    FreePortNotFound(u16, usize),
+//     #[error("failed to find free port {0}, tried {1} times")]
+//     FreePortNotFound(u16, usize),
 
-    #[error("no message received")]
-    NoMessageReceived,
+//     #[error("no message received")]
+//     NoMessageReceived,
 
-    #[error(transparent)]
-    TcpListener(#[from] tokio::io::Error),
-}
+//     #[error(transparent)]
+//     TcpListener(#[from] tokio::io::Error),
+// }
 
 
-#[derive(Debug, Error)]
-pub enum MapOutputError {
-    #[error("Shuffle id output #{0} not found in the map")]
-    ShuffleIdNotFound(usize),
-}
+// #[derive(Debug, Error)]
+// pub enum MapOutputError {
+//     #[error("Shuffle id output #{0} not found in the map")]
+//     ShuffleIdNotFound(usize),
+// }

@@ -238,7 +238,10 @@ dependencies = [
  "dashmap",
  "dotenvy",
  "dyn-clone",
+ "ember-cache",
+ "ember-compute",
  "ember-data",
+ "ember-scheduler",
  "ember-utils",
  "ember-wasm",
  "futures",
@@ -266,6 +269,23 @@ dependencies = [
  "tonic",
  "tonic-build",
  "uuid",
+]
+
+[[package]]
+name = "ember-cache"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "dashmap",
+ "ember-data",
+ "ember-shuffle",
+ "ember-utils",
+ "futures",
+ "log",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -304,6 +324,21 @@ version = "0.1.0"
 [[package]]
 name = "ember-scheduler"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "dashmap",
+ "ember-compute",
+ "ember-data",
+ "ember-shuffle",
+ "ember-utils",
+ "futures",
+ "log",
+ "parking_lot",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
 
 [[package]]
 name = "ember-shuffle"
@@ -312,6 +347,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "crossbeam",
+ "dashmap",
  "ember-data",
  "ember-utils",
  "futures",
@@ -328,6 +364,7 @@ dependencies = [
  "statrs",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tonic",
  "uuid",
 ]

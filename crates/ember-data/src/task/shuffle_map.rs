@@ -2,13 +2,14 @@ use std::fmt::Display;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use ember_data::context::{Task, TaskBase};
-use ember_data::data::Data;
-use ember_data::dependency::Dependency;
-use ember_data::rdd::RddBase;
+use crate::data::Data;
+use crate::dependency::Dependency;
+use crate::rdd::RddBase;
+use crate::task::{Task, TaskBase};
+
 
 #[derive(Clone)]
-pub(crate) struct ShuffleMapTask {
+pub struct ShuffleMapTask {
     pub task_id: usize,
     pub run_id: usize,
     pub stage_id: usize,
@@ -81,7 +82,7 @@ impl TaskBase for ShuffleMapTask {
 
 impl Task for ShuffleMapTask {
     fn run(&self, _id: usize) -> Result<Box<dyn Data>, Box<dyn std::error::Error>> {
-        if let Some(shuffle_dep) = self.dep.get_shuffle_deps() {
+        if let Some(shuffle_dep) = self.dep.get_shuffle_dep() {
             // New signature: do_shuffle_task now only takes partition
             // The ShuffleDependency internally has the typed RDD
             let result = shuffle_dep.do_shuffle_task(self.partition);
