@@ -1,48 +1,83 @@
 # 🔥 Ember
 
-**A distributed data processing framework powered by WebAssembly and Rust**
+**A distributed data processing framework written in Rust**
 
 ---
 
 ## ✨ Overview
 
-**Ember** is a next-generation distributed data processing framework written in **Rust**, inspired by **Apache Spark** — but rebuilt for the modern, secure, and portable compute era.
+**Ember** is a distributed data processing framework written in **Rust**, inspired by **Apache Spark** — designed for type-safe, efficient, and resilient data processing.
 
-Instead of running user-defined functions (UDFs) directly on worker machines, **Ember executes tasks inside WASM runtimes**, ensuring:
+Ember provides a **Spark-like RDD API** with familiar transformations and actions, backed by a **DAG-based execution engine** that optimizes task scheduling and execution across single machines or distributed clusters.
 
+**Current Features:**
+* Type-safe RDD API with lazy evaluation
+* DAG-based task scheduling
+* Local and distributed execution modes
+* Shuffle operations for wide transformations
+* Task result tracking and caching
+
+**Future Vision:**
+Instead of running user-defined functions directly, Ember will execute tasks inside **WASM runtimes** in distributed mode, ensuring:
 * Deterministic, sandboxed execution
 * Architecture portability
 * Safety and isolation for untrusted code
 
-At its core, Ember offers a **DAG-based dataflow engine**, a **distributed scheduler**, and a **WASM-based execution layer** that allows developers to scale compute workloads across clusters or edge nodes.
+This project is heavily inspired by [vega](https://github.com/rajasekarv/vega/tree/master). The original project is no longer maintained, and its distributed execution required nightly Rust. Ember aims to provide a safer alternative using WASM-compiled UDFs for distributed execution.
 
 ---
 
 ## ⚙️ Core Architecture
 
 ```
-+--------------------+
-|     Ember CLI      |  → Submit jobs, manage clusters, monitor status
-+---------+----------+
-          |
-          v
-+--------------------+        +--------------------+
-|   Master Node      |  <-->  |   Worker Nodes     |
-|  - DAG scheduler   |        |  - WASM executor   |
-|  - Job tracker     |        |  - Task sandbox    |
-|  - Resource manager|        |  - IO handlers     |
-+--------------------+        +--------------------+
+┌─────────────────────────────────────────────────────┐
+│                   Ember Framework                    │
+├─────────────────────────────────────────────────────┤
+│                                                      │
+│  ┌────────────┐      ┌─────────────────────────┐   │
+│  │  RDD API   │─────▶│   DAG Scheduler         │   │
+│  │ (map, etc) │      │  - Job Tracker          │   │
+│  └────────────┘      │  - Stage Generation     │   │
+│                      │  - Task Scheduling       │   │
+│                      └──────────┬──────────────┘   │
+│                                 │                   │
+│                      ┌──────────▼──────────────┐   │
+│                      │   Execution Modes       │   │
+│                      ├─────────────────────────┤   │
+│                      │  Local Scheduler        │   │
+│                      │  - Thread pool exec     │   │
+│                      │  - In-process tasks     │   │
+│                      └─────────────────────────┘   │
+│                                                      │
+│  ┌─────────────────────────────────────────────┐   │
+│  │         Supporting Components                │   │
+│  ├─────────────────────────────────────────────┤   │
+│  │  • Shuffle Manager (data exchange)          │   │
+│  │  • Cache Tracker (RDD caching)              │   │
+│  │  • Dependency Management (narrow/shuffle)   │   │
+│  │  • Split/Partition abstraction              │   │
+│  └─────────────────────────────────────────────┘   │
+│                                                      │
+└─────────────────────────────────────────────────────┘
+
+Future: Distributed Mode with WASM Execution
+┌─────────────┐        ┌──────────────────┐
+│ Master Node │◄──────►│  Worker Nodes    │
+│ - Scheduler │        │  - WASM Runtime  │
+│ - Tracker   │        │  - Task Sandbox  │
+└─────────────┘        └──────────────────┘
 ```
 
 ---
 
 ## 🧠 Key Concepts
 
-* **Flow DAGs** — Define jobs as *directed acyclic graphs* of transformations and actions.
-* **WASM Executors** — Each task is compiled or serialized into a WASM module executed remotely in a sandbox.
-* **Task Isolation** — No shared state or unsafe code between workers.
-* **Dynamic Scheduling** — Workload distributed based on node load and data locality.
-* **Unified API** — One interface for batch and stream processing.
+* **RDD (Resilient Distributed Datasets)** — Immutable, partitioned collections that support transformations and actions
+* **Lazy Evaluation** — Transformations are recorded as a DAG and executed only when an action is called
+* **Type-Safe API** — Leverages Rust's type system to catch errors at compile time
+* **Dependency Tracking** — Narrow (one-to-one, range) and shuffle (wide) dependencies for efficient execution
+* **Task Scheduling** — DAG-based scheduler that generates stages and distributes tasks
+* **Future: WASM Isolation** — Tasks will run in sandboxed WASM runtimes in distributed mode
 
 ---
 
@@ -51,64 +86,82 @@ At its core, Ember offers a **DAG-based dataflow engine**, a **distributed sched
 ```rust
 use ember::prelude::*;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let mut flow = Flow::new("wordcount");
+fn main() -> Result<()> {
+    let sc = Context::new("wordcount")?;
 
-    let input = flow.read_text("s3://datasets/text/");
-    let words = input.flat_map(|line| line.split_whitespace());
-    let pairs = words.map(|w| (w.to_string(), 1));
-    let counts = pairs.reduce_by_key(|a, b| a + b);
-    flow.write(counts, "s3://output/wordcount");
-
-    Ember::run(flow).await
+    let lines = sc.text_file("data/input.txt", 4)?;
+    
+    let words = lines.flat_map(|line| {
+        line.split_whitespace()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    });
+    
+    let pairs = words.map(|word| (word, 1));
+    let counts = pairs.reduce_by_key(|a, b| a + b, 4)?;
+    
+    counts.save_as_text_file("output/wordcount")?;
+    
+    Ok(())
 }
 ```
 
 ---
 
-## 🧩 WASM Execution Model
+## 🔧 Core Components
 
-Each transformation (e.g., `map`, `reduce`, `filter`) is serialized into a **WASM module** using the [wasmtime](https://github.com/bytecodealliance/wasmtime) runtime.
+### RDD Operations
+
+**Transformations** (lazy):
+* `map` — Apply a function to each element
+* `flat_map` — Map and flatten results
+* `filter` — Keep elements matching a predicate
+* `map_partitions` — Transform entire partitions
+* `union` — Combine two RDDs
+* `cartesian` — Cartesian product of two RDDs
+* `coalesce` — Reduce number of partitions
+
+**Actions** (trigger execution):
+* `collect` — Return all elements to driver
+* `reduce` — Aggregate elements using a function
+* `count` — Count number of elements
+* `take` — Return first n elements
+* `save_as_text_file` — Write to disk
+
+### Shuffle Operations
+
+For key-value RDDs:
+* `reduce_by_key` — Combine values for each key
+* `group_by_key` — Group values by key
+* `join` — Inner join two RDDs by key
+* `co_group` — Group multiple RDDs by key
+
+---
+
+## 🚀 Future: WASM Execution Model
+
+In distributed mode, transformations will be compiled to **WASM modules** using [wasmtime](https://github.com/bytecodealliance/wasmtime).
 
 ```rust
-// A simple WASM-executable function
-#[wasm_bindgen]
+// Future: WASM-executable task
+#[wasm_task]
 pub fn map_fn(line: &str) -> Vec<String> {
-    line.split_whitespace().map(|s| s.to_string()).collect()
+    line.split_whitespace()
+        .map(|s| s.to_string())
+        .collect()
 }
 ```
 
-The compiled `.wasm` is shipped to remote workers via the scheduler, executed in isolation, and results are streamed back to the master node.
+The compiled `.wasm` module will be:
+1. Serialized and sent to worker nodes
+2. Executed in isolated WASM sandbox
+3. Results streamed back to scheduler
 
----
-
-## 🧱 Project Structure
-
-```
-ember/
-├── ember-core/        # Scheduler, DAG engine, and APIs
-├── ember-runtime/     # WASM execution engine (Wasmtime backend)
-├── ember-worker/      # Distributed worker nodes
-├── ember-cli/         # CLI for job submission & monitoring
-├── ember-network/     # RPC, message passing, and data transport
-└── examples/          # Sample jobs & flows
-```
-
----
-
-## 🧪 Running Ember
-
-```bash
-# Start master
-ember-cli master --bind 0.0.0.0:9090
-
-# Start workers
-ember-cli worker --connect master:9090 --slots 4
-
-# Submit job
-ember-cli submit jobs/wordcount.yaml
-```
+**Benefits:**
+* No unsafe code execution on workers
+* Deterministic behavior across architectures
+* Portable across ARM, x86, RISC-V
+* Memory-safe sandboxing
 
 ---
 

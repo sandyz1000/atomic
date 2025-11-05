@@ -5,6 +5,7 @@ use crate::data::Data;
 // use crate::env;
 use crate::partitioner::Partitioner;
 use crate::rdd::RddBase;
+use crate::split::CoalescedRddSplit;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -33,6 +34,15 @@ pub enum Dependency {
         out_start: usize,
         /// the length of the range
         length: usize,
+    },
+
+    CoalescedSplitDep {
+        /// The RDD that this coalesced split depends on.
+        /// This is a reference to the base RDD in the dependency graph.
+        rdd: Arc<dyn RddBase>,
+        /// The previous RDD in the transformation chain.
+        /// Used to track the lineage of transformations leading to this coalesced split.
+        prev: Arc<dyn RddBase>,
     },
     /// Shuffle dependency representing a shuffle operation
     /// Uses type-erased box to allow heterogeneous shuffle dependencies with different type parameters
@@ -77,6 +87,14 @@ impl Dependency {
                 }
             }
             Dependency::Shuffle(_) => Vec::new(),
+            Dependency::CoalescedSplitDep { rdd, .. } => rdd
+                .splits()
+                .into_iter()
+                .enumerate()
+                .find(|(i, _)| i == &partition_id)
+                .and_then(|(_, p)| CoalescedRddSplit::downcasting(p).ok())
+                .map(|split| split.parent_indices)
+                .unwrap_or_default(),
         }
     }
 
@@ -86,6 +104,7 @@ impl Dependency {
             Dependency::OneToOne { rdd_base } => rdd_base.clone(),
             Dependency::Range { rdd_base, .. } => rdd_base.clone(),
             Dependency::Shuffle(dep) => dep.get_rdd_base(),
+            Dependency::CoalescedSplitDep { rdd: _, prev } => prev.clone(),
         }
     }
 
@@ -97,7 +116,9 @@ impl Dependency {
     /// Get the dependency type
     pub fn dependency_type(&self) -> DependencyType {
         match self {
-            Dependency::OneToOne { .. } | Dependency::Range { .. } => DependencyType::Narrow,
+            Dependency::OneToOne { .. }
+            | Dependency::Range { .. }
+            | Dependency::CoalescedSplitDep { .. } => DependencyType::Narrow,
             Dependency::Shuffle(_) => DependencyType::Shuffle,
         }
     }
@@ -279,7 +300,7 @@ where
             let set: Vec<(K, C)> = bucket.into_iter().collect();
             let config = bincode::config::standard();
             match bincode::encode_to_vec(&set, config) {
-                Ok(ser_bytes) => {
+                Ok(_ser_bytes) => {
                     log::debug!(
                         "shuffle dependency map task set from bucket #{} in shuffle id #{}, partition #{}: {:?}",
                         i,

@@ -7,3 +7,7 @@ pub mod partitioner;
 pub mod rdd;
 pub mod split;
 pub mod task;
+
+
+pub use task_context::TaskContext;
+pub use task::TaskResult;
