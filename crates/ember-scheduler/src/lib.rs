@@ -11,7 +11,7 @@ use ember_compute::{ApproximateEvaluator, result::PartialResult};
 use ember_data::{context::TaskContext, data::Data, rdd::Rdd};
 use std::sync::Arc;
 
-use crate::{distributed::DistributedScheduler, error::LibResult, local::LocalScheduler};
+pub use crate::{distributed::DistributedScheduler, error::LibResult, local::LocalScheduler, base::NativeScheduler};
 
 pub trait Scheduler {
     fn start(&self);
@@ -51,7 +51,7 @@ impl Default for Schedulers {
 }
 
 impl Schedulers {
-    fn run_job<T: Data, U: Data + Clone, F>(
+    pub fn run_job<T: Data, U: Data + Clone, F>(
         &self,
         func: Arc<F>,
         final_rdd: Arc<dyn Rdd<Item = T>>,
@@ -90,7 +90,7 @@ impl Schedulers {
         }
     }
 
-    fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
+    pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
         &self,
         func: Arc<F>,
         final_rdd: Arc<dyn Rdd<Item = T>>,

@@ -1,29 +1,16 @@
 use std::collections::HashMap;
-use std::collections::LinkedList;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::thread;
-use std::time;
 
-use crate::cache::{BoundedMemoryCache, CachePutResponse, KeySpace};
-use ember_data::rdd::Rdd;
-// use crate::serializable_traits::Data;
-// use crate::serialized_data_capnp::serialized_data;
-use ember_data::split::Split;
-use ember_shuffle::error::NetworkError;
-// use capnp::message::ReaderOptions;
-// use capnp_futures::serialize as capnp_serialize;
+use crate::cache::{BoundedMemoryCache, KeySpace};
+use crate::error::{CacheError, Result};
 use dashmap::{DashMap, DashSet};
-use tokio::{net::TcpListener, stream::StreamExt};
-use tokio_util::compat::{Tokio02AsyncReadCompatExt, Tokio02AsyncWriteCompatExt};
-
-// const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
-//     traversal_limit_in_words: std::u64::MAX,
-//     nesting_limit: 64,
-// };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 /// Cache tracker works by creating a server in master node and slave nodes acting as clients.
-pub(crate) enum CacheTrackerMessage {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
+pub enum CacheTrackerMessage {
     AddedToCache {
         rdd_id: usize,
         partition: usize,
@@ -52,17 +39,17 @@ pub(crate) enum CacheTrackerMessage {
     StopCacheTracker,
 }
 
-
-pub(crate) enum CacheTrackerMessageReply {
-    CacheLocations(HashMap<usize, Vec<LinkedList<Ipv4Addr>>>),
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
+pub enum CacheTrackerMessageReply {
+    CacheLocations(HashMap<usize, Vec<Vec<Ipv4Addr>>>),
     CacheStatus(Vec<(Ipv4Addr, usize, usize)>),
     Ok,
 }
 
 #[derive(Debug)]
-pub(crate) struct CacheTracker {
+pub struct CacheTracker {
     is_master: bool,
-    locs: DashMap<usize, Vec<LinkedList<Ipv4Addr>>>,
+    locs: DashMap<usize, Vec<Vec<Ipv4Addr>>>,
     slave_capacity: DashMap<Ipv4Addr, usize>,
     slave_usage: DashMap<Ipv4Addr, usize>,
     registered_rdd_ids: DashSet<usize>,
@@ -105,32 +92,31 @@ impl CacheTracker {
 
     // Slave node will ask master node for cache locs
     async fn client(&self, message: CacheTrackerMessage) -> Result<CacheTrackerMessageReply> {
-        use futures::io::AllowStdIo;
-        use std::net::TcpStream;
-
+        // Connect to master node
         let mut stream = loop {
-            match TcpStream::connect(self.master_addr) {
+            match TcpStream::connect(self.master_addr).await {
                 Ok(stream) => break stream,
-                Err(_) => continue,
+                Err(_) => {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    continue;
+                }
             }
         };
-        let mut stream = AllowStdIo::new(&mut stream);
 
-        {
-            // Due to current limitations w/ capnp_futures not being Send we use the normal
-            // sync Write version here to avoid spawning a second thread to run the future to completion
-            let shuffle_id_bytes = bincode::serialize(&message)?;
-            let mut message = capnp::message::Builder::new_default();
-            let mut shuffle_data = message.init_root::<serialized_data::Builder>();
-            shuffle_data.set_msg(&shuffle_id_bytes);
-            capnp::serialize::write_message(&mut stream, &message).map_err(Error::OutputWrite)?;
-        }
+        // Serialize and send message
+        let message_bytes = bincode::encode_to_vec(&message, bincode::config::standard())?;
+        let len = message_bytes.len() as u32;
+        stream.write_u32(len).await?;
+        stream.write_all(&message_bytes).await?;
+        stream.flush().await?;
 
-        let message_reader = capnp_serialize::read_message(stream, CAPNP_BUF_READ_OPTS)
-            .await?
-            .ok_or_else(|| NetworkError::NoMessageReceived)?;
-        let shuffle_data = message_reader.get_root::<serialized_data::Reader>()?;
-        let reply: CacheTrackerMessageReply = bincode::deserialize(&shuffle_data.get_msg()?)?;
+        // Read response length and data
+        let reply_len = stream.read_u32().await?;
+        let mut reply_bytes = vec![0u8; reply_len as usize];
+        stream.read_exact(&mut reply_bytes).await?;
+
+        let (reply, _): (CacheTrackerMessageReply, usize) =
+            bincode::decode_from_slice(&reply_bytes, bincode::config::standard())?;
         Ok(reply)
     }
 
@@ -141,40 +127,50 @@ impl CacheTracker {
         }
         log::debug!("cache tracker server starting");
         tokio::spawn(async move {
-            let mut listener = TcpListener::bind(self.master_addr)
+            let listener = TcpListener::bind(self.master_addr)
                 .await
-                .map_err(NetworkError::TcpListener)?;
-            log::debug!("cache tracker server started");
-            while let Some(Ok(mut stream)) = listener.incoming().next().await {
-                let selfc = Arc::clone(&self);
-                tokio::spawn(async move {
-                    // let (reader, writer) = stream.split();
-                    // let reader = reader.compat();
-                    // let writer = writer.compat_write();
+                .map_err(|e| CacheError::Io(e))?;
+            log::debug!("cache tracker server started at {:?}", self.master_addr);
 
-                    // //reading
-                    // let message_reader = capnp_serialize::read_message(reader, CAPNP_BUF_READ_OPTS)
-                    //     .await?
-                    //     .ok_or_else(|| NetworkError::NoMessageReceived)?;
-                    // let data = message_reader.get_root::<serialized_data::Reader>()?;
-                    // let message: CacheTrackerMessage = bincode::deserialize(data.get_msg()?)?;
+            loop {
+                match listener.accept().await {
+                    Ok((mut stream, addr)) => {
+                        log::debug!("Accepted connection from {:?}", addr);
+                        let selfc = Arc::clone(&self);
+                        tokio::spawn(async move {
+                            // Read message length
+                            let msg_len = stream.read_u32().await?;
+                            let mut msg_bytes = vec![0u8; msg_len as usize];
+                            stream.read_exact(&mut msg_bytes).await?;
 
-                    // // send reply
-                    // let reply = selfc.process_message(message);
-                    // let result = bincode::serialize(&reply)?;
-                    // let mut message = capnp::message::Builder::new_default();
-                    // let mut locs_data = message.init_root::<serialized_data::Builder>();
-                    // locs_data.set_msg(&result);
-                    // TODO: remove blocking call when possible
-                    // futures::executor::block_on(async {
-                    //     capnp_serialize::write_message(writer, message).await?;
-                    //     Ok::<_, Error>(())
-                    // })?;
+                            // Deserialize message
+                            let (message, _): (CacheTrackerMessage, usize) =
+                                bincode::decode_from_slice(
+                                    &msg_bytes,
+                                    bincode::config::standard(),
+                                )?;
 
-                    Ok::<_, Error>(())
-                });
+                            // Process message and get reply
+                            let reply = selfc.process_message(message);
+
+                            // Serialize and send reply
+                            let reply_bytes =
+                                bincode::encode_to_vec(&reply, bincode::config::standard())?;
+                            let reply_len = reply_bytes.len() as u32;
+                            stream.write_u32(reply_len).await?;
+                            stream.write_all(&reply_bytes).await?;
+                            stream.flush().await?;
+
+                            Ok::<_, CacheError>(())
+                        });
+                    }
+                    Err(e) => {
+                        log::error!("Error accepting connection: {:?}", e);
+                        break;
+                    }
+                }
             }
-            Err::<(), _>(Error::ExecutorShutdown)
+            Err::<(), _>(CacheError::ExecutorShutdown)
         });
     }
 
@@ -190,10 +186,8 @@ impl CacheTracker {
                 rdd_id,
                 num_partitions,
             } => {
-                self.locs.insert(
-                    rdd_id,
-                    (0..num_partitions).map(|_| LinkedList::new()).collect(),
-                );
+                self.locs
+                    .insert(rdd_id, (0..num_partitions).map(|_| Vec::new()).collect());
                 CacheTrackerMessageReply::Ok
             }
             CacheTrackerMessage::AddedToCache {
@@ -210,7 +204,7 @@ impl CacheTracker {
                 }
                 if let Some(mut locs_rdd) = self.locs.get_mut(&rdd_id) {
                     if let Some(locs_rdd_p) = locs_rdd.get_mut(partition) {
-                        locs_rdd_p.push_front(host);
+                        locs_rdd_p.insert(0, host); // Insert at front like push_front
                     }
                 }
                 CacheTrackerMessageReply::Ok
@@ -308,7 +302,7 @@ impl CacheTracker {
                     (k, v)
                 })
                 .collect()),
-            Ok(_) => Err(Error::Other),
+            Ok(_) => Err(CacheError::Other),
             Err(err) => Err(err),
         }
     }
@@ -316,7 +310,7 @@ impl CacheTracker {
     async fn get_cache_status(&self) -> Result<Vec<(Ipv4Addr, usize, usize)>> {
         match self.client(CacheTrackerMessage::GetCacheStatus).await {
             Ok(CacheTrackerMessageReply::CacheStatus(s)) => Ok(s),
-            Ok(_) => Err(Error::Other),
+            Ok(_) => Err(CacheError::Other),
             Err(err) => Err(err),
         }
     }

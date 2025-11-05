@@ -242,6 +242,7 @@ dependencies = [
  "ember-compute",
  "ember-data",
  "ember-scheduler",
+ "ember-shuffle",
  "ember-utils",
  "ember-wasm",
  "futures",

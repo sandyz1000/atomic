@@ -14,7 +14,7 @@ use crate::{
 };
 
 #[derive(Clone, Default)]
-pub(crate) struct DistributedScheduler {
+pub struct DistributedScheduler {
     mutators: MutatorsAndGetter,
     max_failures: usize,
     attempt_id: Arc<AtomicUsize>,

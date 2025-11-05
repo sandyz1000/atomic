@@ -1,9 +1,8 @@
-use std::{collections::HashMap, io::Write, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use ember_utils::bounded_double::BoundedDouble;
 
 use crate::{
-    context::{Context, TaskContext},
     data::Data,
     dependency::Dependency,
     error::BaseResult,
@@ -13,8 +12,6 @@ use crate::{
 
 pub trait RddBase: Send + Sync {
     fn get_rdd_id(&self) -> usize;
-
-    fn get_context(&self) -> Arc<Context>;
 
     fn get_op_name(&self) -> String {
         "unknown".to_owned()
@@ -56,19 +53,6 @@ pub trait RddBase: Send + Sync {
     }
 }
 
-fn save<R: Data>(ctx: TaskContext, iter: Box<dyn Iterator<Item = R>>, path: String) {
-    std::fs::create_dir_all(&path).unwrap();
-    let id = ctx.split_id;
-    let file_path = std::path::Path::new(&path).join(format!("part-{}", id));
-    let f = std::fs::File::create(file_path).expect("unable to create file");
-    let mut f = std::io::BufWriter::new(f);
-    for item in iter {
-        let line = format!("{:?}", item);
-        f.write_all(line.as_bytes())
-            .expect("error while writing to file");
-    }
-}
-
 // Rdd containing methods associated with processing
 pub trait Rdd: RddBase + 'static {
     type Item: Data;
@@ -104,11 +88,6 @@ pub trait RddOperation: Rdd {
     /// Return an RDD created by coalescing all elements within each partition into an array.
     #[allow(clippy::type_complexity)]
     fn glom(&self) -> Arc<dyn Rdd<Item = Vec<Self::Item>>>;
-
-    fn save_as_text_file(&self, path: String) -> BaseResult<Vec<()>> {
-        let cl = move |(ctx, iter)| save::<Self::Item>(ctx, iter, path.to_string());
-        self.get_context().run_job_with_context(self.get_rdd(), cl)
-    }
 
     fn reduce<F>(&self, func: F) -> BaseResult<Option<Self::Item>>
     where

@@ -1,11 +1,8 @@
-use crate::dependency::Dependency;
 use crate::error::Error;
-use crate::rdd::RddVals;
-use crate::split::Split;
-use crate::{
-    context::Context,
-    rdd::{Data, Rdd, RddBase},
-};
+use ember_data::{data::Data, dependency::Dependency, rdd::{Rdd, RddBase}};
+
+use crate::context::Context;
+use ember_data::split::Split;
 use itertools::{Itertools, iproduct};
 use std::{marker::PhantomData, sync::Arc};
 

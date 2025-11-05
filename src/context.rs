@@ -16,16 +16,16 @@ use std::time::{Duration, Instant};
 use crate::error::{Error, Result};
 use crate::executor::{Executor, Signal};
 use crate::io::ReaderConfiguration;
-use crate::partial::{ApproximateEvaluator, PartialResult};
-use crate::rdd::{ParallelCollection, Rdd, RddBase, UnionRdd};
-use crate::scheduler::{DistributedScheduler, LocalScheduler, NativeScheduler, TaskContext};
-use crate::{env, hosts, utils, Fn, SerArc};
+use ember_compute::ApproximateEvaluator;
+use ember_data::context::TaskContext;
+use ember_data::rdd::{Rdd, RddBase};
+use ember_scheduler::{DistributedScheduler, LocalScheduler, NativeScheduler, Schedulers};
+use ember_utils::clean_up_work_dir;
+use crate::{env, hosts};
 use ember_data::data::Data;
 use log::error;
 use once_cell::sync::OnceCell;
-// use simplelog::*;
 use uuid::Uuid;
-use crate::scheduler::Schedulers;
 
 
 
@@ -58,9 +58,28 @@ impl Drop for Context {
     }
 }
 
+pub fn save<R: Data>(ctx: TaskContext, iter: Box<dyn Iterator<Item = R>>, path: String) {
+    std::fs::create_dir_all(&path).unwrap();
+    let id = ctx.split_id;
+    let file_path = std::path::Path::new(&path).join(format!("part-{}", id));
+    let f = std::fs::File::create(file_path).expect("unable to create file");
+    let mut f = std::io::BufWriter::new(f);
+    for item in iter {
+        let line = format!("{:?}", item);
+        f.write_all(line.as_bytes())
+            .expect("error while writing to file");
+    }
+}
+
+
 impl Context {
     pub fn new() -> Result<Arc<Self>> {
         Context::with_mode(env::Configuration::get().deployment_mode)
+    }
+
+    fn save_as_text_file(&self, path: String) -> Result<Vec<()>> {
+        let cl = move |(ctx, iter)| save::<Self::Item>(ctx, iter, path.to_string());
+        self.run_job_with_context(self.get_rdd(), cl)
     }
 
     pub fn with_mode(mode: env::DeploymentMode) -> Result<Arc<Self>> {
@@ -217,7 +236,7 @@ impl Context {
         }))
     }
 
-    fn init_distributed_worker() -> Result<!> {
+    fn init_distributed_worker() -> Result<()> {
         let mut work_dir = PathBuf::from("");
         match std::env::current_exe().map_err(|_| Error::CurrentBinaryPath) {
             Ok(binary_path) => {
@@ -241,12 +260,13 @@ impl Context {
             Err(err) => Context::worker_clean_up_directives(Err(err), work_dir)?,
         };
         let executor = Arc::new(Executor::new(port));
-        Context::worker_clean_up_directives(executor.worker(), work_dir)
+        Context::worker_clean_up_directives(executor.worker(), work_dir);
+        Ok(())
     }
 
-    fn worker_clean_up_directives(run_result: Result<Signal>, work_dir: PathBuf) -> Result<!> {
+    fn worker_clean_up_directives(run_result: Result<Signal>, work_dir: PathBuf) -> Result<()> {
         env::Env::get().shuffle_manager.clean_up_shuffle_data();
-        utils::clean_up_work_dir(&work_dir);
+        clean_up_work_dir(&work_dir, true);
         match run_result {
             Err(err) => {
                 log::error!("executor failed with error: {}", err);
@@ -257,6 +277,8 @@ impl Context {
                 std::process::exit(0);
             }
         }
+
+        Ok(())
     }
 
     fn driver_clean_up_directives(work_dir: &Path, executors: &[SocketAddrV4]) {
@@ -264,7 +286,7 @@ impl Context {
         // Give some time for the executors to shut down and clean up
         std::thread::sleep(std::time::Duration::from_millis(1_500));
         env::Env::get().shuffle_manager.clean_up_shuffle_data();
-        utils::clean_up_work_dir(work_dir);
+        clean_up_work_dir(work_dir, true);
     }
 
     fn create_workers_config_file(local_ip: Ipv4Addr, port: u16, config_path: &str) -> Result<()> {
@@ -322,7 +344,7 @@ impl Context {
         self: &Arc<Self>,
         seq: I,
         num_slices: usize,
-    ) -> SerArc<dyn Rdd<Item = T>>
+    ) -> Arc<dyn Rdd<Item = T>>
     where
         I: IntoIterator<Item = T>,
     {
@@ -337,7 +359,7 @@ impl Context {
         end: u64,
         step: usize,
         num_slices: usize,
-    ) -> SerArc<dyn Rdd<Item = u64>> {
+    ) -> Arc<dyn Rdd<Item = u64>> {
         // TODO: input validity check
         let seq = (start..=end).step_by(step);
         let rdd = self.parallelize(seq, num_slices);
@@ -349,11 +371,11 @@ impl Context {
         self: &Arc<Self>,
         seq: I,
         num_slices: usize,
-    ) -> SerArc<dyn Rdd<Item = T>>
+    ) -> Arc<dyn Rdd<Item = T>>
     where
         I: IntoIterator<Item = T>,
     {
-        SerArc::new(ParallelCollection::new(self.clone(), seq, num_slices))
+        Arc::new(ParallelCollection::new(self.clone(), seq, num_slices))
     }
 
     /// Load from a distributed source and turns it into a parallel collection.
@@ -377,7 +399,7 @@ impl Context {
     where
         F: Fn(Box<dyn Iterator<Item = T>>) -> U,
     {
-        let cl = Fn!(move |(_task_context, iter)| (func)(iter));
+        let cl = move |(_task_context, iter)| (func)(iter);
         let func = Arc::new(cl);
         self.scheduler.run_job(
             func,
@@ -397,7 +419,7 @@ impl Context {
         F: Fn(Box<dyn Iterator<Item = T>>) -> U,
         P: IntoIterator<Item = usize>,
     {
-        let cl = Fn!(move |(_task_context, iter)| (func)(iter));
+        let cl = move |(_task_context, iter)| (func)(iter);
         self.scheduler
             .run_job(Arc::new(cl), rdd, partitions.into_iter().collect(), false)
     }
