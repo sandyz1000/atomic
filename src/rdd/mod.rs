@@ -4,10 +4,9 @@ pub mod cartesian;
 pub mod coalesced;
 pub mod co_grouped;
 
-use crate::task::TaskContext;
-use ember_utils::bpq::BoundedPriorityQueue;
-use crate::context::Context;
+pub use ember_data::context::TaskContext;
+pub use ember_utils::bpq::BoundedPriorityQueue;
+pub use crate::context::Context;
 
-pub use ember_data::data::Data;
-use std::{sync::{Arc, Weak}, time::Duration};
+pub use ember_data::{data::Data, rdd::{Rdd, RddBase}};
 

@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::io::*;
 use crate::rdd::{MapPartitionsRdd, MapperRdd, Rdd, RddBase};
 
-use crate::split::Split;
+use ember_data::split::Split;
 
 use log::debug;
 use rand::prelude::*;
@@ -56,7 +56,7 @@ impl LocalFsReaderConfig {
 }
 
 impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
-    fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> SerArc<dyn Rdd<Item = U>>
+    fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> Arc<dyn Rdd<Item = U>>
     where
         F: Fn(Vec<u8>) -> U,
     {
@@ -71,12 +71,12 @@ impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
         );
         let decoder = MapperRdd::new(files_per_executor, decoder).pin();
         decoder.register_op_name("local_fs_reader<bytes>");
-        SerArc::new(decoder)
+        Arc::new(decoder)
     }
 }
 
 impl ReaderConfiguration<PathBuf> for LocalFsReaderConfig {
-    fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> SerArc<dyn Rdd<Item = U>>
+    fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> Arc<dyn Rdd<Item = U>>
     where
         F: Fn(PathBuf) -> U,
     {
@@ -92,7 +92,7 @@ impl ReaderConfiguration<PathBuf> for LocalFsReaderConfig {
         );
         let decoder = MapperRdd::new(files_per_executor, decoder).pin();
         decoder.register_op_name("local_fs_reader<files>");
-        SerArc::new(decoder)
+        Arc::new(decoder)
     }
 }
 

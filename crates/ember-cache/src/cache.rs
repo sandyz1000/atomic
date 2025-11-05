@@ -4,7 +4,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 
 #[derive(Debug)]
-pub(crate) enum CachePutResponse {
+pub enum CachePutResponse {
     CachePutSuccess(usize),
     CachePutFailure,
 }
@@ -14,7 +14,7 @@ type CacheMap = Arc<DashMap<((usize, usize), usize), (Vec<u8>, usize)>>;
 // Despite the name, it is currently unbounded cache. Once done with LRU iterator, have to make this bounded.
 // Since we are storing everything as serialized objects, size estimation is as simple as getting the length of byte vector
 #[derive(Debug, Clone)]
-pub(crate) struct BoundedMemoryCache {
+pub struct BoundedMemoryCache {
     max_mbytes: usize,
     next_key_space_id: Arc<AtomicUsize>,
     current_bytes: usize,
@@ -76,7 +76,7 @@ impl BoundedMemoryCache {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct KeySpace<'a> {
+pub struct KeySpace<'a> {
     pub cache: &'a BoundedMemoryCache,
     pub key_space_id: usize,
 }

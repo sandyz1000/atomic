@@ -1,6 +1,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use ember_compute::PartialJobError;
+use ember_shuffle::error::{NetworkError, ShuffleError};
+use ember_shuffle::map_output::MapOutputError;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
