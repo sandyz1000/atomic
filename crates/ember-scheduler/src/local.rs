@@ -10,7 +10,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use ember_compute::result::PartialResult;
 use ember_compute::{ApproximateActionListener, ApproximateEvaluator};
-use ember_data::context::TaskContext;
+use ember_data::task_context::TaskContext;
 use ember_data::data::Data;
 use ember_data::dependency::ShuffleDependencyBox;
 use ember_data::rdd::Rdd;
