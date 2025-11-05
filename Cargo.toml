@@ -50,16 +50,10 @@ crossbeam.workspace = true
 hyper-util.workspace = true
 ember-data.workspace = true
 ember-utils.workspace = true
-ember-cache.workspace = true
-ember-shuffle.workspace = true
-ember-compute.workspace = true
 ember-scheduler.workspace = true
-
+tokio-util.workspace = true
 
 [workspace.dependencies]
-ember-shuffle = { path = "crates/ember-shuffle" }
-ember-cache = { path = "crates/ember-cache" }
-ember-compute = { path = "crates/ember-compute" }
 ember-scheduler = { path = "crates/ember-scheduler" }
 ember-data = { path = "crates/ember-data" }
 ember-utils = { path = "crates/ember-utils" }

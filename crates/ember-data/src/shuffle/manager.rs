@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::cache::ShuffleCache;
-use crate::config::ShuffleConfig;
-use crate::error::ShuffleError;
+use crate::shuffle::cache::ShuffleCache;
+use crate::shuffle::config::ShuffleConfig;
+use crate::shuffle::error::{NetworkError, ShuffleError};
 use crossbeam::channel as cb_channel;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -28,9 +28,7 @@ fn get_free_connection(ip: Ipv4Addr) -> LibResult<(TcpListener, u16)> {
             return Ok((conn, port));
         }
     }
-    Err(ShuffleError::NetworkError(
-        crate::error::NetworkError::FreePortNotFound(port, 100),
-    ))
+    Err(ShuffleError::NetworkError(NetworkError::FreePortNotFound(port, 100)))
 }
 
 fn get_dynamic_port() -> u16 {
@@ -121,8 +119,7 @@ impl ShuffleManager {
     ) -> LibResult<(String, u16)> {
         let port = if let Some(bind_port) = port {
             let conn = TcpListener::bind(SocketAddr::from((bind_ip, bind_port))).map_err(|_| {
-                let err: ShuffleError =
-                    crate::error::NetworkError::FreePortNotFound(bind_port, 0).into();
+                let err: ShuffleError = NetworkError::FreePortNotFound(bind_port, 0).into();
                 err
             })?;
             Self::launch_async_server(conn, cache)?;

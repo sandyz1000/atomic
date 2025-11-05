@@ -4,7 +4,7 @@
 
 ---
 
-## ✨ Overview
+## Overview
 
 **Ember** is a distributed data processing framework written in **Rust**, inspired by **Apache Spark** — designed for type-safe, efficient, and resilient data processing.
 
@@ -70,7 +70,7 @@ Future: Distributed Mode with WASM Execution
 
 ---
 
-## 🧠 Key Concepts
+## Key Concepts
 
 * **RDD (Resilient Distributed Datasets)** — Immutable, partitioned collections that support transformations and actions
 * **Lazy Evaluation** — Transformations are recorded as a DAG and executed only when an action is called
@@ -108,7 +108,7 @@ fn main() -> Result<()> {
 
 ---
 
-## 🔧 Core Components
+## Core Components
 
 ### RDD Operations
 
@@ -157,11 +157,54 @@ The compiled `.wasm` module will be:
 2. Executed in isolated WASM sandbox
 3. Results streamed back to scheduler
 
-**Benefits:**
-* No unsafe code execution on workers
-* Deterministic behavior across architectures
-* Portable across ARM, x86, RISC-V
-* Memory-safe sandboxing
+---
+
+## Roadmap
+
+**Completed:**
+* [x] RDD API (transformations & actions)
+* [x] Local scheduler implementation
+* [x] Shuffle operations
+* [x] Cache tracking system
+* [x] Dependency management (narrow/shuffle)
+* [x] Task execution framework
+
+**In Progress:**
+* [ ] Distributed scheduler
+* [ ] Network communication layer
+* [ ] Result aggregation
+
+**Future:**
+* [ ] WASM sandbox execution for distributed mode
+* [ ] Checkpointing and recovery
+* [ ] Query optimizer (predicate pushdown, pipelining)
+* [ ] Python bindings for client API
+* [ ] Web dashboard (metrics + job UI)
+* [ ] Advanced shuffle optimizations
+
+---
+
+## 💡 Why WASM for Distributed Mode?
+
+| Feature     | Traditional | Ember (Future)   |
+| ----------- | ----------- | ---------------- |
+| Language    | JVM/Native  | Rust + WASM      |
+| Task Safety | JVM sandbox | WASM sandbox     |
+| Overhead    | Medium-High | Near-native      |
+| Portability | Limited     | Any architecture |
+| Edge Ready  | ❌           | ✅                |
+| Memory Safe | Depends     | ✅ Always         |
+
+**Key Advantages:**
+* **Security**: No unsafe code execution on workers
+* **Isolation**: Each task runs in its own sandbox
+* **Efficiency**: Near-native performance with safety guarantees
+
+---
+
+## Design Philosophy
+
+> "Ember brings Spark's proven RDD model to Rust, with a vision for WASM-powered distributed execution that prioritizes safety, portability, and efficiency."
 
 ---
 
@@ -178,24 +221,6 @@ The compiled `.wasm` module will be:
 
 ---
 
-## 💡 Why WASM?
-
-| Feature     | Spark       | Ember            |
-| ----------- | ----------- | ---------------- |
-| Language    | JVM         | Rust             |
-| Task Safety | JVM sandbox | WASM sandbox     |
-| Overhead    | High        | Near-native      |
-| Portability | JVM-only    | Any architecture |
-| Edge Ready  | ❌           | ✅                |
-
----
-
-## 🧠 Vision
-
-> “Spark redefined distributed compute for the JVM era.
-> Ember is here to redefine it for the WebAssembly era.”
-
----
 
 ## 📜 License
 

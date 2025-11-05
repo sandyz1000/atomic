@@ -3,7 +3,7 @@ use http_body_util::Full;
 use hyper::body::Bytes;
 use thiserror::Error;
 
-use crate::Body;
+use crate::shuffle::Body;
 
 #[derive(Debug, Error)]
 pub enum ShuffleError {

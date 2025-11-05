@@ -1,3 +1,7 @@
+use std::{rc::Weak, sync::Arc};
+use ember_data::dependency::Dependency;
+use crate::rdd::Context;
+
 pub struct RddVals {
     pub id: usize,
     pub dependencies: Vec<Dependency>,

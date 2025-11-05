@@ -8,8 +8,8 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
-use ember_compute::result::PartialResult;
-use ember_compute::{ApproximateActionListener, ApproximateEvaluator};
+use ember_data::partial::result::PartialResult;
+use ember_data::partial::{ApproximateActionListener, ApproximateEvaluator};
 use ember_data::task_context::TaskContext;
 use ember_data::data::Data;
 use ember_data::dependency::ShuffleDependencyBox;

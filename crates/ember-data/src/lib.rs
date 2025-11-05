@@ -7,6 +7,9 @@ pub mod partitioner;
 pub mod rdd;
 pub mod split;
 pub mod task;
+pub mod shuffle;
+pub mod cache;
+pub mod partial;
 
 
 pub use task_context::TaskContext;

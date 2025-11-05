@@ -3,9 +3,9 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::approx_eval::ApproximateEvaluator;
-use crate::error::PartialJobError;
-use crate::result::PartialResult;
+use crate::partial::approx_eval::ApproximateEvaluator;
+use crate::partial::error::PartialJobError;
+use crate::partial::result::PartialResult;
 use tokio::sync::Mutex;
 
 /// A JobListener for an approximate single-result action, such as count() or non-parallel reduce().

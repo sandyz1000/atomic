@@ -3,11 +3,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use ember_utils::bounded_double::BoundedDouble;
 
 use crate::{
-    data::Data,
-    dependency::Dependency,
-    error::BaseResult,
-    partitioner::Partitioner,
-    split::Split,
+    data::Data, dependency::Dependency, error::BaseResult, partitioner::Partitioner, split::Split,
 };
 
 pub trait RddBase: Send + Sync {
@@ -25,7 +21,7 @@ pub trait RddBase: Send + Sync {
     fn preferred_locations(&self, _split: Box<dyn Split>) -> Vec<std::net::Ipv4Addr> {
         Vec::new()
     }
-    fn partitioner(&self) -> Option<Box<dyn Partitioner>> {
+    fn partitioner(&self) -> Option<Partitioner> {
         None
     }
     fn splits(&self) -> Vec<Box<dyn Split>>;
@@ -36,17 +32,17 @@ pub trait RddBase: Send + Sync {
 
     // Analyse whether this is required or not. It requires downcasting while executing tasks which could hurt performance.
     // TODO: Rename the below method to use only the prefix noun and remove any suffix _any
-    // fn iterator_any(
-    //     &self,
-    //     split: Box<dyn Split>,
-    // ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>>;
+    fn iterator_any(
+        &self,
+        split: Box<dyn Split>,
+    ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>>;
 
-    // fn cogroup_iterator_any(
-    //     &self,
-    //     split: Box<dyn Split>,
-    // ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
-    //     self.iterator_any(split)
-    // }
+    fn cogroup_iterator_any(
+        &self,
+        split: Box<dyn Split>,
+    ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+        self.iterator_any(split)
+    }
 
     fn is_pinned(&self) -> bool {
         false
@@ -68,7 +64,6 @@ pub trait Rdd: RddBase + 'static {
 }
 
 pub trait RddOperation: Rdd {
-    
     /// Return a new RDD containing only the elements that satisfy a predicate.
     fn filter<F>(&self, predicate: F) -> Arc<dyn Rdd<Item = Self::Item>>;
 
@@ -343,7 +338,7 @@ pub trait RddOperation: Rdd {
     fn group_by_with_partitioner<K, F>(
         &self,
         func: F,
-        partitioner: Box<dyn Partitioner>,
+        partitioner: Box<Partitioner>,
     ) -> Arc<dyn Rdd<Item = (K, Vec<Self::Item>)>>
     where
         K: Data + std::hash::Hash + Eq,

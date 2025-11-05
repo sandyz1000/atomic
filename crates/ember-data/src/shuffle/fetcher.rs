@@ -1,6 +1,6 @@
 use super::error::ShuffleError;
-use crate::map_output::MapOutputTracker;
-use ember_data::data::Data;
+use crate::shuffle::map_output::MapOutputTracker;
+use crate::data::Data;
 use futures::future;
 use http_body_util::{BodyExt, Full};
 use hyper::Uri;

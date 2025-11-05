@@ -26,39 +26,10 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct ParallelCollectionSplit<T> {
-    rdd_id: i64,
-    index: usize,
-    values: Arc<Vec<T>>,
-}
-
-impl<T: Data> Split for ParallelCollectionSplit<T> {
-    fn get_index(&self) -> usize {
-        self.index
-    }
-}
-
-impl<T: Data> ParallelCollectionSplit<T> {
-    fn new(rdd_id: i64, index: usize, values: Arc<Vec<T>>) -> Self {
-        ParallelCollectionSplit {
-            rdd_id,
-            index,
-            values,
-        }
-    }
-    // Lot of unnecessary cloning is there. Have to refactor for better performance
-    fn iterator(&self) -> Box<dyn Iterator<Item = T>> {
-        let data = self.values.clone();
-        let len = data.len();
-        Box::new((0..len).map(move |i| data[i].clone()))
-    }
-}
 
 #[derive(Serialize, Deserialize)]
 pub struct ParallelCollectionVals<T> {
     vals: Arc<RddVals>,
-    #[serde(skip_serializing, skip_deserializing)]
     context: Weak<Context>,
     splits_: Vec<Arc<Vec<T>>>,
     num_slices: usize,
@@ -66,7 +37,6 @@ pub struct ParallelCollectionVals<T> {
 
 #[derive(Serialize, Deserialize)]
 pub struct ParallelCollection<T> {
-    #[serde(skip_serializing, skip_deserializing)]
     name: Mutex<String>,
     rdd_vals: Arc<ParallelCollectionVals<T>>,
 }

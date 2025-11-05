@@ -12,7 +12,7 @@ pub enum CacheError {
     BincodeDecode(#[from] bincode::error::DecodeError),
 
     #[error("Network error: {0}")]
-    Network(#[from] ember_shuffle::error::NetworkError),
+    Network(#[from] crate::shuffle::error::NetworkError),
 
     #[error("No message received")]
     NoMessageReceived,

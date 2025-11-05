@@ -1,4 +1,4 @@
-use ember_compute::PartialJobError;
+use ember_data::partial::PartialJobError;
 
 
 

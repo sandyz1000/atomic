@@ -85,21 +85,21 @@ impl<T: Data> RddBase for PartitionwiseSampledRdd<T> {
         }
     }
 
-    default fn cogroup_iterator_any(
+    fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
         self.iterator_any(split)
     }
 
-    default fn iterator_any(
+    fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         log::debug!("inside PartitionwiseSampledRdd iterator_any");
         Ok(Box::new(
             self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
+                .map(|x| Box::new(x) as Box<dyn Data>),
         ))
     }
 }
@@ -113,6 +113,25 @@ impl<T: Data, V: Data> RddBase for PartitionwiseSampledRdd<(T, V)> {
         Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
             Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
         })))
+    }
+    
+    fn get_rdd_id(&self) -> usize {
+        todo!()
+    }
+    
+    fn get_dependencies(&self) -> Vec<ember_data::dependency::Dependency> {
+        todo!()
+    }
+    
+    fn splits(&self) -> Vec<Box<dyn ember_data::split::Split>> {
+        todo!()
+    }
+    
+    fn iterator_any(
+        &self,
+        split: Box<dyn ember_data::split::Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn ember_data::data::Data>>>> {
+        todo!()
     }
 }
 
