@@ -1,25 +1,15 @@
-use crate::{error::Error, rdd::rdd_val::RddVals};
-use ember_data::{data::Data, dependency::Dependency, rdd::{Rdd, RddBase}};
+use crate::{context::RddContext, error::Error, rdd::rdd_val::RddVals};
+use ember_data::{
+    data::Data,
+    dependency::Dependency,
+    rdd::{Rdd, RddBase}, split::CartesianSplit,
+};
 
 use crate::context::Context;
 use ember_data::split::Split;
 use itertools::{Itertools, iproduct};
 use std::{marker::PhantomData, sync::Arc};
 
-#[derive(Clone)]
-struct CartesianSplit {
-    idx: usize,
-    s1_idx: usize,
-    s2_idx: usize,
-    s1: Box<dyn Split>,
-    s2: Box<dyn Split>,
-}
-
-impl Split for CartesianSplit {
-    fn get_index(&self) -> usize {
-        self.idx
-    }
-}
 
 pub struct CartesianRdd<T: Data, U: Data> {
     vals: Arc<RddVals>,
@@ -61,13 +51,15 @@ impl<T: Data, U: Data> Clone for CartesianRdd<T, U> {
     }
 }
 
+impl<T, U> RddContext for CartesianRdd<T, U> {
+    fn get_context(&self) -> Arc<Context> {
+        self.vals.context.upgrade().unwrap()
+    }
+}
+
 impl<T: Data, U: Data> RddBase for CartesianRdd<T, U> {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
-    }
-
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.context.upgrade().unwrap()
     }
 
     fn get_dependencies(&self) -> Vec<Dependency> {
@@ -92,9 +84,22 @@ impl<T: Data, U: Data> RddBase for CartesianRdd<T, U> {
         }
         array
     }
+
+    fn iterator_any(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+        Ok(Box::new(
+            self.iterator(split)?.map(|x| Box::new(x)),
+        ))
+    }
 }
 
-impl<T: Data, U: Data> Rdd for CartesianRdd<T, U> {
+impl<T, U> Rdd for CartesianRdd<T, U>
+where
+    T: Data + Clone,
+    U: Data + Clone,
+{
     type Item = (T, U);
 
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {

@@ -21,4 +21,3 @@ pub enum PartialJobError {
     DowncastFailure(String),
 }
 
-pub type ComputRes<T> = Result<T, PartialJobError>;

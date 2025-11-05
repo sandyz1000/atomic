@@ -1,5 +1,5 @@
-use crate::{approx_eval::ApproximateEvaluator, count_eval::bound};
-use ember_data::data::Data;
+use crate::partial::{approx_eval::ApproximateEvaluator, count_eval::bound};
+use crate::data::Data;
 use ember_utils::bounded_double::BoundedDouble;
 use std::collections::HashMap;
 use std::hash::Hash;

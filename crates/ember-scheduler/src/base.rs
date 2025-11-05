@@ -12,7 +12,7 @@ use ember_data::task::TaskOption;
 use ember_data::task::result::ResultTask;
 use ember_data::task::shuffle_map::ShuffleMapTask;
 use ember_data::task_context::TaskContext;
-use ember_shuffle::MapOutputTracker;
+use ember_data::shuffle::MapOutputTracker;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
@@ -112,7 +112,7 @@ pub trait NativeScheduler: Send + Sync {
                             | Dependency::Range { rdd_base, .. }
                             | Dependency::CoalescedSplitDep {
                                 rdd: rdd_base,
-                                prev,
+                                prev: _,
                             } => {
                                 log::debug!("narrow stage in missing stages");
                                 self.visit_for_missing_parent_stages(missing, visited, rdd_base)
@@ -150,7 +150,7 @@ pub trait NativeScheduler: Send + Sync {
                     | Dependency::Range { rdd_base, .. }
                     | Dependency::CoalescedSplitDep {
                         rdd: rdd_base,
-                        prev,
+                        prev: _,
                     } => {
                         self.visit_for_parent_stages(parents, visited, rdd_base)
                             .await?;
@@ -528,7 +528,9 @@ pub trait NativeScheduler: Send + Sync {
             }
             for dep in rdd.get_dependencies().iter() {
                 match dep {
-                    Dependency::OneToOne { .. } | Dependency::Range { .. } | Dependency::CoalescedSplitDep { .. }=> {
+                    Dependency::OneToOne { .. }
+                    | Dependency::Range { .. }
+                    | Dependency::CoalescedSplitDep { .. } => {
                         for in_part in dep.get_parents(partition) {
                             let locs = self.get_preferred_locs(dep.get_rdd_base(), in_part);
                             if !locs.is_empty() {

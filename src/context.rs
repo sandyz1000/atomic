@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use crate::error::{Error, Result};
 use crate::executor::{Executor, Signal};
 use crate::io::ReaderConfiguration;
-use ember_compute::ApproximateEvaluator;
+use ember_data::partial::ApproximateEvaluator;
 use ember_data::task_context::TaskContext;
 use ember_data::rdd::{Rdd, RddBase};
 use ember_scheduler::{DistributedScheduler, LocalScheduler, NativeScheduler, Schedulers};
@@ -27,7 +27,9 @@ use log::error;
 use once_cell::sync::OnceCell;
 use uuid::Uuid;
 
-
+pub trait RddContext {
+    fn get_context(&self) -> Arc<Context>;
+}
 
 #[derive(Default)]
 pub struct Context {

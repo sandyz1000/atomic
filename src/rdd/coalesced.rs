@@ -1,10 +1,9 @@
-use crate::context::Context;
+use crate::error::Result;
 use crate::rdd::rdd_val::RddVals;
-use ember_data::dependency::Dependency;
-use crate::error::{Error, Result};
 use crate::rdd::*;
 use crate::rdd::{Rdd, RddBase};
-use ember_data::split::Split;
+use ember_data::dependency::Dependency;
+use ember_data::split::{CoalescedRddSplit, PrefLoc, Split};
 use parking_lot::Mutex;
 use rand::Rng;
 use std::cmp::Ordering;
@@ -12,102 +11,6 @@ use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as SyncOrd};
-
-// /// Class that captures a coalesced RDD by essentially keeping track of parent partitions.
-// #[derive(Clone)]
-// struct CoalescedRddSplit {
-//     index: usize,
-//     rdd: Arc<dyn RddBase>,
-//     parent_indices: Vec<usize>,
-//     preferred_location: Option<PrefLoc>,
-// }
-
-// impl CoalescedRddSplit {
-//     fn new(
-//         index: usize,
-//         preferred_location: Option<PrefLoc>,
-//         rdd: Arc<dyn RddBase>,
-//         parent_indices: Vec<usize>,
-//     ) -> Self {
-//         CoalescedRddSplit {
-//             index,
-//             preferred_location,
-//             rdd,
-//             parent_indices,
-//         }
-//     }
-
-//     /// Computes the fraction of the parents partitions containing preferred_location within
-//     /// their preferred_locs.
-//     ///
-//     /// Returns locality of this coalesced partition between 0 and 1.
-//     fn local_fraction(&self) -> f64 {
-//         if self.parent_indices.is_empty() {
-//             0.0
-//         } else {
-//             let mut loc = 0u32;
-//             let pl: Ipv4Addr = self.preferred_location.unwrap().into();
-//             for p in self.rdd.splits() {
-//                 let parent_pref_locs = self.rdd.preferred_locations(p);
-//                 if parent_pref_locs.contains(&pl) {
-//                     loc += 1;
-//                 }
-//             }
-//             loc as f64 / self.parent_indices.len() as f64
-//         }
-//     }
-
-//     fn downcasting(split: Box<dyn Split>) -> Box<CoalescedRddSplit> {
-//         split
-//             .downcast::<CoalescedRddSplit>()
-//             .or(Err(Error::DowncastFailure("CoalescedRddSplit")))
-//             .unwrap()
-//     }
-// }
-
-// impl Split for CoalescedRddSplit {
-//     fn get_index(&self) -> usize {
-//         self.index
-//     }
-// }
-
-/// Dependency information for a coalesced split.
-///
-/// This struct maintains references to both the parent RDD and the previous RDD
-/// in the dependency chain for coalesced partitions.
-struct CoalescedSplitDep {
-    /// The RDD that this coalesced split depends on.
-    /// This is a reference to the base RDD in the dependency graph.
-    rdd: Arc<dyn RddBase>,
-    /// The previous RDD in the transformation chain.
-    /// Used to track the lineage of transformations leading to this coalesced split.
-    prev: Arc<dyn RddBase>,
-}
-
-impl CoalescedSplitDep {
-    fn new(rdd: Arc<dyn RddBase>, prev: Arc<dyn RddBase>) -> CoalescedSplitDep {
-        CoalescedSplitDep { rdd, prev }
-    }
-}
-
-impl NarrowDependencyTrait for CoalescedSplitDep {
-    fn get_parents(&self, partition_id: usize) -> Vec<usize> {
-        self.rdd
-            .splits()
-            .into_iter()
-            .enumerate()
-            .find(|(i, _)| i == &partition_id)
-            .map(|(_, p)| CoalescedRddSplit::downcasting(p))
-            .unwrap()
-            .parent_indices
-    }
-
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        // this method is called on the scheduler on get_preferred_locs
-        // and is expected to return the previous dependency
-        self.prev.clone()
-    }
-}
 
 /// Represents a coalesced RDD that has fewer partitions than its parent RDD
 ///
@@ -130,7 +33,8 @@ impl<T: Data> CoalescedRdd<T> {
     ///
     /// max_partitions: number of desired partitions in the coalesced RDD
     pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, max_partitions: usize) -> Self {
-        let vals = RddVals::new(prev.get_context());
+        let ctx = prev.get_context();
+        let vals = RddVals::new(ctx);
         CoalescedRdd {
             vals: Arc::new(vals),
             parent: prev,
@@ -162,25 +66,47 @@ impl<T: Data> RddBase for CoalescedRdd<T> {
         self.vals.id
     }
 
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.context.upgrade().unwrap()
+    fn iterator_any(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+        Ok(Box::new(
+            self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
+        ))
     }
 
     fn get_dependencies(&self) -> Vec<Dependency> {
-        vec![Dependency::NarrowDependency(
-            Arc::new(CoalescedSplitDep::new(
-                self.get_rdd_base(),
-                self.parent.get_rdd_base(),
-            )) as Arc<dyn NarrowDependencyTrait>,
-        )]
+        vec![Dependency::CoalescedSplitDep {
+            rdd: self.get_rdd_base(),
+            prev: self.parent.get_rdd_base(),
+        }]
     }
 
     /// Returns the preferred machine for the partition. If split is of type CoalescedRddSplit,
     /// then the preferred machine will be one which most parent splits prefer too.
     fn preferred_locations(&self, split: Box<dyn Split>) -> Vec<Ipv4Addr> {
-        let split = CoalescedRddSplit::downcasting(split);
-        if let Some(loc) = split.preferred_location {
-            vec![loc.into()]
+        // The preferred location is computed during split creation in splits()
+        // We need to look it up from the parent partitions
+        if let Ok(coalesced_split) = CoalescedRddSplit::downcasting(split) {
+            // Get the preferred locations from parent splits
+            let mut location_counts: HashMap<Ipv4Addr, usize> = HashMap::new();
+            for parent_idx in &coalesced_split.parent_indices {
+                if let Some(parent_split) = self.parent.splits().get(*parent_idx) {
+                    for loc in self
+                        .parent
+                        .get_rdd_base()
+                        .preferred_locations(parent_split.clone())
+                    {
+                        *location_counts.entry(loc).or_insert(0) += 1;
+                    }
+                }
+            }
+            // Return the most common location
+            location_counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(loc, _)| vec![loc])
+                .unwrap_or_default()
         } else {
             Vec::new()
         }
@@ -201,7 +127,7 @@ impl<T: Data> Rdd for CoalescedRdd<T> {
     }
 
     fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        let split = CoalescedRddSplit::downcasting(split);
+        let split = CoalescedRddSplit::downcasting(split)?;
         let mut iter = Vec::new();
         for (_, p) in self
             .parent
@@ -241,21 +167,6 @@ pub trait PartitionCoalescer: Send + Sync {
     /// `Partition`s and represents a partition after coalescing is performed.
     fn coalesce(self, max_partitions: usize, parent: Arc<dyn RddBase>) -> Vec<PartitionGroup>;
 }
-
-// #[derive(Debug, Clone, Copy)]
-// struct PrefLoc(u32);
-
-// impl Into<Ipv4Addr> for PrefLoc {
-//     fn into(self) -> Ipv4Addr {
-//         Ipv4Addr::from(self.0)
-//     }
-// }
-
-// impl From<Ipv4Addr> for PrefLoc {
-//     fn from(other: Ipv4Addr) -> PrefLoc {
-//         PrefLoc(other.into())
-//     }
-// }
 
 pub struct PartitionGroup {
     id: usize,
@@ -465,7 +376,7 @@ impl DefaultPartitionCoalescer {
     /// * target_len - the number of desired partition groups
     #[allow(clippy::map_entry)]
     fn setup_groups(&mut self, target_len: usize, partition_locs: &mut PartitionLocations) {
-        let mut rng = utils::random::get_default_rng();
+        let mut rng = ember_utils::random::get_default_rng();
         let part_cnt = AtomicUsize::new(0);
 
         // deal with empty case, just create target_len partition groups with no preferred location
@@ -549,7 +460,7 @@ impl DefaultPartitionCoalescer {
         prev: &dyn RddBase,
         balance_slack: f64,
     ) -> Arc<PSyncGroup> {
-        let mut rnd = utils::random::get_default_rng();
+        let mut rnd = ember_utils::random::get_default_rng();
         let slack = balance_slack * prev.number_of_splits() as f64;
 
         // least loaded pref_locs

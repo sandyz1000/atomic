@@ -9,9 +9,9 @@ use crate::context::Context;
 use ember_data::dependency::Dependency;
 use crate::error::{Error, Result};
 use crate::io::*;
-use crate::rdd::{MapPartitionsRdd, MapperRdd, Rdd, RddBase};
+use crate::rdd::{map_partitions::MapPartitionsRdd, mapper::MapperRdd, Rdd, RddBase};
 
-use ember_data::split::Split;
+use ember_data::split::{BytesReader, FileReader, Split};
 
 use log::debug;
 use rand::prelude::*;
@@ -299,54 +299,6 @@ impl<T> LocalFsReader<T> {
     }
 }
 
-
-#[derive(Clone, Debug)]
-pub struct BytesReader {
-    files: Vec<PathBuf>,
-    idx: usize,
-    host: Ipv4Addr,
-}
-
-impl Split for BytesReader {
-    fn get_index(&self) -> usize {
-        self.idx
-    }
-}
-
-impl Iterator for BytesReader {
-    type Item = Vec<u8>;
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(path) = self.files.pop() {
-            let file = fs::File::open(path).unwrap();
-            let mut content = vec![];
-            let mut reader = BufReader::new(file);
-            reader.read_to_end(&mut content).unwrap();
-            Some(content)
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct FileReader {
-    files: Vec<PathBuf>,
-    idx: usize,
-    host: Ipv4Addr,
-}
-
-impl Split for FileReader {
-    fn get_index(&self) -> usize {
-        self.idx
-    }
-}
-
-impl Iterator for FileReader {
-    type Item = PathBuf;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.files.pop()
-    }
-}
 
 #[cfg(test)]
 mod tests {

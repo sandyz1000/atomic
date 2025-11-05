@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use crate::error::PartialJobError;
+use crate::partial::error::PartialJobError;
 use parking_lot::Mutex;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;

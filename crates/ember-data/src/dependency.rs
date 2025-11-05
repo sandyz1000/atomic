@@ -215,7 +215,7 @@ where
     /// Typed aggregator
     aggregator: Arc<Aggregator<K, V, C>>,
     /// Partitioner for determining output partitions
-    partitioner: Box<dyn Partitioner>,
+    partitioner: Partitioner,
     _phantom: std::marker::PhantomData<(K, V, C)>,
 }
 
@@ -231,7 +231,7 @@ where
         is_cogroup: bool,
         rdd: Arc<dyn crate::rdd::Rdd<Item = (K, V)>>,
         aggregator: Arc<Aggregator<K, V, C>>,
-        partitioner: Box<dyn Partitioner>,
+        partitioner: Partitioner,
     ) -> Arc<Self> {
         Arc::new(ShuffleDependency {
             shuffle_id,

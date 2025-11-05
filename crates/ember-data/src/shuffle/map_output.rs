@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::error::NetworkError;
+use crate::shuffle::error::NetworkError;
 use dashmap::{DashMap, DashSet};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;

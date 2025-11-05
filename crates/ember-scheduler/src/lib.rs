@@ -7,7 +7,7 @@ pub mod listener;
 pub mod local;
 pub mod stage;
 
-use ember_compute::{ApproximateEvaluator, result::PartialResult};
+use ember_data::partial::{ApproximateEvaluator, result::PartialResult};
 use ember_data::{task_context::TaskContext, data::Data, rdd::Rdd};
 use std::sync::Arc;
 

@@ -1,4 +1,4 @@
-use crate::{approx_eval::ApproximateEvaluator};
+use crate::partial::{approx_eval::ApproximateEvaluator};
 use ember_utils::bounded_double::BoundedDouble;
 use statrs::{distribution::Poisson, statistics::{Distribution, MeanN}};
 

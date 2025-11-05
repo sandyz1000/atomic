@@ -2,23 +2,21 @@ use std::marker::PhantomData;
 use std::net::Ipv4Addr;
 use std::sync::{atomic::AtomicBool, atomic::Ordering::SeqCst, Arc};
 
-use crate::context::Context;
-use crate::dependency::{Dependency, OneToOneDependency};
+use crate::context::{Context, RddContext};
+use ember_data::dependency::{Dependency, OneToOneDependency};
 use crate::error::Result;
-use crate::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::{AnyData, Data, Func, SerFunc};
-use crate::split::Split;
+use crate::rdd::rdd_val::RddVals;
+use crate::rdd::{Rdd, RddBase};
+use ember_data::split::Split;
+use ember_data::data::Data;
 use parking_lot::Mutex;
-use serde_derive::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+
 pub struct MapperRdd<T: Data, U: Data, F>
 where
-    F: Func(T) -> U + Clone,
+    F: Fn(T) -> U + Clone,
 {
-    #[serde(skip_serializing, skip_deserializing)]
     name: Mutex<String>,
-    #[serde(with = "serde_traitobject")]
     prev: Arc<dyn Rdd<Item = T>>,
     vals: Arc<RddVals>,
     f: F,
@@ -29,7 +27,7 @@ where
 // Can't derive clone automatically
 impl<T: Data, U: Data, F> Clone for MapperRdd<T, U, F>
 where
-    F: Func(T) -> U + Clone,
+    F: Fn(T) -> U + Clone,
 {
     fn clone(&self) -> Self {
         MapperRdd {
@@ -45,7 +43,7 @@ where
 
 impl<T: Data, U: Data, F> MapperRdd<T, U, F>
 where
-    F: SerFunc(T) -> U,
+    F: Fn(T) -> U,
 {
     pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
         let mut vals = RddVals::new(prev.get_context());
@@ -70,16 +68,18 @@ where
     }
 }
 
+impl<T, U, F> RddContext for MapperRdd<T, U, F> {
+    fn get_context(&self) -> Arc<Context> {
+        self.vals.context.upgrade().unwrap()
+    }
+}
+
 impl<T: Data, U: Data, F> RddBase for MapperRdd<T, U, F>
 where
-    F: SerFunc(T) -> U,
+    F: Fn(T) -> U,
 {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
-    }
-
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.context.upgrade().unwrap()
     }
 
     fn get_op_name(&self) -> String {
@@ -107,21 +107,20 @@ where
         self.prev.number_of_splits()
     }
 
-    default fn cogroup_iterator_any(
+    fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         self.iterator_any(split)
     }
 
-    default fn iterator_any(
+    fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         log::debug!("inside iterator_any maprdd",);
         Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
+            self.iterator(split)?.map(|x| Box::new(x) ),
         ))
     }
 
@@ -132,22 +131,40 @@ where
 
 impl<T: Data, V: Data, U: Data, F> RddBase for MapperRdd<T, (V, U), F>
 where
-    F: SerFunc(T) -> (V, U),
+    F: Fn(T) -> (V, U),
 {
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         log::debug!("inside iterator_any maprdd",);
-        Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
-        })))
+        let val = Box::new(self.iterator(split)?.map(|(k, v)| Box::new((k, Box::new(v)))));
+        Ok(val)
+    }
+    
+    fn get_rdd_id(&self) -> usize {
+        todo!()
+    }
+    
+    fn get_dependencies(&self) -> Vec<Dependency> {
+        todo!()
+    }
+    
+    fn splits(&self) -> Vec<Box<dyn Split>> {
+        todo!()
+    }
+    
+    fn iterator_any(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+        todo!()
     }
 }
 
 impl<T: Data, U: Data, F: 'static> Rdd for MapperRdd<T, U, F>
 where
-    F: SerFunc(T) -> U,
+    F: Fn(T) -> U,
 {
     type Item = U;
     fn get_rdd_base(&self) -> Arc<dyn RddBase> {

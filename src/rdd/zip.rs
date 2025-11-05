@@ -2,37 +2,16 @@ use std::cmp::min;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::context::Context;
-use crate::dependency::{Dependency, OneToOneDependency};
+use crate::context::{Context, RddContext};
 use crate::error::{Error, Result};
-use crate::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::{AnyData, Data};
-use crate::split::Split;
-use serde_derive::{Deserialize, Serialize};
+use crate::rdd::rdd_val::RddVals;
+use crate::rdd::{Rdd, RddBase};
+use ember_data::data::Data;
+use ember_data::dependency::Dependency;
+use ember_data::split::{Split, ZippedPartitionsSplit};
 
-#[derive(Clone, Serialize, Deserialize)]
-struct ZippedPartitionsSplit {
-    fst_idx: usize,
-    sec_idx: usize,
-    idx: usize,
-
-    #[serde(with = "serde_traitobject")]
-    fst_split: Box<dyn Split>,
-    #[serde(with = "serde_traitobject")]
-    sec_split: Box<dyn Split>,
-}
-
-impl Split for ZippedPartitionsSplit {
-    fn get_index(&self) -> usize {
-        self.idx
-    }
-}
-
-#[derive(Serialize, Deserialize)]
 pub struct ZippedPartitionsRdd<F: Data, S: Data> {
-    #[serde(with = "serde_traitobject")]
     first: Arc<dyn Rdd<Item = F>>,
-    #[serde(with = "serde_traitobject")]
     second: Arc<dyn Rdd<Item = S>>,
     vals: Arc<RddVals>,
     _marker_t: PhantomData<(F, S)>,
@@ -49,13 +28,15 @@ impl<F: Data, S: Data> Clone for ZippedPartitionsRdd<F, S> {
     }
 }
 
+impl<F, S> RddContext for ZippedPartitionsRdd<F, S> {
+    fn get_context(&self) -> Arc<Context> {
+        self.vals.context.upgrade().unwrap()
+    }
+}
+
 impl<F: Data, S: Data> RddBase for ZippedPartitionsRdd<F, S> {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
-    }
-
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.context.upgrade().unwrap()
     }
 
     fn get_dependencies(&self) -> Vec<Dependency> {
@@ -90,22 +71,23 @@ impl<F: Data, S: Data> RddBase for ZippedPartitionsRdd<F, S> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
-        Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn AnyData>),
-        ))
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+        Ok(Box::new(self.iterator(split)?.map(|x| Box::new(x))))
     }
 
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         self.iterator_any(split)
     }
 }
 
-impl<F: Data, S: Data> Rdd for ZippedPartitionsRdd<F, S> {
+impl<F, S> Rdd for ZippedPartitionsRdd<F, S>
+where
+    F: Data + Clone,
+    S: Data + Clone,
+{
     type Item = (F, S);
 
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
@@ -135,9 +117,7 @@ impl<F: Data, S: Data> ZippedPartitionsRdd<F, S> {
     pub fn new(first: Arc<dyn Rdd<Item = F>>, second: Arc<dyn Rdd<Item = S>>) -> Self {
         let mut vals = RddVals::new(first.get_context());
         vals.dependencies
-            .push(Dependency::NarrowDependency(Arc::new(
-                OneToOneDependency::new(first.get_rdd_base()),
-            )));
+            .push(Dependency::new_one_to_one(first.get_rdd_base()));
         let vals = Arc::new(vals);
 
         ZippedPartitionsRdd {
