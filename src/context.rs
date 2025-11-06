@@ -13,7 +13,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use crate::error::{Error, Result};
+use crate::error::{Error, LibResult};
 use crate::executor::{Executor, Signal};
 use crate::io::ReaderConfiguration;
 use ember_data::partial::ApproximateEvaluator;

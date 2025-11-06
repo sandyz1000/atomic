@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::context::{Context, RddContext};
-use crate::error::Result;
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use ember_data::aggregator::Aggregator;
 use ember_data::data::Data;
 use ember_data::dependency::{Dependency, ShuffleDependency};
+use ember_data::error::BaseError;
 use ember_data::partitioner::Partitioner;
 use ember_data::shuffle::fetcher::ShuffleFetcher;
 use ember_data::split::{ShuffledRddSplit, Split};
@@ -45,15 +45,13 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> ShuffledRdd<K, V, C> {
         let mut vals = RddVals::new(ctx);
 
         vals.dependencies
-            .push(Dependency::ShuffleDependency(Arc::new(
-                ShuffleDependency::new(
-                    shuffle_id,
-                    false,
-                    parent.get_rdd_base(),
-                    aggregator.clone(),
-                    part.clone(),
-                ),
-            )));
+            .push(Dependency::Shuffle(Arc::new(ShuffleDependency::new(
+                shuffle_id,
+                false,
+                parent.get_rdd_base(),
+                aggregator.clone(),
+                part.clone(),
+            ))));
         let vals = Arc::new(vals);
         ShuffledRdd {
             parent,
@@ -67,7 +65,7 @@ impl<K: Data + Eq + Hash, V: Data, C: Data> ShuffledRdd<K, V, C> {
 
 impl<K, V, C> RddContext for ShuffleDependency<K, V, C> {
     fn get_context(&self) -> Arc<Context> {
-        self.vals.context.upgrade().unwrap()
+        self.vals.get_context()
     }
 }
 
@@ -102,7 +100,7 @@ where
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside iterator_any shuffledrdd",);
         Ok(Box::new(
             self.iterator(split)?.map(|(k, v)| Box::new((k, v))),
@@ -112,7 +110,7 @@ where
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside cogroup iterator_any shuffledrdd",);
         Ok(Box::new(
             self.iterator(split)?
@@ -137,7 +135,7 @@ where
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         log::debug!("compute inside shuffled rdd");
         let start = Instant::now();
 

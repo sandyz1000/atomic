@@ -1,13 +1,13 @@
-pub mod typed;
+// pub mod typed;
 pub mod map_partitions;
 pub mod cartesian;
 pub mod coalesced;
 pub mod co_grouped;
 pub mod flatmapper;
 pub mod mapper;
-pub mod union;
+pub mod union_rdd;
 pub mod zip;
-pub mod shuffle;
+pub mod shuffled;
 pub mod pair;
 pub mod parallel_collection;
 pub mod partitionwise_sampled;

@@ -1,12 +1,14 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use ember_compute::PartialJobError;
-use ember_shuffle::error::{NetworkError, ShuffleError};
-use ember_shuffle::map_output::MapOutputError;
+use ember_data::partial::PartialJobError;
+use ember_data::shuffle::{
+    error::{NetworkError, ShuffleError},
+    map_output::MapOutputError,
+};
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type LibResult<T> = std::result::Result<T, Error>;
 pub type StdResult<T, E> = std::result::Result<T, E>;
 
 #[derive(Debug, Error)]
@@ -40,7 +42,6 @@ pub enum Error {
 
     // #[error(transparent)]
     // CapnpDeserialization(#[from] capnp::Error),
-
     #[error("failure while downcasting an object to a concrete type: {0}")]
     DowncastFailure(&'static str),
 
@@ -131,7 +132,6 @@ impl Error {
 //     #[error(transparent)]
 //     TcpListener(#[from] tokio::io::Error),
 // }
-
 
 // #[derive(Debug, Error)]
 // pub enum MapOutputError {

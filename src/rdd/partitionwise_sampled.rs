@@ -1,21 +1,19 @@
-use crate::context::Context;
-use crate::dependency::{Dependency, OneToOneDependency};
-use crate::error::Result;
-use crate::partitioner::Partitioner;
-use crate::rdd::{Rdd, RddBase, RddVals};
-use crate::serializable_traits::{AnyData, Data};
-use crate::split::Split;
-use crate::utils::random::RandomSampler;
-use serde_derive::{Deserialize, Serialize};
+use crate::context::{Context, RddContext};
+use crate::rdd::rdd_val::RddVals;
+use crate::rdd::{Rdd, RddBase};
+use ember_data::data::Data;
+use ember_data::dependency::Dependency;
+use ember_data::error::BaseError;
+use ember_data::partitioner::Partitioner;
+use ember_data::split::Split;
+use ember_utils::random::RandomSampler;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-#[derive(Serialize, Deserialize)]
+// #[derive(Serialize, Deserialize)]
 pub struct PartitionwiseSampledRdd<T: Data> {
-    #[serde(with = "serde_traitobject")]
     prev: Arc<dyn Rdd<Item = T>>,
     vals: Arc<RddVals>,
-    #[serde(with = "serde_traitobject")]
     sampler: Arc<dyn RandomSampler<T>>,
     preserves_partitioning: bool,
     _marker_t: PhantomData<T>,
@@ -28,10 +26,9 @@ impl<T: Data> PartitionwiseSampledRdd<T> {
         preserves_partitioning: bool,
     ) -> Self {
         let mut vals = RddVals::new(prev.get_context());
-        vals.dependencies
-            .push(Dependency::NarrowDependency(Arc::new(
-                OneToOneDependency::new(prev.get_rdd_base()),
-            )));
+        vals.dependencies.push(Dependency::OneToOne {
+            rdd_base: prev.get_rdd_base(),
+        });
         let vals = Arc::new(vals);
 
         PartitionwiseSampledRdd {
@@ -56,13 +53,15 @@ impl<T: Data> Clone for PartitionwiseSampledRdd<T> {
     }
 }
 
+impl<T: Data + Clone> RddContext for PartitionwiseSampledRdd<T> {
+    fn get_context(&self) -> Arc<Context> {
+        self.vals.get_context()
+    }
+}
+
 impl<T: Data> RddBase for PartitionwiseSampledRdd<T> {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
-    }
-
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.context.upgrade().unwrap()
     }
 
     fn get_dependencies(&self) -> Vec<Dependency> {
@@ -77,7 +76,7 @@ impl<T: Data> RddBase for PartitionwiseSampledRdd<T> {
         self.prev.number_of_splits()
     }
 
-    fn partitioner(&self) -> Option<Box<dyn Partitioner>> {
+    fn partitioner(&self) -> Option<Partitioner> {
         if self.preserves_partitioning {
             self.prev.partitioner()
         } else {
@@ -88,50 +87,18 @@ impl<T: Data> RddBase for PartitionwiseSampledRdd<T> {
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         self.iterator_any(split)
     }
 
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside PartitionwiseSampledRdd iterator_any");
         Ok(Box::new(
-            self.iterator(split)?
-                .map(|x| Box::new(x) as Box<dyn Data>),
+            self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
-    }
-}
-
-impl<T: Data, V: Data> RddBase for PartitionwiseSampledRdd<(T, V)> {
-    fn cogroup_iterator_any(
-        &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
-        log::debug!("inside PartitionwiseSampledRdd cogroup_iterator_any",);
-        Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
-        })))
-    }
-    
-    fn get_rdd_id(&self) -> usize {
-        todo!()
-    }
-    
-    fn get_dependencies(&self) -> Vec<ember_data::dependency::Dependency> {
-        todo!()
-    }
-    
-    fn splits(&self) -> Vec<Box<dyn ember_data::split::Split>> {
-        todo!()
-    }
-    
-    fn iterator_any(
-        &self,
-        split: Box<dyn ember_data::split::Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn ember_data::data::Data>>>> {
-        todo!()
     }
 }
 
@@ -145,7 +112,7 @@ impl<T: Data> Rdd for PartitionwiseSampledRdd<T> {
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let sampler_func = self.sampler.get_sampler(None);
         let iter = self.prev.iterator(split)?;
         Ok(Box::new(sampler_func(iter).into_iter()) as Box<dyn Iterator<Item = T>>)

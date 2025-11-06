@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::data::Data;
 
-fn hash<T: Hash>(t: &T) -> u64 {
+pub fn hash<T: Hash>(t: &T) -> u64 {
     let mut s: FxHasher = Default::default();
     t.hash(&mut s);
     s.finish()

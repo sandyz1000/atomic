@@ -202,12 +202,7 @@ impl Ord for ShuffleDependencyBox {
 
 /// Generic shuffle dependency with full type information
 /// This struct is fully typed and doesn't require iterator_any or unsafe downcasting
-pub struct ShuffleDependency<K, V, C>
-where
-    K: Data + Clone,
-    V: Data + Clone,
-    C: Data + Clone,
-{
+pub struct ShuffleDependency<K: Data, V: Data, C: Data> {
     shuffle_id: usize,
     is_cogroup_flag: bool,
     /// Typed RDD - we know it produces (K, V) tuples
@@ -221,9 +216,11 @@ where
 
 impl<K, V, C> ShuffleDependency<K, V, C>
 where
-    K: Data + Clone + Eq + Hash + Encode,
+    K: Eq + Hash + Encode + Clone,
+    C: Encode + Clone,
+    K: Data,
     V: Data + Clone,
-    C: Data + Clone + Encode,
+    C: Data,
 {
     /// Create a new shuffle dependency
     pub fn new(
@@ -282,8 +279,7 @@ where
                     let bucket = &mut buckets[bucket_id];
 
                     if let Some(old_v) = bucket.get_mut(&k) {
-                        let output = (self.aggregator.merge_value)((old_v.clone(), v));
-                        *old_v = output;
+                        (self.aggregator.merge_value)(old_v, v);
                     } else {
                         bucket.insert(k, (self.aggregator.create_combiner)(v));
                     }
@@ -331,9 +327,9 @@ where
 /// Convert typed ShuffleDependency to type-erased ShuffleDependencyBox
 impl<K, V, C> From<Arc<ShuffleDependency<K, V, C>>> for ShuffleDependencyBox
 where
-    K: Data + Clone + Eq + Hash + Encode,
+    K: Data + Eq + Hash + Encode + Clone,
     V: Data + Clone,
-    C: Data + Clone + Encode,
+    C: Data + Encode + Clone,
 {
     fn from(dep: Arc<ShuffleDependency<K, V, C>>) -> Self {
         let cloned = Arc::clone(&dep);
