@@ -1,12 +1,13 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
+use ember_data::error::BaseError;
 use itertools::{Itertools, MinMaxResult};
 
 use crate::context::{Context, RddContext};
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::rdd::rdd_val::RddVals;
-use crate::rdd::union::UnionVariants::{NonUniquePartitioner, PartitionerAware};
+use crate::rdd::union_rdd::UnionVariants::{NonUniquePartitioner, PartitionerAware};
 use crate::rdd::*;
 use ember_data::dependency::Dependency;
 use ember_data::partitioner::Partitioner;
@@ -18,12 +19,12 @@ impl<T> UnionRdd<T>
 where
     T: Data,
 {
-    pub(crate) fn new(rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self> {
+    pub fn new(rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self, Error> {
         Ok(UnionRdd(UnionVariants::new(rdds)?))
     }
 }
 
-enum UnionVariants<T: 'static> {
+pub enum UnionVariants<T: 'static> {
     NonUniquePartitioner {
         rdds: Vec<Arc<dyn Rdd<Item = T>>>,
         vals: Arc<RddVals>,
@@ -57,7 +58,7 @@ impl<T: Data> Clone for UnionVariants<T> {
 }
 
 impl<T: Data> UnionVariants<T> {
-    fn new(rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self> {
+    fn new(rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self, Error> {
         let context = rdds[0].get_context();
         let mut vals = RddVals::new(context);
 
@@ -137,8 +138,8 @@ impl<T: Data> UnionVariants<T> {
 impl<T> RddContext for UnionRdd<T> {
     fn get_context(&self) -> Arc<Context> {
         match &self.0 {
-            NonUniquePartitioner { vals, .. } => vals.context.upgrade().unwrap(),
-            PartitionerAware { vals, .. } => vals.context.upgrade().unwrap(),
+            NonUniquePartitioner { vals, .. } => vals.get_context(),
+            PartitionerAware { vals, .. } => vals.get_context(),
         }
     }
 }
@@ -240,7 +241,7 @@ impl<T: Data> RddBase for UnionRdd<T> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside iterator_any union_rdd",);
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
@@ -266,7 +267,7 @@ impl<T: Data> Rdd for UnionRdd<T> {
         Arc::new(UnionRdd(self.0.clone())) as Arc<dyn Rdd<Item = T>>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = T>>> {
+    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = T>>, BaseError> {
         match &self.0 {
             NonUniquePartitioner { rdds, .. } => {
                 let part = &*split

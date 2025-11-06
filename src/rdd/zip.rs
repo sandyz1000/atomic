@@ -3,21 +3,30 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::context::{Context, RddContext};
-use crate::error::{Error, Result};
+use crate::error::{Error};
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use ember_data::data::Data;
 use ember_data::dependency::Dependency;
+use ember_data::error::BaseError;
 use ember_data::split::{Split, ZippedPartitionsSplit};
 
-pub struct ZippedPartitionsRdd<F: Data, S: Data> {
+pub struct ZippedPartitionsRdd<F, S>
+where
+    F: Data + Clone,
+    S: Data + Clone,
+{
     first: Arc<dyn Rdd<Item = F>>,
     second: Arc<dyn Rdd<Item = S>>,
     vals: Arc<RddVals>,
     _marker_t: PhantomData<(F, S)>,
 }
 
-impl<F: Data, S: Data> Clone for ZippedPartitionsRdd<F, S> {
+impl<F, S> Clone for ZippedPartitionsRdd<F, S>
+where
+    F: Data + Clone,
+    S: Data + Clone,
+{
     fn clone(&self) -> Self {
         ZippedPartitionsRdd {
             first: self.first.clone(),
@@ -28,13 +37,21 @@ impl<F: Data, S: Data> Clone for ZippedPartitionsRdd<F, S> {
     }
 }
 
-impl<F, S> RddContext for ZippedPartitionsRdd<F, S> {
+impl<F, S> RddContext for ZippedPartitionsRdd<F, S>
+where
+    F: Data + Clone,
+    S: Data + Clone,
+{
     fn get_context(&self) -> Arc<Context> {
-        self.vals.context.upgrade().unwrap()
+        self.vals.get_context()
     }
 }
 
-impl<F: Data, S: Data> RddBase for ZippedPartitionsRdd<F, S> {
+impl<F, S> RddBase for ZippedPartitionsRdd<F, S>
+where
+    F: Data + Clone,
+    S: Data + Clone,
+{
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -71,14 +88,14 @@ impl<F: Data, S: Data> RddBase for ZippedPartitionsRdd<F, S> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         Ok(Box::new(self.iterator(split)?.map(|x| Box::new(x))))
     }
 
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         self.iterator_any(split)
     }
 }
@@ -98,7 +115,10 @@ where
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let current_split = split
             .downcast::<ZippedPartitionsSplit>()
             .or(Err(Error::DowncastFailure("ZippedPartitionsSplit")))?;
@@ -108,12 +128,15 @@ where
         Ok(Box::new(fst_iter.zip(sec_iter)))
     }
 
-    fn iterator(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn iterator(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         self.compute(split.clone())
     }
 }
 
-impl<F: Data, S: Data> ZippedPartitionsRdd<F, S> {
+impl<F: Data + Clone, S: Data + Clone> ZippedPartitionsRdd<F, S> {
     pub fn new(first: Arc<dyn Rdd<Item = F>>, second: Arc<dyn Rdd<Item = S>>) -> Self {
         let mut vals = RddVals::new(first.get_context());
         vals.dependencies

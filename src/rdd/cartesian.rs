@@ -1,15 +1,16 @@
-use crate::{context::RddContext, error::Error, rdd::rdd_val::RddVals};
+use crate::{context::RddContext, rdd::rdd_val::RddVals};
 use ember_data::{
     data::Data,
     dependency::Dependency,
-    rdd::{Rdd, RddBase}, split::CartesianSplit,
+    error::BaseError,
+    rdd::{Rdd, RddBase},
+    split::CartesianSplit,
 };
 
 use crate::context::Context;
 use ember_data::split::Split;
 use itertools::{Itertools, iproduct};
 use std::{marker::PhantomData, sync::Arc};
-
 
 pub struct CartesianRdd<T: Data, U: Data> {
     vals: Arc<RddVals>,
@@ -22,10 +23,11 @@ pub struct CartesianRdd<T: Data, U: Data> {
 
 impl<T: Data, U: Data> CartesianRdd<T, U> {
     pub(crate) fn new(
+        context: Arc<Context>,
         rdd1: Arc<dyn Rdd<Item = T>>,
         rdd2: Arc<dyn Rdd<Item = U>>,
     ) -> CartesianRdd<T, U> {
-        let vals = Arc::new(RddVals::new(rdd1.get_context()));
+        let vals = Arc::new(RddVals::new(context));
         let num_partitions_in_rdd2 = rdd2.number_of_splits();
         CartesianRdd {
             vals,
@@ -51,13 +53,17 @@ impl<T: Data, U: Data> Clone for CartesianRdd<T, U> {
     }
 }
 
-impl<T, U> RddContext for CartesianRdd<T, U> {
+impl<T, U> RddContext for CartesianRdd<T, U>
+where
+    T: Data + Clone,
+    U: Data + Clone,
+{
     fn get_context(&self) -> Arc<Context> {
-        self.vals.context.upgrade().unwrap()
+        self.vals.get_context()
     }
 }
 
-impl<T: Data, U: Data> RddBase for CartesianRdd<T, U> {
+impl<T: Data + Clone, U: Data + Clone> RddBase for CartesianRdd<T, U> {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -88,18 +94,14 @@ impl<T: Data, U: Data> RddBase for CartesianRdd<T, U> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         Ok(Box::new(
-            self.iterator(split)?.map(|x| Box::new(x)),
+            self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
     }
 }
 
-impl<T, U> Rdd for CartesianRdd<T, U>
-where
-    T: Data + Clone,
-    U: Data + Clone,
-{
+impl<T: Data + Clone, U: Data + Clone> Rdd for CartesianRdd<T, U> {
     type Item = (T, U);
 
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
@@ -110,10 +112,14 @@ where
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let current_split = split
-            .downcast::<CartesianSplit>()
-            .or(Err(Error::DowncastFailure("CartesianSplit")))?;
+            .as_any()
+            .downcast_ref::<CartesianSplit>()
+            .ok_or_else(|| BaseError::DowncastFailure("CartesianSplit".to_string()))?;
 
         let iter1 = self.rdd1.iterator(current_split.s1)?;
         // required because iter2 must be clonable:

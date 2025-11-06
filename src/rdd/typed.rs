@@ -1,21 +1,21 @@
 use crate::partial::bounded_double::BoundedDouble;
+use crate::partial::group_count_eval::GroupedCountEvaluator;
 use crate::partial::result::PartialResult;
 use crate::rdd::RddOperation;
 use crate::rdd::cartesian::CartesianRdd;
+use crate::rdd::coalesced::CoalescedRdd;
 use crate::rdd::map_partitions::MapPartitionsRdd;
+use crate::split::Split;
 use crate::task::TaskContext;
 use crate::{
     rdd::{Data, Rdd, RddBase},
     utils::bpq::BoundedPriorityQueue,
 };
 use rustc_hash::FxHasher;
-use std::hash::Hasher;
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use crate::split::Split;
-use crate::rdd::coalesced::CoalescedRdd;
-use crate::partial::group_count_eval::GroupedCountEvaluator;
 
 /// Type alias for Arc-wrapped RDD trait objects
 pub type RddRef<T> = Arc<dyn Rdd<Item = T>>;
@@ -29,17 +29,17 @@ impl<T> TypedRdd<T> {
     pub fn new(rdd: RddRef<T>) -> Self {
         Self {
             rdd,
-            _marker: PhantomData
+            _marker: PhantomData,
         }
     }
 }
 
-impl <D> Rdd for TypedRdd<D>
+impl<D> Rdd for TypedRdd<D>
 where
-    D: Data + Ord + Eq + std::hash::Hash
+    D: Data + Ord + Eq + std::hash::Hash,
 {
     type Item = D;
-    
+
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
         todo!()
     }
@@ -52,7 +52,6 @@ where
         todo!()
     }
 }
-
 
 impl<D: Data + Ord + Eq + std::hash::Hash> RddOperation for TypedRdd<D> {
     type Item = D;
@@ -115,8 +114,6 @@ impl<D: Data + Ord + Eq + std::hash::Hash> RddOperation for TypedRdd<D> {
         }
     }
 
-    
-
     fn iterator(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         self.compute(split)
     }
@@ -159,7 +156,7 @@ impl<D: Data + Ord + Eq + std::hash::Hash> RddOperation for TypedRdd<D> {
     fn glom(&self) -> Arc<dyn Rdd<Item = Vec<Self::Item>>> {
         let func = |_index: usize, iter: Box<dyn Iterator<Item = Self::Item>>| {
             Box::new(std::iter::once(iter.collect::<Vec<_>>()))
-                // as Box<dyn Iterator<Item = Vec<Self::Item>>>
+            // as Box<dyn Iterator<Item = Vec<Self::Item>>>
         };
         let rdd = MapPartitionsRdd::new(self.get_rdd(), Box::new(func));
         rdd.register_op_name("gloom");
@@ -216,11 +213,14 @@ impl<D: Data + Ord + Eq + std::hash::Hash> RddOperation for TypedRdd<D> {
         &self,
         other: Arc<dyn Rdd<Item = U>>,
     ) -> Arc<dyn Rdd<Item = (Self::Item, U)>> {
-        Arc::new(CartesianRdd::new(self.get_rdd(), other.into()))
+        Arc::new(CartesianRdd::new(
+            self.get_context(),
+            self.get_rdd(),
+            other.into(),
+        ))
     }
 
     fn coalesce(&self, num_partitions: usize, shuffle: bool) -> Arc<dyn Rdd<Item = Self::Item>> {
-        
         if shuffle {
             // Distributes elements evenly across output partitions, starting from a random partition.
             let distributed_partition =
@@ -817,5 +817,4 @@ impl<D: Data + Ord + Eq + std::hash::Hash> RddOperation for TypedRdd<D> {
         let min_fn = |x: Self::Item, y: Self::Item| x.min(y);
         self.reduce(min_fn)
     }
-
 }

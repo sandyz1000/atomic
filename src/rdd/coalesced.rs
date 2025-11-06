@@ -1,8 +1,8 @@
-use crate::error::Result;
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::*;
 use crate::rdd::{Rdd, RddBase};
 use ember_data::dependency::Dependency;
+use ember_data::error::BaseError;
 use ember_data::split::{CoalescedRddSplit, PrefLoc, Split};
 use parking_lot::Mutex;
 use rand::Rng;
@@ -69,7 +69,7 @@ impl<T: Data> RddBase for CoalescedRdd<T> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
@@ -126,7 +126,7 @@ impl<T: Data> Rdd for CoalescedRdd<T> {
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let split = CoalescedRddSplit::downcasting(split)?;
         let mut iter = Vec::new();
         for (_, p) in self

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::env;
-use crate::error::{Error, NetworkError, Result};
+use crate::error::{Error, Result};
 use crate::task::TaskOption;
 // use crate::serialized_data_capnp::serialized_data;
 // use capnp::{

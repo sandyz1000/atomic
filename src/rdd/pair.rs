@@ -2,15 +2,16 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::aggregator::Aggregator;
-use crate::context::Context;
-use crate::dependency::{Dependency, OneToOneDependency};
+use crate::context::{Context, RddContext};
 use crate::error::Result;
-use crate::rdd::co_grouped_rdd::CoGroupedRdd;
-use crate::rdd::shuffled_rdd::ShuffledRdd;
+use crate::rdd::co_grouped::CoGroupedRdd;
+use crate::rdd::rdd_val::RddVals;
+use crate::rdd::shuffled::ShuffledRdd;
 use crate::rdd::*;
-use crate::split::Split;
+use ember_data::aggregator::Aggregator;
+use ember_data::dependency::Dependency;
 use ember_data::partitioner::Partitioner;
+use ember_data::split::Split;
 
 // Trait containing pair rdd methods. No need of implicit conversion like in Spark version.
 pub trait PairRdd<K: Data + Eq + Hash, V: Data>: Rdd<Item = (K, V)> + Send + Sync {
@@ -103,7 +104,7 @@ pub trait PairRdd<K: Data + Eq + Hash, V: Data>: Rdd<Item = (K, V)> + Send + Syn
             Arc::from(other.get_rdd_base()),
         ];
         let cg_rdd = CoGroupedRdd::<K>::new(rdds, partitioner);
-        let f = |v: Vec<Vec<Box<dyn AnyData>>>| -> (Vec<V>, Vec<W>) {
+        let f = |v: Vec<Vec<Box<dyn Data>>>| -> (Vec<V>, Vec<W>) {
             let mut count = 0;
             let mut vs: Vec<V> = Vec::new();
             let mut ws: Vec<W> = Vec::new();
@@ -148,12 +149,10 @@ pub trait PairRdd<K: Data + Eq + Hash, V: Data>: Rdd<Item = (K, V)> + Send + Syn
 impl<K: Data + Eq + Hash, V: Data, T> PairRdd<K, V> for T where T: Rdd<Item = (K, V)> {}
 impl<K: Data + Eq + Hash, V: Data, T> PairRdd<K, V> for Arc<T> where T: Rdd<Item = (K, V)> {}
 
-#[derive(Serialize, Deserialize)]
 pub struct MappedValuesRdd<K: Data, V: Data, U: Data, F>
 where
     F: Fn(V) -> U + Clone,
 {
-    #[serde(with = "serde_traitobject")]
     prev: Arc<dyn Rdd<Item = (K, V)>>,
     vals: Arc<RddVals>,
     f: F,
@@ -200,9 +199,15 @@ where
     }
 }
 
-impl<K, V, U, F> RddContext for MappedValuesRdd<K, V, U, F> {
+impl<K, V, U, F> RddContext for MappedValuesRdd<K, V, U, F>
+where
+    K: Data + Clone,
+    V: Data + Clone,
+    U: Data + Clone,
+    F: Fn(V) -> U,
+{
     fn get_context(&self) -> Arc<Context> {
-        self.vals.context.upgrade().unwrap()
+        self.vals.get_context()
     }
 }
 
@@ -226,25 +231,26 @@ where
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         log::debug!("inside iterator_any mapvaluesrdd");
         Ok(Box::new(
             self.iterator(split)?
-                .map(|(k, v)| Box::new((k, v)) as Box<dyn AnyData>),
+                .map(|(k, v)| Box::new((k, v)) as Box<dyn Data>),
         ))
     }
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         log::debug!("inside cogroup_iterator_any mapvaluesrdd");
-        Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
-        })))
+        Ok(Box::new(
+            self.iterator(split)?
+                .map(|(k, v)| Box::new((k, Box::new(v)))),
+        ))
     }
 }
 
-impl<K: Data, V: Data, U: Data, F> Rdd for MappedValuesRdd<K, V, U, F>
+impl<K: Data + Clone, V: Data, U: Data + Clone, F> Rdd for MappedValuesRdd<K, V, U, F>
 where
     F: Fn(V) -> U,
 {
@@ -263,12 +269,10 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize)]
 pub struct FlatMappedValuesRdd<K: Data, V: Data, U: Data, F>
 where
     F: Fn(V) -> Box<dyn Iterator<Item = U>> + Clone,
 {
-    #[serde(with = "serde_traitobject")]
     prev: Arc<dyn Rdd<Item = (K, V)>>,
     vals: Arc<RddVals>,
     f: F,
@@ -300,9 +304,7 @@ where
     fn new(prev: Arc<dyn Rdd<Item = (K, V)>>, f: F) -> Self {
         let mut vals = RddVals::new(prev.get_context());
         vals.dependencies
-            .push(Dependency::NarrowDependency(Arc::new(
-                OneToOneDependency::new(prev.get_rdd_base()),
-            )));
+            .push(Dependency::new_one_to_one(prev.get_rdd_base()));
         let vals = Arc::new(vals);
         FlatMappedValuesRdd {
             prev,
@@ -335,25 +337,25 @@ where
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         log::debug!("inside iterator_any flatmapvaluesrdd",);
         Ok(Box::new(
-            self.iterator(split)?
-                .map(|(k, v)| Box::new((k, v)) as Box<dyn AnyData>),
+            self.iterator(split)?.map(|(k, v)| Box::new((k, v))),
         ))
     }
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn AnyData>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         log::debug!("inside iterator_any flatmapvaluesrdd",);
-        Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
-        })))
+        Ok(Box::new(
+            self.iterator(split)?
+                .map(|(k, v)| Box::new((k, Box::new(v)))),
+        ))
     }
 }
 
-impl<K: Data, V: Data, U: Data, F> Rdd for FlatMappedValuesRdd<K, V, U, F>
+impl<K: Data + Clone, V: Data, U: Data + Clone, F> Rdd for FlatMappedValuesRdd<K, V, U, F>
 where
     F: Fn(V) -> Box<dyn Iterator<Item = U>>,
 {
