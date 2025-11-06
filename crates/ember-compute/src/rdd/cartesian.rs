@@ -1,4 +1,4 @@
-use crate::{context::RddContext, rdd::rdd_val::RddVals};
+use crate::rdd::rdd_val::RddVals;
 use ember_data::{
     data::Data,
     dependency::Dependency,
@@ -7,7 +7,6 @@ use ember_data::{
     split::CartesianSplit,
 };
 
-use crate::context::Context;
 use ember_data::split::Split;
 use itertools::{Itertools, iproduct};
 use std::{marker::PhantomData, sync::Arc};
@@ -23,11 +22,11 @@ pub struct CartesianRdd<T: Data, U: Data> {
 
 impl<T: Data, U: Data> CartesianRdd<T, U> {
     pub(crate) fn new(
-        context: Arc<Context>,
+        id: usize,
         rdd1: Arc<dyn Rdd<Item = T>>,
         rdd2: Arc<dyn Rdd<Item = U>>,
     ) -> CartesianRdd<T, U> {
-        let vals = Arc::new(RddVals::new(context));
+        let vals = Arc::new(RddVals::new(id));
         let num_partitions_in_rdd2 = rdd2.number_of_splits();
         CartesianRdd {
             vals,
@@ -50,16 +49,6 @@ impl<T: Data, U: Data> Clone for CartesianRdd<T, U> {
             _marker_t: PhantomData,
             _market_u: PhantomData,
         }
-    }
-}
-
-impl<T, U> RddContext for CartesianRdd<T, U>
-where
-    T: Data + Clone,
-    U: Data + Clone,
-{
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.get_context()
     }
 }
 

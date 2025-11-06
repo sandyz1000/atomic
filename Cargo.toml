@@ -15,45 +15,14 @@ workspace.exclude = ["examples/*", "tests/*"]
 workspace.default-members = ["."]
 
 [dependencies]
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
-toml = { workspace = true }
-ember-wasm = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-tonic = { workspace = true }
-prost = { workspace = true }
-tonic-build = { workspace = true }
-hyper = { workspace = true }
-http-body-util = { workspace = true }
-http = { workspace = true }
-tempfile = { workspace = true }
-once_cell.workspace = true
-dashmap.workspace = true
-rand.workspace = true
-parking_lot.workspace = true
-log.workspace = true
-anyhow.workspace = true
-uuid.workspace = true
-async-trait.workspace = true
-statrs.workspace = true
-itertools.workspace = true
-rand_distr.workspace = true
-rand_pcg.workspace = true
-dotenvy.workspace = true
-rustc-hash.workspace = true
-num_cpus.workspace = true
-bincode.workspace = true
-dyn-clone.workspace = true
-futures.workspace = true
-crossbeam.workspace = true
-hyper-util.workspace = true
-ember-data.workspace = true
-ember-utils.workspace = true
-ember-scheduler.workspace = true
-tokio-util.workspace = true
+once_cell = { workspace = true }
+ember-macros = { workspace = true }
+ember-compute = { workspace = true }
 
 [workspace.dependencies]
+ember-macros = { path = "crates/ember-macros"}
+ember-wasm = { path = "crates/ember-wasm" }
+ember-compute = { path = "crates/ember-compute" }
 ember-scheduler = { path = "crates/ember-scheduler" }
 ember-data = { path = "crates/ember-data" }
 ember-utils = { path = "crates/ember-utils" }
@@ -78,8 +47,6 @@ prost = "0.14.1"
 tonic-build = "0.14.2"
 hyper = "1.7.0"
 http-body-util = "0.1.3"
-ember-macros = { path = "crates/ember-macros" }
-ember-wasm = { path = "crates/ember-wasm" }
 
 wasmtime = "38.0.3"
 wasmparser = "0.240.0"

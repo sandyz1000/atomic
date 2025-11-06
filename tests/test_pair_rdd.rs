@@ -113,7 +113,7 @@ fn test_group_by() -> Result<()> {
     let sc = CONTEXT.clone();
     let vec = vec![-3i32, -2, -1, 0, 1, 2, 3];
     let r = sc.make_rdd(vec, 2);
-    let grouping_func = Fn!(|k: &i32| -> String {
+    let grouping_func = |k: &i32| -> String {
         if k.is_positive() {
             "pos".to_string()
         } else if k.is_negative() {
@@ -121,7 +121,7 @@ fn test_group_by() -> Result<()> {
         } else {
             "zero".to_string()
         }
-    });
+    };
     let g = r.group_by(grouping_func);
     let mut res = g.collect()?;
     res.sort();

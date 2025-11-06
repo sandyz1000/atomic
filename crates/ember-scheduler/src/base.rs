@@ -50,7 +50,7 @@ pub trait NativeScheduler: Send + Sync {
     async fn new_stage(
         &self,
         rdd_base: Arc<dyn RddBase>,
-        shuffle_dependency: Option<ShuffleDependencyBox>,
+        shuffle_dependency: Option<Arc<ShuffleDependencyBox>>,
     ) -> LibResult<Stage> {
         log::debug!("creating new stage");
         // TODO: Cache tracker - for LocalScheduler, cache is managed locally
@@ -552,7 +552,7 @@ pub trait NativeScheduler: Send + Sync {
         }
     }
 
-    async fn get_shuffle_map_stage(&self, shuf: ShuffleDependencyBox) -> LibResult<Stage>;
+    async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependencyBox>) -> LibResult<Stage>;
 }
 
 #[derive(Clone, Default)]

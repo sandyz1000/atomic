@@ -12,7 +12,7 @@ pub struct SplitStruct {
     pub index: usize,
 }
 
-pub trait Split: DynClone {
+pub trait Split: DynClone + Send {
     fn get_index(&self) -> usize;
     fn as_any(&self) -> &dyn Any;
 }

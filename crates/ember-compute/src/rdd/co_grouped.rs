@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::*;
+use bincode::Encode;
 use ember_data::aggregator::Aggregator;
 use ember_data::dependency::{Dependency, ShuffleDependency, ShuffleDependencyBox};
 use ember_data::error::BaseError;
@@ -24,25 +25,26 @@ pub struct CoGroupedRdd<K: Data> {
     _marker: PhantomData<K>,
 }
 
-impl<K: Data + Eq + Hash> CoGroupedRdd<K> {
-    pub fn new(context: Arc<Context>, rdds: Vec<Arc<dyn RddBase>>, part: Partitioner) -> Self {
-        let mut vals = RddVals::new(context.clone());
+impl<K: Data + Eq + Hash + Encode + Clone> CoGroupedRdd<K> {
+    pub fn new(
+        id: usize,
+        shuffle_id: usize,
+        rdds: Vec<Arc<dyn RddBase>>,
+        part: Partitioner,
+    ) -> Self {
+        let mut vals = RddVals::new(id);
 
         // Use Arc<dyn Data> instead of Box<dyn Data> to support Clone
-        let create_combiner = Box::new(|v: Arc<dyn Data>| vec![v]);
-        fn merge_value(mut buf: Vec<Arc<dyn Data>>, v: Arc<dyn Data>) -> Vec<Arc<dyn Data>> {
+        let create_combiner = Arc::new(|v: Arc<dyn Data>| vec![v])
+            as Arc<dyn Fn(Arc<dyn Data>) -> Vec<Arc<dyn Data>> + Send + Sync>;
+        let merge_value = Arc::new(|buf: &mut Vec<Arc<dyn Data>>, v: Arc<dyn Data>| {
             buf.push(v);
-            buf
-        }
-        let merge_value = Box::new(|(buf, v)| merge_value(buf, v));
-        fn merge_combiners(
-            mut b1: Vec<Arc<dyn Data>>,
-            mut b2: Vec<Arc<dyn Data>>,
-        ) -> Vec<Arc<dyn Data>> {
-            b1.append(&mut b2);
-            b1
-        }
-        let merge_combiners = Box::new(|(b1, b2)| merge_combiners(b1, b2));
+        })
+            as Arc<dyn Fn(&mut Vec<Arc<dyn Data>>, Arc<dyn Data>) + Send + Sync>;
+        let merge_combiners = Arc::new(|b1: &mut Vec<Arc<dyn Data>>, b2: Vec<Arc<dyn Data>>| {
+            b1.extend(b2);
+        })
+            as Arc<dyn Fn(&mut Vec<Arc<dyn Data>>, Vec<Arc<dyn Data>>) + Send + Sync>;
         let aggr = Arc::new(Aggregator::<K, Arc<dyn Data>, Vec<Arc<dyn Data>>>::new(
             create_combiner,
             merge_value,
@@ -55,20 +57,15 @@ impl<K: Data + Eq + Hash> CoGroupedRdd<K> {
                 let rdd_base = rdd.clone();
                 deps.push(Dependency::OneToOne { rdd_base })
             } else {
+                // Note: Cannot create shuffle dependency with type-erased Arc<dyn Data>
+                // because it doesn't implement Encode. Would need typed ShuffledRdd instead.
+                // For now, using OneToOne dependency (requires pre-shuffled data).
                 log::warn!(
-                    "CoGroupedRdd: Cannot create shuffle dependency with type-erased values - using OneToOne instead"
+                    "CoGroupedRdd: Partitioner mismatch but cannot create shuffle with type-erased data - using OneToOne. \
+                    Data should be pre-shuffled or use typed operations."
                 );
                 let rdd_base = rdd.clone();
-                log::debug!("creating aggregator inside cogrouprdd");
-                let shuffle_dep: ShuffleDependencyBox = ShuffleDependency::new(
-                    context.new_shuffle_id(),
-                    true,
-                    rdd_base,
-                    aggr.clone(),
-                    part.clone(),
-                )
-                .into();
-                deps.push(Dependency::Shuffle(shuffle_dep));
+                deps.push(Dependency::OneToOne { rdd_base });
             }
         }
         vals.dependencies = deps;
@@ -208,5 +205,12 @@ where
         } else {
             panic!("Got split object from different concrete type other than CoGroupSplit")
         }
+    }
+
+    fn iterator(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+        self.compute(split)
     }
 }

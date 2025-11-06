@@ -6,16 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::context::Context;
-use ember_data::dependency::Dependency;
-use crate::error::{Error, Result};
+use crate::error::{Error, LibResult};
 use crate::io::*;
-use crate::rdd::{map_partitions::MapPartitionsRdd, mapper::MapperRdd, Rdd, RddBase};
+use crate::rdd::{Rdd, RddBase, map_partitions::MapPartitionsRdd, mapper::MapperRdd};
+use ember_data::dependency::Dependency;
 
 use ember_data::split::{BytesReader, FileReader, Split};
 
 use log::debug;
 use rand::prelude::*;
-
 
 pub struct LocalFsReaderConfig {
     filter_ext: Option<std::ffi::OsString>,
@@ -60,16 +59,18 @@ impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
     where
         F: Fn(Vec<u8>) -> U,
     {
-        let reader = LocalFsReader::<BytesReader>::new(self, context);
-        let read_files = 
-            |_part: usize, readers: Box<dyn Iterator<Item = BytesReader>>| {
-                Box::new(readers.into_iter().map(|file| file.into_iter()).flatten())
-                    as Box<dyn Iterator<Item = _>>
-            };
+        let reader = LocalFsReader::<BytesReader>::new(self, context.clone());
+        let read_files = |_part: usize, readers: Box<dyn Iterator<Item = BytesReader>>| {
+            Box::new(readers.into_iter().map(|file| file.into_iter()).flatten())
+                as Box<dyn Iterator<Item = _>>
+        };
+        let id1 = context.new_rdd_id();
         let files_per_executor = Arc::new(
-            MapPartitionsRdd::new(Arc::new(reader) as Arc<dyn Rdd<Item = _>>, read_files).pin(),
+            MapPartitionsRdd::new(id1, Arc::new(reader) as Arc<dyn Rdd<Item = _>>, read_files)
+                .pin(),
         );
-        let decoder = MapperRdd::new(files_per_executor, decoder).pin();
+        let id2 = context.new_rdd_id();
+        let decoder = MapperRdd::new(id2, files_per_executor, decoder).pin();
         decoder.register_op_name("local_fs_reader<bytes>");
         Arc::new(decoder)
     }
@@ -80,17 +81,19 @@ impl ReaderConfiguration<PathBuf> for LocalFsReaderConfig {
     where
         F: Fn(PathBuf) -> U,
     {
-        let reader = LocalFsReader::<FileReader>::new(self, context);
-        let read_files = 
-            |_part: usize, readers: Box<dyn Iterator<Item = FileReader>>| {
-                Box::new(readers.map(|reader| reader.into_iter()).flatten())
-                    as Box<dyn Iterator<Item = _>>
-            };
-        
+        let reader = LocalFsReader::<FileReader>::new(self, context.clone());
+        let read_files = |_part: usize, readers: Box<dyn Iterator<Item = FileReader>>| {
+            Box::new(readers.map(|reader| reader.into_iter()).flatten())
+                as Box<dyn Iterator<Item = _>>
+        };
+
+        let id1 = context.new_rdd_id();
         let files_per_executor = Arc::new(
-            MapPartitionsRdd::new(Arc::new(reader) as Arc<dyn Rdd<Item = _>>, read_files).pin(),
+            MapPartitionsRdd::new(id1, Arc::new(reader) as Arc<dyn Rdd<Item = _>>, read_files)
+                .pin(),
         );
-        let decoder = MapperRdd::new(files_per_executor, decoder).pin();
+        let id2 = context.new_rdd_id();
+        let decoder = MapperRdd::new(id2, files_per_executor, decoder).pin();
         decoder.register_op_name("local_fs_reader<files>");
         Arc::new(decoder)
     }
@@ -142,7 +145,7 @@ impl<T> LocalFsReader<T> {
 
     /// This function should be called once per host to come with the paralel workload.
     /// Is safe to recompute on failure though.
-    fn load_local_files(&self) -> Result<Vec<Vec<PathBuf>>> {
+    fn load_local_files(&self) -> LibResult<Vec<Vec<PathBuf>>> {
         let mut total_size = 0_u64;
         if self.is_single_file {
             let files = vec![vec![self.path.clone()]];
@@ -298,7 +301,6 @@ impl<T> LocalFsReader<T> {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

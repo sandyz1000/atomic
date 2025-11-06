@@ -1,4 +1,3 @@
-use crate::context::{Context, RddContext};
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use ember_data::data::Data;
@@ -21,11 +20,12 @@ pub struct PartitionwiseSampledRdd<T: Data> {
 
 impl<T: Data> PartitionwiseSampledRdd<T> {
     pub(crate) fn new(
+        id: usize,
         prev: Arc<dyn Rdd<Item = T>>,
         sampler: Arc<dyn RandomSampler<T>>,
         preserves_partitioning: bool,
     ) -> Self {
-        let mut vals = RddVals::new(prev.get_context());
+        let mut vals = RddVals::new(id);
         vals.dependencies.push(Dependency::OneToOne {
             rdd_base: prev.get_rdd_base(),
         });
@@ -50,12 +50,6 @@ impl<T: Data> Clone for PartitionwiseSampledRdd<T> {
             preserves_partitioning: self.preserves_partitioning,
             _marker_t: PhantomData,
         }
-    }
-}
-
-impl<T: Data + Clone> RddContext for PartitionwiseSampledRdd<T> {
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.get_context()
     }
 }
 
@@ -112,7 +106,10 @@ impl<T: Data> Rdd for PartitionwiseSampledRdd<T> {
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    fn compute(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let sampler_func = self.sampler.get_sampler(None);
         let iter = self.prev.iterator(split)?;
         Ok(Box::new(sampler_func(iter).into_iter()) as Box<dyn Iterator<Item = T>>)

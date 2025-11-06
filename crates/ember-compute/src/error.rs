@@ -118,6 +118,12 @@ impl Error {
     }
 }
 
+impl From<Error> for ember_data::error::BaseError {
+    fn from(err: Error) -> Self {
+        ember_data::error::BaseError::Other(format!("{}", err))
+    }
+}
+
 // #[derive(Debug, Error)]
 // pub enum NetworkError {
 //     #[error("disconnected from address")]

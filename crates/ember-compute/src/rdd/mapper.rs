@@ -2,7 +2,6 @@ use std::marker::PhantomData;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering::SeqCst};
 
-use crate::context::{Context, RddContext};
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use ember_data::data::Data;
@@ -24,7 +23,7 @@ where
     _marker_t: PhantomData<(T, U)>, // phantom data is necessary because of type parameter T
 }
 
-pub struct MapperPairRdd<T: Data, K: Data, V: Data, F>
+pub struct MapperPairRdd<T: Data, K: Data + Clone, V: Data + Clone, F>
 where
     F: RddFn<T, (K, V)>,
 {
@@ -57,11 +56,10 @@ impl<T: Data, U: Data, F> MapperRdd<T, U, F>
 where
     F: RddFn<T, U>,
 {
-    pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
-        let mut vals = RddVals::new(prev.get_context());
-        vals.dependencies.push(Dependency::OneToOne {
-            rdd_base: prev.get_rdd_base(),
-        });
+    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+        let rdd_base = prev.get_rdd_base();
+        let mut vals = RddVals::new(id);
+        vals.dependencies.push(Dependency::OneToOne { rdd_base });
         let vals = Arc::new(vals);
         MapperRdd {
             name: Mutex::new("map".to_owned()),
@@ -76,17 +74,6 @@ where
     pub(crate) fn pin(self) -> Self {
         self.pinned.store(true, SeqCst);
         self
-    }
-}
-
-impl<T, U, F> RddContext for MapperRdd<T, U, F>
-where
-    T: Data,
-    U: Data,
-    F: RddFn<T, U>,
-{
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.get_context()
     }
 }
 
@@ -171,7 +158,7 @@ where
 // MapperPairRdd - Specialized implementation for tuple outputs (K, V)
 // ============================================================================
 
-impl<T: Data, K: Data, V: Data, F> Clone for MapperPairRdd<T, K, V, F>
+impl<T: Data, K: Data + Clone, V: Data + Clone, F> Clone for MapperPairRdd<T, K, V, F>
 where
     F: RddFn<T, (K, V)>,
 {
@@ -187,15 +174,14 @@ where
     }
 }
 
-impl<T: Data, K: Data, V: Data, F> MapperPairRdd<T, K, V, F>
+impl<T: Data + Clone, K: Data + Clone, V: Data + Clone, F> MapperPairRdd<T, K, V, F>
 where
     F: RddFn<T, (K, V)>,
 {
-    pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
-        let mut vals = RddVals::new(prev.get_context());
-        vals.dependencies.push(Dependency::OneToOne {
-            rdd_base: prev.get_rdd_base(),
-        });
+    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+        let rdd_base = prev.get_rdd_base();
+        let mut vals = RddVals::new(id);
+        vals.dependencies.push(Dependency::OneToOne { rdd_base });
         let vals = Arc::new(vals);
         MapperPairRdd {
             name: Mutex::new("map".to_owned()),
@@ -213,19 +199,7 @@ where
     }
 }
 
-impl<T, K, V, F> RddContext for MapperPairRdd<T, K, V, F>
-where
-    T: Data,
-    K: Data,
-    V: Data,
-    F: RddFn<T, (K, V)>,
-{
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.get_context()
-    }
-}
-
-impl<T: Data, K: Data, V: Data, F> RddBase for MapperPairRdd<T, K, V, F>
+impl<T: Data, K: Data + Clone, V: Data + Clone, F> RddBase for MapperPairRdd<T, K, V, F>
 where
     F: RddFn<T, (K, V)>,
 {
@@ -263,9 +237,12 @@ where
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside cogroup_iterator_any mapperpairrdd");
-        Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn Data>)) as Box<dyn Data>
-        })))
+        // For cogroup, we need to box the tuple directly without nested boxing
+        // The tuple (K, V) itself implements Data, so we can box it directly
+        Ok(Box::new(
+            self.iterator(split)?
+                .map(|pair| Box::new(pair) as Box<dyn Data>),
+        ))
     }
 
     fn iterator_any(
@@ -283,7 +260,7 @@ where
     }
 }
 
-impl<T: Data, K: Data, V: Data, F: 'static> Rdd for MapperPairRdd<T, K, V, F>
+impl<T: Data, K: Data + Clone, V: Data + Clone, F: 'static> Rdd for MapperPairRdd<T, K, V, F>
 where
     F: RddFn<T, (K, V)>,
 {

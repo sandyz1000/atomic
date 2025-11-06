@@ -1,6 +1,17 @@
-
-
-
+use crate::error::Error;
+use crate::executor::{Executor, Signal};
+use crate::io::ReaderConfiguration;
+use crate::rdd::typed::TypedRdd;
+use crate::{env, hosts};
+use ember_data::data::Data;
+use ember_data::partial::ApproximateEvaluator;
+use ember_data::partial::result::PartialResult;
+use ember_data::rdd::{Rdd, RddBase};
+use ember_data::task_context::TaskContext;
+use ember_scheduler::{DistributedScheduler, LocalScheduler, NativeScheduler, Schedulers};
+use ember_utils::clean_up_work_dir;
+use log::error;
+use once_cell::sync::OnceCell;
 use std::fmt::Debug;
 use std::fs;
 use std::io::Write;
@@ -8,38 +19,20 @@ use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
-
-use crate::error::{Error, LibResult};
-use crate::executor::{Executor, Signal};
-use crate::io::ReaderConfiguration;
-use ember_data::partial::ApproximateEvaluator;
-use ember_data::task_context::TaskContext;
-use ember_data::rdd::{Rdd, RddBase};
-use ember_scheduler::{DistributedScheduler, LocalScheduler, NativeScheduler, Schedulers};
-use ember_utils::clean_up_work_dir;
-use crate::{env, hosts};
-use ember_data::data::Data;
-use log::error;
-use once_cell::sync::OnceCell;
 use uuid::Uuid;
 
-pub trait RddContext {
-    fn get_context(&self) -> Arc<Context>;
-}
-
-#[derive(Default)]
 pub struct Context {
-    next_rdd_id: Arc<AtomicUsize>,
-    next_shuffle_id: Arc<AtomicUsize>,
     scheduler: Schedulers,
-    pub(crate) address_map: Vec<SocketAddrV4>,
-    distributed_driver: bool,
-    /// this context/session temp work dir
-    work_dir: PathBuf,
+    pub next_rdd_id: Arc<AtomicUsize>,
+    pub next_shuffle_id: Arc<AtomicUsize>,
+    pub address_map: Vec<SocketAddrV4>,
+    pub distributed_driver: bool,
+    /// this context/session temp work dir  
+    pub work_dir: PathBuf,
 }
 
 // There is a problem with this approach since T needs to satisfy PartialEq, Eq for Range
@@ -73,16 +66,16 @@ pub fn save<R: Data>(ctx: TaskContext, iter: Box<dyn Iterator<Item = R>>, path: 
     }
 }
 
-
 impl Context {
-    pub fn new() -> Result<Arc<Self>> {
+    pub fn new() -> Result<Arc<Self>, Error> {
         Context::with_mode(env::Configuration::get().deployment_mode)
     }
 
-    fn save_as_text_file(&self, path: String) -> Result<Vec<()>> {
-        let cl = move |(ctx, iter)| save::<Self::Item>(ctx, iter, path.to_string());
-        self.run_job_with_context(self.get_rdd(), cl)
-    }
+    // TODO: This method should be moved to TypedRdd or removed
+    // fn save_as_text_file(&self, path: String) -> Result<Vec<()>, Error> {
+    //     let cl = move |(ctx, iter)| save::<Self::Item>(ctx, iter, path.to_string());
+    //     self.run_job_with_context(self.get_rdd(), cl)
+    // }
 
     pub fn with_mode(mode: env::DeploymentMode) -> Result<Arc<Self>> {
         match mode {
@@ -117,7 +110,7 @@ impl Context {
         })
     }
 
-    fn init_local_scheduler() -> Result<Arc<Self>> {
+    fn init_local_scheduler() -> Result<Arc<Self>, Error> {
         let job_id = Uuid::new_v4().to_string();
         let job_work_dir = env::Configuration::get()
             .local_dir
@@ -128,9 +121,9 @@ impl Context {
         let scheduler = Schedulers::Local(Arc::new(LocalScheduler::new(20, true)));
 
         Ok(Arc::new(Context {
+            scheduler,
             next_rdd_id: Arc::new(AtomicUsize::new(0)),
             next_shuffle_id: Arc::new(AtomicUsize::new(0)),
-            scheduler,
             address_map: vec![SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)],
             distributed_driver: false,
             work_dir: job_work_dir,
@@ -142,7 +135,7 @@ impl Context {
     /// * Distributes a copy of the application binary to all the active worker host nodes.
     /// * Launches the workers in the remote machine using the same binary (required).
     /// * Creates and returns a working Context.
-    fn init_distributed_driver() -> Result<Arc<Self>> {
+    fn init_distributed_driver() -> Result<Arc<Self>, Error> {
         let mut port: u16 = 10000;
         let mut address_map = Vec::new();
         let job_id = Uuid::new_v4().to_string();
@@ -223,22 +216,24 @@ impl Context {
             port += 5000;
         }
 
+        let scheduler = Schedulers::Distributed(Arc::new(DistributedScheduler::new(
+            20,
+            true,
+            Some(address_map.clone()),
+            10000,
+        )));
+
         Ok(Arc::new(Context {
+            scheduler,
             next_rdd_id: Arc::new(AtomicUsize::new(0)),
             next_shuffle_id: Arc::new(AtomicUsize::new(0)),
-            scheduler: Schedulers::Distributed(Arc::new(DistributedScheduler::new(
-                20,
-                true,
-                Some(address_map.clone()),
-                10000,
-            ))),
             address_map,
             distributed_driver: true,
             work_dir: job_work_dir,
         }))
     }
 
-    fn init_distributed_worker() -> Result<()> {
+    fn init_distributed_worker() -> Result<(), Error> {
         let mut work_dir = PathBuf::from("");
         match std::env::current_exe().map_err(|_| Error::CurrentBinaryPath) {
             Ok(binary_path) => {
@@ -266,7 +261,10 @@ impl Context {
         Ok(())
     }
 
-    fn worker_clean_up_directives(run_result: Result<Signal>, work_dir: PathBuf) -> Result<()> {
+    fn worker_clean_up_directives(
+        run_result: Result<Signal, Error>,
+        work_dir: PathBuf,
+    ) -> Result<(), Error> {
         env::Env::get().shuffle_manager.clean_up_shuffle_data();
         clean_up_work_dir(&work_dir, true);
         match run_result {
@@ -279,8 +277,6 @@ impl Context {
                 std::process::exit(0);
             }
         }
-
-        Ok(())
     }
 
     fn driver_clean_up_directives(work_dir: &Path, executors: &[SocketAddrV4]) {
@@ -291,7 +287,11 @@ impl Context {
         clean_up_work_dir(work_dir, true);
     }
 
-    fn create_workers_config_file(local_ip: Ipv4Addr, port: u16, config_path: &str) -> Result<()> {
+    fn create_workers_config_file(
+        local_ip: Ipv4Addr,
+        port: u16,
+        config_path: &str,
+    ) -> Result<(), Error> {
         let mut current_config = env::Configuration::get().clone();
         current_config.local_ip = local_ip;
         current_config.slave = Some(std::convert::From::<(bool, u16)>::from((true, port)));
@@ -317,13 +317,11 @@ impl Context {
             if let Ok(mut stream) =
                 TcpStream::connect(format!("{}:{}", socket_addr.ip(), socket_addr.port() + 10))
             {
+                // Serialize signal directly with bincode (no capnp wrapper needed)
                 let signal = bincode::serialize(&Signal::ShutDownGracefully).unwrap();
-                let mut message = capnp::message::Builder::new_default();
-                let mut task_data = message.init_root::<serialized_data::Builder>();
-                task_data.set_msg(&signal);
-                capnp::serialize::write_message(&mut stream, &message)
-                    .map_err(Error::OutputWrite)
-                    .unwrap();
+                if let Err(e) = stream.write_all(&signal) {
+                    error!("Failed to send shutdown signal: {}", e);
+                }
             } else {
                 error!(
                     "Failed to connect to {}:{} in order to stop its executor",
@@ -377,7 +375,30 @@ impl Context {
     where
         I: IntoIterator<Item = T>,
     {
-        Arc::new(ParallelCollection::new(self.clone(), seq, num_slices))
+        let id = self.new_rdd_id();
+        Arc::new(ParallelCollection::new(id, seq, num_slices))
+    }
+
+    /// Create a TypedRdd from a collection with explicit typing.
+    ///
+    /// This is a convenience method that returns TypedRdd instead of Arc<dyn Rdd>.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let rdd = ctx.parallelize_typed(vec![1, 2, 3, 4, 5], 2);
+    /// let sum = rdd.reduce(|a, b| a + b)?;
+    /// ```
+    pub fn parallelize_typed<T: Data, I>(
+        self: &Arc<Self>,
+        seq: I,
+        num_slices: usize,
+    ) -> crate::rdd::TypedRdd<T>
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let id = self.new_rdd_id();
+        let rdd = Arc::new(ParallelCollection::new(id, seq, num_slices));
+        crate::rdd::TypedRdd::new(rdd, self.clone())
     }
 
     /// Load from a distributed source and turns it into a parallel collection.
@@ -397,7 +418,7 @@ impl Context {
         self: &Arc<Self>,
         rdd: Arc<dyn Rdd<Item = T>>,
         func: F,
-    ) -> Result<Vec<U>>
+    ) -> Result<Vec<U>, Error>
     where
         F: Fn(Box<dyn Iterator<Item = T>>) -> U,
     {
@@ -416,7 +437,7 @@ impl Context {
         rdd: Arc<dyn Rdd<Item = T>>,
         func: F,
         partitions: P,
-    ) -> Result<Vec<U>>
+    ) -> Result<Vec<U>, Error>
     where
         F: Fn(Box<dyn Iterator<Item = T>>) -> U,
         P: IntoIterator<Item = usize>,
@@ -430,7 +451,7 @@ impl Context {
         self: &Arc<Self>,
         rdd: Arc<dyn Rdd<Item = T>>,
         func: F,
-    ) -> Result<Vec<U>>
+    ) -> Result<Vec<U>, Error>
     where
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
     {
@@ -452,7 +473,7 @@ impl Context {
         rdd: Arc<dyn Rdd<Item = T>>,
         evaluator: E,
         timeout: Duration,
-    ) -> Result<PartialResult<R>>
+    ) -> Result<PartialResult<R>, Error>
     where
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
@@ -473,8 +494,8 @@ impl Context {
         }
     }
 
-    pub fn union<T: Data>(rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<impl Rdd<Item = T>> {
-        UnionRdd::new(rdds)
+    pub fn union<T: Data>(&self, rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<impl Rdd<Item = T>> {
+        UnionRdd::new(Arc::new(self.clone()), rdds)
     }
 }
 

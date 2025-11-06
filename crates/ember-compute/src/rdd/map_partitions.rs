@@ -1,17 +1,16 @@
+use parking_lot::Mutex;
 use std::{
     marker::PhantomData,
     net::Ipv4Addr,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use ember_data::{dependency::Dependency, error::BaseError, fn_traits::RddPartitionFn, rdd::RddBase, split::Split};
-
-use crate::{
-    context::RddContext,
-    rdd::{Context, Data, Rdd, rdd_val::RddVals},
+use crate::rdd::{Data, Rdd, rdd_val::RddVals};
+use ember_data::{
+    dependency::Dependency, error::BaseError, fn_traits::RddPartitionFn, rdd::RddBase, split::Split,
 };
 
 /// An RDD that applies the provided function to every partition of the parent RDD.
@@ -24,7 +23,7 @@ where
     vals: Arc<RddVals>,
     f: Arc<F>,
     pinned: AtomicBool,
-    _marker_t: PhantomData<T>,
+    _marker: PhantomData<(T, U)>,
 }
 
 impl<T: Data, U: Data, F> Clone for MapPartitionsRdd<T, U, F>
@@ -38,7 +37,7 @@ where
             vals: self.vals.clone(),
             f: self.f.clone(),
             pinned: AtomicBool::new(self.pinned.load(Ordering::SeqCst)),
-            _marker_t: PhantomData,
+            _marker: PhantomData,
         }
     }
 }
@@ -47,8 +46,8 @@ impl<T: Data, U: Data, F> MapPartitionsRdd<T, U, F>
 where
     F: RddPartitionFn<T, U>,
 {
-    pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
-        let mut vals = RddVals::new(prev.get_context());
+    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+        let mut vals = RddVals::new(id);
         vals.dependencies
             .push(Dependency::new_one_to_one(prev.get_rdd_base()));
         let vals = Arc::new(vals);
@@ -58,19 +57,13 @@ where
             vals,
             f: Arc::new(f),
             pinned: AtomicBool::new(false),
-            _marker_t: PhantomData,
+            _marker: PhantomData,
         }
     }
 
     pub(crate) fn pin(self) -> Self {
         self.pinned.store(true, Ordering::SeqCst);
         self
-    }
-}
-
-impl<T, U, F> RddContext for MapPartitionsRdd<T, U, F> {
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.get_context()
     }
 }
 
@@ -119,7 +112,9 @@ where
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside iterator_any map_partitions_rdd",);
-        Ok(Box::new(self.iterator(split)?.map(|x| Box::new(x))))
+        Ok(Box::new(
+            self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
+        ))
     }
 
     fn is_pinned(&self) -> bool {
@@ -127,48 +122,77 @@ where
     }
 }
 
-pub struct MapPartitionsPairRdd<T: Data, V: Data, U: Data, F: Data>
+pub struct MapPartitionsPairRdd<T: Data, V: Data, U: Data, F>
 where
-    F: Fn(usize, Box<dyn Iterator<Item = T>>) -> Box<dyn Iterator<Item = (V, U)>> + Clone,
+    F: RddPartitionFn<T, (U, V)>,
 {
     name: Mutex<String>,
     prev: Arc<dyn Rdd<Item = T>>,
     vals: Arc<RddVals>,
     f: F,
     pinned: AtomicBool,
-    _marker_t: PhantomData<T>,
+    _marker_t: PhantomData<(T, U, V)>,
 }
 
-impl<T: Data, V: Data, U: Data, F> RddBase for MapPartitionsPairRdd<T, V, U, F>
+impl<T, V, U, F> RddBase for MapPartitionsPairRdd<T, V, U, F>
 where
-    F: Fn(usize, Box<dyn Iterator<Item = T>>) -> Box<dyn Iterator<Item = (V, U)>>,
+    F: RddPartitionFn<T, (U, V)>,
+    T: Data,
+    V: Data,
+    U: Data + Clone,
 {
     fn cogroup_iterator_any(
         &self,
-        split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+        _split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside iterator_any map_partitions_rdd",);
-        Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn Data>)) as Box<dyn Data>
-        })))
+
+        // Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
+        //     Box::new((k, Box::new(v) as Box<dyn AnyData>)) as Box<dyn AnyData>
+        // })))
+        // TODO: MapPartitionsPairRdd is incomplete - implement when needed
+        todo!("MapPartitionsPairRdd::cogroup_iterator_any not yet implemented")
     }
 
     fn get_rdd_id(&self) -> usize {
-        todo!()
+        todo!("MapPartitionsPairRdd::get_rdd_id not yet implemented")
     }
 
     fn get_dependencies(&self) -> Vec<ember_data::dependency::Dependency> {
-        todo!()
+        todo!("MapPartitionsPairRdd::get_dependencies not yet implemented")
     }
 
     fn splits(&self) -> Vec<Box<dyn Split>> {
-        todo!()
+        todo!("MapPartitionsPairRdd::splits not yet implemented")
     }
 
     fn iterator_any(
         &self,
+        _split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+        todo!("MapPartitionsPairRdd::iterator_any not yet implemented")
+    }
+}
+
+// TODO: Implement Rdd trait for MapPartitionsPairRdd when it's actually needed
+impl<T: Data, V: Data + Clone, U: Data + Clone, F> Rdd for MapPartitionsPairRdd<T, V, U, F>
+where
+    F: RddPartitionFn<T, (U, V)>,
+{
+    type Item = (U, V);
+
+    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+        todo!()
+    }
+
+    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+        todo!()
+    }
+
+    fn compute(
+        &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         todo!()
     }
 }
@@ -184,7 +208,10 @@ where
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
         Arc::new(self.clone())
     }
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    fn compute(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let f = self.f.clone();
         let index = split.get_index();
         let f_result = f(index, self.prev.iterator(split)?);

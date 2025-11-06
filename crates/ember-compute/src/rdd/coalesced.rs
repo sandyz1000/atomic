@@ -32,9 +32,8 @@ impl<T: Data> CoalescedRdd<T> {
     /// ## Arguments
     ///
     /// max_partitions: number of desired partitions in the coalesced RDD
-    pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, max_partitions: usize) -> Self {
-        let ctx = prev.get_context();
-        let vals = RddVals::new(ctx);
+    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, max_partitions: usize) -> Self {
+        let vals = RddVals::new(id);
         CoalescedRdd {
             vals: Arc::new(vals),
             parent: prev,
@@ -115,18 +114,26 @@ impl<T: Data> RddBase for CoalescedRdd<T> {
 
 impl<T: Data> Rdd for CoalescedRdd<T> {
     type Item = T;
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>>
-    where
-        Self: Sized,
-    {
-        Arc::new(self.clone())
+    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+        Arc::new(CoalescedRdd {
+            vals: self.vals.clone(),
+            parent: self.parent.clone(),
+            max_partitions: self.max_partitions,
+        })
     }
 
     fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        Arc::new(self.clone()) as Arc<dyn RddBase>
+        Arc::new(CoalescedRdd {
+            vals: self.vals.clone(),
+            parent: self.parent.clone(),
+            max_partitions: self.max_partitions,
+        }) as Arc<dyn RddBase>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    fn compute(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let split = CoalescedRddSplit::downcasting(split)?;
         let mut iter = Vec::new();
         for (_, p) in self
@@ -426,7 +433,7 @@ impl DefaultPartitionCoalescer {
             // Copy the preferred location from a random input partition.
             // This helps in avoiding skew when the input partitions are clustered by preferred location.
             let (nxt_replica, nxt_part) = &partition_locs.parts_with_locs
-                [rng.gen_range(0..partition_locs.parts_with_locs.len()) as usize];
+                [rng.random_range(0..partition_locs.parts_with_locs.len()) as usize];
             let pgroup = Arc::new(PSyncGroup(Mutex::new(PartitionGroup::new(
                 Some(*nxt_replica),
                 part_cnt.fetch_add(1, SyncOrd::SeqCst),
@@ -486,8 +493,8 @@ impl DefaultPartitionCoalescer {
             // pref.iter().enumerate().map(|i| &*(***i).lock()).min()
         };
 
-        let r1 = rnd.gen_range(0..self.group_arr.len());
-        let r2 = rnd.gen_range(0..self.group_arr.len());
+        let r1 = rnd.random_range(0..self.group_arr.len());
+        let r2 = rnd.random_range(0..self.group_arr.len());
 
         let min_power_of_two = {
             if self.group_arr[r1].lock().num_partitions()
