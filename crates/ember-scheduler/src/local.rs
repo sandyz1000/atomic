@@ -367,7 +367,7 @@ impl NativeScheduler for LocalScheduler {
         Ok(())
     }
 
-    async fn get_shuffle_map_stage(&self, shuf: ShuffleDependencyBox) -> LibResult<Stage> {
+    async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependencyBox>) -> LibResult<Stage> {
         log::debug!("getting shuffle map stage");
         let stage = self.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
         match stage {

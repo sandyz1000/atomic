@@ -46,7 +46,7 @@ pub enum Dependency {
     },
     /// Shuffle dependency representing a shuffle operation
     /// Uses type-erased box to allow heterogeneous shuffle dependencies with different type parameters
-    Shuffle(ShuffleDependencyBox),
+    Shuffle(Arc<ShuffleDependencyBox>),
 }
 
 impl Dependency {

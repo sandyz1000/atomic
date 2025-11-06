@@ -3,16 +3,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::env;
-use crate::error::{Error, Result};
-use crate::task::TaskOption;
-// use crate::serialized_data_capnp::serialized_data;
-// use capnp::{
-//     message::{Builder as MsgBuilder, HeapAllocator, Reader as CpnpReader, ReaderOptions},
-//     serialize::OwnedSegments,
-// };
-// use capnp_futures::serialize as capnp_serialize;
-use crossbeam::{channel::bounded, Receiver, Sender};
-// use serde::{Deserialize, Serialize};
+use crate::error::{Error};
+use ember_data::task::TaskOption;
+
+use crossbeam::{Receiver, Sender, channel::bounded};
+use ember_data::shuffle::error::NetworkError;
 use tokio::{
     net::TcpListener,
     stream::StreamExt,
@@ -21,10 +16,7 @@ use tokio::{
 };
 use tokio_util::compat::{Tokio02AsyncReadCompatExt, Tokio02AsyncWriteCompatExt};
 
-// const CAPNP_BUF_READ_OPTS: ReaderOptions = ReaderOptions {
-//     traversal_limit_in_words: std::u64::MAX,
-//     nesting_limit: 64,
-// };
+
 
 pub(crate) struct Executor {
     port: u16,
@@ -79,19 +71,21 @@ impl Executor {
                     _ => {}
                 }
                 log::debug!("received new task @{} executor", selfc.port);
-                let message = {
-                    let message_reader = capnp_serialize::read_message(reader, CAPNP_BUF_READ_OPTS)
-                        .await?
-                        .ok_or_else(|| NetworkError::NoMessageReceived)?;
+                let result_data = {
+                    // Read the serialized task data directly with bincode
+                    let mut reader_std = reader.into_inner();
                     spawn_blocking(move || -> Result<_> {
-                        let des_task = selfc.deserialize_task(message_reader)?;
+                        let des_task = selfc.deserialize_task(&mut reader_std)?;
                         selfc.run_task(des_task)
                     })
                     .await??
                 };
-                // TODO: remove blocking call when possible
-                futures::executor::block_on(capnp_serialize::write_message(&mut writer, &message))
-                    .map_err(Error::CapnpDeserialization)?;
+                // Write result back directly with bincode
+                use std::io::Write;
+                writer
+                    .write_all(&result_data)
+                    .await
+                    .map_err(Error::OutputWrite)?;
                 log::debug!("sent result data to driver");
                 Ok(Signal::Continue)
             })
@@ -106,33 +100,12 @@ impl Executor {
     }
 
     #[allow(clippy::drop_copy)]
-    fn deserialize_task(
-        self: &Arc<Self>,
-        message_reader: CpnpReader<OwnedSegments>,
-    ) -> Result<TaskOption> {
+    fn deserialize_task(self: &Arc<Self>, reader: &mut impl std::io::Read) -> Result<TaskOption> {
         let start = Instant::now();
-        let task_data = message_reader.get_root::<serialized_data::Reader>()?;
-        let msg = match task_data.get_msg() {
-            Ok(s) => {
-                log::debug!("got the task message in executor {}", self.port);
-                s
-            }
-            Err(e) => {
-                log::debug!("problem while getting the task in executor: {:?}", e);
-                return Err(Error::CapnpDeserialization(e));
-            }
-        };
+        // Deserialize task directly with bincode
+        let des_task: TaskOption = bincode::deserialize_from(reader)?;
         log::debug!(
-            "deserialized data task @{} executor with {} bytes, took {}ms",
-            self.port,
-            msg.len(),
-            start.elapsed().as_millis()
-        );
-        std::mem::drop(task_data);
-        let start = Instant::now();
-        let des_task: TaskOption = bincode::deserialize(&msg)?;
-        log::debug!(
-            "deserialized task at executor @{} with id #{}, deserialization, took {}ms",
+            "deserialized task at executor @{} with id #{}, took {}ms",
             self.port,
             des_task.get_task_id(),
             start.elapsed().as_millis(),
@@ -140,35 +113,28 @@ impl Executor {
         Ok(des_task)
     }
 
-    fn run_task(self: &Arc<Self>, des_task: TaskOption) -> Result<MsgBuilder<HeapAllocator>> {
+    fn run_task(self: &Arc<Self>, des_task: TaskOption) -> Result<Vec<u8>> {
         // Run execution + serialization in parallel in the executor threadpool
-        let result: Result<Vec<u8>> = {
-            let start = Instant::now();
-            log::debug!("executing the task from server port {}", self.port);
-            // TODO: change attempt id from 0 to proper value
-            let result = des_task.run(0);
-            log::debug!(
-                "time taken @{} executor running task #{}: {}ms",
-                self.port,
-                des_task.get_task_id(),
-                start.elapsed().as_millis(),
-            );
-            let start = Instant::now();
-            let result = bincode::serialize(&result)?;
-            log::debug!(
-                "time taken @{} executor serializing task #{} result of size {} bytes: {}ms",
-                self.port,
-                des_task.get_task_id(),
-                result.len(),
-                start.elapsed().as_millis(),
-            );
-            Ok(result)
-        };
-
-        let mut message = capnp::message::Builder::new_default();
-        let mut task_data = message.init_root::<serialized_data::Builder>();
-        task_data.set_msg(&(result?));
-        Ok(message)
+        let start = Instant::now();
+        log::debug!("executing the task from server port {}", self.port);
+        // TODO: change attempt id from 0 to proper value
+        let result = des_task.run(0);
+        log::debug!(
+            "time taken @{} executor running task #{}: {}ms",
+            self.port,
+            des_task.get_task_id(),
+            start.elapsed().as_millis(),
+        );
+        let start = Instant::now();
+        let result = bincode::serialize(&result)?;
+        log::debug!(
+            "time taken @{} executor serializing task #{} result of size {} bytes: {}ms",
+            self.port,
+            des_task.get_task_id(),
+            result.len(),
+            start.elapsed().as_millis(),
+        );
+        Ok(result)
     }
 
     /// A listener for exit signal from master to end the whole slave process.
@@ -181,14 +147,9 @@ impl Executor {
         let mut signal: Result<Signal> = Err(Error::ExecutorShutdown);
         while let Some(Ok(stream)) = listener.incoming().next().await {
             let stream = stream.compat();
-            let signal_data = capnp_serialize::read_message(stream, CAPNP_BUF_READ_OPTS)
-                .await?
-                .ok_or_else(|| NetworkError::NoMessageReceived)?;
-            let data = bincode::deserialize::<Signal>(
-                signal_data
-                    .get_root::<serialized_data::Reader>()?
-                    .get_msg()?,
-            )?;
+            let mut stream_std = stream.into_inner();
+            // Deserialize signal directly with bincode
+            let data = bincode::deserialize_from::<_, Signal>(&mut stream_std)?;
             match data {
                 Signal::ShutDownError => {
                     log::info!("received error shutdown signal @ {}", self.port);
@@ -215,7 +176,7 @@ impl Executor {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Signal {
     ShutDownError,
     ShutDownGracefully,
@@ -227,10 +188,10 @@ mod tests {
     #![allow(unused_must_use)]
 
     use super::*;
+    use core::time;
+    use crossbeam::channel::{Receiver, Sender, unbounded};
     use ember_data::{TaskContext, TaskResult};
     use ember_utils::get_dynamic_port;
-    use crossbeam::channel::{unbounded, Receiver, Sender};
-    use core::time;
     use std::io::Write;
     use std::thread;
     use std::time::Duration;
@@ -267,11 +228,8 @@ mod tests {
     }
 
     fn send_shutdown_signal_msg(stream: &mut std::net::TcpStream) -> Result<()> {
-        let signal = bincode::serialize(&Signal::ShutDownGracefully)?;
-        let mut message = capnp::message::Builder::new_default();
-        let mut msg_data = message.init_root::<serialized_data::Builder>();
-        msg_data.set_msg(&signal);
-        capnp::serialize::write_message(stream, &message).map_err(Error::OutputWrite)?;
+        // Serialize signal directly with bincode
+        bincode::serialize_into(stream, &Signal::ShutDownGracefully)?;
         Ok(())
     }
 
@@ -327,10 +285,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_task() -> Result<()> {
+    async fn send_task() -> Result<(), Error> {
         fn test(client_rcv: Receiver<ComputeResult>, port: Port) -> Result<()> {
             // Mock data:
-            let func = Fn!(move |(_task_context, iter): (
+            let func = move |(_task_context, iter): (
                 TaskContext,
                 Box<dyn Iterator<Item = u8>>
             )|
@@ -338,14 +296,10 @@ mod tests {
                 // let iter = iter.collect::<Vec<u8>>();
                 // eprintln!("{:?}", iter);
                 iter.into_iter().next().unwrap()
-            });
+            };
             let mock_task: TaskOption = create_test_task(func).into();
-            let ser_task = bincode::serialize(&mock_task)?;
-            let mut message = capnp::message::Builder::new_default();
-            let mut msg_data = message.init_root::<serialized_data::Builder>();
-            msg_data.set_msg(&ser_task);
-            let mut buf = Vec::new();
-            capnp::serialize::write_message(&mut buf, &message).map_err(Error::OutputWrite)?;
+            // Serialize task directly with bincode
+            let buf = bincode::serialize(&mock_task)?;
 
             let end = Instant::now() + Duration::from_millis(150);
             while Instant::now() < end {
@@ -356,28 +310,20 @@ mod tests {
                 }
                 if let Ok(mut stream) = connect_to_executor(port, false) {
                     // Send task to executor:
-                    stream.write_all(&*buf).map_err(Error::OutputWrite)?;
+                    stream.write_all(&buf).map_err(Error::OutputWrite)?;
                     if let Ok(Err(_)) = client_rcv.try_recv() {
                         return Err(Error::Other);
                     }
 
-                    // Get the results back:
-                    if let Ok(res) =
-                        capnp::serialize::read_message(&mut stream, CAPNP_BUF_READ_OPTS)
-                    {
-                        let task_data = res.get_root::<serialized_data::Reader>().unwrap();
-
-                        match bincode::deserialize::<TaskResult>(&*task_data.get_msg().unwrap())? {
-                            TaskResult::ResultTask(_) => {}
-                            _ => return Err(Error::DowncastFailure("incorrect task result")),
-                        }
-
-                        let mut signal_handler = connect_to_executor(port, true)?;
-                        send_shutdown_signal_msg(&mut signal_handler)?;
-                        return Ok(());
-                    } else {
-                        return Err(Error::Other);
+                    // Get the results back: deserialize directly with bincode
+                    match bincode::deserialize_from::<_, TaskResult>(&mut stream)? {
+                        TaskResult::ResultTask(_) => {}
+                        _ => return Err(Error::DowncastFailure("incorrect task result")),
                     }
+
+                    let mut signal_handler = connect_to_executor(port, true)?;
+                    send_shutdown_signal_msg(&mut signal_handler)?;
+                    return Ok(());
                 }
                 thread::sleep(time::Duration::from_millis(5));
             }

@@ -231,6 +231,19 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 name = "ember"
 version = "0.1.0"
 dependencies = [
+ "ember-compute",
+ "ember-macros",
+ "once_cell",
+]
+
+[[package]]
+name = "ember-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ember-compute"
+version = "0.1.0"
+dependencies = [
  "anyhow",
  "async-trait",
  "bincode",
@@ -269,10 +282,6 @@ dependencies = [
  "tonic-build",
  "uuid",
 ]
-
-[[package]]
-name = "ember-cli"
-version = "0.1.0"
 
 [[package]]
 name = "ember-data"

@@ -10,7 +10,7 @@ use std::sync::Arc;
 pub(crate) struct Stage {
     pub id: usize,
     pub num_partitions: usize,
-    pub shuffle_dependency: Option<ShuffleDependencyBox>,
+    pub shuffle_dependency: Option<Arc<ShuffleDependencyBox>>,
     pub is_shuffle_map: bool,
     pub rdd: Arc<dyn RddBase>,
     pub parents: Vec<Stage>,
@@ -50,7 +50,7 @@ impl Stage {
     pub fn new(
         id: usize,
         rdd: Arc<dyn RddBase>,
-        shuffle_dependency: Option<ShuffleDependencyBox>,
+        shuffle_dependency: Option<Arc<ShuffleDependencyBox>>,
         parents: Vec<Stage>,
     ) -> Self {
         Stage {

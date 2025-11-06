@@ -33,7 +33,7 @@ fn set_up(file_name: &str) {
 fn test_make_rdd() -> Result<()> {
     let sc = CONTEXT.clone();
     let col = sc.make_rdd((0..10).collect::<Vec<_>>(), 32);
-    let vec_iter = col.map(Fn!(|i| (0..i).collect::<Vec<_>>()));
+    let vec_iter = col.map(|i| (0..i).collect::<Vec<_>>());
     let res = vec_iter.collect()?;
     let expected = (0..10)
         .map(|i| (0..i).collect::<Vec<_>>())
@@ -51,10 +51,10 @@ fn test_basic_operations() -> Result<()> {
     //  assert_eq!(nums.iterator()?, vec![1i32,2,3,4]);
     let dups = sc.make_rdd(vec![1i32, 1, 2, 2, 3, 3, 4, 4], 2);
     assert_eq!(dups.distinct().count()?, 4);
-    assert_eq!(nums.reduce(Fn!(|x: i32, y: i32| x + y))?, Some(10));
-    assert_eq!(nums.fold(0, Fn!(|x: i32, y: i32| x + y))?, 10);
+    assert_eq!(nums.reduce(|x: i32, y: i32| x + y)?, Some(10));
+    assert_eq!(nums.fold(0, |x: i32, y: i32| x + y)?, 10);
     assert_eq!(
-        nums.map(Fn!(|x: i32| x.to_string())).collect()?,
+        nums.map(|x: i32| x.to_string()).collect()?,
         vec![
             "1".to_string(),
             "2".to_string(),
@@ -62,11 +62,11 @@ fn test_basic_operations() -> Result<()> {
             "4".to_string()
         ]
     );
-    //assert_eq!(nums.filter(Fn!(|x:i32| x>2)).collect(),vec![3i32,4])
+    //assert_eq!(nums.filter(|x:i32| x>2).collect(),vec![3i32,4])
     assert_eq!(
-        nums.flat_map(Fn!(
+        nums.flat_map(
             |x: i32| Box::new((1..(1 + x))) as Box<dyn Iterator<Item = _>>
-        ))
+        )
         .collect()?,
         vec![1i32, 1, 2, 1, 2, 3, 1, 2, 3, 4]
     );
@@ -75,7 +75,7 @@ fn test_basic_operations() -> Result<()> {
         vec![1i32, 2, 3, 4, 1, 2, 3, 4]
     );
     assert_eq!(nums.glom().collect()?, vec![vec![1i32, 2], vec![3i32, 4]]);
-    // assert_eq!(nums.collect(Fn!(|x:i32| x>=3 )).collect()?, vec![3i32,4]); --method not implemented
+    // assert_eq!(nums.collect(|x:i32| x>=3 ).collect()?, vec![3i32,4]); --method not implemented
     // assert_eq!(nums.gr) -- no keyby implementation
     //assert_eq!(!nums.isEmpty()) -- no isEmpty
     // no min, max functions
@@ -90,7 +90,7 @@ fn test_filter() {
 
     let rdd = sc.parallelize(col1, 2);
 
-    let predicate = Fn!(|&i: &usize| i > 100);
+    let predicate = (|&i: &usize| i > 100);
 
     assert_eq!(rdd.filter(predicate).collect().unwrap(), vec![103, 113]);
 }
@@ -100,10 +100,9 @@ fn test_map_partitions() -> Result<()> {
     let sc = CONTEXT.clone();
     let rdd = sc.make_rdd(vec![1, 2, 3, 4], 2);
     let partition_sums = rdd
-        .map_partitions(Fn!(
-            |iter: Box<dyn Iterator<Item = i64>>| Box::new(std::iter::once(iter.sum::<i64>()))
+        .map_partitions(|iter: Box<dyn Iterator<Item = i64>>| Box::new(std::iter::once(iter.sum::<i64>()))
                 as Box<dyn Iterator<Item = i64>>
-        ))
+        )
         .collect()?;
     assert_eq!(partition_sums, vec![3, 7]);
     assert_eq!(rdd.glom().collect()?, vec![vec![1, 2], vec![3, 4]]);
@@ -114,7 +113,7 @@ fn test_map_partitions() -> Result<()> {
 fn test_fold() {
     let sc = CONTEXT.clone();
     let rdd = sc.make_rdd((-1000..1000).collect::<Vec<_>>(), 10);
-    let f = Fn!(|c, x| c + x);
+    let f = |c, x| c + x;
     // def op: (Int, Int) => Int = (c: Int, x: Int) => c + x
     let sum = rdd.fold(0, f).unwrap();
     assert_eq!(sum, -1000)
@@ -125,11 +124,11 @@ fn test_fold_with_modifying_initial_value() {
     let sc = CONTEXT.clone();
     let rdd = sc
         .make_rdd((-1000..1000).collect::<Vec<i32>>(), 10)
-        .map(Fn!(|x| vec![x]));
-    let f = Fn!(|mut c: Vec<i32>, x: Vec<i32>| {
+        .map(|x| vec![x]);
+    let f = |mut c: Vec<i32>, x: Vec<i32>| {
         c[0] += x[0];
         c
-    });
+    };
     let sum = rdd.fold(vec![0], f).unwrap();
     assert_eq!(sum[0], -1000)
 }
@@ -150,16 +149,16 @@ fn test_aggregate() {
     use std::collections::{HashMap, HashSet};
     type StringMap = HashMap<String, i32>;
     let empty_map = StringMap::new();
-    let merge_element = Fn!(|mut map: StringMap, pair: (String, i32)| {
+    let merge_element = |mut map: StringMap, pair: (String, i32)| {
         *map.entry(pair.0).or_insert(0) += pair.1;
         map
-    });
-    let merge_maps = Fn!(|mut map1: StringMap, map2: StringMap| {
+    };
+    let merge_maps = |mut map1: StringMap, map2: StringMap| {
         for (key, value) in map2 {
             *map1.entry(key).or_insert(0) += value;
         }
         map1
-    });
+    };
     let result = pairs
         .aggregate(empty_map, merge_element, merge_maps)
         .unwrap();
@@ -214,7 +213,7 @@ fn test_first() {
 
 #[test]
 fn test_read_files_bytes() -> Result<()> {
-    let deserializer = Fn!(|file: Vec<u8>| -> Vec<String> {
+    let deserializer = |file: Vec<u8>| -> Vec<String> {
         // do stuff with the read files ...
         let parsed: Vec<_> = String::from_utf8(file)
             .unwrap()
@@ -225,7 +224,7 @@ fn test_read_files_bytes() -> Result<()> {
         assert_eq!(parsed[0], "This is some textual test data.");
         // return lines
         parsed
-    });
+    };
 
     // Single file test
     let file_name = "test_file_1";
@@ -259,7 +258,7 @@ fn test_read_files_bytes() -> Result<()> {
 
 #[test]
 fn test_read_files() -> Result<()> {
-    let deserializer = Fn!(|file: std::path::PathBuf| {
+    let deserializer = |file: std::path::PathBuf| {
         let mut file = File::open(file).unwrap();
         let mut content = String::new();
         file.read_to_string(&mut content).unwrap();
@@ -267,7 +266,7 @@ fn test_read_files() -> Result<()> {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0], "This is some textual test data.");
         parsed
-    });
+    };
 
     let file_name = "test_file_1";
     let file_path = WORK_DIR.join(TEST_DIR).join(file_name);
@@ -614,7 +613,7 @@ fn test_key_by() {
     let col1 = vec![3, 4, 5];
     let rdd = sc.parallelize(col1, 2);
 
-    let res = rdd.key_by(Fn!(|&i: &usize| i * 10)).collect().unwrap();
+    let res = rdd.key_by(|&i: &usize| i * 10).collect().unwrap();
 
     assert_eq!(res, vec![(3, 30), (4, 40), (5, 50)]);
 }

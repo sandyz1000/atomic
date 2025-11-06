@@ -1,7 +1,6 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::context::{Context, RddContext};
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use ember_data::data::Data;
@@ -17,7 +16,7 @@ where
     prev: Arc<dyn Rdd<Item = T>>,
     vals: Arc<RddVals>,
     f: Arc<F>,
-    _marker_t: PhantomData<T>, // phantom data is necessary because of type parameter T
+    _marker: PhantomData<(T, U)>,
 }
 
 pub struct FlatMapperPairRdd<T: Data, K: Data + Clone, V: Data + Clone, F>
@@ -27,7 +26,7 @@ where
     prev: Arc<dyn Rdd<Item = T>>,
     vals: Arc<RddVals>,
     f: Arc<F>,
-    _marker_t: PhantomData<T>,
+    _marker: PhantomData<(T, K, V)>,
 }
 
 impl<T: Data, U: Data, F> Clone for FlatMapperRdd<T, U, F>
@@ -39,7 +38,7 @@ where
             prev: self.prev.clone(),
             vals: self.vals.clone(),
             f: self.f.clone(),
-            _marker_t: PhantomData,
+            _marker: PhantomData,
         }
     }
 }
@@ -48,8 +47,8 @@ impl<T: Data, U: Data, F> FlatMapperRdd<T, U, F>
 where
     F: RddFlatMapFn<T, U>,
 {
-    pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
-        let mut vals = RddVals::new(prev.get_context());
+    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+        let mut vals = RddVals::new(id);
         vals.dependencies.push(Dependency::OneToOne {
             rdd_base: prev.get_rdd_base(),
         });
@@ -58,14 +57,8 @@ where
             prev,
             vals,
             f: Arc::new(f),
-            _marker_t: PhantomData,
+            _marker: PhantomData,
         }
-    }
-}
-
-impl<T, U, F> RddContext for FlatMapperRdd<T, U, F> {
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.get_context()
     }
 }
 
@@ -91,14 +84,14 @@ where
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         self.iterator_any(split)
     }
 
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside iterator_any flatmaprdd",);
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
@@ -119,7 +112,10 @@ where
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let f = self.f.clone();
         Ok(Box::new(self.prev.iterator(split)?.flat_map(move |x| f(x))))
     }
@@ -138,7 +134,7 @@ where
             prev: self.prev.clone(),
             vals: self.vals.clone(),
             f: self.f.clone(),
-            _marker_t: PhantomData,
+            _marker: PhantomData,
         }
     }
 }
@@ -147,8 +143,8 @@ impl<T: Data, K: Data + Clone, V: Data + Clone, F> FlatMapperPairRdd<T, K, V, F>
 where
     F: RddFlatMapFn<T, (K, V)>,
 {
-    pub(crate) fn new(prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
-        let mut vals = RddVals::new(prev.get_context());
+    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+        let mut vals = RddVals::new(id);
         vals.dependencies.push(Dependency::OneToOne {
             rdd_base: prev.get_rdd_base(),
         });
@@ -157,14 +153,8 @@ where
             prev,
             vals,
             f: Arc::new(f),
-            _marker_t: PhantomData,
+            _marker: PhantomData,
         }
-    }
-}
-
-impl<T, K, V, F> RddContext for FlatMapperPairRdd<T, K, V, F> {
-    fn get_context(&self) -> Arc<Context> {
-        self.vals.get_context()
     }
 }
 
@@ -193,9 +183,10 @@ where
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside cogroup_iterator_any flatmapperpairrdd");
-        Ok(Box::new(self.iterator(split)?.map(|(k, v)| {
-            Box::new((k, Box::new(v) as Box<dyn Data>)) as Box<dyn Data>
-        })))
+        Ok(Box::new(
+            self.iterator(split)?
+                .map(|pair| Box::new(pair) as Box<dyn Data>),
+        ))
     }
 
     fn iterator_any(
@@ -223,7 +214,10 @@ where
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    fn compute(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let f = self.f.clone();
         Ok(Box::new(self.prev.iterator(split)?.flat_map(move |x| f(x))))
     }

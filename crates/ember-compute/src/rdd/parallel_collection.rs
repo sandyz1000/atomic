@@ -1,7 +1,4 @@
 //! This module implements parallel collection RDD for dividing the input collection for parallel processing.
-use std::sync::{Arc, Weak};
-
-use crate::context::{Context, RddContext};
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use ember_data::data::Data;
@@ -9,6 +6,7 @@ use ember_data::dependency::Dependency;
 use ember_data::error::BaseError;
 use ember_data::split::{ParallelCollectionSplit, Split};
 use parking_lot::Mutex;
+use std::sync::{Arc, Weak};
 
 /// A collection of objects which can be sliced into partitions with a partitioning function.
 pub trait Chunkable<D>
@@ -28,7 +26,6 @@ where
 
 pub struct ParallelCollectionVals<T> {
     vals: Arc<RddVals>,
-    context: Weak<Context>,
     splits_: Vec<Arc<Vec<T>>>,
     num_slices: usize,
 }
@@ -48,29 +45,27 @@ impl<T: Data> Clone for ParallelCollection<T> {
 }
 
 impl<T: Data> ParallelCollection<T> {
-    pub fn new<I>(context: Arc<Context>, data: I, num_slices: usize) -> Self
+    pub fn new<I>(id: usize, data: I, num_slices: usize) -> Self
     where
         I: IntoIterator<Item = T>,
     {
         ParallelCollection {
             name: Mutex::new("parallel_collection".to_owned()),
             rdd_vals: Arc::new(ParallelCollectionVals {
-                context: Arc::downgrade(&context),
-                vals: Arc::new(RddVals::new(context.clone())),
+                vals: Arc::new(RddVals::new(id)),
                 splits_: ParallelCollection::slice(data, num_slices),
                 num_slices,
             }),
         }
     }
 
-    pub fn from_chunkable<C>(context: Arc<Context>, data: C) -> Self
+    pub fn from_chunkable<C>(id: usize, data: C) -> Self
     where
         C: Chunkable<T>,
     {
         let splits_ = data.slice();
         let rdd_vals = ParallelCollectionVals {
-            context: Arc::downgrade(&context),
-            vals: Arc::new(RddVals::new(context.clone())),
+            vals: Arc::new(RddVals::new(id)),
             num_slices: splits_.len(),
             splits_,
         };
@@ -109,12 +104,6 @@ impl<T: Data> ParallelCollection<T> {
             output.push(Arc::new(tmp.drain(..).collect::<Vec<_>>()));
             output
         }
-    }
-}
-
-impl<T> RddContext for ParallelCollection<T> {
-    fn get_context(&self) -> Arc<Context> {
-        self.rdd_vals.vals.get_context()
     }
 }
 
@@ -183,8 +172,11 @@ impl<T: Data + Clone> Rdd for ParallelCollection<T> {
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
-        if let Some(s) = split.downcast_ref::<ParallelCollectionSplit<T>>() {
+    fn compute(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+        if let Some(s) = split.as_any().downcast_ref::<ParallelCollectionSplit<T>>() {
             Ok(s.iterator())
         } else {
             panic!(

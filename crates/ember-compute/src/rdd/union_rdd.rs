@@ -1,17 +1,15 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use ember_data::error::BaseError;
-use itertools::{Itertools, MinMaxResult};
-
-use crate::context::{Context, RddContext};
 use crate::error::Error;
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::union_rdd::UnionVariants::{NonUniquePartitioner, PartitionerAware};
 use crate::rdd::*;
 use ember_data::dependency::Dependency;
+use ember_data::error::BaseError;
 use ember_data::partitioner::Partitioner;
 use ember_data::split::{PartitionerAwareUnionSplit, Split, UnionSplit};
+use itertools::{Itertools, MinMaxResult};
 
 pub struct UnionRdd<T: 'static>(UnionVariants<T>);
 
@@ -19,8 +17,8 @@ impl<T> UnionRdd<T>
 where
     T: Data,
 {
-    pub fn new(rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self, Error> {
-        Ok(UnionRdd(UnionVariants::new(rdds)?))
+    pub fn new(id: usize, rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self, Error> {
+        Ok(UnionRdd(UnionVariants::new(id, rdds)?))
     }
 }
 
@@ -58,9 +56,8 @@ impl<T: Data> Clone for UnionVariants<T> {
 }
 
 impl<T: Data> UnionVariants<T> {
-    fn new(rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self, Error> {
-        let context = rdds[0].get_context();
-        let mut vals = RddVals::new(context);
+    fn new(id: usize, rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self, Error> {
+        let mut vals = RddVals::new(id);
 
         let mut pos = 0;
         let final_rdds: Vec<_> = rdds.iter().map(|rdd| rdd.clone().into()).collect();
@@ -123,28 +120,20 @@ impl<T: Data> UnionVariants<T> {
             .is_ok()
     }
 
-    fn current_pref_locs<'a>(
-        &'a self,
-        rdd: Arc<dyn RddBase>,
-        split: &dyn Split,
-        context: Arc<Context>,
-    ) -> impl Iterator<Item = std::net::Ipv4Addr> + 'a {
-        context
-            .get_preferred_locs(rdd, split.get_index())
-            .into_iter()
-    }
+    // TODO: Preferred locations functionality needs to be reimplemented at Context/Scheduler layer
+    // fn current_pref_locs<'a>(
+    //     &'a self,
+    //     rdd: Arc<dyn RddBase>,
+    //     split: &dyn Split,
+    //     context: Arc<Context>,
+    // ) -> impl Iterator<Item = std::net::Ipv4Addr> + 'a {
+    //     context
+    //         .get_preferred_locs(rdd, split.get_index())
+    //         .into_iter()
+    // }
 }
 
-impl<T> RddContext for UnionRdd<T> {
-    fn get_context(&self) -> Arc<Context> {
-        match &self.0 {
-            NonUniquePartitioner { vals, .. } => vals.get_context(),
-            PartitionerAware { vals, .. } => vals.get_context(),
-        }
-    }
-}
-
-impl<T: Data> RddBase for UnionRdd<T> {
+impl<T: Data + Clone> RddBase for UnionRdd<T> {
     fn get_rdd_id(&self) -> usize {
         match &self.0 {
             NonUniquePartitioner { vals, .. } => vals.id,
@@ -172,38 +161,18 @@ impl<T: Data> RddBase for UnionRdd<T> {
                     split.get_index()
                 );
 
-                let split = &*split
-                    .downcast::<PartitionerAwareUnionSplit>()
-                    .or(Err(Error::DowncastFailure("UnionSplit")))
-                    .unwrap();
-
-                let locations =
-                    rdds.iter()
-                        .zip(split.parents(rdds.as_slice()))
-                        .map(|(rdd, part)| {
-                            let parent_locations = self.0.current_pref_locs(
-                                rdd.get_rdd_base(),
-                                &*part,
-                                self.get_context(),
-                            );
-                            log::debug!("location of {} partition {} = {}", 1, 2, 3);
-                            parent_locations
-                        });
-
-                // find the location that maximum number of parent partitions prefer
-                let location = match locations.flatten().minmax_by_key(|loc| *loc) {
-                    MinMaxResult::MinMax(_, max) => Some(max),
-                    MinMaxResult::OneElement(e) => Some(e),
-                    MinMaxResult::NoElements => None,
+                let Some(split) = split.as_any().downcast_ref::<PartitionerAwareUnionSplit>()
+                else {
+                    log::warn!("Failed to downcast split to PartitionerAwareUnionSplit");
+                    return Vec::new();
                 };
 
+                // TODO: Preferred locations need to be computed through Context/Scheduler
+                // layer rather than at RDD level after decoupling context from RDDs
                 log::debug!(
-                    "selected location for PartitionerAwareRdd, partition {} = {:?}",
-                    split.get_index(),
-                    location
+                    "Preferred locations for PartitionerAwareUnionRdd temporarily disabled"
                 );
-
-                location.into_iter().collect()
+                Vec::new()
             }
         }
     }
@@ -256,7 +225,7 @@ impl<T: Data> RddBase for UnionRdd<T> {
     }
 }
 
-impl<T: Data> Rdd for UnionRdd<T> {
+impl<T: Data + Clone> Rdd for UnionRdd<T> {
     type Item = T;
 
     fn get_rdd_base(&self) -> Arc<dyn RddBase> {
@@ -270,17 +239,19 @@ impl<T: Data> Rdd for UnionRdd<T> {
     fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = T>>, BaseError> {
         match &self.0 {
             NonUniquePartitioner { rdds, .. } => {
-                let part = &*split
-                    .downcast::<UnionSplit<T>>()
-                    .or(Err(Error::DowncastFailure("UnionSplit")))?;
+                let part = split
+                    .as_any()
+                    .downcast_ref::<UnionSplit<T>>()
+                    .ok_or(Error::DowncastFailure("UnionSplit"))?;
                 let parent = &rdds[part.parent_rdd_index];
                 parent.iterator(part.parent_partition())
             }
             PartitionerAware { rdds, .. } => {
                 let split = split
-                    .downcast::<PartitionerAwareUnionSplit>()
-                    .or(Err(Error::DowncastFailure("PartitionerAwareUnionSplit")))?;
-                let iter: Result<Vec<_>> = rdds
+                    .as_any()
+                    .downcast_ref::<PartitionerAwareUnionSplit>()
+                    .ok_or(Error::DowncastFailure("PartitionerAwareUnionSplit"))?;
+                let iter: Result<Vec<_>, BaseError> = rdds
                     .iter()
                     .zip(split.parents(&rdds))
                     .map(|(rdd, p)| rdd.iterator(p.clone()))

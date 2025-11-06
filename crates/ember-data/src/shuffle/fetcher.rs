@@ -15,6 +15,7 @@ type Body = Full<Bytes>;
 type LibResult<T> = Result<T, ShuffleError>;
 
 /// Parallel shuffle fetcher.
+#[derive(Debug, Clone)]
 pub struct ShuffleFetcher {
     tracker: Arc<MapOutputTracker>,
 }
