@@ -1,6 +1,0 @@
-[package]
-name = "ember-wasm"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
