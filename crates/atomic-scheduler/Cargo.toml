@@ -1,0 +1,17 @@
+[package]
+name = "atomic-scheduler"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+atomic-utils = { workspace = true }
+atomic-data = { workspace = true }
+log = { workspace = true }
+async-trait = { workspace = true }
+dashmap = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+bincode = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true }

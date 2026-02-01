@@ -1,29 +1,27 @@
-# 🔥 Ember
+# 🔥 Atomic
 
-**A distributed data processing framework written in Rust**
+## A distributed data processing framework written in Rust
 
 ---
 
 ## Overview
 
-**Ember** is a distributed data processing framework written in **Rust**, inspired by **Apache Spark** — designed for type-safe, efficient, and resilient data processing.
+**atomic** is a distributed data processing framework written in **Rust**, inspired by **Apache Spark** — designed for type-safe, efficient, and resilient data processing.
 
-Ember provides a **Spark-like RDD API** with familiar transformations and actions, backed by a **DAG-based execution engine** that optimizes task scheduling and execution across single machines or distributed clusters.
+atomic provides a **Spark-like RDD API** with familiar transformations and actions, backed by a **DAG-based execution engine** that optimizes task scheduling and execution across single machines or distributed clusters.
 
 **Current Features:**
+
 * Type-safe RDD API with lazy evaluation
 * DAG-based task scheduling
 * Local and distributed execution modes
 * Shuffle operations for wide transformations
 * Task result tracking and caching
-
-**Future Vision:**
-Instead of running user-defined functions directly, Ember will execute tasks inside **WASM runtimes** in distributed mode, ensuring:
 * Deterministic, sandboxed execution
 * Architecture portability
 * Safety and isolation for untrusted code
 
-This project is heavily inspired by [vega](https://github.com/rajasekarv/vega/tree/master). The original project is no longer maintained, and its distributed execution required nightly Rust. Ember aims to provide a safer alternative using WASM-compiled UDFs for distributed execution.
+This project is heavily inspired by [vega](https://github.com/rajasekarv/vega/tree/master). The original project is no longer maintained. atomic adopts a similar distributed execution model where compiled binaries are distributed to remote nodes, with communication handled via rkyv-based RPC for data and control messages.
 
 ---
 
@@ -31,7 +29,7 @@ This project is heavily inspired by [vega](https://github.com/rajasekarv/vega/tr
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   Ember Framework                    │
+│                   atomic Framework                    │
 ├─────────────────────────────────────────────────────┤
 │                                                      │
 │  ┌────────────┐      ┌─────────────────────────┐   │
@@ -59,14 +57,122 @@ This project is heavily inspired by [vega](https://github.com/rajasekarv/vega/tr
 │  └─────────────────────────────────────────────┘   │
 │                                                      │
 └─────────────────────────────────────────────────────┘
-
-Future: Distributed Mode with WASM Execution
-┌─────────────┐        ┌──────────────────┐
-│ Master Node │◄──────►│  Worker Nodes    │
-│ - Scheduler │        │  - WASM Runtime  │
-│ - Tracker   │        │  - Task Sandbox  │
-└─────────────┘        └──────────────────┘
 ```
+
+### Distributed Execution Model
+
+Atomic's distributed mode follows a **Vega-inspired architecture** where compiled binaries are distributed to worker nodes, and communication happens via **rkyv-based RPC** for efficient serialization of data and control messages.
+
+#### Binary Distribution Strategies
+
+##### Option 1: SSH + rsync/Ansible
+
+* Build your Rust binary once
+* Use rsync or Ansible to distribute the binary to remote nodes
+* Suitable for static clusters or bare-metal deployments
+
+##### Option 2: Container Registry (Kubernetes, Nomad, ECS)
+
+* Package your atomic-based app into a Docker image (binary + config)
+* Deploy the same image across all nodes
+* Let the orchestrator handle image distribution
+
+#### Communication Protocol
+
+In distributed mode, atomic nodes communicate over **rkyv RPC** to move:
+
+* **RDD partitions** — Serialized data chunks
+* **Control messages** — Heartbeats, task status, errors
+* **Task metadata** — Stage info, partition locations
+
+The rkyv crate provides zero-copy deserialization for efficient data transfer between nodes.
+
+#### Python/JavaScript Task Execution
+
+For Python and JavaScript tasks, atomic follows a **Ray-inspired strategy**:
+
+* Language-specific runtimes embedded on worker nodes
+* Task definitions serialized and dispatched to appropriate workers
+* Results collected and aggregated back to the driver
+
+#### Kubernetes Deployment Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  Kubernetes Cluster                      │
+├─────────────────────────────────────────────────────────┤
+│                                                          │
+│  ┌──────────────────────┐                               │
+│  │  Driver/Master Pod   │                               │
+│  │  ┌────────────────┐  │                               │
+│  │  │ DAG Scheduler  │  │◄──── rkyv RPC ────┐          │
+│  │  │ Job Tracker    │  │                    │          │
+│  │  │ Result Agg     │  │                    │          │
+│  │  └────────────────┘  │                    │          │
+│  │   (atomic:latest)    │                    │          │
+│  └──────────────────────┘                    │          │
+│           ▲                                   │          │
+│           │                                   │          │
+│           │  Service Discovery                │          │
+│           │  (env vars, DNS)                  │          │
+│           │                                   │          │
+│  ┌────────┴───────────────────────────────────┐│          │
+│  │                                           ││          │
+│  │  ┌──────────────┐    ┌──────────────┐   ││          │
+│  │  │ Worker Pod 1 │    │ Worker Pod 2 │   ││          │
+│  │  │ ┌──────────┐ │    │ ┌──────────┐ │   ││          │
+│  │  │ │ Executor │─┼────┼─│ Executor │ │◄──┘│          │
+│  │  │ │ Shuffle  │ │    │ │ Shuffle  │ │    │          │
+│  │  │ │ Cache    │ │    │ │ Cache    │ │    │          │
+│  │  │ └──────────┘ │    │ └──────────┘ │    │          │
+│  │  │ (atomic:latest)    │ (atomic:latest)   │          │
+│  │  └──────────────┘    └──────────────┘   │          │
+│  │                                           │          │
+│  │              Worker Deployment            │          │
+│  │         (Deployment/StatefulSet)          │          │
+│  └───────────────────────────────────────────┘          │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+
+        Container Registry
+        ┌──────────────┐
+        │ atomic:latest│  ← Build once, pull everywhere
+        │ atomic:v1.2.3│
+        └──────────────┘
+```
+
+**How It Works on Kubernetes:**
+
+1. **Build & Package**
+   * Compile your atomic-based application
+   * Create a Docker image containing the binary, config, and dependencies
+   * Push to a container registry (Docker Hub, GCR, ECR, etc.)
+
+2. **Deploy**
+   * **Driver Pod**: Single pod (Deployment or Job) that runs the DAG scheduler
+   * **Worker Pods**: Multiple pods (Deployment, StatefulSet, or DaemonSet) that execute tasks
+   * All pods use the **same image tag** (e.g., `atomic:latest`)
+
+3. **Service Discovery**
+   * Configure Kubernetes Service for the driver pod
+   * Use environment variables (e.g., `ATOMIC_DRIVER_HOST`, `ATOMIC_LOCAL_IP`) for node registration
+   * Workers discover and connect to the driver via DNS or injected config
+
+4. **Runtime Behavior**
+   * **Binary distribution**: Handled automatically by Kubernetes image-pull mechanism
+   * **Data transfer**: Only serialized RDD partitions, task metadata, and control messages flow over rkyv RPC
+   * **No per-job binary shipping**: Code updates happen via rolling image updates
+
+5. **Scaling**
+   * Scale workers via `kubectl scale` or HorizontalPodAutoscaler
+   * Driver remains single-instance; workers are stateless (or use StatefulSet for caching)
+
+**Benefits:**
+
+* **Efficient**: No binary shipping at runtime—only data and metadata
+* **Standard**: Leverage existing K8s tools for deployment, scaling, and monitoring
+* **Versioned**: Image tags provide clear versioning and rollback capability
+* **Isolated**: Each pod has resource limits and network isolation
 
 ---
 
@@ -77,14 +183,13 @@ Future: Distributed Mode with WASM Execution
 * **Type-Safe API** — Leverages Rust's type system to catch errors at compile time
 * **Dependency Tracking** — Narrow (one-to-one, range) and shuffle (wide) dependencies for efficient execution
 * **Task Scheduling** — DAG-based scheduler that generates stages and distributes tasks
-* **Future: WASM Isolation** — Tasks will run in sandboxed WASM runtimes in distributed mode
 
 ---
 
-## 🦀 Example: Word Count in Ember
+## 🦀 Example: Word Count in atomic
 
 ```rust
-use ember::prelude::*;
+use atomic::prelude::*;
 
 fn main() -> Result<()> {
     let sc = Context::new("wordcount")?;
@@ -113,6 +218,7 @@ fn main() -> Result<()> {
 ### RDD Operations
 
 **Transformations** (lazy):
+
 * `map` — Apply a function to each element
 * `flat_map` — Map and flatten results
 * `filter` — Keep elements matching a predicate
@@ -122,6 +228,7 @@ fn main() -> Result<()> {
 * `coalesce` — Reduce number of partitions
 
 **Actions** (trigger execution):
+
 * `collect` — Return all elements to driver
 * `reduce` — Aggregate elements using a function
 * `count` — Count number of elements
@@ -131,6 +238,7 @@ fn main() -> Result<()> {
 ### Shuffle Operations
 
 For key-value RDDs:
+
 * `reduce_by_key` — Combine values for each key
 * `group_by_key` — Group values by key
 * `join` — Inner join two RDDs by key
@@ -138,30 +246,10 @@ For key-value RDDs:
 
 ---
 
-## 🚀 Future: WASM Execution Model
-
-In distributed mode, transformations will be compiled to **WASM modules** using [wasmtime](https://github.com/bytecodealliance/wasmtime).
-
-```rust
-// Future: WASM-executable task
-#[wasm_task]
-pub fn map_fn(line: &str) -> Vec<String> {
-    line.split_whitespace()
-        .map(|s| s.to_string())
-        .collect()
-}
-```
-
-The compiled `.wasm` module will be:
-1. Serialized and sent to worker nodes
-2. Executed in isolated WASM sandbox
-3. Results streamed back to scheduler
-
----
-
 ## Roadmap
 
 **Completed:**
+
 * [x] RDD API (transformations & actions)
 * [x] Local scheduler implementation
 * [x] Shuffle operations
@@ -170,41 +258,25 @@ The compiled `.wasm` module will be:
 * [x] Task execution framework
 
 **In Progress:**
+
 * [ ] Distributed scheduler
 * [ ] Network communication layer
 * [ ] Result aggregation
 
 **Future:**
-* [ ] WASM sandbox execution for distributed mode
+
 * [ ] Checkpointing and recovery
 * [ ] Query optimizer (predicate pushdown, pipelining)
 * [ ] Python bindings for client API
 * [ ] Web dashboard (metrics + job UI)
 * [ ] Advanced shuffle optimizations
-
----
-
-## 💡 Why WASM for Distributed Mode?
-
-| Feature     | Traditional | Ember (Future)   |
-| ----------- | ----------- | ---------------- |
-| Language    | JVM/Native  | Rust + WASM      |
-| Task Safety | JVM sandbox | WASM sandbox     |
-| Overhead    | Medium-High | Near-native      |
-| Portability | Limited     | Any architecture |
-| Edge Ready  | ❌           | ✅                |
-| Memory Safe | Depends     | ✅ Always         |
-
-**Key Advantages:**
-* **Security**: No unsafe code execution on workers
-* **Isolation**: Each task runs in its own sandbox
-* **Efficiency**: Near-native performance with safety guarantees
+* Multi-language support (Python/JavaScript via embedded runtimes)
 
 ---
 
 ## Design Philosophy
 
-> "Ember brings Spark's proven RDD model to Rust, with a vision for WASM-powered distributed execution that prioritizes safety, portability, and efficiency."
+> "Atomic brings Spark's proven RDD model to Rust, with a vision for distributed execution that prioritizes efficiency, portability, and safety through compiled binaries and efficient serialization."
 
 ---
 
@@ -213,7 +285,6 @@ The compiled `.wasm` module will be:
 * [x] Flow definition API (DAG)
 * [x] Local scheduler prototype
 * [ ] Distributed cluster mode
-* [ ] WASM sandbox execution
 * [ ] Checkpointing and recovery
 * [ ] Optimizer (predicate pushdown, pipelining)
 * [ ] Python bindings for client API
@@ -221,8 +292,6 @@ The compiled `.wasm` module will be:
 
 ---
 
-
 ## 📜 License
 
 Licensed under the [Apache 2.0 License](LICENSE).
-

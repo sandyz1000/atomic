@@ -1,6 +1,0 @@
-[package]
-name = "ember-cli"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

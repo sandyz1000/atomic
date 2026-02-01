@@ -1,31 +1,30 @@
 [workspace.package]
-name = "ember"
+name = "atomic"
 version = "0.1.0"
 edition = "2024"
 
 [package]
-name = "ember"
+name = "atomic"
 edition.workspace = true
 version.workspace = true
 
 [workspace]
-members = ["crates/*", "."]
+matomics = ["crates/*", "."]
 
 workspace.exclude = ["examples/*", "tests/*"]
-workspace.default-members = ["."]
+workspace.default-matomics = ["."]
 
 [dependencies]
 once_cell = { workspace = true }
-ember-macros = { workspace = true }
-ember-compute = { workspace = true }
+atomic-macros = { workspace = true }
+atomic-compute = { workspace = true }
 
 [workspace.dependencies]
-ember-macros = { path = "crates/ember-macros"}
-ember-wasm = { path = "crates/ember-wasm" }
-ember-compute = { path = "crates/ember-compute" }
-ember-scheduler = { path = "crates/ember-scheduler" }
-ember-data = { path = "crates/ember-data" }
-ember-utils = { path = "crates/ember-utils" }
+atomic-macros = { path = "crates/atomic-macros"}
+atomic-compute = { path = "crates/atomic-compute" }
+atomic-scheduler = { path = "crates/atomic-scheduler" }
+atomic-data = { path = "crates/atomic-data" }
+atomic-utils = { path = "crates/atomic-utils" }
 http = "1.3.1"
 tempfile = "3.23.0"
 dyn-clone = "1.0.20"
@@ -48,8 +47,6 @@ tonic-build = "0.14.2"
 hyper = "1.7.0"
 http-body-util = "0.1.3"
 
-wasmtime = "38.0.3"
-wasmparser = "0.240.0"
 rmp-serde = "1.3"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.42", features = ["full"] }
