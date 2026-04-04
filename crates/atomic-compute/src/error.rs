@@ -10,6 +10,7 @@ use atomic_data::shuffle::{
 use thiserror::Error;
 
 pub type LibResult<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 pub type StdResult<T, E> = std::result::Result<T, E>;
 
 #[derive(Debug, Error)]
@@ -152,6 +153,12 @@ impl Error {
             Error::ExecutorShutdown => true,
             _ => false,
         }
+    }
+}
+
+impl From<atomic_scheduler::error::SchedulerError> for Error {
+    fn from(err: atomic_scheduler::error::SchedulerError) -> Self {
+        Error::InvalidPayload(err.to_string())
     }
 }
 

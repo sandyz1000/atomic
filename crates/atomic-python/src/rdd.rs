@@ -1,15 +1,14 @@
 use std::collections::HashMap;
 
-use pyo3::ffi::PyObject;
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyIterator, PyList, PyTuple};
 
 use crate::docker_stub::PyDockerStub;
 
 /// An in-memory distributed dataset (RDD) of Python objects.
 ///
 /// `PyRdd` is the Python-facing equivalent of Rust's `TypedRdd<T>`. It holds
-/// elements as `PyObject` values and applies transformations eagerly when each
+/// elements as `Py<PyAny>` values and applies transformations eagerly when each
 /// method is called. All local execution happens in the calling thread.
 ///
 /// Partitioning is tracked logically: `num_partitions` is stored and influences
@@ -38,12 +37,12 @@ use crate::docker_stub::PyDockerStub;
 /// ```
 #[pyclass(name = "Rdd")]
 pub struct PyRdd {
-    pub(crate) elements: Vec<PyObject>,
+    pub(crate) elements: Vec<Py<PyAny>>,
     pub(crate) num_partitions: usize,
 }
 
 impl PyRdd {
-    pub fn from_data(_py: Python, elements: Vec<PyObject>, num_partitions: usize) -> Self {
+    pub fn from_data(_py: Python, elements: Vec<Py<PyAny>>, num_partitions: usize) -> Self {
         Self { elements, num_partitions }
     }
 }
@@ -53,7 +52,7 @@ impl PyRdd {
     // ── Transformations ──────────────────────────────────────────────────────
 
     /// Apply `f` to each element, returning a new RDD.
-    pub fn map(&self, py: Python, f: PyObject) -> PyResult<PyRdd> {
+    pub fn map(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         let elements = self
             .elements
             .iter()
@@ -63,7 +62,7 @@ impl PyRdd {
     }
 
     /// Keep only elements for which `f` returns truthy.
-    pub fn filter(&self, py: Python, f: PyObject) -> PyResult<PyRdd> {
+    pub fn filter(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         let elements = self
             .elements
             .iter()
@@ -80,11 +79,11 @@ impl PyRdd {
     }
 
     /// Apply `f` to each element and flatten the results (f must return an iterable).
-    pub fn flat_map(&self, py: Python, f: PyObject) -> PyResult<PyRdd> {
+    pub fn flat_map(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         let mut elements = Vec::new();
         for item in &self.elements {
             let result = f.call1(py, (item,))?;
-            let iter = result.bind(py).iter()?;
+            let iter = PyIterator::from_object(result.bind(py))?;
             for val in iter {
                 elements.push(val?.unbind());
             }
@@ -95,12 +94,12 @@ impl PyRdd {
     /// Apply `f` only to the value in each `(key, value)` pair.
     ///
     /// Requires elements to be 2-tuples. Returns an RDD of `(key, f(value))` pairs.
-    pub fn map_values(&self, py: Python, f: PyObject) -> PyResult<PyRdd> {
+    pub fn map_values(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         let elements = self
             .elements
             .iter()
             .map(|item| {
-                let pair = item.downcast_bound::<PyTuple>(py)?;
+                let pair = item.bind(py).downcast::<PyTuple>()?;
                 if pair.len() != 2 {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "map_values requires elements to be 2-tuples",
@@ -108,7 +107,7 @@ impl PyRdd {
                 }
                 let key = pair.get_item(0)?.unbind();
                 let new_val = f.call1(py, (pair.get_item(1)?,))?;
-                Ok(PyTuple::new(py, [key, new_val])?.unbind().into())
+                Ok(PyTuple::new(py, [key, new_val])?.unbind().into_any())
             })
             .collect::<PyResult<Vec<_>>>()?;
         Ok(PyRdd { elements, num_partitions: self.num_partitions })
@@ -117,10 +116,10 @@ impl PyRdd {
     /// Apply `f` to each value in `(key, value)` pairs and flatten the results.
     ///
     /// `f` must return an iterable. Returns an RDD of `(key, item)` pairs.
-    pub fn flat_map_values(&self, py: Python, f: PyObject) -> PyResult<PyRdd> {
+    pub fn flat_map_values(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         let mut elements = Vec::new();
         for item in &self.elements {
-            let pair = item.downcast_bound::<PyTuple>(py)?;
+            let pair = item.bind(py).downcast::<PyTuple>()?;
             if pair.len() != 2 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "flat_map_values requires elements to be 2-tuples",
@@ -128,29 +127,30 @@ impl PyRdd {
             }
             let key = pair.get_item(0)?.unbind();
             let iter_result = f.call1(py, (pair.get_item(1)?,))?;
-            for val in iter_result.bind(py).iter()? {
-                let new_pair = PyTuple::new(py, [key.clone_ref(py), val?.unbind()])?.unbind();
-                elements.push(new_pair.into());
+            let iter_obj = PyIterator::from_object(iter_result.bind(py))?;
+            for val in iter_obj {
+                let new_pair = PyTuple::new(py, [key.clone_ref(py), val?.unbind()])?.unbind().into_any();
+                elements.push(new_pair);
             }
         }
         Ok(PyRdd { elements, num_partitions: self.num_partitions })
     }
 
     /// Produce `(f(element), element)` pairs, keying each element by `f`.
-    pub fn key_by(&self, py: Python, f: PyObject) -> PyResult<PyRdd> {
+    pub fn key_by(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         let elements = self
             .elements
             .iter()
             .map(|item| {
                 let key = f.call1(py, (item,))?;
-                Ok(PyTuple::new(py, [key, item.clone_ref(py)])?.unbind().into())
+                Ok(PyTuple::new(py, [key, item.clone_ref(py)])?.unbind().into_any())
             })
             .collect::<PyResult<Vec<_>>>()?;
         Ok(PyRdd { elements, num_partitions: self.num_partitions })
     }
 
     /// Group elements by `f(element)`, returning `(key, [elements])` pairs.
-    pub fn group_by(&self, py: Python, f: PyObject) -> PyResult<PyRdd> {
+    pub fn group_by(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         self.key_by(py, f)?.group_by_key(py)
     }
 
@@ -158,11 +158,11 @@ impl PyRdd {
     ///
     /// Requires elements to be 2-tuples `(key, value)`.
     pub fn group_by_key(&self, py: Python) -> PyResult<PyRdd> {
-        let mut groups: HashMap<String, (PyObject, Vec<PyObject>)> = HashMap::new();
+        let mut groups: HashMap<String, (Py<PyAny>, Vec<Py<PyAny>>)> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
 
         for item in &self.elements {
-            let pair = item.downcast_bound::<PyTuple>(py)?;
+            let pair = item.bind(py).downcast::<PyTuple>()?;
             if pair.len() != 2 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "group_by_key requires elements to be 2-tuples",
@@ -183,10 +183,8 @@ impl PyRdd {
             .iter()
             .map(|k| {
                 let (key, vals) = &groups[k];
-                let py_list = PyList::new(py, vals.iter().map(|v| v.bind(py)))?.unbind();
-                let items: [&pyo3::Bound<'_, pyo3::PyAny>; 2] =
-                    [key.bind(py), py_list.bind(py).as_any()];
-                Ok(PyTuple::new(py, items)?.unbind().into())
+                let py_list = PyList::new(py, vals.iter().map(|v| v.bind(py)))?.into_any().unbind();
+                Ok(PyTuple::new(py, [key.bind(py), py_list.bind(py)])?.unbind().into_any())
             })
             .collect::<PyResult<Vec<_>>>()?;
 
@@ -201,12 +199,12 @@ impl PyRdd {
     /// ```python
     /// word_counts = words.map(lambda w: (w, 1)).reduce_by_key(lambda a, b: a + b)
     /// ```
-    pub fn reduce_by_key(&self, py: Python, f: PyObject) -> PyResult<PyRdd> {
-        let mut accum: HashMap<String, (PyObject, PyObject)> = HashMap::new();
+    pub fn reduce_by_key(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
+        let mut accum: HashMap<String, (Py<PyAny>, Py<PyAny>)> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
 
         for item in &self.elements {
-            let pair = item.downcast_bound::<PyTuple>(py)?;
+            let pair = item.bind(py).downcast::<PyTuple>()?;
             if pair.len() != 2 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "reduce_by_key requires elements to be 2-tuples",
@@ -232,7 +230,7 @@ impl PyRdd {
             .iter()
             .map(|k| {
                 let (key, val) = &accum[k];
-                Ok(PyTuple::new(py, [key.bind(py).clone(), val.bind(py).clone()])?.unbind().into())
+                Ok(PyTuple::new(py, [key.bind(py).clone(), val.bind(py).clone()])?.unbind().into_any())
             })
             .collect::<PyResult<Vec<_>>>()?;
 
@@ -241,7 +239,7 @@ impl PyRdd {
 
     /// Merge two RDDs with the same element type into one.
     pub fn union(&self, py: Python, other: &PyRdd) -> PyRdd {
-        let mut elements: Vec<PyObject> = self.elements.iter().map(|e| e.clone_ref(py)).collect();
+        let mut elements: Vec<Py<PyAny>> = self.elements.iter().map(|e| e.clone_ref(py)).collect();
         elements.extend(other.elements.iter().map(|e| e.clone_ref(py)));
         let partitions = self.num_partitions + other.num_partitions;
         PyRdd { elements, num_partitions: partitions }
@@ -263,7 +261,7 @@ impl PyRdd {
             .iter()
             .zip(other.elements.iter())
             .map(|(a, b)| {
-                Ok(PyTuple::new(py, [a.bind(py).clone(), b.bind(py).clone()])?.unbind().into())
+                Ok(PyTuple::new(py, [a.bind(py).clone(), b.bind(py).clone()])?.unbind().into_any())
             })
             .collect::<PyResult<Vec<_>>>()?;
         Ok(PyRdd { elements, num_partitions: self.num_partitions })
@@ -275,7 +273,7 @@ impl PyRdd {
         for a in &self.elements {
             for b in &other.elements {
                 elements.push(
-                    PyTuple::new(py, [a.bind(py).clone(), b.bind(py).clone()])?.unbind().into(),
+                    PyTuple::new(py, [a.bind(py).clone(), b.bind(py).clone()])?.unbind().into_any(),
                 );
             }
         }
@@ -323,7 +321,7 @@ impl PyRdd {
         let result_rdd = stub.execute_partitions(py, &self.elements, self.num_partitions)?;
         let mut flat = Vec::new();
         for item in &result_rdd.elements {
-            match item.downcast_bound::<PyList>(py) {
+            match item.bind(py).downcast::<PyList>() {
                 Ok(list) => {
                     for v in list.iter() {
                         flat.push(v.unbind());
@@ -338,11 +336,11 @@ impl PyRdd {
     // ── Actions ──────────────────────────────────────────────────────────────
 
     /// Return all elements as a Python list.
-    pub fn collect(&self, py: Python) -> PyObject {
+    pub fn collect(&self, py: Python) -> Py<PyAny> {
         PyList::new(py, self.elements.iter().map(|e| e.bind(py).clone()))
             .unwrap()
+            .into_any()
             .unbind()
-            .into()
     }
 
     /// Return the number of elements.
@@ -351,7 +349,7 @@ impl PyRdd {
     }
 
     /// Return the first element, or raise `StopIteration` if the RDD is empty.
-    pub fn first(&self, py: Python) -> PyResult<PyObject> {
+    pub fn first(&self, py: Python) -> PyResult<Py<PyAny>> {
         self.elements
             .first()
             .map(|e| Ok(e.clone_ref(py)))
@@ -363,14 +361,14 @@ impl PyRdd {
     }
 
     /// Return the first `n` elements as a Python list.
-    pub fn take(&self, py: Python, n: usize) -> PyObject {
+    pub fn take(&self, py: Python, n: usize) -> Py<PyAny> {
         PyList::new(
             py,
             self.elements.iter().take(n).map(|e| e.bind(py).clone()),
         )
         .unwrap()
+        .into_any()
         .unbind()
-        .into()
     }
 
     /// Aggregate all elements using a binary function `f(acc, element) -> acc`.
@@ -380,7 +378,7 @@ impl PyRdd {
     /// total = ctx.parallelize([1, 2, 3]).reduce(lambda a, b: a + b)
     /// # 6
     /// ```
-    pub fn reduce(&self, py: Python, f: PyObject) -> PyResult<PyObject> {
+    pub fn reduce(&self, py: Python, f: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let mut iter = self.elements.iter();
         let first = iter.next().ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("reduce on empty RDD")
@@ -401,7 +399,7 @@ impl PyRdd {
     /// total = ctx.parallelize([1, 2, 3]).fold(0, lambda a, b: a + b)
     /// # 6
     /// ```
-    pub fn fold(&self, py: Python, zero: PyObject, f: PyObject) -> PyResult<PyObject> {
+    pub fn fold(&self, py: Python, zero: Py<PyAny>, f: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let mut acc = zero;
         for item in &self.elements {
             acc = f.call1(py, (acc, item.clone_ref(py)))?;

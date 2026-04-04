@@ -1,4 +1,3 @@
-use pyo3::ffi::PyObject;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -50,7 +49,7 @@ impl PyContext {
         data: &Bound<'_, PyList>,
         num_partitions: Option<usize>,
     ) -> PyResult<PyRdd> {
-        let elements: Vec<PyObject> = data.iter().map(|item| item.unbind()).collect();
+        let elements: Vec<Py<PyAny>> = data.iter().map(|item| item.unbind()).collect();
         let partitions = num_partitions.unwrap_or(self.default_parallelism).max(1);
         Ok(PyRdd::from_data(py, elements, partitions))
     }
@@ -67,9 +66,9 @@ impl PyContext {
     pub fn text_file(&self, py: Python, path: &str) -> PyResult<PyRdd> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let elements: Vec<PyObject> = content
+        let elements: Vec<Py<PyAny>> = content
             .lines()
-            .map(|line| line.to_string().into_pyobject(py).unwrap().unbind().into())
+            .map(|line| line.to_string().into_pyobject(py).unwrap().into_any().unbind())
             .collect();
         let partitions = self.default_parallelism.max(1);
         Ok(PyRdd::from_data(py, elements, partitions))
@@ -94,10 +93,10 @@ impl PyContext {
         if step == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err("step cannot be zero"));
         }
-        let elements: Vec<PyObject> = (start..end)
+        let elements: Vec<Py<PyAny>> = (start..end)
             .step_by(step.unsigned_abs() as usize)
             .filter(|&x| if step > 0 { x < end } else { x > end })
-            .map(|i| i.into_pyobject(py).unwrap().unbind().into())
+            .map(|i| i.into_pyobject(py).unwrap().into_any().unbind())
             .collect();
         let partitions = num_partitions.unwrap_or(self.default_parallelism).max(1);
         Ok(PyRdd::from_data(py, elements, partitions))

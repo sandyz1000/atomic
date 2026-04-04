@@ -4,23 +4,14 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Sandip Dey <sandip.dey1988@yahoo.com>"]
 
-[package]
-name = "atomic"
-edition.workspace = true
-version.workspace = true
+# [package]
+# name = "atomic"
+# edition.workspace = true
+# version.workspace = true
 
 [workspace]
-members = ["crates/*", "."]
-exclude = ["examples/*", "tests/*"]
-default-members = ["."]
-
-[dependencies]
-once_cell = { workspace = true }
-atomic-compute = { workspace = true }
-
-[dev-dependencies]
-# Used by examples/docker_sum.rs to rkyv-encode partitions for Docker tasks
-rkyv = { workspace = true }
+members = ["crates/*"]
+exclude = ["examples/*"]
 
 [workspace.dependencies]
 atomic-compute = { path = "crates/atomic-compute" }

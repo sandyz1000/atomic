@@ -1,4 +1,3 @@
-use pyo3::ffi::PyObject;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -44,17 +43,17 @@ impl PyDockerStub {
     }
 
     pub fn operation_id(&self) -> &str {
-        &self.descriptor.operation_id
+        &self.descriptor.op_id
     }
 
     pub fn image(&self) -> &str {
-        &self.descriptor.artifact_ref
+        &self.descriptor.uri
     }
 
     pub fn __repr__(&self) -> String {
         format!(
             "DockerStub(operation_id={:?}, image={:?})",
-            self.descriptor.operation_id, self.descriptor.artifact_ref
+            self.descriptor.op_id, self.descriptor.uri
         )
     }
 }
@@ -68,11 +67,11 @@ impl PyDockerStub {
     pub fn execute_partitions(
         &self,
         py: Python,
-        elements: &[PyObject],
+        elements: &[Py<PyAny>],
         num_partitions: usize,
     ) -> PyResult<PyRdd> {
         let partitions = split_into_partitions(elements, num_partitions);
-        let mut results: Vec<PyObject> = Vec::new();
+        let mut results: Vec<Py<PyAny>> = Vec::new();
 
         for partition in partitions {
             let partition_json = encode_partition_json(py, &partition)?;
@@ -87,7 +86,7 @@ impl PyDockerStub {
 }
 
 /// Split elements into `n` roughly equal partitions.
-fn split_into_partitions(elements: &[PyObject], n: usize) -> Vec<Vec<&PyObject>> {
+fn split_into_partitions(elements: &[Py<PyAny>], n: usize) -> Vec<Vec<&Py<PyAny>>> {
     let n = n.max(1);
     let chunk_size = (elements.len() + n - 1) / n;
     if chunk_size == 0 {
@@ -100,20 +99,20 @@ fn split_into_partitions(elements: &[PyObject], n: usize) -> Vec<Vec<&PyObject>>
 }
 
 /// JSON-encode a partition as a Python list using `json.dumps`.
-fn encode_partition_json(py: Python, partition: &[&PyObject]) -> PyResult<Vec<u8>> {
+fn encode_partition_json(py: Python, partition: &[&Py<PyAny>]) -> PyResult<Vec<u8>> {
     let json_mod = py.import("json")?;
     let py_list = PyList::new(py, partition.iter().map(|o| o.bind(py).clone()))?;
     let json_str: String = json_mod.call_method1("dumps", (py_list,))?.extract()?;
     Ok(json_str.into_bytes())
 }
 
-/// JSON-decode the output bytes from a Docker container into a `Vec<PyObject>`.
-fn decode_partition_json(py: Python, bytes: &[u8]) -> PyResult<Vec<PyObject>> {
+/// JSON-decode the output bytes from a Docker container into a `Vec<Py<PyAny>>`.
+fn decode_partition_json(py: Python, bytes: &[u8]) -> PyResult<Vec<Py<PyAny>>> {
     let json_mod = py.import("json")?;
     let s = std::str::from_utf8(bytes)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     let result = json_mod.call_method1("loads", (s,))?;
-    match result.cast::<PyList>() {
+    match result.downcast::<PyList>() {
         Ok(list) => Ok(list.iter().map(|item| item.unbind()).collect()),
         Err(_) => Ok(vec![result.unbind()]),
     }
@@ -130,7 +129,7 @@ fn run_docker_partition(stub: &PyDockerStub, json_bytes: &[u8]) -> Result<Vec<u8
     use std::io::{Read, Write};
     use std::process::{Command, Stdio};
 
-    let image = &stub.descriptor.artifact_ref;
+    let image = &stub.descriptor.uri;
     let entrypoint = &stub.descriptor.entrypoint;
 
     let mut child = Command::new("docker")

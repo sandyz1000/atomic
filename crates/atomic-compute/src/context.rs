@@ -14,7 +14,8 @@ use atomic_data::partial::ApproximateEvaluator;
 use atomic_data::partial::result::PartialResult;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::task_context::TaskContext;
-use atomic_scheduler::{DistributedScheduler, LocalScheduler, NativeScheduler, Schedulers};
+use atomic_scheduler::{DistributedScheduler, LocalScheduler, Schedulers};
+use crate::rdd::{ParallelCollection, UnionRdd};
 use atomic_utils::clean_up_work_dir;
 use log::error;
 use once_cell::sync::OnceCell;
@@ -177,7 +178,8 @@ impl Context {
                     ctx.set_cleanup_process();
                     Ok(ctx)
                 } else {
-                    Context::init_distributed_worker()?
+                    Context::init_distributed_worker()?;
+                    unreachable!("worker process always terminates via std::process::exit")
                 }
             }
             env::DeploymentMode::Local => Context::init_local_scheduler(runtime),
@@ -232,7 +234,7 @@ impl Context {
             .join(format!("ns-session-{}", job_id));
         fs::create_dir_all(&job_work_dir).unwrap();
 
-        initialize_loggers(job_work_dir.join("ns-driver.log"));
+        let _ = env_logger::try_init();
         let scheduler = Schedulers::Local(Arc::new(LocalScheduler::new(20, true)));
 
         Ok(Arc::new(Context {
@@ -277,7 +279,7 @@ impl Context {
         fs::create_dir_all(&job_work_dir).unwrap();
         let conf_path = job_work_dir.join("config.toml");
         let conf_path = conf_path.to_str().unwrap();
-        initialize_loggers(job_work_dir.join("ns-driver.log"));
+        let _ = env_logger::try_init();
         let scheduler = Arc::new(DistributedScheduler::new(20, true));
 
         for address in &hosts::Hosts::get()?.slaves {
@@ -356,11 +358,11 @@ impl Context {
             Ok(binary_path) => {
                 match binary_path.parent().ok_or_else(|| Error::CurrentBinaryPath) {
                     Ok(dir) => work_dir = dir.into(),
-                    Err(err) => Context::worker_clean_up_directives(Err(err), work_dir)?,
+                    Err(err) => Context::worker_clean_up_directives(Err(err), work_dir),
                 };
-                initialize_loggers(work_dir.join("ns-executor.log"));
+                let _ = env_logger::try_init();
             }
-            Err(err) => Context::worker_clean_up_directives(Err(err), work_dir)?,
+            Err(err) => Context::worker_clean_up_directives(Err(err), work_dir),
         }
 
         log::debug!("starting worker");
@@ -371,18 +373,13 @@ impl Context {
             .ok_or(Error::GetOrCreateConfig("executor port not set"))
         {
             Ok(port) => port,
-            Err(err) => Context::worker_clean_up_directives(Err(err), work_dir)?,
+            Err(err) => Context::worker_clean_up_directives(Err(err), work_dir),
         };
         let executor = Arc::new(Executor::new(port));
-        Context::worker_clean_up_directives(executor.worker(), work_dir);
-        Ok(())
+        Context::worker_clean_up_directives(executor.worker(), work_dir)
     }
 
-    fn worker_clean_up_directives(
-        run_result: Result<Signal, Error>,
-        work_dir: PathBuf,
-    ) -> Result<(), Error> {
-        env::Env::get().shuffle_manager.clean_up_shuffle_data();
+    fn worker_clean_up_directives(run_result: Result<Signal, Error>, work_dir: PathBuf) -> ! {
         clean_up_work_dir(&work_dir, true);
         match run_result {
             Err(err) => {
@@ -400,7 +397,6 @@ impl Context {
         Context::drop_executors(executors);
         // Give some time for the executors to shut down and clean up
         std::thread::sleep(std::time::Duration::from_millis(1_500));
-        env::Env::get().shuffle_manager.clean_up_shuffle_data();
         clean_up_work_dir(work_dir, true);
     }
 
@@ -474,8 +470,10 @@ impl Context {
             if let Ok(mut stream) =
                 TcpStream::connect(format!("{}:{}", socket_addr.ip(), socket_addr.port() + 10))
             {
-                // Serialize signal directly with bincode (no capnp wrapper needed)
-                let signal = bincode::serialize(&Signal::ShutDownGracefully).unwrap();
+                // Serialize signal as 4-byte LE length + serde_json bytes
+                let json = serde_json::to_vec(&Signal::ShutDownGracefully).unwrap();
+                let mut signal = (json.len() as u32).to_le_bytes().to_vec();
+                signal.extend_from_slice(&json);
                 if let Err(e) = stream.write_all(&signal) {
                     error!("Failed to send shutdown signal: {}", e);
                 }
@@ -497,7 +495,7 @@ impl Context {
         self.next_shuffle_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub fn make_rdd<T: Data, I>(
+    pub fn make_rdd<T: Data + Clone, I>(
         self: &Arc<Self>,
         seq: I,
         num_slices: usize,
@@ -524,7 +522,7 @@ impl Context {
         rdd
     }
 
-    pub fn parallelize<T: Data, I>(
+    pub fn parallelize<T: Data + Clone, I>(
         self: &Arc<Self>,
         seq: I,
         num_slices: usize,
@@ -545,7 +543,7 @@ impl Context {
     /// let rdd = ctx.parallelize_typed(vec![1, 2, 3, 4, 5], 2);
     /// let sum = rdd.reduce(|a, b| a + b)?;
     /// ```
-    pub fn parallelize_typed<T: Data, I>(
+    pub fn parallelize_typed<T: Data + Clone, I>(
         self: &Arc<Self>,
         seq: I,
         num_slices: usize,
@@ -563,21 +561,21 @@ impl Context {
         self: &Arc<Self>,
         config: C,
         func: F,
-    ) -> impl Rdd<Item = O>
+    ) -> Arc<dyn Rdd<Item = O>>
     where
-        F: Fn(I) -> O,
+        F: Fn(I) -> O + Send + Sync + 'static,
         C: ReaderConfiguration<I>,
     {
         config.make_reader(self.clone(), func)
     }
 
-    pub fn run_job<T: Data, U: Data, F>(
+    pub fn run_job<T: Data, U: Data + Clone, F>(
         self: &Arc<Self>,
         rdd: Arc<dyn Rdd<Item = T>>,
         func: F,
     ) -> Result<Vec<U>, Error>
     where
-        F: Fn(Box<dyn Iterator<Item = T>>) -> U,
+        F: Fn(Box<dyn Iterator<Item = T>>) -> U + Send + Sync + 'static,
     {
         let cl = move |(_task_context, iter)| (func)(iter);
         let func = Arc::new(cl);
@@ -586,31 +584,32 @@ impl Context {
             rdd.clone(),
             (0..rdd.number_of_splits()).collect(),
             false,
-        )
+        ).map_err(Error::from)
     }
 
-    pub fn run_job_with_partitions<T: Data, U: Data, F, P>(
+    pub fn run_job_with_partitions<T: Data, U: Data + Clone, F, P>(
         self: &Arc<Self>,
         rdd: Arc<dyn Rdd<Item = T>>,
         func: F,
         partitions: P,
     ) -> Result<Vec<U>, Error>
     where
-        F: Fn(Box<dyn Iterator<Item = T>>) -> U,
+        F: Fn(Box<dyn Iterator<Item = T>>) -> U + Send + Sync + 'static,
         P: IntoIterator<Item = usize>,
     {
         let cl = move |(_task_context, iter)| (func)(iter);
         self.scheduler
             .run_job(Arc::new(cl), rdd, partitions.into_iter().collect(), false)
+            .map_err(Error::from)
     }
 
-    pub fn run_job_with_context<T: Data, U: Data, F>(
+    pub fn run_job_with_context<T: Data, U: Data + Clone, F>(
         self: &Arc<Self>,
         rdd: Arc<dyn Rdd<Item = T>>,
         func: F,
     ) -> Result<Vec<U>, Error>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
     {
         log::debug!("inside run job in context");
         let func = Arc::new(func);
@@ -619,7 +618,7 @@ impl Context {
             rdd.clone(),
             (0..rdd.number_of_splits()).collect(),
             false,
-        )
+        ).map_err(Error::from)
     }
 
     pub fn run_registered_wasm_job(
@@ -707,7 +706,7 @@ impl Context {
 
     /// Run a job that can return approximate results. Returns a partial result
     /// (how partial depends on whether the job was finished before or after timeout).
-    pub(crate) fn run_approximate_job<T: Data, U: Data, R, F, E>(
+    pub(crate) fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
         self: &Arc<Self>,
         func: F,
         rdd: Arc<dyn Rdd<Item = T>>,
@@ -715,23 +714,13 @@ impl Context {
         timeout: Duration,
     ) -> Result<PartialResult<R>, Error>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + Debug + Send + Sync + 'static,
     {
         self.scheduler
             .run_approximate_job(Arc::new(func), rdd, evaluator, timeout)
-    }
-
-    pub(crate) fn get_preferred_locs(
-        &self,
-        rdd: Arc<dyn RddBase>,
-        partition: usize,
-    ) -> Vec<std::net::Ipv4Addr> {
-        match &self.scheduler {
-            Schedulers::Distributed(scheduler) => scheduler.get_preferred_locs(rdd, partition),
-            Schedulers::Local(scheduler) => scheduler.get_preferred_locs(rdd, partition),
-        }
+            .map_err(Error::from)
     }
 
     pub fn register_artifact(&self, descriptor: ArtifactDescriptor) -> Result<(), Error> {
@@ -795,8 +784,8 @@ impl Context {
         }
     }
 
-    pub fn union<T: Data>(&self, rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<impl Rdd<Item = T>> {
-        UnionRdd::new(Arc::new(self.clone()), rdds)
+    pub fn union<T: Data + Clone>(self: &Arc<Self>, rdds: &[Arc<dyn Rdd<Item = T>>]) -> std::result::Result<UnionRdd<T>, Error> {
+        UnionRdd::new(self.new_rdd_id(), rdds)
     }
 }
 
@@ -819,26 +808,3 @@ mod tests {
     }
 }
 
-static LOGGER: OnceCell<()> = OnceCell::new();
-
-fn initialize_loggers<P: Into<PathBuf>>(file_path: P) {
-    fn _initializer(file_path: PathBuf) {
-        let log_level = env::Configuration::get().loggin.log_level.into();
-        log::info!("path for file logger: {}", file_path.display());
-        let file_logger: Box<dyn SharedLogger> = WriteLogger::new(
-            log_level,
-            Config::default(),
-            fs::File::create(file_path).expect("not able to create log file"),
-        );
-        let mut combined = vec![file_logger];
-        if let Some(term_logger) =
-            TermLogger::new(log_level, Config::default(), TerminalMode::Mixed)
-        {
-            let logger: Box<dyn SharedLogger> = term_logger;
-            combined.push(logger);
-        }
-        CombinedLogger::init(combined).unwrap();
-    }
-
-    LOGGER.get_or_init(move || _initializer(file_path.into()));
-}

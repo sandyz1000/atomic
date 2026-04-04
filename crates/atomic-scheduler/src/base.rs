@@ -27,7 +27,7 @@ pub(crate) type RddFunc<T, U> =
 
 /// Functionality of the library built-in schedulers
 #[async_trait::async_trait]
-pub(crate) trait NativeScheduler: Send + Sync {
+pub trait NativeScheduler: Send + Sync {
     fn get_mutators(&self) -> MutatorsAndGetter;
 
     /// Fast path for execution. Runs the DD in the driver main thread if possible.

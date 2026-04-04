@@ -7,7 +7,7 @@ use std::sync::Arc;
 /// Stage in the DAG scheduler
 /// Simplified: now uses concrete ShuffleDependencyBox instead of trait object
 #[derive(Clone)]
-pub(crate) struct Stage {
+pub struct Stage {
     pub id: usize,
     pub num_partitions: usize,
     pub shuffle_dependency: Option<Arc<ShuffleDependencyBox>>,

@@ -11,7 +11,8 @@ use atomic_data::partial::{ApproximateEvaluator, result::PartialResult};
 use atomic_data::{task_context::TaskContext, data::Data, rdd::Rdd};
 use std::sync::Arc;
 
-pub(crate) use crate::{distributed::DistributedScheduler, error::LibResult, local::LocalScheduler, base::NativeScheduler};
+pub use crate::{distributed::DistributedScheduler, local::LocalScheduler};
+pub(crate) use crate::{base::NativeScheduler, error::LibResult};
 
 pub trait Scheduler {
     fn start(&self);
