@@ -11,18 +11,13 @@ use atomic_data::distributed::{
     parse_transport_header,
 };
 
-use crossbeam::{Receiver, Sender, channel::bounded};
+use crossbeam::channel::{Receiver, Sender, bounded};
 use atomic_data::shuffle::error::NetworkError;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    stream::StreamExt,
     task::{spawn, spawn_blocking},
-    time::delay_for,
 };
-use tokio_util::compat::{Tokio02AsyncReadCompatExt, Tokio02AsyncWriteCompatExt};
-
-
 
 pub(crate) struct Executor {
     port: u16,
@@ -69,8 +64,6 @@ impl Executor {
 
     /// Worker which spawns threads for received tasks, deserializes them,
     /// executes the task and sends the result back to the master.
-    ///
-    /// This will spawn it's own Tokio runtime to run the tasks on.
     #[allow(clippy::drop_copy)]
     pub fn worker(self: Arc<Self>) -> LibResult<Signal> {
         env::Env::run_in_async_rt(move || -> LibResult<Signal> {
@@ -89,10 +82,14 @@ impl Executor {
     #[allow(clippy::drop_copy)]
     async fn process_stream(self: Arc<Self>, rcv_main: Receiver<Signal>) -> LibResult<Signal> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
-        let mut listener = TcpListener::bind(addr)
+        let listener = TcpListener::bind(addr)
             .await
             .map_err(NetworkError::TcpListener)?;
-        while let Some(Ok(mut stream)) = listener.incoming().next().await {
+        loop {
+            let (mut stream, _peer) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => break,
+            };
             let rcv_main = rcv_main.clone();
             let selfc = Arc::clone(&self);
             let res: LibResult<Signal> = spawn(async move {
@@ -109,8 +106,9 @@ impl Executor {
                 }
                 log::debug!("received new task @{} executor", selfc.port);
                 let (frame_kind, payload) = selfc.read_transport_frame(&mut stream).await?;
+                let selfc2 = Arc::clone(&selfc);
                 let (result_kind, result_payload) = spawn_blocking(move || {
-                    selfc.handle_transport_frame(frame_kind, payload)
+                    selfc2.handle_transport_frame(frame_kind, payload)
                 })
                 .await??;
                 selfc
@@ -188,18 +186,33 @@ impl Executor {
     }
 
     /// A listener for exit signal from master to end the whole slave process.
+    /// Signals are sent as 4-byte LE length prefix + serde_json bytes.
     async fn signal_handler(self: Arc<Self>, send_child: Sender<Signal>) -> LibResult<Signal> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port + 10));
         log::debug!("signal handler port open @ {}", addr.port());
-        let mut listener = TcpListener::bind(addr)
+        let listener = TcpListener::bind(addr)
             .await
             .map_err(NetworkError::TcpListener)?;
         let mut signal: LibResult<Signal> = Err(Error::ExecutorShutdown);
-        while let Some(Ok(stream)) = listener.incoming().next().await {
-            let stream = stream.compat();
-            let mut stream_std = stream.into_inner();
-            // Deserialize signal directly with bincode
-            let data = bincode::deserialize_from::<_, Signal>(&mut stream_std)?;
+        loop {
+            let (mut stream, _peer) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(_) => break,
+            };
+            // Read length-prefixed serde_json signal
+            let mut len_buf = [0u8; 4];
+            if stream.read_exact(&mut len_buf).await.is_err() {
+                continue;
+            }
+            let len = u32::from_le_bytes(len_buf) as usize;
+            let mut buf = vec![0u8; len];
+            if stream.read_exact(&mut buf).await.is_err() {
+                continue;
+            }
+            let data: Signal = match serde_json::from_slice(&buf) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
             match data {
                 Signal::ShutDownError => {
                     log::info!("received error shutdown signal @ {}", self.port);
@@ -220,8 +233,8 @@ impl Executor {
                 _ => {}
             }
         }
-        // give some time to the executor threads to shut down hopefully
-        delay_for(Duration::from_millis(1_000)).await;
+        // Give executor threads a moment to shut down.
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
         signal
     }
 }
@@ -262,7 +275,7 @@ mod tests {
     use std::time::Duration;
 
     type Port = u16;
-    type ComputeResult = std::result::Result<(), ()>;
+    type ComputeResult = std::result::Result<(), Error>;
 
     fn initialize_exec() -> Arc<Executor> {
         let port = get_dynamic_port();
@@ -274,7 +287,6 @@ mod tests {
 
         let mut i: usize = 0;
         if signal_handler {
-            // connect to signal handling port
             port += 10;
         }
 
@@ -293,8 +305,11 @@ mod tests {
     }
 
     fn send_shutdown_signal_msg(stream: &mut std::net::TcpStream) -> LibResult<()> {
-        // Serialize signal directly with bincode
-        bincode::serialize_into(stream, &Signal::ShutDownGracefully)?;
+        let json = serde_json::to_vec(&Signal::ShutDownGracefully)
+            .map_err(|_| Error::Other)?;
+        let len = (json.len() as u32).to_le_bytes();
+        stream.write_all(&len).map_err(Error::OutputWrite)?;
+        stream.write_all(&json).map_err(Error::OutputWrite)?;
         Ok(())
     }
 
@@ -352,7 +367,7 @@ mod tests {
                     Ok(())
                 }
                 Ok(_) | Err(_) => {
-                    sender.send(Err(()));
+                    sender.send(Err(Error::Other));
                     Err(Error::Other)
                 }
             }
@@ -381,7 +396,7 @@ mod tests {
                     let capabilities = WorkerCapabilities::decode_wire(&payload)
                         .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
                     assert!(!capabilities.worker_id.is_empty());
-                    assert!(capabilities.max_concurrent_tasks >= 1);
+                    assert!(capabilities.max_tasks >= 1);
                     return Ok(());
                 }
             }

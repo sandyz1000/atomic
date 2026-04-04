@@ -1,18 +1,19 @@
 use std::sync::Arc;
-use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
+use std::{fs, path::PathBuf, time::Duration};
 
 use atomic_data::distributed::{
-    ArtifactKind, DockerTaskPayload, ExecutionBackend, TaskEnvelope,
-    TaskResultEnvelope, WasmTaskPayload, WasmValueEncoding, WorkerCapabilities,
-    WIRE_SCHEMA_V1, WireDecode, WireEncode,
+    ArtifactKind, DockerTaskPayload, ExecutionBackend, RuntimeKind, TaskEnvelope,
+    TaskResultEnvelope, WIRE_SCHEMA_V1, WasmTaskPayload, WasmValueEncoding, WireDecode, WireEncode,
+    WorkerCapabilities,
+};
+use bollard::Docker;
+use bollard::container::AttachContainerResults;
+use bollard::models::ContainerCreateBody;
+use bollard::query_parameters::{
+    AttachContainerOptionsBuilder, CreateImageOptionsBuilder, ListImagesOptionsBuilder,
+    LogsOptionsBuilder, RemoveContainerOptionsBuilder,
 };
 use dashmap::DashMap;
-use bollard::container::{
-    AttachContainerOptions, Config as ContainerConfig, CreateContainerOptions, LogsOptions,
-    RemoveContainerOptions, StartContainerOptions, WaitContainerOptions,
-};
-use bollard::image::{CreateImageOptions, ListImagesOptions};
-use bollard::Docker;
 use futures::TryStreamExt;
 use rkyv::from_bytes;
 use sha2::{Digest, Sha256};
@@ -121,10 +122,7 @@ impl DockerBackend {
         let _ = docker
             .remove_container(
                 &container_id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
+                Some(RemoveContainerOptionsBuilder::default().force(true).build()),
             )
             .await;
 
@@ -173,23 +171,22 @@ impl DockerBackend {
     }
 
     async fn ensure_image(&self, docker: &Docker, image: &str) -> LibResult<()> {
-        let mut filters: HashMap<&str, Vec<&str>> = HashMap::new();
-        filters.insert("reference", vec![image]);
-
         let list = docker
-            .list_images(Some(ListImagesOptions::<&str> {
-                filters,
-                ..Default::default()
-            }))
+            .list_images(Some(ListImagesOptionsBuilder::default().all(true).build()))
             .await
             .map_err(|e| Error::DockerRuntime(e.to_string()))?;
 
-        if list.is_empty() {
+        let exists = list
+            .iter()
+            .any(|img| img.repo_tags.iter().any(|t| t.as_str() == image));
+
+        if !exists {
             let mut pull = docker.create_image(
-                Some(CreateImageOptions::<&str> {
-                    from_image: image,
-                    ..Default::default()
-                }),
+                Some(
+                    CreateImageOptionsBuilder::default()
+                        .from_image(image)
+                        .build(),
+                ),
                 None,
                 None,
             );
@@ -225,7 +222,7 @@ impl DockerBackend {
         }
 
         let has_stdin = payload.stdin.is_some();
-        let cfg = ContainerConfig {
+        let cfg = ContainerCreateBody {
             image: Some(image.to_string()),
             cmd: Some(cmd),
             env: if env.is_empty() { None } else { Some(env) },
@@ -237,9 +234,7 @@ impl DockerBackend {
             ..Default::default()
         };
 
-        let container = docker
-            .create_container(None::<CreateContainerOptions<String>>, cfg)
-            .await?;
+        let container = docker.create_container(None, cfg).await?;
 
         Ok(container.id)
     }
@@ -259,20 +254,22 @@ impl DockerBackend {
             // Attach to stdin/stdout before starting so we don't miss any output.
             use tokio::io::AsyncWriteExt;
 
-            let attach_opts = AttachContainerOptions::<String> {
-                stdin: Some(true),
-                stdout: Some(true),
-                stderr: Some(true),
-                stream: Some(true),
-                ..Default::default()
-            };
-            let bollard::container::AttachContainerResults { mut input, mut output } = docker
+            let attach_opts = AttachContainerOptionsBuilder::default()
+                .stdin(true)
+                .stdout(true)
+                .stderr(true)
+                .stream(true)
+                .build();
+            let AttachContainerResults {
+                mut input,
+                mut output,
+            } = docker
                 .attach_container(container_id, Some(attach_opts))
                 .await
                 .map_err(|e| Error::DockerRuntime(e.to_string()))?;
 
             docker
-                .start_container(container_id, None::<StartContainerOptions<String>>)
+                .start_container(container_id, None)
                 .await
                 .map_err(|e| Error::DockerRuntime(e.to_string()))?;
 
@@ -297,8 +294,7 @@ impl DockerBackend {
                 collected.extend_from_slice(&chunk.into_bytes());
             }
 
-            let mut waiter =
-                docker.wait_container(container_id, None::<WaitContainerOptions<String>>);
+            let mut waiter = docker.wait_container(container_id, None);
             let mut exit_code = 1_i64;
             while let Some(status) = waiter
                 .try_next()
@@ -311,19 +307,20 @@ impl DockerBackend {
             Ok((exit_code, collected))
         } else {
             docker
-                .start_container(container_id, None::<StartContainerOptions<String>>)
+                .start_container(container_id, None)
                 .await
                 .map_err(|e| Error::DockerRuntime(e.to_string()))?;
 
             let mut logs = docker.logs(
                 container_id,
-                Some(LogsOptions::<&str> {
-                    follow: true,
-                    stdout: true,
-                    stderr: true,
-                    timestamps: true,
-                    ..Default::default()
-                }),
+                Some(
+                    LogsOptionsBuilder::default()
+                        .follow(true)
+                        .stdout(true)
+                        .stderr(true)
+                        .timestamps(true)
+                        .build(),
+                ),
             );
 
             let mut collected = Vec::new();
@@ -336,8 +333,7 @@ impl DockerBackend {
                 collected.push(b'\n');
             }
 
-            let mut waiter =
-                docker.wait_container(container_id, None::<WaitContainerOptions<String>>);
+            let mut waiter = docker.wait_container(container_id, None);
             let mut exit_code = 1_i64;
             while let Some(status) = waiter
                 .try_next()
@@ -426,8 +422,7 @@ impl WasmBackend {
         let bytes = self.load_module_bytes(task)?;
         self.validate_digest(task, &bytes)?;
         let module = Arc::new(
-            Module::new(&self.engine, &bytes)
-                .map_err(|err| Error::WasmRuntime(err.to_string()))?,
+            Module::new(&self.engine, &bytes).map_err(|err| Error::WasmRuntime(err.to_string()))?,
         );
         self.module_cache.insert(key, module.clone());
         Ok(module)
@@ -527,8 +522,15 @@ impl WasmBackend {
             return Ok(());
         };
 
-        let actual = format!("{:x}", Sha256::digest(module_bytes));
-        let expected = expected_digest.strip_prefix("sha256:").unwrap_or(expected_digest);
+        let hash = Sha256::digest(module_bytes);
+        let actual: String = hash.iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{:02x}", b);
+            s
+        });
+        let expected = expected_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(expected_digest);
         if actual != expected {
             return Err(Error::ArtifactValidation(format!(
                 "digest mismatch for {}: expected {}, got {}",
@@ -551,19 +553,19 @@ impl WasmBackend {
         let input_len = i32::try_from(input.len())
             .map_err(|_| Error::WasmRuntime("input too large for wasm guest".to_string()))?;
         let input_ptr = alloc
-            .call(store, input_len)
+            .call(&mut *store, input_len)
             .map_err(|err| Error::WasmRuntime(err.to_string()))?;
 
         memory
-            .write(store, input_ptr as usize, input)
+            .write(&mut *store, input_ptr as usize, input)
             .map_err(|err| Error::WasmRuntime(err.to_string()))?;
 
         let packed = run
-            .call(store, (input_ptr, input_len))
+            .call(&mut *store, (input_ptr, input_len))
             .map_err(|err| Error::WasmRuntime(err.to_string()))?;
 
         if let Some(dealloc) = dealloc {
-            let _ = dealloc.call(store, (input_ptr, input_len));
+            let _ = dealloc.call(&mut *store, (input_ptr, input_len));
         }
 
         let result_ptr = (packed >> 32) as u32 as usize;
@@ -574,12 +576,12 @@ impl WasmBackend {
 
         let mut result = vec![0_u8; result_len];
         memory
-            .read(store, result_ptr, &mut result)
+            .read(&mut *store, result_ptr, &mut result)
             .map_err(|err| Error::WasmRuntime(err.to_string()))?;
 
         if let Some(dealloc) = dealloc {
             let _ = dealloc.call(
-                store,
+                &mut *store,
                 (
                     i32::try_from(result_ptr)
                         .map_err(|_| Error::WasmRuntime("result pointer overflow".to_string()))?,
@@ -604,7 +606,7 @@ impl WorkerRuntime {
         match backend {
             ExecutionBackend::LocalThread => Self::Thread(LocalThreadBackend),
             ExecutionBackend::Docker => Self::Docker(DockerBackend),
-            ExecutionBackend::Wasm => Self::Wasm(WasmBackend),
+            ExecutionBackend::Wasm => Self::Wasm(WasmBackend::default()),
         }
     }
 
@@ -636,7 +638,11 @@ impl WorkerRuntime {
         }
     }
 
-    pub fn execute(&self, ctx: &BackendContext, task: &TaskEnvelope) -> LibResult<TaskResultEnvelope> {
+    pub fn execute(
+        &self,
+        ctx: &BackendContext,
+        task: &TaskEnvelope,
+    ) -> LibResult<TaskResultEnvelope> {
         let backend = self.as_backend();
         let configured = backend.exec_backend();
         if configured != task.artifact.backend {
@@ -653,7 +659,10 @@ impl WorkerRuntime {
             });
         }
 
-        if !backend.supported_runtimes().contains(&task.artifact.runtime) {
+        if !backend
+            .supported_runtimes()
+            .contains(&task.artifact.runtime)
+        {
             return Err(Error::UnsupportedOperation(
                 "task runtime is not supported by the configured worker backend",
             ));
@@ -687,7 +696,7 @@ impl WorkerRuntime {
 mod tests {
     use atomic_data::distributed::{
         ArtifactDescriptor, ArtifactKind, DockerTaskPayload, ExecutionBackend, ResourceProfile,
-        RuntimeKind, TaskEnvelope, WasmTaskPayload, WasmValueEncoding, WireEncode,
+        RuntimeKind, TaskEnvelope, WIRE_SCHEMA_V1, WasmTaskPayload, WasmValueEncoding, WireEncode,
     };
     use rkyv::to_bytes;
     use sha2::{Digest, Sha256};
@@ -753,13 +762,10 @@ mod tests {
         let ctx = BackendContext {
             worker_id: "worker-test".into(),
         };
-        let task = wasm_task(
-            "run_map",
-            map_module_bytes(),
-            vec![1, 2, 3],
-            None,
-        );
-        let result = runtime.execute(&ctx, &task).expect("wasm task envelope response");
+        let task = wasm_task("run_map", map_module_bytes(), vec![1, 2, 3], None);
+        let result = runtime
+            .execute(&ctx, &task)
+            .expect("wasm task envelope response");
         assert_eq!(result.data, vec![2, 3, 4]);
     }
 
@@ -769,13 +775,10 @@ mod tests {
         let ctx = BackendContext {
             worker_id: "worker-test".into(),
         };
-        let task = wasm_task(
-            "run_reduce",
-            reduce_module_bytes(),
-            vec![1, 2, 3],
-            None,
-        );
-        let result = runtime.execute(&ctx, &task).expect("wasm task envelope response");
+        let task = wasm_task("run_reduce", reduce_module_bytes(), vec![1, 2, 3], None);
+        let result = runtime
+            .execute(&ctx, &task)
+            .expect("wasm task envelope response");
         assert_eq!(result.data, 6_u32.to_le_bytes());
     }
 
@@ -791,7 +794,9 @@ mod tests {
             vec![1, 2, 3],
             Some("sha256:deadbeef".to_string()),
         );
-        let result = runtime.execute(&ctx, &task).expect("wasm task envelope response");
+        let result = runtime
+            .execute(&ctx, &task)
+            .expect("wasm task envelope response");
         assert!(result.error.as_deref().is_some());
     }
 
@@ -827,13 +832,13 @@ mod tests {
 
     fn wasm_task(
         entrypoint: &str,
-        module_bytes: Vec<u8>,
+        module: Vec<u8>,
         partition_data: Vec<u8>,
         artifact_digest: Option<String>,
     ) -> TaskEnvelope {
         let dir = tempdir().expect("tempdir");
         let module_path = dir.path().join(format!("{}.wasm", entrypoint));
-        std::fs::write(&module_path, &module_bytes).expect("write wasm module");
+        std::fs::write(&module_path, &module).expect("write wasm module");
 
         let payload = WasmTaskPayload {
             abi_version: WIRE_SCHEMA_V1,
@@ -843,9 +848,8 @@ mod tests {
             result_enc: WasmValueEncoding::RawBytes,
         };
         let payload_bytes = payload.encode_wire().expect("serialize wasm payload");
-        let digest = artifact_digest.or_else(|| {
-            Some(format!("sha256:{:x}", Sha256::digest(&module_bytes)))
-        });
+        let digest =
+            artifact_digest.or_else(|| Some(format!("sha256:{:?}", Sha256::digest(&module))));
 
         let task = TaskEnvelope::new(
             1,

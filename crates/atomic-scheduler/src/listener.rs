@@ -11,7 +11,7 @@ use std::time::Instant;
 /// DAGScheduler. The listener is notified each time a task succeeds, as well as if the whole
 /// job fails (and no further taskSucceeded events will happen).
 #[async_trait::async_trait]
-pub(crate) trait JobListener: Send + Sync {
+pub trait JobListener: Send + Sync {
     async fn task_succeeded(&self, _index: usize, _result: &dyn Data) -> LibResult<()> {
         Ok(())
     }

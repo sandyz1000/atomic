@@ -11,5 +11,5 @@ pub trait ReaderConfiguration<I: Data> {
     fn make_reader<F, O>(self, context: Arc<Context>, decoder: F) -> Arc<dyn Rdd<Item = O>>
     where
         O: Data,
-        F: Fn(I) -> O;
+        F: Fn(I) -> O + Send + Sync + 'static;
 }

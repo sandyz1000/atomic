@@ -383,13 +383,20 @@ pub struct PoolConfig {
     #[serde(rename = "max_per_op", default = "PoolConfig::default_max_slots")]
     pub max_slots: u16,
     /// Evict idle instances after this many seconds. Default: 60.
-    #[serde(rename = "idle_timeout_secs", default = "PoolConfig::default_idle_secs")]
+    #[serde(
+        rename = "idle_timeout_secs",
+        default = "PoolConfig::default_idle_secs"
+    )]
     pub idle_secs: u32,
 }
 
 impl PoolConfig {
-    fn default_max_slots() -> u16 { 4 }
-    fn default_idle_secs() -> u32 { 60 }
+    fn default_max_slots() -> u16 {
+        4
+    }
+    fn default_idle_secs() -> u32 {
+        60
+    }
 }
 
 impl Default for PoolConfig {
@@ -401,7 +408,6 @@ impl Default for PoolConfig {
         }
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct TaskEnvelope {
@@ -613,7 +619,11 @@ mod tests {
 
     #[test]
     fn resource_profile_fields() {
-        let profile = ResourceProfile { cpu_millis: 500, memory_mb: 256, timeout_ms: 10_000 };
+        let profile = ResourceProfile {
+            cpu_millis: 500,
+            memory_mb: 256,
+            timeout_ms: 10_000,
+        };
         assert_eq!(profile.cpu_millis, 500);
         assert_eq!(profile.memory_mb, 256);
         assert_eq!(profile.timeout_ms, 10_000);

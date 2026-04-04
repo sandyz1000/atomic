@@ -9,6 +9,7 @@ use crate::context::Context;
 use crate::error::{Error, LibResult};
 use crate::io::*;
 use crate::rdd::{Rdd, RddBase, map_partitions::MapPartitionsRdd, mapper::MapperRdd};
+use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
 
 use atomic_data::split::{BytesReader, FileReader, Split};
@@ -57,7 +58,8 @@ impl LocalFsReaderConfig {
 impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
     fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> Arc<dyn Rdd<Item = U>>
     where
-        F: Fn(Vec<u8>) -> U,
+        U: Data,
+        F: Fn(Vec<u8>) -> U + Send + Sync + 'static,
     {
         let reader = LocalFsReader::<BytesReader>::new(self, context.clone());
         let read_files = |_part: usize, readers: Box<dyn Iterator<Item = BytesReader>>| {
@@ -77,7 +79,8 @@ impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
 impl ReaderConfiguration<PathBuf> for LocalFsReaderConfig {
     fn make_reader<F, U>(self, context: Arc<Context>, decoder: F) -> Arc<dyn Rdd<Item = U>>
     where
-        F: Fn(PathBuf) -> U,
+        U: Data,
+        F: Fn(PathBuf) -> U + Send + Sync + 'static,
     {
         let reader = LocalFsReader::<FileReader>::new(self, context.clone());
         let read_files = |_part: usize, readers: Box<dyn Iterator<Item = FileReader>>| {

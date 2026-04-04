@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use atomic_compute::rdd::Context;
 use once_cell::sync::Lazy;
-use vega::*;
+
 
 static CONTEXT: Lazy<Arc<Context>> = Lazy::new(|| Context::new().unwrap());
 

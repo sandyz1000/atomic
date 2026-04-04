@@ -26,6 +26,14 @@ impl Job {
     pub fn new(run_id: usize, job_id: usize) -> Self {
         Job { run_id, job_id }
     }
+
+    pub fn run_id(&self) -> usize {
+        self.run_id
+    }
+
+    pub fn job_id(&self) -> usize {
+        self.job_id
+    }
 }
 
 // Manual ordering implemented because we want the jobs to be sorted in reverse order.
@@ -53,7 +61,7 @@ impl Ord for Job {
 type PendingTasks = BTreeMap<Stage, BTreeSet<TaskOption>>;
 
 /// Contains all the necessary types to run and track a job progress
-pub(crate) struct JobTracker<F, U: Data, T: Data, L>
+pub struct JobTracker<F, U: Data, T: Data, L>
 where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync,
     L: JobListener,
