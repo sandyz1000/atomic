@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering::SeqCst};
 
 use crate::rdd::rdd_val::RddVals;
-use crate::rdd::{Rdd, RddBase};
+use crate::rdd::{Rdd, RddBase, inherited_wasm_bytes};
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
 use atomic_data::error::BaseError;
@@ -129,6 +129,15 @@ where
 
     fn is_pinned(&self) -> bool {
         self.pinned.load(SeqCst)
+    }
+
+    fn wasm_bytes(&self, partition: usize) -> Option<Result<Vec<u8>, BaseError>> {
+        inherited_wasm_bytes(&self.prev, partition, || {
+            format!(
+                "mapper `{}` cannot lower non-u8 input to raw wasm bytes",
+                self.get_op_name()
+            )
+        })
     }
 }
 
@@ -257,6 +266,15 @@ where
 
     fn is_pinned(&self) -> bool {
         self.pinned.load(SeqCst)
+    }
+
+    fn wasm_bytes(&self, partition: usize) -> Option<Result<Vec<u8>, BaseError>> {
+        inherited_wasm_bytes(&self.prev, partition, || {
+            format!(
+                "mapper `{}` cannot lower non-u8 input to raw wasm bytes",
+                self.get_op_name()
+            )
+        })
     }
 }
 

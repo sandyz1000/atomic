@@ -33,11 +33,18 @@ dotenvy.workspace = true
 rustc-hash.workspace = true
 num_cpus.workspace = true
 bincode.workspace = true
+rkyv.workspace = true
 dyn-clone.workspace = true
 futures.workspace = true
 crossbeam.workspace = true
 hyper-util.workspace = true
+bollard = "0.20.2"
+sha2 = "0.11.0"
+wasmtime = "43.0.0"
 atomic-data.workspace = true
 atomic-utils.workspace = true
 atomic-scheduler.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+wat = "1.240.0"

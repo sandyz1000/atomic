@@ -65,10 +65,8 @@ impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
                 as Box<dyn Iterator<Item = _>>
         };
         let id1 = context.new_rdd_id();
-        let files_per_executor = Arc::new(
-            MapPartitionsRdd::new(id1, Arc::new(reader) as Arc<dyn Rdd<Item = _>>, read_files)
-                .pin(),
-        );
+        let prev: Arc<dyn Rdd<Item = BytesReader>> = Arc::new(reader);
+        let files_per_executor = Arc::new(MapPartitionsRdd::new(id1, prev, read_files).pin());
         let id2 = context.new_rdd_id();
         let decoder = MapperRdd::new(id2, files_per_executor, decoder).pin();
         decoder.register_op_name("local_fs_reader<bytes>");
@@ -88,10 +86,8 @@ impl ReaderConfiguration<PathBuf> for LocalFsReaderConfig {
         };
 
         let id1 = context.new_rdd_id();
-        let files_per_executor = Arc::new(
-            MapPartitionsRdd::new(id1, Arc::new(reader) as Arc<dyn Rdd<Item = _>>, read_files)
-                .pin(),
-        );
+        let prev: Arc<dyn Rdd<Item = FileReader>> = Arc::new(reader);
+        let files_per_executor = Arc::new(MapPartitionsRdd::new(id1, prev, read_files).pin());
         let id2 = context.new_rdd_id();
         let decoder = MapperRdd::new(id2, files_per_executor, decoder).pin();
         decoder.register_op_name("local_fs_reader<files>");
@@ -103,7 +99,7 @@ impl ReaderConfiguration<PathBuf> for LocalFsReaderConfig {
 /// on all executors on every worker node.
 #[derive(Clone)]
 pub struct LocalFsReader<T> {
-    id: usize,
+    pub(super) id: usize,
     path: PathBuf,
     is_single_file: bool,
     filter_ext: Option<std::ffi::OsString>,
@@ -112,7 +108,7 @@ pub struct LocalFsReader<T> {
     context: Arc<Context>,
     // explicitly copy the address map as the map under context is not
     // deserialized in tasks and this is required:
-    splits: Vec<SocketAddrV4>,
+    pub(super) splits: Vec<SocketAddrV4>,
     _marker_reader_data: PhantomData<T>,
 }
 
@@ -145,7 +141,7 @@ impl<T> LocalFsReader<T> {
 
     /// This function should be called once per host to come with the paralel workload.
     /// Is safe to recompute on failure though.
-    fn load_local_files(&self) -> LibResult<Vec<Vec<PathBuf>>> {
+    pub(super) fn load_local_files(&self) -> LibResult<Vec<Vec<PathBuf>>> {
         let mut total_size = 0_u64;
         if self.is_single_file {
             let files = vec![vec![self.path.clone()]];

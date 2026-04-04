@@ -3,17 +3,21 @@ use crate::rdd::coalesced::CoalescedRdd;
 use crate::rdd::flatmapper::FlatMapperRdd;
 use crate::rdd::map_partitions::MapPartitionsRdd;
 use crate::rdd::mapper::MapperRdd;
+use crate::rdd::wasm::WasmRddExt;
 use atomic_data::dependency::Dependency;
+use atomic_data::distributed::{AggregateActionConfig, FoldActionConfig};
+use atomic_data::distributed::{RkyvWireSerializer, RkyvWireStrategy, RkyvWireValidator};
 use atomic_data::error::BaseError;
 use atomic_data::fn_traits::{RddFlatMapFn, RddFn};
 use atomic_data::partitioner::Partitioner;
+use rkyv::bytecheck::CheckBytes;
 
 use crate::rdd::{Data, Rdd, RddBase};
 use atomic_data::split::Split;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::context::Context;
+use crate::context::{Context, ExecutionRuntime};
 
 /// Type alias for Arc-wrapped RDD trait objects
 pub type RddRef<T> = Arc<dyn Rdd<Item = T>>;
@@ -227,7 +231,39 @@ impl<T: Data> TypedRdd<T> {
 // ACTION METHODS
 // ============================================================================
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExecMode {
+    Local,
+    Wasm(String),
+}
+
 impl<T: Data + Clone> TypedRdd<T> {
+    fn wasm_ops(&self, action: &str) -> Vec<String> {
+        let op_name = self.rdd.get_op_name();
+        vec![format!("{}.{}.v1", op_name, action), format!("{}.{}", op_name, action)]
+    }
+
+    fn exec_mode(&self, action: &str) -> Result<ExecMode, BaseError> {
+        match self.context.runtime() {
+            ExecutionRuntime::Local => Ok(ExecMode::Local),
+            ExecutionRuntime::Wasm => self
+                .context
+                .resolve_registered_wasm_operation(self.wasm_ops(action))
+                .map(ExecMode::Wasm)
+                .ok_or_else(|| {
+                    BaseError::Other(format!(
+                        "missing registered wasm operation for action '{}' on '{}'",
+                        action,
+                        self.rdd.get_op_name()
+                    ))
+                }),
+            ExecutionRuntime::Docker => Err(BaseError::Other(format!(
+                "typed action '{}' does not yet support the docker runtime",
+                action
+            ))),
+        }
+    }
+
     /// Collect all elements from all partitions into a Vec.
     ///
     /// **Warning**: This brings all data to the driver. Only use on small datasets.
@@ -238,7 +274,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// let result = rdd.collect()?;
     /// assert_eq!(result, vec![1, 2, 3]);
     /// ```
-    pub fn collect(&self) -> Result<Vec<T>, BaseError> {
+    pub fn collect_local(&self) -> Result<Vec<T>, BaseError> {
         let cl = |iter: Box<dyn Iterator<Item = T>>| iter.collect::<Vec<T>>();
         let results = self.context.run_job(self.rdd.clone(), cl)?;
         let size = results.iter().fold(0, |a, b: &Vec<T>| a + b.len());
@@ -250,19 +286,97 @@ impl<T: Data + Clone> TypedRdd<T> {
             }))
     }
 
+    pub fn collect(&self) -> Result<Vec<T>, BaseError>
+    where
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        Vec<T>: rkyv::Archive,
+        <Vec<T> as rkyv::Archive>::Archived:
+            for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
+                + rkyv::Deserialize<Vec<T>, RkyvWireStrategy>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match self.exec_mode("collect")? {
+            ExecMode::Local => self.collect_local(),
+            ExecMode::Wasm(operation_id) => self.collect_wasm_rkyv::<T>(&operation_id),
+        }
+    }
+
+    pub fn try_collect_wasm(&self) -> Result<Option<Vec<T>>, BaseError>
+    where
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        Vec<T>: rkyv::Archive,
+        <Vec<T> as rkyv::Archive>::Archived:
+            for<'a> CheckBytes<RkyvWireValidator<'a>>
+                + rkyv::Deserialize<Vec<T>, RkyvWireStrategy>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match self.exec_mode("collect")? {
+            ExecMode::Local => Ok(None),
+            ExecMode::Wasm(operation_id) => {
+                self.collect_wasm_rkyv::<T>(&operation_id).map(Some)
+            }
+        }
+    }
+
+    pub fn collect_auto_wasm_rkyv(&self) -> Result<Option<Vec<T>>, BaseError>
+    where
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        Vec<T>: rkyv::Archive,
+        <Vec<T> as rkyv::Archive>::Archived:
+            for<'a> CheckBytes<RkyvWireValidator<'a>>
+                + rkyv::Deserialize<Vec<T>, RkyvWireStrategy>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        self.try_collect_wasm()
+    }
+
     /// Count the number of elements in the RDD.
     ///
     /// # Example
     /// ```ignore
     /// let count = rdd.count()?;
     /// ```
-    pub fn count(&self) -> Result<u64, BaseError> {
+    pub fn count_local(&self) -> Result<u64, BaseError> {
         let counting_func = |iter: Box<dyn Iterator<Item = T>>| iter.count() as u64;
         Ok(self
             .context
             .run_job(self.rdd.clone(), counting_func)?
             .into_iter()
             .sum())
+    }
+
+    pub fn count(&self) -> Result<u64, BaseError>
+    where
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match self.exec_mode("count")? {
+            ExecMode::Local => self.count_local(),
+            ExecMode::Wasm(operation_id) => {
+                Ok(self.run_wasm::<u64>(&operation_id)?.into_iter().sum())
+            }
+        }
+    }
+
+    pub fn try_count_wasm(&self) -> Result<Option<u64>, BaseError>
+    where
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match self.exec_mode("count")? {
+            ExecMode::Local => Ok(None),
+            ExecMode::Wasm(operation_id) => {
+                Ok(Some(self.run_wasm::<u64>(&operation_id)?.into_iter().sum()))
+            }
+        }
+    }
+
+    pub fn count_auto_wasm_rkyv(&self) -> Result<Option<u64>, BaseError>
+    where
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        self.try_count_wasm()
     }
 
     /// Take the first n elements from the RDD.
@@ -335,7 +449,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// ```ignore
     /// let sum = rdd.reduce(|a, b| a + b)?;
     /// ```
-    pub fn reduce<F>(&self, f: F) -> Result<Option<T>, BaseError>
+    pub fn reduce_local<F>(&self, f: F) -> Result<Option<T>, BaseError>
     where
         F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
     {
@@ -351,13 +465,64 @@ impl<T: Data + Clone> TypedRdd<T> {
         Ok(results.into_iter().flatten().reduce(f))
     }
 
+    pub fn reduce<F>(&self, f: F) -> Result<Option<T>, BaseError>
+    where
+        F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        Option<T>: rkyv::Archive,
+        <Option<T> as rkyv::Archive>::Archived:
+            for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
+                + rkyv::Deserialize<Option<T>, RkyvWireStrategy>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match self.exec_mode("reduce")? {
+            ExecMode::Local => self.reduce_local(f),
+            ExecMode::Wasm(operation_id) => {
+                let partials = self.run_wasm::<Option<T>>(&operation_id)?;
+                Ok(partials.into_iter().flatten().reduce(f))
+            }
+        }
+    }
+
+    pub fn try_reduce_wasm<F>(&self, f: F) -> Result<Option<Option<T>>, BaseError>
+    where
+        F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        Option<T>: rkyv::Archive,
+        <Option<T> as rkyv::Archive>::Archived:
+            for<'a> CheckBytes<RkyvWireValidator<'a>>
+                + rkyv::Deserialize<Option<T>, RkyvWireStrategy>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match self.exec_mode("reduce")? {
+            ExecMode::Local => Ok(None),
+            ExecMode::Wasm(operation_id) => {
+                let partials = self.run_wasm::<Option<T>>(&operation_id)?;
+                Ok(Some(partials.into_iter().flatten().reduce(f)))
+            }
+        }
+    }
+
+    pub fn reduce_auto_wasm_rkyv<F>(&self, f: F) -> Result<Option<Option<T>>, BaseError>
+    where
+        F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        Option<T>: rkyv::Archive,
+        <Option<T> as rkyv::Archive>::Archived:
+            for<'a> CheckBytes<RkyvWireValidator<'a>>
+                + rkyv::Deserialize<Option<T>, RkyvWireStrategy>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        self.try_reduce_wasm(f)
+    }
+
     /// Fold/aggregate the elements using an initial value and associative function.
     ///
     /// # Example
     /// ```ignore
     /// let sum = rdd.fold(0, |acc, x| acc + x)?;
     /// ```
-    pub fn fold<F>(&self, init: T, f: F) -> Result<T, BaseError>
+    pub fn fold_local<F>(&self, init: T, f: F) -> Result<T, BaseError>
     where
         F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
     {
@@ -367,6 +532,56 @@ impl<T: Data + Clone> TypedRdd<T> {
             move |iter: Box<dyn Iterator<Item = T>>| iter.fold(zero.clone(), &f_clone);
         let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
         Ok(results.into_iter().fold(init, f))
+    }
+
+    pub fn fold<F>(&self, init: T, f: F) -> Result<T, BaseError>
+    where
+        F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        T: rkyv::Archive,
+        T::Archived: for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
+            + rkyv::Deserialize<T, RkyvWireStrategy>,
+        FoldActionConfig<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match self.exec_mode("fold")? {
+            ExecMode::Local => self.fold_local(init, f),
+            ExecMode::Wasm(operation_id) => {
+                let config = FoldActionConfig { zero: init.clone() };
+                let partials = self.run_wasm_cfg::<T, _>(&operation_id, &config)?;
+                Ok(partials.into_iter().fold(init, f))
+            }
+        }
+    }
+
+    pub fn try_fold_wasm<F>(&self, init: T, f: F) -> Result<Option<T>, BaseError>
+    where
+        F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        T: rkyv::Archive,
+        T::Archived: for<'a> CheckBytes<RkyvWireValidator<'a>>
+            + rkyv::Deserialize<T, RkyvWireStrategy>,
+        FoldActionConfig<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match self.exec_mode("fold")? {
+            ExecMode::Local => Ok(None),
+            ExecMode::Wasm(operation_id) => {
+                let config = FoldActionConfig { zero: init.clone() };
+                let partials = self.run_wasm_cfg::<T, _>(&operation_id, &config)?;
+                Ok(Some(partials.into_iter().fold(init, f)))
+            }
+        }
+    }
+
+    pub fn fold_auto_wasm_rkyv<F>(&self, init: T, f: F) -> Result<Option<T>, BaseError>
+    where
+        F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        T: rkyv::Archive,
+        T::Archived: for<'a> CheckBytes<RkyvWireValidator<'a>>
+            + rkyv::Deserialize<T, RkyvWireStrategy>,
+        FoldActionConfig<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        self.try_fold_wasm(init, f)
     }
 
     /// Check if the RDD is empty.
@@ -393,7 +608,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     ///     |acc1, acc2| acc1 + acc2,  // comb_fn: combine partitions
     /// )?;
     /// ```
-    pub fn aggregate<U, SF, CF>(&self, init: U, seq_fn: SF, comb_fn: CF) -> Result<U, BaseError>
+    pub fn aggregate_local<U, SF, CF>(&self, init: U, seq_fn: SF, comb_fn: CF) -> Result<U, BaseError>
     where
         U: Data + Clone,
         SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
@@ -404,6 +619,66 @@ impl<T: Data + Clone> TypedRdd<T> {
             move |iter: Box<dyn Iterator<Item = T>>| iter.fold(zero.clone(), &seq_fn);
         let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
         Ok(results.into_iter().fold(init, comb_fn))
+    }
+
+    pub fn aggregate<U, SF, CF>(&self, init: U, seq_fn: SF, comb_fn: CF) -> Result<U, BaseError>
+    where
+        U: Data + Clone + rkyv::Archive,
+        U::Archived: for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
+            + rkyv::Deserialize<U, RkyvWireStrategy>,
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        AggregateActionConfig<U>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
+        CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
+    {
+        match self.exec_mode("aggregate")? {
+            ExecMode::Local => self.aggregate_local(init, seq_fn, comb_fn),
+            ExecMode::Wasm(operation_id) => {
+                let _ = seq_fn;
+                let config = AggregateActionConfig { zero: init.clone() };
+                let partials = self.run_wasm_cfg::<U, _>(&operation_id, &config)?;
+                Ok(partials.into_iter().fold(init, comb_fn))
+            }
+        }
+    }
+
+    pub fn try_agg_wasm<U, CF>(
+        &self,
+        init: U,
+        comb_fn: CF,
+    ) -> Result<Option<U>, BaseError>
+    where
+        U: Data + Clone + rkyv::Archive,
+        U::Archived: for<'a> CheckBytes<RkyvWireValidator<'a>>
+            + rkyv::Deserialize<U, RkyvWireStrategy>,
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        AggregateActionConfig<U>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
+    {
+        match self.exec_mode("aggregate")? {
+            ExecMode::Local => Ok(None),
+            ExecMode::Wasm(operation_id) => {
+                let config = AggregateActionConfig { zero: init.clone() };
+                let partials = self.run_wasm_cfg::<U, _>(&operation_id, &config)?;
+                Ok(Some(partials.into_iter().fold(init, comb_fn)))
+            }
+        }
+    }
+
+    pub fn aggregate_auto_wasm_rkyv<U, CF>(
+        &self,
+        init: U,
+        comb_fn: CF,
+    ) -> Result<Option<U>, BaseError>
+    where
+        U: Data + Clone + rkyv::Archive,
+        U::Archived: for<'a> CheckBytes<RkyvWireValidator<'a>>
+            + rkyv::Deserialize<U, RkyvWireStrategy>,
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        AggregateActionConfig<U>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
+    {
+        self.try_agg_wasm(init, comb_fn)
     }
 
     /// Apply a function to each element (for side effects).
@@ -1015,5 +1290,122 @@ pub trait RddExt<T: Data>: Rdd<Item = T> {
 impl<T: Data + Clone, R: Rdd<Item = T>> RddExt<T> for R {
     fn typed(self: Arc<Self>, context: Arc<Context>) -> TypedRdd<T> {
         TypedRdd::new(self, context)
+    }
+}
+
+// ============================================================================
+// ARTIFACT STUB METHODS — type-safe WASM / Docker dispatch
+// ============================================================================
+
+use atomic_data::distributed::ExecutionBackend;
+use atomic_data::stub::ArtifactStub;
+
+impl<T: Data + Clone> TypedRdd<T> {
+    /// Execute a prebuilt artifact (WASM or Docker) that maps each partition `T → U`.
+    ///
+    /// The stub's `Input` type must match `T` and `Output` must match `U`.
+    /// The compiler enforces this — a type mismatch is a compile error, not a runtime error.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let stub: WasmStub<u8, u32> = WasmStub::from_manifest("manifest.toml", "demo.map.v1")?;
+    /// let result: Vec<u32> = rdd.map_via(&stub)?;
+    /// ```
+    pub fn map_via<U>(&self, stub: &ArtifactStub<T, U>) -> Result<Vec<U>, BaseError>
+    where
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        U: rkyv::Archive,
+        U::Archived: for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
+            + rkyv::Deserialize<U, RkyvWireStrategy>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match stub.backend() {
+            ExecutionBackend::Wasm => self.run_wasm(stub.operation_id()),
+            ExecutionBackend::Docker | ExecutionBackend::LocalThread => Err(BaseError::Other(
+                format!(
+                    "map_via does not yet support the {:?} backend for operation '{}'",
+                    stub.backend(),
+                    stub.operation_id()
+                ),
+            )),
+        }
+    }
+
+    /// Execute a prebuilt artifact that collects each partition into `Vec<U>`.
+    ///
+    /// Use this when the artifact returns a full `Vec<U>` per partition
+    /// (as opposed to a single `U` value per partition from `map_via`).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let stub: WasmStub<u8, u8> = WasmStub::from_manifest("manifest.toml", "demo.collect.v1")?;
+    /// let result: Vec<u8> = rdd.collect_via(&stub)?;
+    /// ```
+    pub fn collect_via<U>(&self, stub: &ArtifactStub<T, U>) -> Result<Vec<U>, BaseError>
+    where
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        Vec<U>: rkyv::Archive,
+        <Vec<U> as rkyv::Archive>::Archived:
+            for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
+                + rkyv::Deserialize<Vec<U>, RkyvWireStrategy>,
+        (): for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match stub.backend() {
+            ExecutionBackend::Wasm => self.collect_wasm_rkyv(stub.operation_id()),
+            ExecutionBackend::Docker | ExecutionBackend::LocalThread => Err(BaseError::Other(
+                format!(
+                    "collect_via does not yet support the {:?} backend for operation '{}'",
+                    stub.backend(),
+                    stub.operation_id()
+                ),
+            )),
+        }
+    }
+
+    /// Execute a prebuilt artifact with a per-partition config value.
+    ///
+    /// The config is rkyv-serialized and sent alongside the partition data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let stub: WasmStub<u8, u32> = WasmStub::from_manifest("manifest.toml", "demo.fold.v1")?;
+    /// let result: Vec<u32> = rdd.map_via_cfg(&stub, &FoldConfig { zero: 0 })?;
+    /// ```
+    pub fn map_via_cfg<U, C>(&self, stub: &ArtifactStub<T, U>, config: &C) -> Result<Vec<U>, BaseError>
+    where
+        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        U: rkyv::Archive,
+        U::Archived: for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
+            + rkyv::Deserialize<U, RkyvWireStrategy>,
+        C: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+    {
+        match stub.backend() {
+            ExecutionBackend::Wasm => self.run_wasm_cfg(stub.operation_id(), config),
+            ExecutionBackend::Docker | ExecutionBackend::LocalThread => Err(BaseError::Other(
+                format!(
+                    "map_via_cfg does not yet support the {:?} backend for operation '{}'",
+                    stub.backend(),
+                    stub.operation_id()
+                ),
+            )),
+        }
+    }
+
+    /// Group elements by a key function, returning `TypedRdd<(K, Vec<T>)>`.
+    ///
+    /// This is an in-partition grouping (no shuffle). For cross-partition grouping
+    /// with shuffle, use `.key_by(f).group_by_key()`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let grouped = rdd.group_by(|x| x % 3);
+    /// ```
+    pub fn group_by<K, F>(self, f: F) -> TypedRdd<(K, Vec<T>)>
+    where
+        K: Data + Eq + std::hash::Hash + Clone,
+        T: Clone,
+        F: Fn(&T) -> K + Clone + Send + Sync + 'static,
+    {
+        self.key_by(f).group_by_key()
     }
 }

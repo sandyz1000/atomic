@@ -1,6 +1,6 @@
 //! This module implements parallel collection RDD for dividing the input collection for parallel processing.
 use crate::rdd::rdd_val::RddVals;
-use crate::rdd::{Rdd, RddBase};
+use crate::rdd::{Rdd, RddBase, rdd_wasm_bytes};
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
 use atomic_data::error::BaseError;
@@ -156,6 +156,12 @@ impl<T: Data + Clone> RddBase for ParallelCollection<T> {
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
+    }
+
+    fn wasm_bytes(&self, partition: usize) -> Option<Result<Vec<u8>, BaseError>> {
+        rdd_wasm_bytes(self, partition, || {
+            "parallel collection partition cannot be lowered to raw wasm bytes".to_string()
+        })
     }
 }
 

@@ -2,13 +2,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::backend::{BackendContext, WorkerRuntime};
 use crate::env;
-use crate::error::{Error};
-use atomic_data::task::TaskOption;
+use crate::error::{Error, LibResult};
+use atomic_data::distributed::{
+    TaskEnvelope, TaskResultEnvelope, TransportFrameKind, WorkerCapabilities,
+    TRANSPORT_HEADER_LEN, WireDecode, WireEncode, encode_transport_frame,
+    parse_transport_header,
+};
 
 use crossbeam::{Receiver, Sender, channel::bounded};
 use atomic_data::shuffle::error::NetworkError;
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     stream::StreamExt,
     task::{spawn, spawn_blocking},
@@ -20,11 +26,45 @@ use tokio_util::compat::{Tokio02AsyncReadCompatExt, Tokio02AsyncWriteCompatExt};
 
 pub(crate) struct Executor {
     port: u16,
+    worker_runtime: WorkerRuntime,
+    backend_ctx: BackendContext,
 }
 
 impl Executor {
     pub fn new(port: u16) -> Self {
-        Executor { port }
+        let conf = env::Configuration::get();
+        let worker_runtime = conf
+            .slave
+            .as_ref()
+            .map(|slave| WorkerRuntime::from_execution_backend(slave.backend))
+            .unwrap_or_else(|| {
+                WorkerRuntime::default_for(conf.deployment_mode == env::DeploymentMode::Distributed)
+            });
+        Executor {
+            port,
+            worker_runtime,
+            backend_ctx: BackendContext {
+                worker_id: Arc::from(format!("worker-{}", port)),
+            },
+        }
+    }
+
+    /// Executes the artifact-first distributed envelope protocol.
+    pub fn execute_distributed_task_envelope(
+        &self,
+        task: &TaskEnvelope,
+    ) -> LibResult<TaskResultEnvelope> {
+        self.worker_runtime.execute(&self.backend_ctx, task)
+    }
+
+    pub fn worker_capabilities(&self) -> WorkerCapabilities {
+        let max_concurrent_tasks = env::Configuration::get()
+            .slave
+            .as_ref()
+            .map(|slave| slave.max_concurrent_tasks)
+            .unwrap_or(1);
+        self.worker_runtime
+            .capabilities(self.backend_ctx.worker_id.to_string(), max_concurrent_tasks)
     }
 
     /// Worker which spawns threads for received tasks, deserializes them,
@@ -32,8 +72,8 @@ impl Executor {
     ///
     /// This will spawn it's own Tokio runtime to run the tasks on.
     #[allow(clippy::drop_copy)]
-    pub fn worker(self: Arc<Self>) -> Result<Signal> {
-        env::Env::run_in_async_rt(move || -> Result<Signal> {
+    pub fn worker(self: Arc<Self>) -> LibResult<Signal> {
+        env::Env::run_in_async_rt(move || -> LibResult<Signal> {
             futures::executor::block_on(async move {
                 let (send_child, rcv_main) = bounded::<Signal>(100);
                 let process_err = Arc::clone(&self).process_stream(rcv_main);
@@ -47,7 +87,7 @@ impl Executor {
     }
 
     #[allow(clippy::drop_copy)]
-    async fn process_stream(self: Arc<Self>, rcv_main: Receiver<Signal>) -> Result<Signal> {
+    async fn process_stream(self: Arc<Self>, rcv_main: Receiver<Signal>) -> LibResult<Signal> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
         let mut listener = TcpListener::bind(addr)
             .await
@@ -55,10 +95,7 @@ impl Executor {
         while let Some(Ok(mut stream)) = listener.incoming().next().await {
             let rcv_main = rcv_main.clone();
             let selfc = Arc::clone(&self);
-            let res: Result<Signal> = spawn(async move {
-                let (reader, writer) = stream.split();
-                let reader = reader.compat();
-                let mut writer = writer.compat_write();
+            let res: LibResult<Signal> = spawn(async move {
                 match rcv_main.try_recv() {
                     Ok(Signal::ShutDownError) => {
                         log::info!("shutting down executor @{} due to error", selfc.port);
@@ -71,21 +108,14 @@ impl Executor {
                     _ => {}
                 }
                 log::debug!("received new task @{} executor", selfc.port);
-                let result_data = {
-                    // Read the serialized task data directly with bincode
-                    let mut reader_std = reader.into_inner();
-                    spawn_blocking(move || -> Result<_> {
-                        let des_task = selfc.deserialize_task(&mut reader_std)?;
-                        selfc.run_task(des_task)
-                    })
-                    .await??
-                };
-                // Write result back directly with bincode
-                use std::io::Write;
-                writer
-                    .write_all(&result_data)
-                    .await
-                    .map_err(Error::OutputWrite)?;
+                let (frame_kind, payload) = selfc.read_transport_frame(&mut stream).await?;
+                let (result_kind, result_payload) = spawn_blocking(move || {
+                    selfc.handle_transport_frame(frame_kind, payload)
+                })
+                .await??;
+                selfc
+                    .write_transport_frame(&mut stream, result_kind, &result_payload)
+                    .await?;
                 log::debug!("sent result data to driver");
                 Ok(Signal::Continue)
             })
@@ -99,52 +129,72 @@ impl Executor {
         Err(Error::ExecutorShutdown)
     }
 
-    #[allow(clippy::drop_copy)]
-    fn deserialize_task(self: &Arc<Self>, reader: &mut impl std::io::Read) -> Result<TaskOption> {
-        let start = Instant::now();
-        // Deserialize task directly with bincode
-        let des_task: TaskOption = bincode::deserialize_from(reader)?;
-        log::debug!(
-            "deserialized task at executor @{} with id #{}, took {}ms",
-            self.port,
-            des_task.get_task_id(),
-            start.elapsed().as_millis(),
-        );
-        Ok(des_task)
+    fn handle_transport_frame(
+        self: &Arc<Self>,
+        frame_kind: TransportFrameKind,
+        payload: Vec<u8>,
+    ) -> LibResult<(TransportFrameKind, Vec<u8>)> {
+        match frame_kind {
+            TransportFrameKind::TaskEnvelope => {
+                let task = TaskEnvelope::decode_wire(&payload)
+                    .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
+                let result = self.execute_distributed_task_envelope(&task)?;
+                let bytes = result
+                    .encode_wire()
+                    .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
+                Ok((TransportFrameKind::TaskResultEnvelope, bytes))
+            }
+            TransportFrameKind::WorkerCapabilities => {
+                let bytes = self
+                    .worker_capabilities()
+                    .encode_wire()
+                    .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
+                Ok((TransportFrameKind::WorkerCapabilities, bytes))
+            }
+            other => Err(Error::InvalidTransportFrame(format!(
+                "unsupported request frame kind: {:?}",
+                other
+            ))),
+        }
     }
 
-    fn run_task(self: &Arc<Self>, des_task: TaskOption) -> Result<Vec<u8>> {
-        // Run execution + serialization in parallel in the executor threadpool
-        let start = Instant::now();
-        log::debug!("executing the task from server port {}", self.port);
-        // TODO: change attempt id from 0 to proper value
-        let result = des_task.run(0);
-        log::debug!(
-            "time taken @{} executor running task #{}: {}ms",
-            self.port,
-            des_task.get_task_id(),
-            start.elapsed().as_millis(),
-        );
-        let start = Instant::now();
-        let result = bincode::serialize(&result)?;
-        log::debug!(
-            "time taken @{} executor serializing task #{} result of size {} bytes: {}ms",
-            self.port,
-            des_task.get_task_id(),
-            result.len(),
-            start.elapsed().as_millis(),
-        );
-        Ok(result)
+    async fn read_transport_frame(
+        &self,
+        stream: &mut tokio::net::TcpStream,
+    ) -> LibResult<(TransportFrameKind, Vec<u8>)> {
+        let mut header = [0_u8; TRANSPORT_HEADER_LEN];
+        stream
+            .read_exact(&mut header)
+            .await
+            .map_err(Error::InputRead)?;
+        let (frame_kind, payload_len) = parse_transport_header(&header)
+            .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
+        let mut payload = vec![0_u8; payload_len];
+        stream
+            .read_exact(&mut payload)
+            .await
+            .map_err(Error::InputRead)?;
+        Ok((frame_kind, payload))
+    }
+
+    async fn write_transport_frame(
+        &self,
+        stream: &mut tokio::net::TcpStream,
+        frame_kind: TransportFrameKind,
+        payload: &[u8],
+    ) -> LibResult<()> {
+        let frame = encode_transport_frame(frame_kind, payload);
+        stream.write_all(&frame).await.map_err(Error::OutputWrite)
     }
 
     /// A listener for exit signal from master to end the whole slave process.
-    async fn signal_handler(self: Arc<Self>, send_child: Sender<Signal>) -> Result<Signal> {
+    async fn signal_handler(self: Arc<Self>, send_child: Sender<Signal>) -> LibResult<Signal> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port + 10));
         log::debug!("signal handler port open @ {}", addr.port());
         let mut listener = TcpListener::bind(addr)
             .await
             .map_err(NetworkError::TcpListener)?;
-        let mut signal: Result<Signal> = Err(Error::ExecutorShutdown);
+        let mut signal: LibResult<Signal> = Err(Error::ExecutorShutdown);
         while let Some(Ok(stream)) = listener.incoming().next().await {
             let stream = stream.compat();
             let mut stream_std = stream.into_inner();
@@ -176,6 +226,18 @@ impl Executor {
     }
 }
 
+pub fn run_worker_from_config() -> LibResult<()> {
+    let port = env::Configuration::get()
+        .slave
+        .as_ref()
+        .map(|slave| slave.port)
+        .ok_or(Error::GetOrCreateConfig(
+            "worker port not configured for slave deployment",
+        ))?;
+    let executor = Arc::new(Executor::new(port));
+    executor.worker().map(|_| ())
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Signal {
     ShutDownError,
@@ -189,8 +251,11 @@ mod tests {
 
     use super::*;
     use core::time;
+    use atomic_data::distributed::{
+        TransportFrameKind, TRANSPORT_HEADER_LEN, encode_transport_frame,
+        parse_transport_header,
+    };
     use crossbeam::channel::{Receiver, Sender, unbounded};
-    use atomic_data::{TaskContext, TaskResult};
     use atomic_utils::get_dynamic_port;
     use std::io::Write;
     use std::thread;
@@ -204,7 +269,7 @@ mod tests {
         Arc::new(Executor::new(port))
     }
 
-    fn connect_to_executor(mut port: u16, signal_handler: bool) -> Result<std::net::TcpStream> {
+    fn connect_to_executor(mut port: u16, signal_handler: bool) -> LibResult<std::net::TcpStream> {
         use std::net::TcpStream;
 
         let mut i: usize = 0;
@@ -227,16 +292,28 @@ mod tests {
         Err(Error::Other)
     }
 
-    fn send_shutdown_signal_msg(stream: &mut std::net::TcpStream) -> Result<()> {
+    fn send_shutdown_signal_msg(stream: &mut std::net::TcpStream) -> LibResult<()> {
         // Serialize signal directly with bincode
         bincode::serialize_into(stream, &Signal::ShutDownGracefully)?;
         Ok(())
     }
 
-    async fn _start_test<TF, CF>(test_func: TF, checker_func: CF) -> Result<()>
+    fn read_transport_response(
+        stream: &mut std::net::TcpStream,
+    ) -> LibResult<(TransportFrameKind, Vec<u8>)> {
+        let mut header = [0_u8; TRANSPORT_HEADER_LEN];
+        std::io::Read::read_exact(stream, &mut header).map_err(Error::InputRead)?;
+        let (kind, payload_len) = parse_transport_header(&header)
+            .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
+        let mut payload = vec![0_u8; payload_len];
+        std::io::Read::read_exact(stream, &mut payload).map_err(Error::InputRead)?;
+        Ok((kind, payload))
+    }
+
+    async fn _start_test<TF, CF>(test_func: TF, checker_func: CF) -> LibResult<()>
     where
-        TF: FnOnce(Receiver<ComputeResult>, Port) -> Result<()> + Send + 'static,
-        CF: FnOnce(Sender<ComputeResult>, Result<Signal>) -> Result<()>,
+        TF: FnOnce(Receiver<ComputeResult>, Port) -> LibResult<()> + Send + 'static,
+        CF: FnOnce(Sender<ComputeResult>, LibResult<Signal>) -> LibResult<()>,
     {
         let executor = initialize_exec();
         let port = executor.port;
@@ -250,8 +327,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_shutdown_signal() -> Result<()> {
-        fn test(client_rcv: Receiver<ComputeResult>, port: Port) -> Result<()> {
+    async fn send_shutdown_signal() -> LibResult<()> {
+        fn test(client_rcv: Receiver<ComputeResult>, port: Port) -> LibResult<()> {
             let end = Instant::now() + Duration::from_millis(150);
             while Instant::now() < end {
                 match client_rcv.try_recv() {
@@ -268,7 +345,7 @@ mod tests {
             Err(Error::Other)
         }
 
-        fn result_checker(sender: Sender<ComputeResult>, result: Result<Signal>) -> Result<()> {
+        fn result_checker(sender: Sender<ComputeResult>, result: LibResult<Signal>) -> LibResult<()> {
             match result {
                 Ok(Signal::ShutDownGracefully) => {
                     sender.send(Ok(()));
@@ -285,21 +362,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_task() -> Result<(), Error> {
-        fn test(client_rcv: Receiver<ComputeResult>, port: Port) -> Result<()> {
-            // Mock data:
-            let func = move |(_task_context, iter): (
-                TaskContext,
-                Box<dyn Iterator<Item = u8>>
-            )|
-                  -> u8 {
-                // let iter = iter.collect::<Vec<u8>>();
-                // eprintln!("{:?}", iter);
-                iter.into_iter().next().unwrap()
-            };
-            let mock_task: TaskOption = create_test_task(func).into();
-            // Serialize task directly with bincode
-            let buf = bincode::serialize(&mock_task)?;
+    async fn reports_worker_capabilities() -> LibResult<()> {
+        fn test(client_rcv: Receiver<ComputeResult>, port: Port) -> LibResult<()> {
+            let frame = encode_transport_frame(TransportFrameKind::WorkerCapabilities, &[]);
 
             let end = Instant::now() + Duration::from_millis(150);
             while Instant::now() < end {
@@ -308,37 +373,31 @@ mod tests {
                     Ok(Err(_)) => return Err(Error::Other),
                     _ => {}
                 }
+
                 if let Ok(mut stream) = connect_to_executor(port, false) {
-                    // Send task to executor:
-                    stream.write_all(&buf).map_err(Error::OutputWrite)?;
-                    if let Ok(Err(_)) = client_rcv.try_recv() {
-                        return Err(Error::Other);
-                    }
-
-                    // Get the results back: deserialize directly with bincode
-                    match bincode::deserialize_from::<_, TaskResult>(&mut stream)? {
-                        TaskResult::ResultTask(_) => {}
-                        _ => return Err(Error::DowncastFailure("incorrect task result")),
-                    }
-
-                    let mut signal_handler = connect_to_executor(port, true)?;
-                    send_shutdown_signal_msg(&mut signal_handler)?;
+                    stream.write_all(&frame).map_err(Error::OutputWrite)?;
+                    let (kind, payload) = read_transport_response(&mut stream)?;
+                    assert_eq!(kind, TransportFrameKind::WorkerCapabilities);
+                    let capabilities = WorkerCapabilities::decode_wire(&payload)
+                        .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
+                    assert!(!capabilities.worker_id.is_empty());
+                    assert!(capabilities.max_concurrent_tasks >= 1);
                     return Ok(());
                 }
-                thread::sleep(time::Duration::from_millis(5));
             }
-            Err(Error::Other)
-        };
 
-        fn result_checker(sender: Sender<ComputeResult>, result: Result<Signal>) -> Result<()> {
+            Err(Error::Other)
+        }
+
+        fn result_checker(sender: Sender<ComputeResult>, result: LibResult<Signal>) -> LibResult<()> {
             match result {
                 Ok(Signal::ShutDownGracefully) => Ok(()),
                 Ok(_) => {
-                    sender.send(Ok(()));
+                    sender.send(Err(Error::Other));
                     Err(Error::Other)
                 }
                 Err(err) => {
-                    sender.send(Err(()));
+                    sender.send(Err(Error::Other));
                     Err(err)
                 }
             }

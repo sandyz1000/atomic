@@ -185,9 +185,9 @@ impl Split for CoGroupSplit {
 
 #[derive(Clone, Debug)]
 pub struct BytesReader {
-    files: Vec<PathBuf>,
-    idx: usize,
-    host: Ipv4Addr,
+    pub files: Vec<PathBuf>,
+    pub idx: usize,
+    pub host: Ipv4Addr,
 }
 
 impl Split for BytesReader {

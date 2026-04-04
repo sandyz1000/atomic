@@ -45,6 +45,10 @@ pub trait RddBase: Send + Sync {
     fn is_pinned(&self) -> bool {
         false
     }
+
+    fn wasm_bytes(&self, _partition: usize) -> Option<BaseResult<Vec<u8>>> {
+        None
+    }
 }
 
 // Rdd containing methods associated with processing
