@@ -2,10 +2,11 @@ use std::sync::Arc;
 use std::{collections::HashMap, fs, path::PathBuf, time::Duration};
 
 use atomic_data::distributed::{
-    ArtifactKind, DockerTaskPayload, ExecutionBackend, RuntimeKind, TaskEnvelope,
+    ArtifactKind, DockerTaskPayload, ExecutionBackend, TaskEnvelope,
     TaskResultEnvelope, WasmTaskPayload, WasmValueEncoding, WorkerCapabilities,
     WIRE_SCHEMA_V1, WireDecode, WireEncode,
 };
+use dashmap::DashMap;
 use bollard::container::{
     AttachContainerOptions, Config as ContainerConfig, CreateContainerOptions, LogsOptions,
     RemoveContainerOptions, StartContainerOptions, WaitContainerOptions,
@@ -97,7 +98,7 @@ impl DockerBackend {
         task: &TaskEnvelope,
     ) -> LibResult<TaskResultEnvelope> {
         let payload = self.decode_payload(task)?;
-        let image = task.artifact.artifact_ref.clone();
+        let image = task.artifact.uri.clone();
 
         let docker = Docker::connect_with_local_defaults()
             .map_err(|e| Error::DockerRuntime(e.to_string()))?;
@@ -110,7 +111,7 @@ impl DockerBackend {
             .map_err(|e| Error::DockerRuntime(e.to_string()))?;
 
         let timeout_ms = task.artifact.profile.timeout_ms.max(1);
-        let stdin = payload.stdin_data.as_deref();
+        let stdin = payload.stdin.as_deref();
         let run_result = timeout(
             Duration::from_millis(timeout_ms),
             self.run_container_and_collect_logs(&docker, &container_id, stdin),
@@ -223,12 +224,12 @@ impl DockerBackend {
             cmd.push("true".to_string());
         }
 
-        let has_stdin = payload.stdin_data.is_some();
+        let has_stdin = payload.stdin.is_some();
         let cfg = ContainerConfig {
             image: Some(image.to_string()),
             cmd: Some(cmd),
             env: if env.is_empty() { None } else { Some(env) },
-            working_dir: payload.working_dir.clone(),
+            working_dir: payload.work_dir.clone(),
             // Open a stdin pipe when partition data needs to be sent.
             attach_stdin: if has_stdin { Some(true) } else { None },
             open_stdin: if has_stdin { Some(true) } else { None },
@@ -351,8 +352,24 @@ impl DockerBackend {
     }
 }
 
-#[derive(Default)]
-pub struct WasmBackend;
+/// Executes prebuilt WASM modules via wasmtime.
+///
+/// Compiled `Module` objects are cached by `artifact_ref + digest` so that
+/// repeated task calls skip recompilation (~5ms) and only pay instantiation cost (~0.1ms).
+pub struct WasmBackend {
+    engine: Arc<Engine>,
+    /// key: "artifact_ref:digest" → compiled Module
+    module_cache: Arc<DashMap<String, Arc<Module>>>,
+}
+
+impl Default for WasmBackend {
+    fn default() -> Self {
+        Self {
+            engine: Arc::new(Engine::default()),
+            module_cache: Arc::new(DashMap::new()),
+        }
+    }
+}
 
 impl WorkerExecutionBackend for WasmBackend {
     fn name(&self) -> &'static str {
@@ -394,17 +411,34 @@ impl WorkerExecutionBackend for WasmBackend {
 }
 
 impl WasmBackend {
+    /// Returns a compiled `Module` from the cache, compiling and caching it on first call.
+    ///
+    /// The cache key is `artifact_ref:digest` — each unique (path, digest) pair is compiled once.
+    fn get_or_compile(&self, task: &TaskEnvelope) -> LibResult<Arc<Module>> {
+        let key = format!(
+            "{}:{}",
+            task.artifact.uri,
+            task.artifact.digest.as_deref().unwrap_or("")
+        );
+        if let Some(cached) = self.module_cache.get(&key) {
+            return Ok(cached.clone());
+        }
+        let bytes = self.load_module_bytes(task)?;
+        self.validate_digest(task, &bytes)?;
+        let module = Arc::new(
+            Module::new(&self.engine, &bytes)
+                .map_err(|err| Error::WasmRuntime(err.to_string()))?,
+        );
+        self.module_cache.insert(key, module.clone());
+        Ok(module)
+    }
+
     fn execute_module(&self, task: &TaskEnvelope) -> LibResult<Vec<u8>> {
         let payload = self.decode_payload(task)?;
         self.validate_payload(&payload)?;
 
-        let module_bytes = self.load_module_bytes(task)?;
-        self.validate_digest(task, &module_bytes)?;
-
-        let engine = Engine::default();
-        let module = Module::new(&engine, &module_bytes)
-            .map_err(|err| Error::WasmRuntime(err.to_string()))?;
-        let mut store = Store::new(&engine, ());
+        let module = self.get_or_compile(task)?;
+        let mut store = Store::new(&*self.engine, ());
         let instance = Instance::new(&mut store, &module, &[])
             .map_err(|err| Error::WasmRuntime(err.to_string()))?;
 
@@ -427,7 +461,7 @@ impl WasmBackend {
             &alloc,
             &run,
             dealloc.as_ref(),
-            &task.partition_data,
+            &task.data,
         )
     }
 
@@ -445,8 +479,8 @@ impl WasmBackend {
         }
 
         if !matches!(
-            payload.partition_encoding,
-            WasmValueEncoding::RawBytes | WasmValueEncoding::Rkyv
+            payload.part_enc,
+            WasmValueEncoding::RawBytes | WasmValueEncoding::Rkyv | WasmValueEncoding::Json
         ) {
             return Err(Error::InvalidPayload(
                 "unsupported wasm partition encoding".to_string(),
@@ -454,8 +488,8 @@ impl WasmBackend {
         }
 
         if !matches!(
-            payload.result_encoding,
-            WasmValueEncoding::RawBytes | WasmValueEncoding::Rkyv
+            payload.result_enc,
+            WasmValueEncoding::RawBytes | WasmValueEncoding::Rkyv | WasmValueEncoding::Json
         ) {
             return Err(Error::InvalidPayload(
                 "unsupported wasm result encoding".to_string(),
@@ -466,7 +500,7 @@ impl WasmBackend {
     }
 
     fn load_module_bytes(&self, task: &TaskEnvelope) -> LibResult<Vec<u8>> {
-        let path = self.artifact_path(&task.artifact.artifact_ref)?;
+        let path = self.artifact_path(&task.artifact.uri)?;
         fs::read(&path).map_err(|err| {
             Error::ArtifactLoad(format!("failed to read {}: {}", path.display(), err))
         })
@@ -489,7 +523,7 @@ impl WasmBackend {
     }
 
     fn validate_digest(&self, task: &TaskEnvelope, module_bytes: &[u8]) -> LibResult<()> {
-        let Some(expected_digest) = task.artifact.artifact_digest.as_deref() else {
+        let Some(expected_digest) = task.artifact.digest.as_deref() else {
             return Ok(());
         };
 
@@ -498,7 +532,7 @@ impl WasmBackend {
         if actual != expected {
             return Err(Error::ArtifactValidation(format!(
                 "digest mismatch for {}: expected {}, got {}",
-                task.artifact.artifact_ref, expected, actual
+                task.artifact.uri, expected, actual
             )));
         }
 
@@ -593,29 +627,29 @@ impl WorkerRuntime {
     ) -> WorkerCapabilities {
         let backend = self.as_backend();
         WorkerCapabilities {
-            schema_version: WIRE_SCHEMA_V1,
+            version: WIRE_SCHEMA_V1,
             worker_id: worker_id.into(),
-            execution_backend: backend.exec_backend(),
-            supported_artifacts: backend.artifacts().to_vec(),
-            supported_runtimes: backend.supported_runtimes().to_vec(),
-            max_concurrent_tasks,
+            backend: backend.exec_backend(),
+            artifacts: backend.artifacts().to_vec(),
+            runtimes: backend.supported_runtimes().to_vec(),
+            max_tasks: max_concurrent_tasks,
         }
     }
 
     pub fn execute(&self, ctx: &BackendContext, task: &TaskEnvelope) -> LibResult<TaskResultEnvelope> {
         let backend = self.as_backend();
         let configured = backend.exec_backend();
-        if configured != task.artifact.execution_backend {
+        if configured != task.artifact.backend {
             return Err(Error::UnsupportedExecutionBackend {
                 configured,
-                requested: task.artifact.execution_backend,
+                requested: task.artifact.backend,
             });
         }
 
-        if !backend.artifacts().contains(&task.artifact.artifact_kind) {
+        if !backend.artifacts().contains(&task.artifact.kind) {
             return Err(Error::UnsupportedArtifact {
                 backend: configured,
-                artifact_kind: task.artifact.artifact_kind,
+                artifact_kind: task.artifact.kind,
             });
         }
 
@@ -626,6 +660,18 @@ impl WorkerRuntime {
         }
 
         backend.execute(ctx, task)
+    }
+
+    /// Construct a runtime from an artifact descriptor, dispatching on `RuntimeKind` first.
+    ///
+    /// Python and JS tasks are always embedded in the worker regardless of `execution_backend`.
+    /// The `execution_backend` field controls scheduler placement, not invocation mechanism.
+    pub fn from_artifact(descriptor: &atomic_data::distributed::ArtifactDescriptor) -> Self {
+        match descriptor.backend {
+            ExecutionBackend::Wasm => Self::Wasm(WasmBackend::default()),
+            ExecutionBackend::Docker => Self::Docker(DockerBackend),
+            ExecutionBackend::LocalThread => Self::Thread(LocalThreadBackend),
+        }
     }
 
     fn as_backend(&self) -> &dyn WorkerExecutionBackend {
@@ -656,9 +702,9 @@ mod tests {
         let payload = DockerTaskPayload {
             command: vec!["echo".to_string(), "hello".to_string()],
             env: vec![("ATOMIC_TASK".to_string(), "1".to_string())],
-            working_dir: None,
-            stdin_data: None,
-            log_stream_key: None,
+            work_dir: None,
+            stdin: None,
+            log_key: None,
         };
 
         let payload_bytes = to_bytes::<RkyvError>(&payload)
@@ -673,13 +719,13 @@ mod tests {
             4,
             "trace-1".to_string(),
             ArtifactDescriptor {
-                operation_id: "op.v1".to_string(),
-                execution_backend: backend,
-                artifact_kind: kind,
-                artifact_ref: "busybox:latest".to_string(),
+                op_id: "op.v1".to_string(),
+                backend,
+                kind,
+                uri: "busybox:latest".to_string(),
                 entrypoint: "run".to_string(),
                 runtime: RuntimeKind::Rust,
-                artifact_digest: Some("sha256:test".to_string()),
+                digest: Some("sha256:test".to_string()),
                 build_target: None,
                 profile: ResourceProfile {
                     cpu_millis: 500,
@@ -714,7 +760,7 @@ mod tests {
             None,
         );
         let result = runtime.execute(&ctx, &task).expect("wasm task envelope response");
-        assert_eq!(result.result_data, vec![2, 3, 4]);
+        assert_eq!(result.data, vec![2, 3, 4]);
     }
 
     #[test]
@@ -730,7 +776,7 @@ mod tests {
             None,
         );
         let result = runtime.execute(&ctx, &task).expect("wasm task envelope response");
-        assert_eq!(result.result_data, 6_u32.to_le_bytes());
+        assert_eq!(result.data, 6_u32.to_le_bytes());
     }
 
     #[test]
@@ -746,7 +792,7 @@ mod tests {
             Some("sha256:deadbeef".to_string()),
         );
         let result = runtime.execute(&ctx, &task).expect("wasm task envelope response");
-        assert!(result.error_message.as_deref().is_some());
+        assert!(result.error.as_deref().is_some());
     }
 
     #[test]
@@ -765,9 +811,9 @@ mod tests {
         let payload = DockerTaskPayload {
             command: vec!["python".to_string(), "main.py".to_string()],
             env: vec![("K".to_string(), "V".to_string())],
-            working_dir: Some("/work".to_string()),
-            stdin_data: Some(vec![1, 2, 3]),
-            log_stream_key: Some("run-1".to_string()),
+            work_dir: Some("/work".to_string()),
+            stdin: Some(vec![1, 2, 3]),
+            log_key: Some("run-1".to_string()),
         };
 
         let bytes = to_bytes::<rkyv::rancor::Error>(&payload)
@@ -791,10 +837,10 @@ mod tests {
 
         let payload = WasmTaskPayload {
             abi_version: WIRE_SCHEMA_V1,
-            config_encoding: WasmValueEncoding::RawBytes,
-            config_payload: Vec::new(),
-            partition_encoding: WasmValueEncoding::RawBytes,
-            result_encoding: WasmValueEncoding::RawBytes,
+            cfg_enc: WasmValueEncoding::RawBytes,
+            cfg_data: Vec::new(),
+            part_enc: WasmValueEncoding::RawBytes,
+            result_enc: WasmValueEncoding::RawBytes,
         };
         let payload_bytes = payload.encode_wire().expect("serialize wasm payload");
         let digest = artifact_digest.or_else(|| {
@@ -809,13 +855,13 @@ mod tests {
             4,
             "trace-1".to_string(),
             ArtifactDescriptor {
-                operation_id: "op.v1".to_string(),
-                execution_backend: ExecutionBackend::Wasm,
-                artifact_kind: ArtifactKind::Wasm,
-                artifact_ref: module_path.display().to_string(),
+                op_id: "op.v1".to_string(),
+                backend: ExecutionBackend::Wasm,
+                kind: ArtifactKind::Wasm,
+                uri: module_path.display().to_string(),
                 entrypoint: entrypoint.to_string(),
                 runtime: RuntimeKind::Rust,
-                artifact_digest: digest,
+                digest,
                 build_target: Some("wasm32-wasip2".to_string()),
                 profile: ResourceProfile {
                     cpu_millis: 500,

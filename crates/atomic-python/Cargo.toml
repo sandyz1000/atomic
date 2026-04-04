@@ -1,0 +1,13 @@
+[package]
+name = "atomic-python"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "atomic"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py311"] }
+atomic-data = { workspace = true }
+serde_json = { workspace = true }

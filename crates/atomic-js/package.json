@@ -1,0 +1,17 @@
+{
+  "name": "@atomic-compute/js",
+  "version": "0.1.0",
+  "description": "Atomic compute engine — JavaScript runtime (QuickJS-based)",
+  "bin": {
+    "atomic-js": "./bin/atomic-js.sh"
+  },
+  "scripts": {
+    "build": "cargo build --release -p atomic-js --manifest-path ../../Cargo.toml",
+    "postinstall": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["compute", "distributed", "quickjs", "rdd"],
+  "license": "MIT"
+}

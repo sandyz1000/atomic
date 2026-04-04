@@ -1,0 +1,11 @@
+{
+  "name": "atomic-js-examples",
+  "version": "0.1.0",
+  "description": "Examples for the Atomic compute JavaScript runtime",
+  "scripts": {
+    "build": "cargo build --release -p atomic-js --manifest-path ../../Cargo.toml",
+    "run:wordcount": "../../target/release/atomic-js local_word_count.js",
+    "run:mapreduce": "../../target/release/atomic-js map_reduce.js"
+  },
+  "license": "MIT"
+}

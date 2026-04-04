@@ -14,6 +14,8 @@ pub mod union_rdd;
 pub mod wasm;
 pub mod zip;
 
+use std::sync::Arc;
+
 pub use crate::context::Context;
 pub use atomic_data::task_context::TaskContext;
 pub use atomic_utils::bpq::BoundedPriorityQueue;

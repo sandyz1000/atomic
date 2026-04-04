@@ -6,6 +6,7 @@ use atomic_data::error::BaseError;
 use atomic_data::split::{CoalescedRddSplit, PrefLoc, Split};
 use parking_lot::Mutex;
 use rand::Rng;
+use rand::RngExt;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;

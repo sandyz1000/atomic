@@ -12,6 +12,7 @@ These instructions are based on [The Rust Book](https://doc.rust-lang.org/book/)
 ## General Instructions
 
 - Always prioritize readability, safety, and maintainability.
+- Use shorter field and variable name max up to 3 words
 - Use strong typing and leverage Rust's ownership system for memory safety.
 - Break down complex functions into smaller, more manageable functions.
 - For algorithm-related code, include explanations of the approach used.

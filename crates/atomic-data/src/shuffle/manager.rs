@@ -13,7 +13,7 @@ use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode, Uri, body::Incoming, service::Service};
 use hyper_util::rt::TokioIo;
-use rand::Rng;
+use rand::RngExt;
 use uuid::Uuid;
 
 pub(crate) type LibResult<T> = Result<T, ShuffleError>;

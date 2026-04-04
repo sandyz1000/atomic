@@ -1,0 +1,18 @@
+schema_version = 1
+
+[[docker_artifacts]]
+image = "docker-sum-task:latest"
+args  = []
+
+[docker_artifacts.descriptor]
+operation_id      = "demo.sum.docker.v1"
+execution_backend = "docker"
+artifact_kind     = "docker"
+artifact_ref      = "docker-sum-task:latest"
+entrypoint        = "docker-sum-task"
+runtime           = "rust"
+
+[docker_artifacts.descriptor.profile]
+cpu_millis  = 500
+memory_mb   = 128
+timeout_ms  = 5000

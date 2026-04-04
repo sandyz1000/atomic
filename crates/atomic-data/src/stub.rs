@@ -48,12 +48,12 @@ impl<I, O> ArtifactStub<I, O> {
 
     /// The stable operation id for this artifact.
     pub fn operation_id(&self) -> &str {
-        &self.descriptor.operation_id
+        &self.descriptor.op_id
     }
 
     /// The execution backend this artifact targets (Wasm or Docker).
     pub fn backend(&self) -> ExecutionBackend {
-        self.descriptor.execution_backend
+        self.descriptor.backend
     }
 }
 
@@ -69,8 +69,8 @@ impl<I, O> Clone for ArtifactStub<I, O> {
 impl<I, O> std::fmt::Debug for ArtifactStub<I, O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ArtifactStub")
-            .field("operation_id", &self.descriptor.operation_id)
-            .field("backend", &self.descriptor.execution_backend)
+            .field("operation_id", &self.descriptor.op_id)
+            .field("backend", &self.descriptor.backend)
             .finish()
     }
 }
@@ -86,3 +86,108 @@ pub type WasmStub<I, O> = ArtifactStub<I, O>;
 /// The container receives rkyv-encoded partition bytes on stdin and writes
 /// rkyv-encoded results to stdout. Same call-site API as `WasmStub`.
 pub type DockerStub<I, O> = ArtifactStub<I, O>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::distributed::{ArtifactKind, ResourceProfile, RuntimeKind};
+
+    fn wasm_descriptor() -> ArtifactDescriptor {
+        ArtifactDescriptor {
+            op_id: "test.op.v1".into(),
+            backend: ExecutionBackend::Wasm,
+            kind: ArtifactKind::Wasm,
+            uri: "oci://test@sha256:abc".into(),
+            entrypoint: "run_map".into(),
+            runtime: RuntimeKind::Rust,
+            digest: Some("sha256:abc".into()),
+            build_target: Some("wasm32-unknown-unknown".into()),
+            profile: ResourceProfile { cpu_millis: 100, memory_mb: 64, timeout_ms: 1000 },
+        }
+    }
+
+    fn docker_descriptor() -> ArtifactDescriptor {
+        ArtifactDescriptor {
+            op_id: "test.docker.v1".into(),
+            backend: ExecutionBackend::Docker,
+            kind: ArtifactKind::Docker,
+            uri: "registry/image@sha256:abc".into(),
+            entrypoint: "/worker".into(),
+            runtime: RuntimeKind::Rust,
+            digest: None,
+            build_target: None,
+            profile: ResourceProfile { cpu_millis: 500, memory_mb: 256, timeout_ms: 5000 },
+        }
+    }
+
+    #[test]
+    fn stub_new_stores_descriptor() {
+        let stub: ArtifactStub<u8, u8> = ArtifactStub::new(wasm_descriptor());
+        assert_eq!(stub.descriptor.op_id, "test.op.v1");
+    }
+
+    #[test]
+    fn stub_operation_id_returns_op_id() {
+        let stub: ArtifactStub<u8, u8> = ArtifactStub::new(wasm_descriptor());
+        assert_eq!(stub.operation_id(), "test.op.v1");
+    }
+
+    #[test]
+    fn stub_backend_returns_wasm() {
+        let stub: ArtifactStub<u8, u8> = ArtifactStub::new(wasm_descriptor());
+        assert_eq!(stub.backend(), ExecutionBackend::Wasm);
+    }
+
+    #[test]
+    fn docker_stub_backend_returns_docker() {
+        let stub: DockerStub<u8, u8> = DockerStub::new(docker_descriptor());
+        assert_eq!(stub.backend(), ExecutionBackend::Docker);
+    }
+
+    #[test]
+    fn stub_clone_is_independent() {
+        let stub: ArtifactStub<u8, u8> = ArtifactStub::new(wasm_descriptor());
+        let cloned = stub.clone();
+        assert_eq!(stub.operation_id(), cloned.operation_id());
+        assert_eq!(stub.backend(), cloned.backend());
+    }
+
+    #[test]
+    fn stub_debug_contains_op_id() {
+        let stub: ArtifactStub<u8, u8> = ArtifactStub::new(wasm_descriptor());
+        let debug = format!("{:?}", stub);
+        assert!(debug.contains("test.op.v1"));
+    }
+
+    #[test]
+    fn from_manifest_missing_file_returns_err() {
+        let result = ArtifactStub::<u8, u8>::from_manifest("/nonexistent/path.toml", "any.op");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_manifest_missing_op_id_returns_err() {
+        let toml = r#"
+schema_version = 1
+[[wasm_artifacts]]
+abi_version = 1
+module_path = "/tmp/foo.wasm"
+[wasm_artifacts.descriptor]
+operation_id = "real.op.v1"
+execution_backend = "wasm"
+artifact_kind = "wasm"
+artifact_ref = "/tmp/foo.wasm"
+entrypoint = "run"
+runtime = "rust"
+[wasm_artifacts.descriptor.profile]
+cpu_millis = 100
+memory_mb = 64
+timeout_ms = 1000
+"#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("atomic_stub_test_manifest.toml");
+        std::fs::write(&path, toml).expect("write temp manifest");
+        let result = ArtifactStub::<u8, u8>::from_manifest(&path, "missing.op");
+        assert!(result.is_err());
+    }
+}
