@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 
 /// Shuffle the elements of a vec into a random order in place, modifying it.

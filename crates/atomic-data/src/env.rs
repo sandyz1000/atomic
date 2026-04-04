@@ -3,13 +3,11 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use atomic_data::distributed::ExecutionBackend;
 use crate::cache::BoundedMemoryCache;
-use crate::tracker::cache::CacheTracker;
+use crate::cache::tracker::CacheTracker;
 use crate::error::Error;
 use crate::hosts::Hosts;
-use crate::tracker::map_output::MapOutputTracker;
-use crate::shuffle::{ShuffleFetcher, ShuffleManager};
+use crate::shuffle::{MapOutputTracker, ShuffleManager};
 use dashmap::DashMap;
 use log::LevelFilter;
 use once_cell::sync::{Lazy, OnceCell};
@@ -63,9 +61,8 @@ impl Env {
             None
         } else {
             Some(
-                tokio::runtime::Builder::new()
+                tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
-                    .threaded_scheduler()
                     .build()
                     .unwrap(),
             )
@@ -140,8 +137,6 @@ struct EnvConfig {
     shuffle_service_port: Option<u16>,
     slave_deployment: Option<bool>,
     slave_port: Option<u16>,
-    worker_backend: Option<ExecutionBackend>,
-    worker_max_concurrent_tasks: Option<u16>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -176,8 +171,6 @@ pub(crate) struct Configuration {
 pub(crate) struct SlaveConfig {
     pub deployment: bool,
     pub port: u16,
-    pub backend: ExecutionBackend,
-    pub max_concurrent_tasks: u16,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -189,12 +182,7 @@ pub(crate) struct LogConfig {
 impl From<(bool, u16)> for SlaveConfig {
     fn from(config: (bool, u16)) -> Self {
         let (deployment, port) = config;
-        SlaveConfig {
-            deployment,
-            port,
-            backend: ExecutionBackend::Docker,
-            max_concurrent_tasks: num_cpus::get().max(1) as u16,
-        }
+        SlaveConfig { deployment, port }
     }
 }
 
@@ -208,7 +196,7 @@ impl Default for Configuration {
         }
 
         // get config from env vars:
-        let config = dotenvy::prefixed(ENV_VAR_PREFIX)
+        let config = envy::prefixed(ENV_VAR_PREFIX)
             .from_env::<EnvConfig>()
             .unwrap();
 
@@ -252,15 +240,9 @@ impl Default for Configuration {
             Some(true) => {
                 if let Some(port) = config.slave_port {
                     is_master = false;
-                    let backend = config.worker_backend.unwrap_or(ExecutionBackend::Docker);
-                    let max_concurrent_tasks = config
-                        .worker_max_concurrent_tasks
-                        .unwrap_or_else(|| num_cpus::get().max(1) as u16);
                     slave = Some(SlaveConfig {
                         deployment: true,
                         port,
-                        backend,
-                        max_concurrent_tasks,
                     });
                 } else {
                     panic!("Port required while deploying a worker.")

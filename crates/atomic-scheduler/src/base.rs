@@ -4,26 +4,30 @@ use crate::error::{LibResult, SchedulerError};
 use crate::job::JobTracker;
 use crate::listener::JobListener;
 use crate::stage::Stage;
-use dashmap::DashMap;
 use atomic_data::data::Data;
 use atomic_data::dependency::{Dependency, ShuffleDependencyBox};
 use atomic_data::rdd::RddBase;
+use atomic_data::shuffle::MapOutputTracker;
 use atomic_data::task::TaskOption;
 use atomic_data::task::result::ResultTask;
 use atomic_data::task::shuffle_map::ShuffleMapTask;
 use atomic_data::task_context::TaskContext;
-use atomic_data::shuffle::MapOutputTracker;
+use dashmap::DashMap;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
 pub(crate) type EventQueue = Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
+
+pub(crate) type RddFunc<T, U> =
+    Arc<dyn Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static>;
 
 /// Functionality of the library built-in schedulers
 #[async_trait::async_trait]
-pub trait NativeScheduler: Send + Sync {
+pub(crate) trait NativeScheduler: Send + Sync {
     fn get_mutators(&self) -> MutatorsAndGetter;
 
     /// Fast path for execution. Runs the DD in the driver main thread if possible.
@@ -75,10 +79,10 @@ pub trait NativeScheduler: Send + Sync {
         Ok(stage)
     }
 
-    async fn visit_for_missing_parent_stages<'s, 'a: 's>(
+    async fn visit_for_missing_parent_stages<'s>(
         &'s self,
-        missing: &'a mut BTreeSet<Stage>,
-        visited: &'a mut HashSet<usize>,
+        missing: &'s mut BTreeSet<Stage>,
+        visited: &'s mut HashSet<usize>,
         rdd: Arc<dyn RddBase>,
     ) -> LibResult<()> {
         log::debug!(
@@ -126,10 +130,10 @@ pub trait NativeScheduler: Send + Sync {
         Ok(())
     }
 
-    async fn visit_for_parent_stages<'s, 'a: 's>(
+    async fn visit_for_parent_stages<'s>(
         &'s self,
-        parents: &'a mut BTreeSet<Stage>,
-        visited: &'a mut HashSet<usize>,
+        parents: &'s mut BTreeSet<Stage>,
+        visited: &'s mut HashSet<usize>,
         rdd: Arc<dyn RddBase>,
     ) -> LibResult<()> {
         log::debug!(

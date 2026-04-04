@@ -4,3 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+sha2 = "0.11.0"
+toml.workspace = true
+wat = "1.240.0"

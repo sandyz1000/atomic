@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use crate::cache::cache::{BoundedMemoryCache, KeySpace};
+use crate::cache::{BoundedMemoryCache, KeySpace};
 use crate::cache::error::{CacheError, Result};
 use dashmap::{DashMap, DashSet};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

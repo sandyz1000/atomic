@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use crate::rdd::{Data, Rdd, rdd_val::RddVals};
+use crate::rdd::{Data, Rdd, inherited_wasm_bytes, rdd_val::RddVals};
 use atomic_data::{
     dependency::Dependency, error::BaseError, fn_traits::RddPartitionFn, rdd::RddBase, split::Split,
 };
@@ -119,6 +119,15 @@ where
 
     fn is_pinned(&self) -> bool {
         self.pinned.load(Ordering::SeqCst)
+    }
+
+    fn wasm_bytes(&self, partition: usize) -> Option<Result<Vec<u8>, BaseError>> {
+        inherited_wasm_bytes(&self.prev, partition, || {
+            format!(
+                "map_partitions `{}` cannot lower non-u8 input to raw wasm bytes",
+                self.get_op_name()
+            )
+        })
     }
 }
 

@@ -1,30 +1,33 @@
-// macro_rules! impl_common_lfs_rddb_funcs {
-//     () => {
-//         fn get_rdd_id(&self) -> usize {
-//             self.id
-//         }
+use std::net::Ipv4Addr;
+use std::sync::Arc;
 
-//         fn get_context(&self) -> Arc<Context> {
-//             self.context.clone()
-//         }
+use atomic_data::data::Data;
+use atomic_data::dependency::Dependency;
+use atomic_data::error::BaseError;
+use atomic_data::rdd::{Rdd, RddBase};
+use atomic_data::split::{BytesReader, FileReader, Split};
 
-//         fn get_dependencies(&self) -> Vec<Dependency> {
-//             vec![]
-//         }
+use super::reader::LocalFsReader;
 
-//         fn is_pinned(&self) -> bool {
-//             true
-//         }
-//     };
-// }
+type Result<T> = std::result::Result<T, BaseError>;
 
 impl RddBase for LocalFsReader<BytesReader> {
-    // impl_common_lfs_rddb_funcs!();
+    fn get_rdd_id(&self) -> usize {
+        self.id
+    }
+
+    fn get_dependencies(&self) -> Vec<Dependency> {
+        vec![]
+    }
+
+    fn is_pinned(&self) -> bool {
+        true
+    }
 
     fn preferred_locations(&self, split: Box<dyn Split>) -> Vec<Ipv4Addr> {
         // for a given split there is only one preferred location because this is pinned,
         // the preferred location is the host at which this split will be executed;
-        let split = split.downcast_ref::<BytesReader>().unwrap();
+        let split = split.as_any().downcast_ref::<BytesReader>().unwrap();
         vec![split.host]
     }
 
@@ -39,13 +42,33 @@ impl RddBase for LocalFsReader<BytesReader> {
         }
         splits
     }
+
+    fn iterator_any(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+        Ok(Box::new(
+            self.compute(split)?
+                .map(|reader| Box::new(reader) as Box<dyn Data>),
+        ))
+    }
 }
 
 impl RddBase for LocalFsReader<FileReader> {
-    // impl_common_lfs_rddb_funcs!();
+    fn get_rdd_id(&self) -> usize {
+        self.id
+    }
+
+    fn get_dependencies(&self) -> Vec<Dependency> {
+        vec![]
+    }
+
+    fn is_pinned(&self) -> bool {
+        true
+    }
 
     fn preferred_locations(&self, split: Box<dyn Split>) -> Vec<Ipv4Addr> {
-        let split = split.downcast_ref::<FileReader>().unwrap();
+        let split = split.as_any().downcast_ref::<FileReader>().unwrap();
         vec![split.host]
     }
 
@@ -60,30 +83,31 @@ impl RddBase for LocalFsReader<FileReader> {
         }
         splits
     }
+
+    fn iterator_any(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+        Ok(Box::new(
+            self.compute(split)?
+                .map(|reader| Box::new(reader) as Box<dyn Data>),
+        ))
+    }
 }
-
-// macro_rules! impl_common_lfs_rdd_funcs {
-//     () => {
-//         fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>>
-//         where
-//             Self: Sized,
-//         {
-//             Arc::new(self.clone()) as Arc<dyn Rdd<Item = Self::Item>>
-//         }
-
-//         fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-//             Arc::new(self.clone()) as Arc<dyn RddBase>
-//         }
-//     };
-// }
 
 impl Rdd for LocalFsReader<BytesReader> {
     type Item = BytesReader;
 
-    // impl_common_lfs_rdd_funcs!();
+    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+        Arc::new(self.clone())
+    }
+
+    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+        Arc::new(self.clone())
+    }
 
     fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        let split = split.downcast_ref::<BytesReader>().unwrap();
+        let split = split.as_any().downcast_ref::<BytesReader>().unwrap();
         let files_by_part = self.load_local_files()?;
         let idx = split.idx;
         let host = split.host;
@@ -98,10 +122,16 @@ impl Rdd for LocalFsReader<BytesReader> {
 impl Rdd for LocalFsReader<FileReader> {
     type Item = FileReader;
 
-    // impl_common_lfs_rdd_funcs!();
+    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+        Arc::new(self.clone())
+    }
+
+    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+        Arc::new(self.clone())
+    }
 
     fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        let split = split.downcast_ref::<FileReader>().unwrap();
+        let split = split.as_any().downcast_ref::<FileReader>().unwrap();
         let files_by_part = self.load_local_files()?;
         let idx = split.idx;
         let host = split.host;

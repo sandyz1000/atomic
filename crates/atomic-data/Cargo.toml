@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 rustc-hash ={ workspace = true }
+rkyv = { workspace = true }
 log = { workspace = true }
 atomic-utils = { path = "../atomic-utils" }
 thiserror = { workspace = true }
@@ -26,3 +27,5 @@ hyper-util = { workspace = true }
 rand = { workspace = true }
 uuid = { workspace = true }
 crossbeam = { workspace = true }
+once_cell = { workspace = true }
+toml = { workspace = true }
