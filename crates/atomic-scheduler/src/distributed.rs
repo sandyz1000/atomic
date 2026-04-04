@@ -1,10 +1,10 @@
 use std::{
-    collections::{BTreeSet, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fmt::Debug,
     net::{Ipv4Addr, SocketAddrV4},
     path::Path,
     sync::{Arc, atomic::{AtomicUsize, Ordering}},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use atomic_data::{
@@ -16,7 +16,6 @@ use atomic_data::{
         WorkerCapabilities, WireDecode, WireEncode, encode_transport_frame,
         parse_transport_header,
     },
-    env,
     partial::{ApproximateEvaluator, result::PartialResult},
     rdd::{Rdd, RddBase},
     task::TaskOption,
@@ -33,9 +32,10 @@ use tokio::{
 
 use crate::{
     base::{MutatorsAndGetter, NativeScheduler},
+    dag::{CompletionEvent, TastEndReason},
     error::{LibResult, SchedulerError},
-    job::Job,
-    listener::LiveListenerBus,
+    job::{Job, JobTracker},
+    listener::{JobListener, LiveListenerBus},
     stage::Stage,
 };
 
@@ -228,7 +228,7 @@ impl DistributedScheduler {
         });
 
         let responses = try_join_all(submits).await?;
-        Ok(responses.into_iter().map(|response| response.result_data).collect())
+        Ok(responses.into_iter().map(|response| response.data).collect())
     }
 
     pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
@@ -280,7 +280,7 @@ impl DistributedScheduler {
             }
         }
 
-        self.event_queues.insert(jt.run_id, VecDeque::new());
+        self.mutators.event_queues.insert(jt.run_id, VecDeque::new());
 
         let mut results: Vec<Option<U>> = (0..jt.num_output_parts).map(|_| None).collect();
         let mut fetch_failure_duration = Duration::new(0, 0);
@@ -289,11 +289,12 @@ impl DistributedScheduler {
 
         let mut num_finished = 0;
         while num_finished != jt.num_output_parts {
-            let event_option = self.wait_for_event(jt.run_id, self.poll_timeout);
+            let event_option = self.wait_for_event(jt.run_id, 100);
             let start = Instant::now();
 
             if let Some(evt) = event_option {
                 let stage = self
+                    .mutators
                     .stage_cache
                     .get(&evt.task.get_stage_id())
                     .unwrap()
@@ -322,7 +323,7 @@ impl DistributedScheduler {
         }
 
         if !jt.failed.lock().await.is_empty()
-            && fetch_failure_duration.as_millis() > self.resubmit_timeout
+            && fetch_failure_duration.as_millis() > 3000
         {
             self.update_cache_locs().await?;
             for stage in jt.failed.lock().await.iter() {
@@ -331,7 +332,7 @@ impl DistributedScheduler {
             jt.failed.lock().await.clear();
         }
 
-        self.event_queues.remove(&jt.run_id);
+        self.mutators.event_queues.remove(&jt.run_id);
         Ok(results
             .into_iter()
             .map(|value| value.expect("some results still missing"))
@@ -368,7 +369,7 @@ impl DistributedScheduler {
 
         Err(SchedulerError::NoCompatibleWorker(format!(
             "backend {:?}, artifact {:?}, runtime {:?}",
-            artifact.execution_backend, artifact.artifact_kind, artifact.runtime
+            artifact.backend, artifact.kind, artifact.runtime
         )))
     }
 
@@ -484,16 +485,8 @@ impl NativeScheduler for DistributedScheduler {
     }
 
     async fn update_cache_locs(&self) -> LibResult<()> {
+        // Cache tracker integration is not yet wired — clear local locs only.
         self.cache_locs.clear();
-        env::Env::get()
-            .cache_tracker
-            .get_location_snapshot()
-            .await
-            .map_err(|_| SchedulerError::Other)?
-            .into_iter()
-            .for_each(|(key, value)| {
-                self.cache_locs.insert(key, value);
-            });
         Ok(())
     }
 

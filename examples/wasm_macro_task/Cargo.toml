@@ -1,0 +1,21 @@
+[package]
+name = "wasm-macro-task"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Isolate from root workspace — examples/* is excluded
+[workspace]
+
+[profile.release]
+lto           = true
+opt-level     = "s"
+panic         = "abort"
+codegen-units = 1
+strip         = true
+
+[dependencies]
+atomic-runtime = { path = "../../crates/atomic-runtime" }
+rkyv = { version = "0.8.12", features = ["std", "bytecheck"] }

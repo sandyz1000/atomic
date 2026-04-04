@@ -1,0 +1,17 @@
+[package]
+name = "atomic-js"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "atomic-js"
+path = "src/main.rs"
+
+[lib]
+name = "atomic_js"
+path = "src/lib.rs"
+
+[dependencies]
+rquickjs = { workspace = true }
+atomic-data = { workspace = true }
+serde_json = { workspace = true }

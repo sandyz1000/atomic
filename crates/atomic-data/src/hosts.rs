@@ -1,7 +1,17 @@
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::error::{Error, Result};
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("unable to determine home directory")]
+    NoHome,
+    #[error("failed to load hosts file {path}: {source}")]
+    LoadHosts { source: std::io::Error, path: PathBuf },
+    #[error("failed to parse hosts file {path}: {source}")]
+    ParseHosts { source: toml::de::Error, path: PathBuf },
+}
+
+type Result<T> = std::result::Result<T, Error>;
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 

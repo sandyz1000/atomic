@@ -243,7 +243,13 @@ fn emit_build_outputs(
     fs::write(&wasm_path, wasm)
         .with_context(|| format!("failed to write {}", wasm_path.display()))?;
 
-    let digest = format!("sha256:{:x}", Sha256::digest(wasm));
+    let digest = format!(
+        "sha256:{}",
+        Sha256::digest(wasm)
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    );
     let manifest = manifest_template(
         &wasm_path,
         &digest,
@@ -350,7 +356,8 @@ fn rust_cargo_template(name: &str) -> String {
 
 fn rust_readme_template(name: &str) -> String {
     format!(
-        "# {}\n\nThis scaffold defines a Rust-authored WASM task for Atomic's current map/reduce runtime.\n\nFiles:\n- `Cargo.toml`: standalone crate manifest for a `cdylib` wasm build\n- `src/lib.rs`: exports `alloc`, `run_map`, and `run_reduce` for the worker ABI\n\nBuild it with:\n\n```sh\ncargo run -p atomic-cli -- wasm build --source . --out ./build\n```\n\nThen run the driver example with the generated manifest:\n\n```sh\nATOMIC_RUN_WASM_EXAMPLE=1 ATOMIC_WASM_MANIFEST=./build/manifest.toml cargo run --example wasm_map_reduce\n```\n\nThe default Rust target for this flow is `wasm32-unknown-unknown` because the worker expects a plain wasm module with exported memory and allocator symbols.\n"
+        "# {}\n\nThis scaffold defines a Rust-authored WASM task for Atomic's current map/reduce runtime.\n\nFiles:\n- `Cargo.toml`: standalone crate manifest for a `cdylib` wasm build\n- `src/lib.rs`: exports `alloc`, `run_map`, and `run_reduce` for the worker ABI\n\nBuild it with:\n\n```sh\ncargo run -p atomic-cli -- wasm build --source . --out ./build\n```\n\nThen run the driver example with the generated manifest:\n\n```sh\nATOMIC_RUN_WASM_EXAMPLE=1 ATOMIC_WASM_MANIFEST=./build/manifest.toml cargo run --example wasm_map_reduce\n```\n\nThe default Rust target for this flow is `wasm32-unknown-unknown` because the worker expects a plain wasm module with exported memory and allocator symbols.\n",
+        name
     )
 }
 
@@ -404,7 +411,8 @@ pub unsafe extern "C" fn run_reduce(ptr: i32, len: i32) -> i64 {
 
 fn wat_readme_template(name: &str) -> String {
     format!(
-        "# {}\n\nThis scaffold defines a byte-oriented WAT task for Atomic's current map/reduce runtime.\n\nFiles:\n- `task.wat`: exports `memory`, `alloc`, `run_map`, and `run_reduce`.\n\nBuild it with:\n\n```sh\ncargo run -p atomic-cli -- wasm build --source ./task.wat --out ./build\n```\n\nThen run the driver example with the generated manifest:\n\n```sh\nATOMIC_RUN_WASM_EXAMPLE=1 ATOMIC_WASM_MANIFEST=./build/manifest.toml cargo run --example wasm_map_reduce\n```\n"
+        "# {}\n\nThis scaffold defines a byte-oriented WAT task for Atomic's current map/reduce runtime.\n\nFiles:\n- `task.wat`: exports `memory`, `alloc`, `run_map`, and `run_reduce`.\n\nBuild it with:\n\n```sh\ncargo run -p atomic-cli -- wasm build --source ./task.wat --out ./build\n```\n\nThen run the driver example with the generated manifest:\n\n```sh\nATOMIC_RUN_WASM_EXAMPLE=1 ATOMIC_WASM_MANIFEST=./build/manifest.toml cargo run --example wasm_map_reduce\n```\n",
+        name
     )
 }
 

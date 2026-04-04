@@ -157,8 +157,6 @@ pub enum ArtifactKind {
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeKind {
     Rust,
-    Python,
-    JavaScript,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -185,6 +183,9 @@ pub enum ResultStatus {
 pub enum WasmValueEncoding {
     RawBytes,
     Rkyv,
+    /// JSON-encoded value (serde_json). Used for cross-language tasks callable
+    /// from Python or JavaScript where rkyv bytes cannot be produced by the caller.
+    Json,
 }
 
 #[derive(
@@ -200,9 +201,9 @@ pub struct ResourceProfile {
 pub struct DockerTaskPayload {
     pub command: Vec<String>,
     pub env: Vec<(String, String)>,
-    pub working_dir: Option<String>,
-    pub stdin_data: Option<Vec<u8>>,
-    pub log_stream_key: Option<String>,
+    pub work_dir: Option<String>,
+    pub stdin: Option<Vec<u8>>,
+    pub log_key: Option<String>,
 }
 
 #[derive(
@@ -210,35 +211,35 @@ pub struct DockerTaskPayload {
 )]
 pub struct WasmTaskPayload {
     pub abi_version: u16,
-    pub config_encoding: WasmValueEncoding,
-    pub config_payload: Vec<u8>,
-    pub partition_encoding: WasmValueEncoding,
-    pub result_encoding: WasmValueEncoding,
+    pub cfg_enc: WasmValueEncoding,
+    pub cfg_data: Vec<u8>,
+    pub part_enc: WasmValueEncoding,
+    pub result_enc: WasmValueEncoding,
 }
 
 impl WasmTaskPayload {
-    pub fn new(config_payload: Vec<u8>) -> Self {
+    pub fn new(cfg_data: Vec<u8>) -> Self {
         Self {
             abi_version: WIRE_SCHEMA_V1,
-            config_encoding: WasmValueEncoding::Rkyv,
-            config_payload,
-            partition_encoding: WasmValueEncoding::Rkyv,
-            result_encoding: WasmValueEncoding::Rkyv,
+            cfg_enc: WasmValueEncoding::Rkyv,
+            cfg_data,
+            part_enc: WasmValueEncoding::Rkyv,
+            result_enc: WasmValueEncoding::Rkyv,
         }
     }
 
     pub fn with_encodings(
-        config_encoding: WasmValueEncoding,
-        config_payload: Vec<u8>,
-        partition_encoding: WasmValueEncoding,
-        result_encoding: WasmValueEncoding,
+        cfg_enc: WasmValueEncoding,
+        cfg_data: Vec<u8>,
+        part_enc: WasmValueEncoding,
+        result_enc: WasmValueEncoding,
     ) -> Self {
         Self {
             abi_version: WIRE_SCHEMA_V1,
-            config_encoding,
-            config_payload,
-            partition_encoding,
-            result_encoding,
+            cfg_enc,
+            cfg_data,
+            part_enc,
+            result_enc,
         }
     }
 
@@ -271,19 +272,24 @@ pub struct AggregateActionConfig<U> {
 )]
 pub struct ArtifactDescriptor {
     /// Stable identifier mapped in driver and worker registries.
-    pub operation_id: String,
+    #[serde(rename = "operation_id")]
+    pub op_id: String,
     /// The scheduler picks one backend for the task instead of probing workers at runtime.
-    pub execution_backend: ExecutionBackend,
-    pub artifact_kind: ArtifactKind,
+    #[serde(rename = "execution_backend")]
+    pub backend: ExecutionBackend,
+    #[serde(rename = "artifact_kind")]
+    pub kind: ArtifactKind,
     /// Registry reference. Examples:
     /// - Docker: `registry/repo/image@sha256:...`
     /// - WASM: `oci://registry/repo/module@sha256:...`
-    pub artifact_ref: String,
+    #[serde(rename = "artifact_ref")]
+    pub uri: String,
     /// Entrypoint inside the artifact (exported wasm fn or container command id).
     pub entrypoint: String,
     pub runtime: RuntimeKind,
     /// Immutable artifact digest that ties task placement to a build output.
-    pub artifact_digest: Option<String>,
+    #[serde(rename = "artifact_digest")]
+    pub digest: Option<String>,
     /// Build target used to produce the artifact, such as `wasm32-wasip2`.
     pub build_target: Option<String>,
     pub profile: ResourceProfile,
@@ -291,19 +297,21 @@ pub struct ArtifactDescriptor {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactManifest {
-    pub schema_version: u16,
-    pub wasm_artifacts: Vec<WasmArtifactManifestEntry>,
+    #[serde(rename = "schema_version")]
+    pub version: u16,
+    #[serde(rename = "wasm_artifacts", default)]
+    pub wasm: Vec<WasmArtifactManifestEntry>,
     /// Docker artifacts listed in this manifest. Defaults to empty when absent in TOML.
-    #[serde(default)]
-    pub docker_artifacts: Vec<DockerArtifactManifestEntry>,
+    #[serde(rename = "docker_artifacts", default)]
+    pub docker: Vec<DockerArtifactManifestEntry>,
 }
 
 impl ArtifactManifest {
-    pub fn new(wasm_artifacts: Vec<WasmArtifactManifestEntry>) -> Self {
+    pub fn new(wasm: Vec<WasmArtifactManifestEntry>) -> Self {
         Self {
-            schema_version: WIRE_SCHEMA_V1,
-            wasm_artifacts,
-            docker_artifacts: Vec::new(),
+            version: WIRE_SCHEMA_V1,
+            wasm,
+            docker: Vec::new(),
         }
     }
 }
@@ -362,9 +370,42 @@ impl WasmArtifactManifestEntry {
     }
 }
 
+/// Pool configuration for WASM module instances and Docker warm containers.
+///
+/// Added to `WasmArtifactManifestEntry` and `DockerArtifactManifestEntry` to
+/// control how many sandboxes the worker keeps alive between task calls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolConfig {
+    /// Minimum number of warm instances to maintain even when idle.
+    #[serde(default)]
+    pub min_warm: u16,
+    /// Maximum concurrent instances per operation. Default: 4.
+    #[serde(rename = "max_per_op", default = "PoolConfig::default_max_slots")]
+    pub max_slots: u16,
+    /// Evict idle instances after this many seconds. Default: 60.
+    #[serde(rename = "idle_timeout_secs", default = "PoolConfig::default_idle_secs")]
+    pub idle_secs: u32,
+}
+
+impl PoolConfig {
+    fn default_max_slots() -> u16 { 4 }
+    fn default_idle_secs() -> u32 { 60 }
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            min_warm: 0,
+            max_slots: Self::default_max_slots(),
+            idle_secs: Self::default_idle_secs(),
+        }
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct TaskEnvelope {
-    pub schema_version: u16,
+    pub version: u16,
     pub run_id: usize,
     pub stage_id: usize,
     pub task_id: usize,
@@ -376,7 +417,7 @@ pub struct TaskEnvelope {
     /// Values that closures would normally capture, encoded by the driver.
     pub payload: Vec<u8>,
     /// Serialized partition bytes.
-    pub partition_data: Vec<u8>,
+    pub data: Vec<u8>,
 }
 
 impl TaskEnvelope {
@@ -389,10 +430,10 @@ impl TaskEnvelope {
         trace_id: String,
         artifact: ArtifactDescriptor,
         payload: Vec<u8>,
-        partition_data: Vec<u8>,
+        data: Vec<u8>,
     ) -> Self {
         Self {
-            schema_version: WIRE_SCHEMA_V1,
+            version: WIRE_SCHEMA_V1,
             run_id,
             stage_id,
             task_id,
@@ -401,21 +442,21 @@ impl TaskEnvelope {
             trace_id,
             artifact,
             payload,
-            partition_data,
+            data,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct TaskResultEnvelope {
-    pub schema_version: u16,
+    pub version: u16,
     pub run_id: usize,
     pub stage_id: usize,
     pub task_id: usize,
     pub attempt_id: usize,
     pub status: ResultStatus,
-    pub result_data: Vec<u8>,
-    pub error_message: Option<String>,
+    pub data: Vec<u8>,
+    pub error: Option<String>,
     pub worker_id: String,
 }
 
@@ -426,17 +467,17 @@ impl TaskResultEnvelope {
         task_id: usize,
         attempt_id: usize,
         worker_id: String,
-        result_data: Vec<u8>,
+        data: Vec<u8>,
     ) -> Self {
         Self {
-            schema_version: WIRE_SCHEMA_V1,
+            version: WIRE_SCHEMA_V1,
             run_id,
             stage_id,
             task_id,
             attempt_id,
             status: ResultStatus::Success,
-            result_data,
-            error_message: None,
+            data,
+            error: None,
             worker_id,
         }
     }
@@ -447,18 +488,18 @@ impl TaskResultEnvelope {
         task_id: usize,
         attempt_id: usize,
         worker_id: String,
-        error_message: String,
-        result_data: Vec<u8>,
+        error: String,
+        data: Vec<u8>,
     ) -> Self {
         Self {
-            schema_version: WIRE_SCHEMA_V1,
+            version: WIRE_SCHEMA_V1,
             run_id,
             stage_id,
             task_id,
             attempt_id,
             status: ResultStatus::RetryableFailure,
-            result_data,
-            error_message: Some(error_message),
+            data,
+            error: Some(error),
             worker_id,
         }
     }
@@ -469,17 +510,17 @@ impl TaskResultEnvelope {
         task_id: usize,
         attempt_id: usize,
         worker_id: String,
-        error_message: String,
+        error: String,
     ) -> Self {
         Self {
-            schema_version: WIRE_SCHEMA_V1,
+            version: WIRE_SCHEMA_V1,
             run_id,
             stage_id,
             task_id,
             attempt_id,
             status: ResultStatus::FatalFailure,
-            result_data: Vec::new(),
-            error_message: Some(error_message),
+            data: Vec::new(),
+            error: Some(error),
             worker_id,
         }
     }
@@ -487,19 +528,19 @@ impl TaskResultEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct WorkerCapabilities {
-    pub schema_version: u16,
+    pub version: u16,
     pub worker_id: String,
-    pub execution_backend: ExecutionBackend,
-    pub supported_artifacts: Vec<ArtifactKind>,
-    pub supported_runtimes: Vec<RuntimeKind>,
-    pub max_concurrent_tasks: u16,
+    pub backend: ExecutionBackend,
+    pub artifacts: Vec<ArtifactKind>,
+    pub runtimes: Vec<RuntimeKind>,
+    pub max_tasks: u16,
 }
 
 impl WorkerCapabilities {
     pub fn supports(&self, artifact: &ArtifactDescriptor) -> bool {
-        self.execution_backend == artifact.execution_backend
-            && self.supported_artifacts.contains(&artifact.artifact_kind)
-            && self.supported_runtimes.contains(&artifact.runtime)
+        self.backend == artifact.backend
+            && self.artifacts.contains(&artifact.kind)
+            && self.runtimes.contains(&artifact.runtime)
     }
 }
 
@@ -509,13 +550,13 @@ mod tests {
 
     fn wasm_descriptor() -> ArtifactDescriptor {
         ArtifactDescriptor {
-            operation_id: "map.words.v1".to_string(),
-            execution_backend: ExecutionBackend::Wasm,
-            artifact_kind: ArtifactKind::Wasm,
-            artifact_ref: "oci://registry/atomic/map-words@sha256:abc".to_string(),
+            op_id: "map.words.v1".to_string(),
+            backend: ExecutionBackend::Wasm,
+            kind: ArtifactKind::Wasm,
+            uri: "oci://registry/atomic/map-words@sha256:abc".to_string(),
             entrypoint: "map_words".to_string(),
             runtime: RuntimeKind::Rust,
-            artifact_digest: Some("sha256:abc".to_string()),
+            digest: Some("sha256:abc".to_string()),
             build_target: Some("wasm32-wasip2".to_string()),
             profile: ResourceProfile {
                 cpu_millis: 250,
@@ -541,8 +582,8 @@ mod tests {
         );
 
         assert_eq!(entry.abi_version, WIRE_SCHEMA_V1);
-        assert_eq!(entry.descriptor.execution_backend, ExecutionBackend::Wasm);
-        assert_eq!(entry.descriptor.artifact_kind, ArtifactKind::Wasm);
+        assert_eq!(entry.descriptor.backend, ExecutionBackend::Wasm);
+        assert_eq!(entry.descriptor.kind, ArtifactKind::Wasm);
         assert_eq!(
             entry.module_path.as_deref(),
             Some("target/wasm-artifacts/map_words.wasm")
@@ -560,5 +601,60 @@ mod tests {
     fn legacy_frame_ids_are_rejected() {
         assert!(TransportFrameKind::try_from(1).is_err());
         assert!(TransportFrameKind::try_from(2).is_err());
+    }
+
+    #[test]
+    fn pool_config_default_values() {
+        let cfg = PoolConfig::default();
+        assert_eq!(cfg.min_warm, 0);
+        assert_eq!(cfg.max_slots, 4);
+        assert_eq!(cfg.idle_secs, 60);
+    }
+
+    #[test]
+    fn resource_profile_fields() {
+        let profile = ResourceProfile { cpu_millis: 500, memory_mb: 256, timeout_ms: 10_000 };
+        assert_eq!(profile.cpu_millis, 500);
+        assert_eq!(profile.memory_mb, 256);
+        assert_eq!(profile.timeout_ms, 10_000);
+    }
+
+    #[test]
+    fn docker_task_payload_fields_accessible() {
+        let payload = DockerTaskPayload {
+            command: vec!["echo".into()],
+            env: vec![("K".into(), "V".into())],
+            work_dir: Some("/work".into()),
+            stdin: Some(vec![1, 2, 3]),
+            log_key: Some("run-1".into()),
+        };
+        assert_eq!(payload.command, vec!["echo"]);
+        assert_eq!(payload.work_dir.as_deref(), Some("/work"));
+        assert_eq!(payload.stdin.as_deref(), Some([1u8, 2, 3].as_slice()));
+    }
+
+    #[test]
+    fn wasm_task_payload_raw_bytes_ctor() {
+        let p = WasmTaskPayload::raw_bytes();
+        assert_eq!(p.cfg_enc, WasmValueEncoding::RawBytes);
+        assert_eq!(p.part_enc, WasmValueEncoding::RawBytes);
+        assert_eq!(p.result_enc, WasmValueEncoding::RawBytes);
+        assert!(p.cfg_data.is_empty());
+    }
+
+    #[test]
+    fn artifact_descriptor_backend_and_kind() {
+        let d = wasm_descriptor();
+        assert_eq!(d.backend, ExecutionBackend::Wasm);
+        assert_eq!(d.kind, ArtifactKind::Wasm);
+        assert_eq!(d.op_id, "map.words.v1");
+    }
+
+    #[test]
+    fn artifact_manifest_new_empty_docker() {
+        let manifest = ArtifactManifest::new(vec![]);
+        assert_eq!(manifest.version, WIRE_SCHEMA_V1);
+        assert!(manifest.wasm.is_empty());
+        assert!(manifest.docker.is_empty());
     }
 }
