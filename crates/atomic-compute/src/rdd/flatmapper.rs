@@ -47,7 +47,7 @@ impl<T: Data, U: Data, F> FlatMapperRdd<T, U, F>
 where
     F: RddFlatMapFn<T, U>,
 {
-    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+    pub fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
         let mut vals = RddVals::new(id);
         vals.dependencies.push(Dependency::OneToOne {
             rdd_base: prev.get_rdd_base(),
@@ -143,7 +143,7 @@ impl<T: Data, K: Data + Clone, V: Data + Clone, F> FlatMapperPairRdd<T, K, V, F>
 where
     F: RddFlatMapFn<T, (K, V)>,
 {
-    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+    pub fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
         let mut vals = RddVals::new(id);
         vals.dependencies.push(Dependency::OneToOne {
             rdd_base: prev.get_rdd_base(),

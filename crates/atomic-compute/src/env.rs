@@ -2,21 +2,21 @@ use std::fs;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use atomic_data::distributed::ExecutionBackend;
 use crate::error::Error;
+use atomic_data::distributed::ExecutionBackend;
 use log::LevelFilter;
 use once_cell::sync::{Lazy, OnceCell};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Handle, Runtime};
 
 const ENV_VAR_PREFIX: &str = "VEGA_";
-pub(crate) const THREAD_PREFIX: &str = "_VEGA";
+pub const THREAD_PREFIX: &str = "_VEGA";
 static CONF: OnceCell<Configuration> = OnceCell::new();
 static ASYNC_RT: Lazy<Option<Runtime>> = Lazy::new(Env::build_async_executor);
 
 /// Minimal env handle — only provides the async-runtime helper.
 /// (Shuffle/cache trackers were removed as part of the Vega→Atomic rewrite.)
-pub(crate) struct Env;
+pub struct Env;
 
 impl Env {
     /// Run a function inside the existing Tokio context (or the internal one).
@@ -51,7 +51,7 @@ impl Env {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum LogLevel {
+pub enum LogLevel {
     Error,
     Warn,
     Debug,
@@ -95,7 +95,7 @@ impl DeploymentMode {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct Configuration {
+pub struct Configuration {
     pub is_driver: bool,
     pub local_ip: Ipv4Addr,
     pub local_dir: std::path::PathBuf,
@@ -106,7 +106,7 @@ pub(crate) struct Configuration {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct SlaveConfig {
+pub struct SlaveConfig {
     pub deployment: bool,
     pub port: u16,
     pub backend: ExecutionBackend,
@@ -114,7 +114,7 @@ pub(crate) struct SlaveConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct LogConfig {
+pub struct LogConfig {
     pub log_level: LogLevel,
     pub log_cleanup: bool,
 }
@@ -145,7 +145,9 @@ impl Default for Configuration {
 
         let deployment_mode = std::env::var(concat_prefix(ENV_VAR_PREFIX, "DEPLOYMENT_MODE"))
             .ok()
-            .and_then(|s| serde_json::from_str::<DeploymentMode>(&format!("\"{}\"", s.to_lowercase())).ok())
+            .and_then(|s| {
+                serde_json::from_str::<DeploymentMode>(&format!("\"{}\"", s.to_lowercase())).ok()
+            })
             .unwrap_or(Local);
 
         let local_dir = std::env::var(concat_prefix(ENV_VAR_PREFIX, "LOCAL_DIR"))
@@ -155,7 +157,9 @@ impl Default for Configuration {
 
         let log_level = std::env::var(concat_prefix(ENV_VAR_PREFIX, "LOG_LEVEL"))
             .ok()
-            .and_then(|s| serde_json::from_str::<LogLevel>(&format!("\"{}\"", s.to_lowercase())).ok())
+            .and_then(|s| {
+                serde_json::from_str::<LogLevel>(&format!("\"{}\"", s.to_lowercase())).ok()
+            })
             .unwrap_or(LogLevel::Info);
 
         let log_cleanup = std::env::var(concat_prefix(ENV_VAR_PREFIX, "LOG_CLEANUP"))
@@ -177,9 +181,10 @@ impl Default for Configuration {
                 }
             });
 
-        let shuffle_service_port = std::env::var(concat_prefix(ENV_VAR_PREFIX, "SHUFFLE_SERVICE_PORT"))
-            .ok()
-            .and_then(|s| s.parse().ok());
+        let shuffle_service_port =
+            std::env::var(concat_prefix(ENV_VAR_PREFIX, "SHUFFLE_SERVICE_PORT"))
+                .ok()
+                .and_then(|s| s.parse().ok());
 
         let slave_deployment = std::env::var(concat_prefix(ENV_VAR_PREFIX, "SLAVE_DEPLOYMENT"))
             .ok()
@@ -193,13 +198,25 @@ impl Default for Configuration {
                 .expect("Port required while deploying a worker.");
             let backend = std::env::var(concat_prefix(ENV_VAR_PREFIX, "WORKER_BACKEND"))
                 .ok()
-                .and_then(|s| serde_json::from_str::<ExecutionBackend>(&format!("\"{}\"", s.to_lowercase())).ok())
+                .and_then(|s| {
+                    serde_json::from_str::<ExecutionBackend>(&format!("\"{}\"", s.to_lowercase()))
+                        .ok()
+                })
                 .unwrap_or(ExecutionBackend::Docker);
-            let max_concurrent_tasks = std::env::var(concat_prefix(ENV_VAR_PREFIX, "WORKER_MAX_CONCURRENT_TASKS"))
-                .ok()
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or_else(|| num_cpus::get().max(1) as u16);
-            (false, Some(SlaveConfig { deployment: true, port, backend, max_concurrent_tasks }))
+            let max_concurrent_tasks =
+                std::env::var(concat_prefix(ENV_VAR_PREFIX, "WORKER_MAX_CONCURRENT_TASKS"))
+                    .ok()
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .unwrap_or_else(|| num_cpus::get().max(1) as u16);
+            (
+                false,
+                Some(SlaveConfig {
+                    deployment: true,
+                    port,
+                    backend,
+                    max_concurrent_tasks,
+                }),
+            )
         } else {
             (true, None)
         };
@@ -209,7 +226,10 @@ impl Default for Configuration {
             local_ip,
             local_dir,
             deployment_mode,
-            loggin: LogConfig { log_level, log_cleanup },
+            loggin: LogConfig {
+                log_level,
+                log_cleanup,
+            },
             shuffle_svc_port: shuffle_service_port,
             slave,
         }

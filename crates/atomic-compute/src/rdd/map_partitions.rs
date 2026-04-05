@@ -46,7 +46,7 @@ impl<T: Data, U: Data, F> MapPartitionsRdd<T, U, F>
 where
     F: RddPartitionFn<T, U>,
 {
-    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+    pub fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
         let mut vals = RddVals::new(id);
         vals.dependencies
             .push(Dependency::new_one_to_one(prev.get_rdd_base()));
@@ -61,7 +61,7 @@ where
         }
     }
 
-    pub(crate) fn pin(self) -> Self {
+    pub fn pin(self) -> Self {
         self.pinned.store(true, Ordering::SeqCst);
         self
     }

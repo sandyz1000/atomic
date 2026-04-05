@@ -1,6 +1,5 @@
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
-use bincode::{Decode, Encode};
 use atomic_data::aggregator::Aggregator;
 use atomic_data::data::Data;
 use atomic_data::dependency::{Dependency, ShuffleDependency};
@@ -8,6 +7,7 @@ use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::shuffle::fetcher::ShuffleFetcher;
 use atomic_data::split::{ShuffledRddSplit, Split};
+use bincode::{Decode, Encode};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ where
     V: Data + Clone,
     C: Data + Clone + Encode + Decode<()>,
 {
-    pub(crate) fn new(
+    pub fn new(
         id: usize,
         shuffle_id: usize,
         parent: Arc<dyn Rdd<Item = (K, V)>>,

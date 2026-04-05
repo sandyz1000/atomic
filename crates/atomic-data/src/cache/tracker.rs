@@ -40,7 +40,7 @@ pub enum CacheTrackerMessage {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, bincode::Encode, bincode::Decode)]
-pub enum CacheTrackerMessageReply {
+pub enum CacheTrackerReply {
     CacheLocations(HashMap<usize, Vec<Vec<Ipv4Addr>>>),
     CacheStatus(Vec<(Ipv4Addr, usize, usize)>),
     Ok,
@@ -91,7 +91,7 @@ impl CacheTracker {
     }
 
     // Slave node will ask master node for cache locs
-    async fn client(&self, message: CacheTrackerMessage) -> Result<CacheTrackerMessageReply> {
+    async fn client(&self, message: CacheTrackerMessage) -> Result<CacheTrackerReply> {
         // Connect to master node
         let mut stream = loop {
             match TcpStream::connect(self.master_addr).await {
@@ -115,7 +115,7 @@ impl CacheTracker {
         let mut reply_bytes = vec![0u8; reply_len as usize];
         stream.read_exact(&mut reply_bytes).await?;
 
-        let (reply, _): (CacheTrackerMessageReply, usize) =
+        let (reply, _): (CacheTrackerReply, usize) =
             bincode::decode_from_slice(&reply_bytes, bincode::config::standard())?;
         Ok(reply)
     }
@@ -174,13 +174,13 @@ impl CacheTracker {
         });
     }
 
-    fn process_message(self: Arc<Self>, message: CacheTrackerMessage) -> CacheTrackerMessageReply {
+    fn process_message(self: Arc<Self>, message: CacheTrackerMessage) -> CacheTrackerReply {
         // TODO: logging
         match message {
             CacheTrackerMessage::SlaveCacheStarted { host, size } => {
                 self.slave_capacity.insert(host, size);
                 self.slave_usage.insert(host, 0);
-                CacheTrackerMessageReply::Ok
+                CacheTrackerReply::Ok
             }
             CacheTrackerMessage::RegisterRdd {
                 rdd_id,
@@ -188,7 +188,7 @@ impl CacheTracker {
             } => {
                 self.locs
                     .insert(rdd_id, (0..num_partitions).map(|_| Vec::new()).collect());
-                CacheTrackerMessageReply::Ok
+                CacheTrackerReply::Ok
             }
             CacheTrackerMessage::AddedToCache {
                 rdd_id,
@@ -207,7 +207,7 @@ impl CacheTracker {
                         locs_rdd_p.insert(0, host); // Insert at front like push_front
                     }
                 }
-                CacheTrackerMessageReply::Ok
+                CacheTrackerReply::Ok
             }
             CacheTrackerMessage::DroppedFromCache {
                 rdd_id,
@@ -234,7 +234,7 @@ impl CacheTracker {
                         *locs_p = remaining_locs;
                     }
                 }
-                CacheTrackerMessageReply::Ok
+                CacheTrackerReply::Ok
             }
             // TODO: memory cache lost needs to be implemented
             CacheTrackerMessage::GetCacheLocations => {
@@ -246,7 +246,7 @@ impl CacheTracker {
                         (*k, v.clone())
                     })
                     .collect();
-                CacheTrackerMessageReply::CacheLocations(locs_clone)
+                CacheTrackerReply::CacheLocations(locs_clone)
             }
             CacheTrackerMessage::GetCacheStatus => {
                 let status = self
@@ -257,9 +257,9 @@ impl CacheTracker {
                         (*host, *capacity, self.get_cache_usage(*host))
                     })
                     .collect();
-                CacheTrackerMessageReply::CacheStatus(status)
+                CacheTrackerReply::CacheStatus(status)
             }
-            _ => CacheTrackerMessageReply::Ok,
+            _ => CacheTrackerReply::Ok,
         }
     }
 
@@ -292,7 +292,7 @@ impl CacheTracker {
 
     pub async fn get_location_snapshot(&self) -> Result<HashMap<usize, Vec<Vec<Ipv4Addr>>>> {
         match self.client(CacheTrackerMessage::GetCacheLocations).await {
-            Ok(CacheTrackerMessageReply::CacheLocations(s)) => Ok(s
+            Ok(CacheTrackerReply::CacheLocations(s)) => Ok(s
                 .into_iter()
                 .map(|(k, v)| {
                     let v = v
@@ -309,7 +309,7 @@ impl CacheTracker {
 
     async fn get_cache_status(&self) -> Result<Vec<(Ipv4Addr, usize, usize)>> {
         match self.client(CacheTrackerMessage::GetCacheStatus).await {
-            Ok(CacheTrackerMessageReply::CacheStatus(s)) => Ok(s),
+            Ok(CacheTrackerReply::CacheStatus(s)) => Ok(s),
             Ok(_) => Err(CacheError::Other),
             Err(err) => Err(err),
         }

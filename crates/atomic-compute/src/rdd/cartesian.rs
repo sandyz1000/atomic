@@ -21,7 +21,7 @@ pub struct CartesianRdd<T: Data, U: Data> {
 }
 
 impl<T: Data, U: Data> CartesianRdd<T, U> {
-    pub(crate) fn new(
+    pub fn new(
         id: usize,
         rdd1: Arc<dyn Rdd<Item = T>>,
         rdd2: Arc<dyn Rdd<Item = U>>,

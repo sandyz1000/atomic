@@ -9,7 +9,7 @@ pub enum BaseError {
     Other(String)
 }
 
-pub(crate) type BaseResult<T> = Result<T, BaseError>;
+pub type BaseResult<T> = Result<T, BaseError>;
 
 #[cfg(test)]
 mod tests {

@@ -19,7 +19,7 @@ pub struct PartitionwiseSampledRdd<T: Data> {
 }
 
 impl<T: Data> PartitionwiseSampledRdd<T> {
-    pub(crate) fn new(
+    pub fn new(
         id: usize,
         prev: Arc<dyn Rdd<Item = T>>,
         sampler: Arc<dyn RandomSampler<T>>,

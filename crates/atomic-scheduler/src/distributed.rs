@@ -3,7 +3,10 @@ use std::{
     fmt::Debug,
     net::{Ipv4Addr, SocketAddrV4},
     path::Path,
-    sync::{Arc, atomic::{AtomicUsize, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -11,16 +14,15 @@ use atomic_data::{
     data::Data,
     dependency::ShuffleDependencyBox,
     distributed::{
-        ArtifactDescriptor, ArtifactManifest, TaskEnvelope, TaskResultEnvelope,
-        TransportFrameKind, TRANSPORT_HEADER_LEN, WasmTaskPayload, WasmValueEncoding,
-        WorkerCapabilities, WireDecode, WireEncode, encode_transport_frame,
-        parse_transport_header,
+        ArtifactDescriptor, ArtifactManifest, TRANSPORT_HEADER_LEN, TaskEnvelope,
+        TaskResultEnvelope, TransportFrameKind, WasmTaskPayload, WasmValueEncoding, WireDecode,
+        WireEncode, WorkerCapabilities, encode_transport_frame, parse_transport_header,
     },
     partial::{ApproximateEvaluator, result::PartialResult},
     rdd::{Rdd, RddBase},
     task::TaskOption,
-    task_registry::TaskRegistry,
     task_context::TaskContext,
+    task_registry::TaskRegistry,
 };
 use dashmap::DashMap;
 use futures::future::try_join_all;
@@ -31,7 +33,7 @@ use tokio::{
 };
 
 use crate::{
-    base::{MutatorsAndGetter, NativeScheduler},
+    base::{Mutators, NativeScheduler},
     dag::{CompletionEvent, TastEndReason},
     error::{LibResult, SchedulerError},
     job::{Job, JobTracker},
@@ -40,11 +42,11 @@ use crate::{
 };
 
 #[derive(Clone, Default)]
-#[allow(dead_code)]
+// #[allow(dead_code)]
 pub struct DistributedScheduler {
     /// Shared mutable state: stage cache, event queues, map-output tracker, and ID counters.
     /// Cloned cheaply because every inner value is `Arc`-wrapped.
-    mutators: MutatorsAndGetter,
+    mutators: Mutators,
 
     /// Maximum number of times a single task partition is retried before the job fails.
     /// Consulted inside `submit_registered_task` to bound the retry loop per task.
@@ -53,26 +55,6 @@ pub struct DistributedScheduler {
     /// Monotonically increasing attempt counter across all tasks in this scheduler instance.
     /// Each call to `submit_registered_task` increments this and embeds the value in `TaskEnvelope`.
     attempt_id: Arc<AtomicUsize>,
-
-    /// Monotonically increasing counter used to allocate unique job IDs.
-    next_job_id: Arc<AtomicUsize>,
-
-    /// Monotonically increasing counter used to allocate unique run IDs.
-    next_run_id: Arc<AtomicUsize>,
-
-    /// Monotonically increasing counter used to allocate unique task IDs.
-    next_task_id: Arc<AtomicUsize>,
-
-    /// Monotonically increasing counter used to allocate unique stage IDs.
-    next_stage_id: Arc<AtomicUsize>,
-
-    /// Maps shuffle dependency IDs to the shuffle map stage that produces their output.
-    /// Populated by `get_shuffle_map_stage`; consulted during DAG stage resolution.
-    shuffle_to_map_stage: Arc<DashMap<usize, Stage>>,
-
-    /// Per-RDD cached partition locations. Cleared by `update_cache_locs` when
-    /// shuffle stages complete or fetch failures are detected.
-    cache_locs: Arc<DashMap<usize, Vec<Vec<Ipv4Addr>>>>,
 
     /// Per-worker capability declarations used to match an artifact's backend/kind to a worker.
     /// Consulted by `select_executor_for_artifact` before dispatching a `TaskEnvelope`.
@@ -124,17 +106,10 @@ impl DistributedScheduler {
     pub fn new(max_failures: usize, master: bool) -> Self {
         let mut live_listener_bus = LiveListenerBus::new();
         live_listener_bus.start().unwrap();
-        let mutators = MutatorsAndGetter::new();
         Self {
-            mutators,
+            mutators: Mutators::new(),
             max_failures,
             attempt_id: Arc::new(AtomicUsize::new(0)),
-            next_job_id: Arc::new(AtomicUsize::new(0)),
-            next_run_id: Arc::new(AtomicUsize::new(0)),
-            next_task_id: Arc::new(AtomicUsize::new(0)),
-            next_stage_id: Arc::new(AtomicUsize::new(0)),
-            shuffle_to_map_stage: Arc::new(DashMap::new()),
-            cache_locs: Arc::new(DashMap::new()),
             worker_capabilities: Arc::new(DashMap::new()),
             task_registry: Arc::new(Mutex::new(TaskRegistry::default())),
             master,
@@ -293,43 +268,46 @@ impl DistributedScheduler {
             .encode_wire()
             .map_err(|err| SchedulerError::Transport(err.to_string()))?;
 
-        let submits = partitions.into_iter().enumerate().map(|(partition_id, partition_data)| {
-            let task_id = self.get_mutators().get_next_task_id();
-            let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
-            let task_key = format!("{}:{}", run_id, task_id);
-            let payload = payload_bytes.clone();
+        let submits = partitions
+            .into_iter()
+            .enumerate()
+            .map(|(partition_id, partition_data)| {
+                let task_id = self.get_mutators().get_next_task_id();
+                let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
+                let task_key = format!("{}:{}", run_id, task_id);
+                let payload = payload_bytes.clone();
 
-            // Register the task → job mapping before dispatch so completion handlers can
-            // route events and diagnostics back to the correct job.
-            self.taskid_to_jobid.insert(task_key.clone(), run_id);
-            self.job_tasks
-                .entry(run_id)
-                .or_default()
-                .insert(task_key.clone());
+                // Register the task → job mapping before dispatch so completion handlers can
+                // route events and diagnostics back to the correct job.
+                self.taskid_to_jobid.insert(task_key.clone(), run_id);
+                self.job_tasks
+                    .entry(run_id)
+                    .or_default()
+                    .insert(task_key.clone());
 
-            async move {
-                let trace_id = format!("wasm-{}-{}", operation_id, partition_id);
-                let (result, worker_addr) = self
-                    .submit_registered_task(
-                        run_id,
-                        stage_id,
-                        task_id,
-                        attempt_id,
-                        partition_id,
-                        trace_id,
-                        operation_id,
-                        payload,
-                        partition_data,
-                    )
-                    .await?;
+                async move {
+                    let trace_id = format!("wasm-{}-{}", operation_id, partition_id);
+                    let (result, worker_addr) = self
+                        .submit_registered_task(
+                            run_id,
+                            stage_id,
+                            task_id,
+                            attempt_id,
+                            partition_id,
+                            trace_id,
+                            operation_id,
+                            payload,
+                            partition_data,
+                        )
+                        .await?;
 
-                // Record which worker handled this task for failure attribution.
-                self.taskid_to_slaveid
-                    .insert(task_key, worker_addr.to_string());
+                    // Record which worker handled this task for failure attribution.
+                    self.taskid_to_slaveid
+                        .insert(task_key, worker_addr.to_string());
 
-                Ok::<_, SchedulerError>(result)
-            }
-        });
+                    Ok::<_, SchedulerError>(result)
+                }
+            });
 
         let result = try_join_all(submits).await;
 
@@ -397,12 +375,15 @@ impl DistributedScheduler {
             }
         }
 
-        self.mutators.event_queues.insert(jt.run_id, VecDeque::new());
+        self.mutators
+            .event_queues
+            .insert(jt.run_id, VecDeque::new());
 
         let mut results: Vec<Option<U>> = (0..jt.num_output_parts).map(|_| None).collect();
         let mut fetch_failure_duration = Duration::new(0, 0);
 
-        self.submit_stage(jt.final_stage.clone(), jt.clone()).await?;
+        self.submit_stage(jt.final_stage.clone(), jt.clone())
+            .await?;
 
         let mut num_finished = 0;
         while num_finished != jt.num_output_parts {
@@ -439,9 +420,7 @@ impl DistributedScheduler {
             }
         }
 
-        if !jt.failed.lock().await.is_empty()
-            && fetch_failure_duration.as_millis() > 3000
-        {
+        if !jt.failed.lock().await.is_empty() && fetch_failure_duration.as_millis() > 3000 {
             self.update_cache_locs().await?;
             for stage in jt.failed.lock().await.iter() {
                 self.submit_stage(stage.clone(), jt.clone()).await?;
@@ -526,7 +505,9 @@ impl DistributedScheduler {
             .map_err(|err| SchedulerError::Transport(err.to_string()))
     }
 
-    async fn read_transport_frame(stream: &mut TcpStream) -> LibResult<(TransportFrameKind, Vec<u8>)> {
+    async fn read_transport_frame(
+        stream: &mut TcpStream,
+    ) -> LibResult<(TransportFrameKind, Vec<u8>)> {
         let mut header = [0_u8; TRANSPORT_HEADER_LEN];
         stream
             .read_exact(&mut header)
@@ -560,7 +541,6 @@ impl DistributedScheduler {
             log::debug!("ignoring completion event for distributed job");
         }
     }
-
 }
 
 #[async_trait::async_trait]
@@ -603,19 +583,23 @@ impl NativeScheduler for DistributedScheduler {
 
     async fn update_cache_locs(&self) -> LibResult<()> {
         // Cache tracker integration is not yet wired — clear local locs only.
-        self.cache_locs.clear();
+        self.mutators.cache_locs.clear();
         Ok(())
     }
 
     async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependencyBox>) -> LibResult<Stage> {
-        let stage = self.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
+        let stage = self
+            .mutators
+            .shuffle_to_map_stage
+            .get(&shuf.get_shuffle_id());
         match stage {
             Some(stage) => Ok(stage.clone()),
             None => {
                 let stage = self
                     .new_stage(shuf.get_rdd_base(), Some(shuf.clone()))
                     .await?;
-                self.shuffle_to_map_stage
+                self.mutators
+                    .shuffle_to_map_stage
                     .insert(shuf.get_shuffle_id(), stage.clone());
                 Ok(stage)
             }
@@ -630,7 +614,7 @@ impl NativeScheduler for DistributedScheduler {
         Ok(missing.into_iter().collect())
     }
 
-    fn get_mutators(&self) -> MutatorsAndGetter {
+    fn get_mutators(&self) -> Mutators {
         self.mutators.clone()
     }
 }
@@ -646,14 +630,11 @@ mod tests {
     use super::*;
     use atomic_data::distributed::{
         ArtifactKind, ArtifactManifest, ExecutionBackend, ResourceProfile, RuntimeKind,
-        TaskResultEnvelope, WasmArtifactManifestEntry, WireDecode, WireEncode,
+        TaskResultEnvelope, WasmManifestEntry, WireDecode, WireEncode,
         encode_transport_frame,
     };
 
-    fn artifact_descriptor(
-        backend: ExecutionBackend,
-        kind: ArtifactKind,
-    ) -> ArtifactDescriptor {
+    fn artifact_descriptor(backend: ExecutionBackend, kind: ArtifactKind) -> ArtifactDescriptor {
         ArtifactDescriptor {
             op_id: "op.test".to_string(),
             backend,
@@ -714,24 +695,14 @@ mod tests {
     fn registered_task_envelope_uses_manifest_module_path() {
         let scheduler = DistributedScheduler::new(4, true);
         scheduler.register_artifact_manifest(ArtifactManifest::new(vec![
-            WasmArtifactManifestEntry::new(
+            WasmManifestEntry::new(
                 artifact_descriptor(ExecutionBackend::Wasm, ArtifactKind::Wasm),
                 Some("target/wasm/map_task.wasm".to_string()),
             ),
         ]));
 
         let task = scheduler
-            .build_registered_task_envelope(
-                1,
-                2,
-                3,
-                0,
-                4,
-                "trace-1",
-                "op.test",
-                vec![9],
-                vec![8],
-            )
+            .build_registered_task_envelope(1, 2, 3, 0, 4, "trace-1", "op.test", vec![9], vec![8])
             .expect("task envelope should resolve from registry");
 
         assert_eq!(task.artifact.backend, ExecutionBackend::Wasm);
@@ -814,7 +785,7 @@ mod tests {
             },
         );
         scheduler.register_artifact_manifest(ArtifactManifest::new(vec![
-            WasmArtifactManifestEntry::new(
+            WasmManifestEntry::new(
                 artifact_descriptor(ExecutionBackend::Wasm, ArtifactKind::Wasm),
                 Some("target/wasm/map_task.wasm".to_string()),
             ),
@@ -840,7 +811,8 @@ mod tests {
                     task.data,
                 );
                 let payload = response.encode_wire().expect("serialize response");
-                let frame = encode_transport_frame(TransportFrameKind::TaskResultEnvelope, &payload);
+                let frame =
+                    encode_transport_frame(TransportFrameKind::TaskResultEnvelope, &payload);
                 socket.write_all(&frame).await.expect("write response");
             }
         });

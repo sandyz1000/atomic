@@ -253,6 +253,7 @@ impl WasmTaskPayload {
     }
 }
 
+/// Wire payload for a distributed fold action — carries the zero/identity value.
 #[derive(
     Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
@@ -260,10 +261,11 @@ pub struct FoldActionConfig<T> {
     pub zero: T,
 }
 
+/// Wire payload for a distributed aggregate action — carries the zero/identity value.
 #[derive(
     Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
-pub struct AggregateActionConfig<U> {
+pub struct AggregateConfig<U> {
     pub zero: U,
 }
 
@@ -300,14 +302,14 @@ pub struct ArtifactManifest {
     #[serde(rename = "schema_version")]
     pub version: u16,
     #[serde(rename = "wasm_artifacts", default)]
-    pub wasm: Vec<WasmArtifactManifestEntry>,
+    pub wasm: Vec<WasmManifestEntry>,
     /// Docker artifacts listed in this manifest. Defaults to empty when absent in TOML.
     #[serde(rename = "docker_artifacts", default)]
-    pub docker: Vec<DockerArtifactManifestEntry>,
+    pub docker: Vec<DockerManifestEntry>,
 }
 
 impl ArtifactManifest {
-    pub fn new(wasm: Vec<WasmArtifactManifestEntry>) -> Self {
+    pub fn new(wasm: Vec<WasmManifestEntry>) -> Self {
         Self {
             version: WIRE_SCHEMA_V1,
             wasm,
@@ -341,7 +343,7 @@ impl ArtifactManifest {
 /// timeout_ms = 5000
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DockerArtifactManifestEntry {
+pub struct DockerManifestEntry {
     pub descriptor: ArtifactDescriptor,
     /// Full image reference, e.g. `registry/repo/image@sha256:...`
     pub image: String,
@@ -353,14 +355,15 @@ pub struct DockerArtifactManifestEntry {
     pub env: Vec<(String, String)>,
 }
 
+/// One entry in an [`ArtifactManifest`] for a WASM artifact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WasmArtifactManifestEntry {
+pub struct WasmManifestEntry {
     pub descriptor: ArtifactDescriptor,
     pub abi_version: u16,
     pub module_path: Option<String>,
 }
 
-impl WasmArtifactManifestEntry {
+impl WasmManifestEntry {
     pub fn new(descriptor: ArtifactDescriptor, module_path: Option<String>) -> Self {
         Self {
             descriptor,
@@ -372,7 +375,7 @@ impl WasmArtifactManifestEntry {
 
 /// Pool configuration for WASM module instances and Docker warm containers.
 ///
-/// Added to `WasmArtifactManifestEntry` and `DockerArtifactManifestEntry` to
+/// Added to `WasmManifestEntry` and `DockerManifestEntry` to
 /// control how many sandboxes the worker keeps alive between task calls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolConfig {
@@ -582,7 +585,7 @@ mod tests {
 
     #[test]
     fn manifest_entry_keeps_wasm_descriptor_metadata() {
-        let entry = WasmArtifactManifestEntry::new(
+        let entry = WasmManifestEntry::new(
             wasm_descriptor(),
             Some("target/wasm-artifacts/map_words.wasm".to_string()),
         );

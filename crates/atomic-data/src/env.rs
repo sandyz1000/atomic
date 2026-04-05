@@ -18,15 +18,15 @@ use tokio::runtime::{Handle, Runtime};
 type ShuffleCache = Arc<DashMap<(usize, usize, usize), Vec<u8>>>;
 
 const ENV_VAR_PREFIX: &str = "VEGA_";
-pub(crate) const THREAD_PREFIX: &str = "_VEGA";
+pub const THREAD_PREFIX: &str = "_VEGA";
 static CONF: OnceCell<Configuration> = OnceCell::new();
 static ENV: OnceCell<Env> = OnceCell::new();
 static ASYNC_RT: Lazy<Option<Runtime>> = Lazy::new(Env::build_async_executor);
 
-pub(crate) static SHUFFLE_CACHE: Lazy<ShuffleCache> = Lazy::new(|| Arc::new(DashMap::new()));
-pub(crate) static BOUNDED_MEM_CACHE: Lazy<BoundedMemoryCache> = Lazy::new(BoundedMemoryCache::new);
+pub static SHUFFLE_CACHE: Lazy<ShuffleCache> = Lazy::new(|| Arc::new(DashMap::new()));
+pub static BOUNDED_MEM_CACHE: Lazy<BoundedMemoryCache> = Lazy::new(BoundedMemoryCache::new);
 
-pub(crate) struct Env {
+pub struct Env {
     pub map_output_tracker: MapOutputTracker,
     pub shuffle_manager: ShuffleManager,
     pub shuffle_fetcher: ShuffleFetcher,
@@ -96,7 +96,7 @@ impl Env {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum LogLevel {
+pub enum LogLevel {
     Error,
     Warn,
     Debug,
@@ -157,7 +157,7 @@ impl DeploymentMode {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct Configuration {
+pub struct Configuration {
     pub is_driver: bool,
     pub local_ip: Ipv4Addr,
     pub local_dir: PathBuf,
@@ -168,13 +168,13 @@ pub(crate) struct Configuration {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct SlaveConfig {
+pub struct SlaveConfig {
     pub deployment: bool,
     pub port: u16,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct LogConfig {
+pub struct LogConfig {
     pub log_level: LogLevel,
     pub log_cleanup: bool,
 }

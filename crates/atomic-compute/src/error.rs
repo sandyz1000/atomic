@@ -148,7 +148,7 @@ pub enum Error {
 }
 
 impl Error {
-    pub(crate) fn executor_shutdown(&self) -> bool {
+    pub fn executor_shutdown(&self) -> bool {
         match self {
             Error::ExecutorShutdown => true,
             _ => false,

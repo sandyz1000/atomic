@@ -129,7 +129,11 @@ impl LiveListenerBus {
     /// listens for any additional events asynchronously while the listener bus is still running.
     /// This should only be called once.
     pub fn start(&mut self) -> LibResult<()> {
-        if self.started.compare_and_swap(false, true, Ordering::SeqCst) {
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             return Err(SchedulerError::Other);
         }
 

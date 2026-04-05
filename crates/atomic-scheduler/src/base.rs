@@ -20,15 +20,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub(crate) type EventQueue = Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
+pub type EventQueue = Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
 
-pub(crate) type RddFunc<T, U> =
-    Arc<dyn Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static>;
+// pub type RddFunc<T, U> =
+//     Arc<dyn Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static>;
 
 /// Functionality of the library built-in schedulers
 #[async_trait::async_trait]
 pub trait NativeScheduler: Send + Sync {
-    fn get_mutators(&self) -> MutatorsAndGetter;
+    fn get_mutators(&self) -> Mutators;
 
     /// Fast path for execution. Runs the DD in the driver main thread if possible.
     fn local_execution<T: Data, U: Data, F, L>(
@@ -59,13 +59,13 @@ pub trait NativeScheduler: Send + Sync {
         log::debug!("creating new stage");
         // TODO: Cache tracker - for LocalScheduler, cache is managed locally
         // For now, we skip cache registration in base scheduler
+        let m = self.get_mutators();
         if let Some(dep) = shuffle_dependency.clone() {
             log::debug!("shuffle dependency exists, registering to map output tracker");
-            self.get_mutators()
-                .register_shuffle(dep.get_shuffle_id(), rdd_base.number_of_splits());
+            m.register_shuffle(dep.get_shuffle_id(), rdd_base.number_of_splits());
             log::debug!("new stage tracker after");
         }
-        let id = self.get_mutators().get_next_stage_id();
+        let id = m.get_next_stage_id();
         log::debug!("new stage id #{}", id);
         let stage = Stage::new(
             id,
@@ -73,8 +73,7 @@ pub trait NativeScheduler: Send + Sync {
             shuffle_dependency,
             self.get_parent_stages(rdd_base).await?,
         );
-        self.get_mutators()
-            .insert_into_stage_cache(id, stage.clone());
+        m.insert_into_stage_cache(id, stage.clone());
         log::debug!("returning new stage #{}", id);
         Ok(stage)
     }
@@ -196,18 +195,17 @@ pub trait NativeScheduler: Send + Sync {
 
         // TODO: mapoutput tracker needs to be finished for this
         // let failed_stage = self.id_to_stage.lock().get(&stage_id).?.clone();
-        let failed_stage = self.get_mutators().fetch_from_stage_cache(stage_id);
+        let m = self.get_mutators();
+        let failed_stage = m.fetch_from_stage_cache(stage_id);
         jt.running.lock().await.remove(&failed_stage);
         jt.failed.lock().await.insert(failed_stage);
         // TODO: logging
-        self.get_mutators()
-            .remove_output_loc_from_stage(shuffle_id, map_id, &server_uri);
-        self.get_mutators()
-            .unregister_map_output(shuffle_id, map_id, server_uri);
+        m.remove_output_loc_from_stage(shuffle_id, map_id, &server_uri);
+        m.unregister_map_output(shuffle_id, map_id, server_uri);
         jt.failed
             .lock()
             .await
-            .insert(self.get_mutators().fetch_from_shuffle_to_cache(shuffle_id));
+            .insert(m.fetch_from_shuffle_to_cache(shuffle_id));
     }
 
     async fn on_event_success<T: Data, U: Data + Clone, F, L>(
@@ -263,13 +261,10 @@ pub trait NativeScheduler: Send + Sync {
                     "completed shuffle task server uri: {:?}",
                     shuffle_server_uri
                 );
-                self.get_mutators().add_output_loc_to_stage(
-                    smt.stage_id,
-                    smt.partition,
-                    shuffle_server_uri,
-                );
+                let m = self.get_mutators();
+                m.add_output_loc_to_stage(smt.stage_id, smt.partition, shuffle_server_uri);
 
-                let stage = self.get_mutators().fetch_from_stage_cache(smt.stage_id);
+                let stage = m.fetch_from_stage_cache(smt.stage_id);
                 log::debug!(
                     "pending stages: {:?}",
                     jt.pending_tasks
@@ -332,8 +327,7 @@ pub trait NativeScheduler: Send + Sync {
                             .map(|x| x.get(0).map(|s| s.to_owned()))
                             .collect();
                         log::debug!("locs for shuffle id #{}: {:?}", dep.get_shuffle_id(), locs);
-                        self.get_mutators()
-                            .register_map_outputs(dep.get_shuffle_id(), locs);
+                        m.register_map_outputs(dep.get_shuffle_id(), locs);
                         log::debug!("finished registering map outputs");
                     }
                     // TODO: Cache
@@ -405,6 +399,7 @@ pub trait NativeScheduler: Send + Sync {
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
         L: JobListener,
     {
+        let m = self.get_mutators();
         let mut pending_tasks = jt.pending_tasks.lock().await;
         let my_pending = pending_tasks
             .entry(stage.clone())
@@ -421,7 +416,7 @@ pub trait NativeScheduler: Send + Sync {
                 let locs = self.get_preferred_locs(jt.final_rdd.get_rdd_base(), *part);
                 // Create ResultTask and convert to TaskOption directly
                 let result_task = ResultTask::new(
-                    self.get_mutators().get_next_task_id(),
+                    m.get_next_task_id(),
                     jt.run_id,
                     jt.final_stage.id,
                     jt.final_rdd.clone(),
@@ -450,7 +445,7 @@ pub trait NativeScheduler: Send + Sync {
                             .ok_or_else(|| SchedulerError::Other)?,
                     ));
                     let shuffle_map_task = ShuffleMapTask::new(
-                        self.get_mutators().get_next_task_id(),
+                        m.get_next_task_id(),
                         jt.run_id,
                         stage.id,
                         stage.rdd.clone(),
@@ -560,18 +555,23 @@ pub trait NativeScheduler: Send + Sync {
 }
 
 #[derive(Clone, Default)]
-pub struct MutatorsAndGetter {
+pub struct Mutators {
     pub stage_cache: Arc<DashMap<usize, Stage>>,
     pub map_output_tracker: Option<Arc<MapOutputTracker>>,
     pub shuffle_to_map_stage: Arc<DashMap<usize, Stage>>,
     pub event_queues: EventQueue,
+    /// Per-RDD cached partition locations. Cleared by `update_cache_locs` when
+    /// shuffle stages complete or fetch failures are detected.
     pub cache_locs: Arc<DashMap<usize, Vec<Vec<Ipv4Addr>>>>,
-    next_job_id: Arc<AtomicUsize>,
-    next_task_id: Arc<AtomicUsize>,
-    next_stage_id: Arc<AtomicUsize>,
+    /// Monotonically increasing counter used to allocate unique job IDs.
+    pub next_job_id: Arc<AtomicUsize>,
+    /// Monotonically increasing counter used to allocate unique task IDs.
+    pub next_task_id: Arc<AtomicUsize>,
+    /// Monotonically increasing counter used to allocate unique stage IDs.
+    pub next_stage_id: Arc<AtomicUsize>,
 }
 
-impl MutatorsAndGetter {
+impl Mutators {
     pub fn new() -> Self {
         Self {
             stage_cache: Arc::new(DashMap::new()),

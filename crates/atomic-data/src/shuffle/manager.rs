@@ -16,7 +16,7 @@ use hyper_util::rt::TokioIo;
 use rand::RngExt;
 use uuid::Uuid;
 
-pub(crate) type LibResult<T> = Result<T, ShuffleError>;
+pub type LibResult<T> = Result<T, ShuffleError>;
 pub type Body = Full<Bytes>;
 
 fn get_free_connection(ip: Ipv4Addr) -> LibResult<(TcpListener, u16)> {

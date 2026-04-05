@@ -37,8 +37,8 @@ use crate::docker_stub::PyDockerStub;
 /// ```
 #[pyclass(name = "Rdd")]
 pub struct PyRdd {
-    pub(crate) elements: Vec<Py<PyAny>>,
-    pub(crate) num_partitions: usize,
+    pub elements: Vec<Py<PyAny>>,
+    pub num_partitions: usize,
 }
 
 impl PyRdd {

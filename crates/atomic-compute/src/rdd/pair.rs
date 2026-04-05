@@ -217,7 +217,7 @@ impl<K: Data + Clone, V: Data + Clone, U: Data, F> MappedValuesRdd<K, V, U, F>
 where
     F: RddFn<V, U>,
 {
-    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = (K, V)>>, f: F) -> Self {
+    pub fn new(id: usize, prev: Arc<dyn Rdd<Item = (K, V)>>, f: F) -> Self {
         let mut vals = RddVals::new(id);
         vals.dependencies
             .push(Dependency::new_one_to_one(prev.get_rdd_base()));
@@ -321,7 +321,7 @@ impl<K: Data + Clone, V: Data + Clone, U: Data, F> FlatMappedValuesRdd<K, V, U, 
 where
     F: RddFlatMapFn<V, U>,
 {
-    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = (K, V)>>, f: F) -> Self {
+    pub fn new(id: usize, prev: Arc<dyn Rdd<Item = (K, V)>>, f: F) -> Self {
         let mut vals = RddVals::new(id);
         vals.dependencies
             .push(Dependency::new_one_to_one(prev.get_rdd_base()));
