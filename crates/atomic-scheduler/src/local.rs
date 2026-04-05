@@ -318,8 +318,22 @@ impl NativeScheduler for LocalScheduler {
         let my_attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
         let event_queues = self.mutators.event_queues.clone();
 
-        // No need to serialize for local execution
+        // No need to serialize for local execution — runs on a Tokio blocking thread
+        let task_id = match &task {
+            TaskOption::ResultTask(t) => t.task_id,
+            TaskOption::ShuffleMapTask(t) => t.task_id,
+        };
+        log::info!(
+            "[local-worker] spawning task_id={} attempt={} on blocking thread",
+            task_id,
+            my_attempt_id,
+        );
         tokio::task::spawn_blocking(move || {
+            log::info!(
+                "[local-worker] executing task_id={} thread={:?}",
+                task_id,
+                std::thread::current().id(),
+            );
             LocalScheduler::run_task::<T, U, F>(event_queues, task, id_in_job, my_attempt_id)
         });
     }

@@ -3,7 +3,6 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use crate::error::Error;
-use atomic_data::distributed::ExecutionBackend;
 use log::LevelFilter;
 use once_cell::sync::{Lazy, OnceCell};
 use serde::{Deserialize, Serialize};
@@ -109,7 +108,6 @@ pub struct Configuration {
 pub struct SlaveConfig {
     pub deployment: bool,
     pub port: u16,
-    pub backend: ExecutionBackend,
     pub max_concurrent_tasks: u16,
 }
 
@@ -125,7 +123,6 @@ impl From<(bool, u16)> for SlaveConfig {
         SlaveConfig {
             deployment,
             port,
-            backend: ExecutionBackend::Docker,
             max_concurrent_tasks: num_cpus::get().max(1) as u16,
         }
     }
@@ -196,14 +193,7 @@ impl Default for Configuration {
                 .ok()
                 .and_then(|s| s.parse::<u16>().ok())
                 .expect("Port required while deploying a worker.");
-            let backend = std::env::var(concat_prefix(ENV_VAR_PREFIX, "WORKER_BACKEND"))
-                .ok()
-                .and_then(|s| {
-                    serde_json::from_str::<ExecutionBackend>(&format!("\"{}\"", s.to_lowercase()))
-                        .ok()
-                })
-                .unwrap_or(ExecutionBackend::Docker);
-            let max_concurrent_tasks =
+                let max_concurrent_tasks =
                 std::env::var(concat_prefix(ENV_VAR_PREFIX, "WORKER_MAX_CONCURRENT_TASKS"))
                     .ok()
                     .and_then(|s| s.parse::<u16>().ok())
@@ -213,7 +203,6 @@ impl Default for Configuration {
                 Some(SlaveConfig {
                     deployment: true,
                     port,
-                    backend,
                     max_concurrent_tasks,
                 }),
             )

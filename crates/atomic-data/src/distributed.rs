@@ -102,316 +102,48 @@ where
     }
 }
 
+/// The action the worker should apply over the partition data using the named task function.
+///
+/// The driver sets this based on which RDD operation triggered the task submission.
+/// The worker dispatch handler reads this to decide how to iterate over the partition.
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    Serialize,
-    Deserialize,
+    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
-#[serde(rename_all = "lowercase")]
-pub enum ExecutionBackend {
-    LocalThread,
-    Docker,
-    Wasm,
+#[serde(rename_all = "snake_case")]
+pub enum TaskAction {
+    /// Apply task function element-wise: `output = task_fn(element)` for each element.
+    Map,
+    /// Keep elements where task function returns true.
+    Filter,
+    /// Apply task function element-wise, each call returns an iterator of output elements.
+    FlatMap,
+    /// Fold partition to a single value. `payload` carries the rkyv-encoded zero/identity value.
+    Fold,
+    /// Reduce partition to a single value using task function as the combiner.
+    Reduce,
+    /// Aggregate partition. `payload` carries the rkyv-encoded zero/identity value.
+    Aggregate,
+    /// Collect all elements from partition (identity pass-through).
+    Collect,
+    /// Shuffle map phase: repartition elements by key into `num_output_partitions` buckets.
+    ShuffleMap { shuffle_id: usize, num_output_partitions: usize },
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    Serialize,
-    Deserialize,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum ArtifactKind {
-    Docker,
-    Wasm,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    Serialize,
-    Deserialize,
-)]
-#[serde(rename_all = "lowercase")]
-pub enum RuntimeKind {
-    Rust,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
+/// Result status codes for task execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum ResultStatus {
     Success,
     RetryableFailure,
     FatalFailure,
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    Serialize,
-    Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum WasmValueEncoding {
-    RawBytes,
-    Rkyv,
-    /// JSON-encoded value (serde_json). Used for cross-language tasks callable
-    /// from Python or JavaScript where rkyv bytes cannot be produced by the caller.
-    Json,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
-)]
-pub struct ResourceProfile {
-    pub cpu_millis: u32,
-    pub memory_mb: u32,
-    pub timeout_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct DockerTaskPayload {
-    pub command: Vec<String>,
-    pub env: Vec<(String, String)>,
-    pub work_dir: Option<String>,
-    pub stdin: Option<Vec<u8>>,
-    pub log_key: Option<String>,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
-)]
-pub struct WasmTaskPayload {
-    pub abi_version: u16,
-    pub cfg_enc: WasmValueEncoding,
-    pub cfg_data: Vec<u8>,
-    pub part_enc: WasmValueEncoding,
-    pub result_enc: WasmValueEncoding,
-}
-
-impl WasmTaskPayload {
-    pub fn new(cfg_data: Vec<u8>) -> Self {
-        Self {
-            abi_version: WIRE_SCHEMA_V1,
-            cfg_enc: WasmValueEncoding::Rkyv,
-            cfg_data,
-            part_enc: WasmValueEncoding::Rkyv,
-            result_enc: WasmValueEncoding::Rkyv,
-        }
-    }
-
-    pub fn with_encodings(
-        cfg_enc: WasmValueEncoding,
-        cfg_data: Vec<u8>,
-        part_enc: WasmValueEncoding,
-        result_enc: WasmValueEncoding,
-    ) -> Self {
-        Self {
-            abi_version: WIRE_SCHEMA_V1,
-            cfg_enc,
-            cfg_data,
-            part_enc,
-            result_enc,
-        }
-    }
-
-    pub fn raw_bytes() -> Self {
-        Self::with_encodings(
-            WasmValueEncoding::RawBytes,
-            Vec::new(),
-            WasmValueEncoding::RawBytes,
-            WasmValueEncoding::RawBytes,
-        )
-    }
-}
-
-/// Wire payload for a distributed fold action — carries the zero/identity value.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
-)]
-pub struct FoldActionConfig<T> {
-    pub zero: T,
-}
-
-/// Wire payload for a distributed aggregate action — carries the zero/identity value.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
-)]
-pub struct AggregateConfig<U> {
-    pub zero: U,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
-)]
-pub struct ArtifactDescriptor {
-    /// Stable identifier mapped in driver and worker registries.
-    #[serde(rename = "operation_id")]
-    pub op_id: String,
-    /// The scheduler picks one backend for the task instead of probing workers at runtime.
-    #[serde(rename = "execution_backend")]
-    pub backend: ExecutionBackend,
-    #[serde(rename = "artifact_kind")]
-    pub kind: ArtifactKind,
-    /// Registry reference. Examples:
-    /// - Docker: `registry/repo/image@sha256:...`
-    /// - WASM: `oci://registry/repo/module@sha256:...`
-    #[serde(rename = "artifact_ref")]
-    pub uri: String,
-    /// Entrypoint inside the artifact (exported wasm fn or container command id).
-    pub entrypoint: String,
-    pub runtime: RuntimeKind,
-    /// Immutable artifact digest that ties task placement to a build output.
-    #[serde(rename = "artifact_digest")]
-    pub digest: Option<String>,
-    /// Build target used to produce the artifact, such as `wasm32-wasip2`.
-    pub build_target: Option<String>,
-    pub profile: ResourceProfile,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactManifest {
-    #[serde(rename = "schema_version")]
-    pub version: u16,
-    #[serde(rename = "wasm_artifacts", default)]
-    pub wasm: Vec<WasmManifestEntry>,
-    /// Docker artifacts listed in this manifest. Defaults to empty when absent in TOML.
-    #[serde(rename = "docker_artifacts", default)]
-    pub docker: Vec<DockerManifestEntry>,
-}
-
-impl ArtifactManifest {
-    pub fn new(wasm: Vec<WasmManifestEntry>) -> Self {
-        Self {
-            version: WIRE_SCHEMA_V1,
-            wasm,
-            docker: Vec::new(),
-        }
-    }
-}
-
-/// A Docker artifact entry in a manifest file.
+/// The wire envelope sent from driver to worker for every distributed task.
 ///
-/// Example TOML:
-/// ```toml
-/// [[docker_artifacts]]
-/// image = "registry/repo/image@sha256:abc123"
-/// args = ["/usr/local/bin/worker", "--op", "map"]
-/// env = [["OPERATION", "map"]]
-///
-/// [docker_artifacts.descriptor]
-/// operation_id = "demo.map.docker.v1"
-/// execution_backend = "docker"
-/// artifact_kind = "docker"
-/// artifact_ref = "registry/repo/image@sha256:abc123"
-/// entrypoint = "/usr/local/bin/worker"
-/// runtime = "rust"
-/// artifact_digest = "sha256:abc123"
-/// build_target = "x86_64-unknown-linux-musl"
-///
-/// [docker_artifacts.descriptor.profile]
-/// cpu_millis = 500
-/// memory_mb = 256
-/// timeout_ms = 5000
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DockerManifestEntry {
-    pub descriptor: ArtifactDescriptor,
-    /// Full image reference, e.g. `registry/repo/image@sha256:...`
-    pub image: String,
-    /// Command to run inside the container. Partition bytes arrive via stdin.
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Static environment variables baked into the manifest.
-    #[serde(default)]
-    pub env: Vec<(String, String)>,
-}
-
-/// One entry in an [`ArtifactManifest`] for a WASM artifact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WasmManifestEntry {
-    pub descriptor: ArtifactDescriptor,
-    pub abi_version: u16,
-    pub module_path: Option<String>,
-}
-
-impl WasmManifestEntry {
-    pub fn new(descriptor: ArtifactDescriptor, module_path: Option<String>) -> Self {
-        Self {
-            descriptor,
-            abi_version: WIRE_SCHEMA_V1,
-            module_path,
-        }
-    }
-}
-
-/// Pool configuration for WASM module instances and Docker warm containers.
-///
-/// Added to `WasmManifestEntry` and `DockerManifestEntry` to
-/// control how many sandboxes the worker keeps alive between task calls.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PoolConfig {
-    /// Minimum number of warm instances to maintain even when idle.
-    #[serde(default)]
-    pub min_warm: u16,
-    /// Maximum concurrent instances per operation. Default: 4.
-    #[serde(rename = "max_per_op", default = "PoolConfig::default_max_slots")]
-    pub max_slots: u16,
-    /// Evict idle instances after this many seconds. Default: 60.
-    #[serde(
-        rename = "idle_timeout_secs",
-        default = "PoolConfig::default_idle_secs"
-    )]
-    pub idle_secs: u32,
-}
-
-impl PoolConfig {
-    fn default_max_slots() -> u16 {
-        4
-    }
-    fn default_idle_secs() -> u32 {
-        60
-    }
-}
-
-impl Default for PoolConfig {
-    fn default() -> Self {
-        Self {
-            min_warm: 0,
-            max_slots: Self::default_max_slots(),
-            idle_secs: Self::default_idle_secs(),
-        }
-    }
-}
-
+/// Contains everything the worker needs to execute one partition of work:
+/// - which function to call (`op_id`)
+/// - what to do with it (`action`)
+/// - configuration data for the action (`payload`, e.g. fold zero value)
+/// - the partition elements (`data`, rkyv-encoded `Vec<T>`)
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct TaskEnvelope {
     pub version: u16,
@@ -422,14 +154,19 @@ pub struct TaskEnvelope {
     pub partition_id: usize,
     /// Correlates scheduler logs and worker logs.
     pub trace_id: String,
-    pub artifact: ArtifactDescriptor,
-    /// Values that closures would normally capture, encoded by the driver.
+    /// Registered task op_id, e.g. `"mycrate::double"`. The worker looks this up
+    /// in its compile-time dispatch table.
+    pub op_id: String,
+    /// The action to perform on the partition using the named task function.
+    pub action: TaskAction,
+    /// Action configuration (rkyv-encoded): zero value for Fold/Aggregate, empty for Map/Reduce.
     pub payload: Vec<u8>,
-    /// Serialized partition bytes.
+    /// Serialized partition elements (rkyv-encoded `Vec<T>`).
     pub data: Vec<u8>,
 }
 
 impl TaskEnvelope {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         run_id: usize,
         stage_id: usize,
@@ -437,7 +174,8 @@ impl TaskEnvelope {
         attempt_id: usize,
         partition_id: usize,
         trace_id: String,
-        artifact: ArtifactDescriptor,
+        op_id: String,
+        action: TaskAction,
         payload: Vec<u8>,
         data: Vec<u8>,
     ) -> Self {
@@ -449,7 +187,8 @@ impl TaskEnvelope {
             attempt_id,
             partition_id,
             trace_id,
-            artifact,
+            op_id,
+            action,
             payload,
             data,
         }
@@ -535,21 +274,21 @@ impl TaskResultEnvelope {
     }
 }
 
+/// Worker capabilities reported to the driver on handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct WorkerCapabilities {
     pub version: u16,
     pub worker_id: String,
-    pub backend: ExecutionBackend,
-    pub artifacts: Vec<ArtifactKind>,
-    pub runtimes: Vec<RuntimeKind>,
     pub max_tasks: u16,
 }
 
 impl WorkerCapabilities {
-    pub fn supports(&self, artifact: &ArtifactDescriptor) -> bool {
-        self.backend == artifact.backend
-            && self.artifacts.contains(&artifact.kind)
-            && self.runtimes.contains(&artifact.runtime)
+    pub fn new(worker_id: String, max_tasks: u16) -> Self {
+        Self {
+            version: WIRE_SCHEMA_V1,
+            worker_id,
+            max_tasks,
+        }
     }
 }
 
@@ -557,53 +296,75 @@ impl WorkerCapabilities {
 mod tests {
     use super::*;
 
-    fn wasm_descriptor() -> ArtifactDescriptor {
-        ArtifactDescriptor {
-            op_id: "map.words.v1".to_string(),
-            backend: ExecutionBackend::Wasm,
-            kind: ArtifactKind::Wasm,
-            uri: "oci://registry/atomic/map-words@sha256:abc".to_string(),
-            entrypoint: "map_words".to_string(),
-            runtime: RuntimeKind::Rust,
-            digest: Some("sha256:abc".to_string()),
-            build_target: Some("wasm32-wasip2".to_string()),
-            profile: ResourceProfile {
-                cpu_millis: 250,
-                memory_mb: 128,
-                timeout_ms: 5_000,
-            },
-        }
-    }
-
     #[test]
-    fn wasm_payload_round_trips_with_rkyv() {
-        let payload = WasmTaskPayload::new(vec![1, 2, 3, 4]);
-        let bytes = payload.encode_wire().expect("serialize payload");
-        let decoded = WasmTaskPayload::decode_wire(&bytes).expect("deserialize payload");
-        assert_eq!(decoded, payload);
-    }
-
-    #[test]
-    fn manifest_entry_keeps_wasm_descriptor_metadata() {
-        let entry = WasmManifestEntry::new(
-            wasm_descriptor(),
-            Some("target/wasm-artifacts/map_words.wasm".to_string()),
+    fn task_envelope_round_trips_with_rkyv() {
+        let envelope = TaskEnvelope::new(
+            1, 2, 3, 0, 4,
+            "trace-1".to_string(),
+            "mycrate::double".to_string(),
+            TaskAction::Map,
+            vec![],
+            vec![1, 2, 3],
         );
-
-        assert_eq!(entry.abi_version, WIRE_SCHEMA_V1);
-        assert_eq!(entry.descriptor.backend, ExecutionBackend::Wasm);
-        assert_eq!(entry.descriptor.kind, ArtifactKind::Wasm);
-        assert_eq!(
-            entry.module_path.as_deref(),
-            Some("target/wasm-artifacts/map_words.wasm")
-        );
+        let bytes = envelope.encode_wire().expect("serialize envelope");
+        let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize envelope");
+        assert_eq!(decoded.op_id, "mycrate::double");
+        assert_eq!(decoded.action, TaskAction::Map);
+        assert_eq!(decoded.data, vec![1, 2, 3]);
     }
 
     #[test]
-    fn rkyv_codec_round_trips_partition_values() {
-        let encoded = vec![1_u32, 2, 3].encode_wire().expect("serialize values");
-        let decoded = Vec::<u32>::decode_wire(&encoded).expect("deserialize values");
-        assert_eq!(decoded, vec![1, 2, 3]);
+    fn task_result_envelope_ok_round_trips() {
+        let result = TaskResultEnvelope::ok(1, 2, 3, 0, "worker-1".to_string(), vec![4, 5, 6]);
+        let bytes = result.encode_wire().expect("serialize result");
+        let decoded = TaskResultEnvelope::decode_wire(&bytes).expect("deserialize result");
+        assert_eq!(decoded.status, ResultStatus::Success);
+        assert_eq!(decoded.data, vec![4, 5, 6]);
+        assert_eq!(decoded.worker_id, "worker-1");
+    }
+
+    #[test]
+    fn task_action_fold_round_trips() {
+        let envelope = TaskEnvelope::new(
+            1, 2, 3, 0, 4,
+            "trace-2".to_string(),
+            "mycrate::sum".to_string(),
+            TaskAction::Fold,
+            0_i32.to_le_bytes().to_vec(), // zero value
+            vec![1, 2, 3],
+        );
+        let bytes = envelope.encode_wire().expect("serialize");
+        let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
+        assert_eq!(decoded.action, TaskAction::Fold);
+        assert_eq!(decoded.payload, 0_i32.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn shuffle_map_action_carries_ids() {
+        let action = TaskAction::ShuffleMap { shuffle_id: 7, num_output_partitions: 4 };
+        let envelope = TaskEnvelope::new(
+            1, 2, 3, 0, 4,
+            "trace-3".to_string(),
+            "sys.shuffle_map".to_string(),
+            action,
+            vec![],
+            vec![],
+        );
+        let bytes = envelope.encode_wire().expect("serialize");
+        let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
+        assert!(matches!(
+            decoded.action,
+            TaskAction::ShuffleMap { shuffle_id: 7, num_output_partitions: 4 }
+        ));
+    }
+
+    #[test]
+    fn worker_capabilities_round_trips() {
+        let caps = WorkerCapabilities::new("worker-42".to_string(), 8);
+        let bytes = caps.encode_wire().expect("serialize caps");
+        let decoded = WorkerCapabilities::decode_wire(&bytes).expect("deserialize caps");
+        assert_eq!(decoded.worker_id, "worker-42");
+        assert_eq!(decoded.max_tasks, 8);
     }
 
     #[test]
@@ -613,61 +374,9 @@ mod tests {
     }
 
     #[test]
-    fn pool_config_default_values() {
-        let cfg = PoolConfig::default();
-        assert_eq!(cfg.min_warm, 0);
-        assert_eq!(cfg.max_slots, 4);
-        assert_eq!(cfg.idle_secs, 60);
-    }
-
-    #[test]
-    fn resource_profile_fields() {
-        let profile = ResourceProfile {
-            cpu_millis: 500,
-            memory_mb: 256,
-            timeout_ms: 10_000,
-        };
-        assert_eq!(profile.cpu_millis, 500);
-        assert_eq!(profile.memory_mb, 256);
-        assert_eq!(profile.timeout_ms, 10_000);
-    }
-
-    #[test]
-    fn docker_task_payload_fields_accessible() {
-        let payload = DockerTaskPayload {
-            command: vec!["echo".into()],
-            env: vec![("K".into(), "V".into())],
-            work_dir: Some("/work".into()),
-            stdin: Some(vec![1, 2, 3]),
-            log_key: Some("run-1".into()),
-        };
-        assert_eq!(payload.command, vec!["echo"]);
-        assert_eq!(payload.work_dir.as_deref(), Some("/work"));
-        assert_eq!(payload.stdin.as_deref(), Some([1u8, 2, 3].as_slice()));
-    }
-
-    #[test]
-    fn wasm_task_payload_raw_bytes_ctor() {
-        let p = WasmTaskPayload::raw_bytes();
-        assert_eq!(p.cfg_enc, WasmValueEncoding::RawBytes);
-        assert_eq!(p.part_enc, WasmValueEncoding::RawBytes);
-        assert_eq!(p.result_enc, WasmValueEncoding::RawBytes);
-        assert!(p.cfg_data.is_empty());
-    }
-
-    #[test]
-    fn artifact_descriptor_backend_and_kind() {
-        let d = wasm_descriptor();
-        assert_eq!(d.backend, ExecutionBackend::Wasm);
-        assert_eq!(d.kind, ArtifactKind::Wasm);
-        assert_eq!(d.op_id, "map.words.v1");
-    }
-
-    #[test]
-    fn artifact_manifest_new_empty_docker() {
-        let manifest = ArtifactManifest::new(vec![]);
-        assert_eq!(manifest.version, WIRE_SCHEMA_V1);
-        assert!(manifest.wasm.is_empty());
-        assert!(manifest.docker.is_empty());
+    fn rkyv_codec_round_trips_partition_values() {
+        let encoded = vec![1_u32, 2, 3].encode_wire().expect("serialize values");
+        let decoded = Vec::<u32>::decode_wire(&encoded).expect("deserialize values");
+        assert_eq!(decoded, vec![1, 2, 3]);
     }
 }

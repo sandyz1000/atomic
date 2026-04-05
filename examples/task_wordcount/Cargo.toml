@@ -1,0 +1,13 @@
+[package]
+name = "task_wordcount"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "task_wordcount"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute.workspace = true
+# atomic-runtime.workspace = true
+tokio.workspace = true

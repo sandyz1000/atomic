@@ -10,10 +10,7 @@ pub mod partitioner;
 pub mod rdd;
 pub mod shuffle;
 pub mod split;
-pub mod stub;
 pub mod task;
-pub mod task_registry;
-// pub mod env;
 pub mod task_context;
 pub mod hosts;
 

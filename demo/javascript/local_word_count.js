@@ -3,7 +3,7 @@
  *
  * Run with:
  *   cargo build -p atomic-js --release
- *   ./target/release/atomic-js examples/javascript/local_word_count.js
+ *   ./target/release/atomic-js demo/javascript/local_word_count.js
  */
 
 const lines = atomic.parallelize([

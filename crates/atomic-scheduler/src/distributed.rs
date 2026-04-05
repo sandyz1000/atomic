@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fmt::Debug,
     net::{Ipv4Addr, SocketAddrV4},
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -14,15 +13,13 @@ use atomic_data::{
     data::Data,
     dependency::ShuffleDependencyBox,
     distributed::{
-        ArtifactDescriptor, ArtifactManifest, TRANSPORT_HEADER_LEN, TaskEnvelope,
-        TaskResultEnvelope, TransportFrameKind, WasmTaskPayload, WasmValueEncoding, WireDecode,
-        WireEncode, WorkerCapabilities, encode_transport_frame, parse_transport_header,
+        TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope, TaskResultEnvelope, TransportFrameKind,
+        WireDecode, WireEncode, WorkerCapabilities, encode_transport_frame, parse_transport_header,
     },
     partial::{ApproximateEvaluator, result::PartialResult},
     rdd::{Rdd, RddBase},
     task::TaskOption,
     task_context::TaskContext,
-    task_registry::TaskRegistry,
 };
 use dashmap::DashMap;
 use futures::future::try_join_all;
@@ -42,63 +39,25 @@ use crate::{
 };
 
 #[derive(Clone, Default)]
-// #[allow(dead_code)]
 pub struct DistributedScheduler {
-    /// Shared mutable state: stage cache, event queues, map-output tracker, and ID counters.
-    /// Cloned cheaply because every inner value is `Arc`-wrapped.
     mutators: Mutators,
-
-    /// Maximum number of times a single task partition is retried before the job fails.
-    /// Consulted inside `submit_registered_task` to bound the retry loop per task.
     max_failures: usize,
-
-    /// Monotonically increasing attempt counter across all tasks in this scheduler instance.
-    /// Each call to `submit_registered_task` increments this and embeds the value in `TaskEnvelope`.
     attempt_id: Arc<AtomicUsize>,
 
-    /// Per-worker capability declarations used to match an artifact's backend/kind to a worker.
-    /// Consulted by `select_executor_for_artifact` before dispatching a `TaskEnvelope`.
+    /// Per-worker capability declarations — keyed by endpoint.
     worker_capabilities: Arc<DashMap<SocketAddrV4, WorkerCapabilities>>,
 
-    /// Registry of `ArtifactDescriptor` entries keyed by `operation_id`.
-    /// Loaded from a TOML manifest or registered individually before jobs are submitted.
-    task_registry: Arc<Mutex<TaskRegistry>>,
-
-    /// Whether this process is the job driver (`true`) or a passthrough coordinator (`false`).
-    /// Only the driver creates jobs, allocates IDs, and routes results back to the caller.
     master: bool,
-
-    /// Tracks every in-flight job by `run_id → Job`.
-    /// Populated at the start of `run_registered_wasm_job_with_payload`; removed on completion.
     active_jobs: Arc<DashMap<usize, Job>>,
-
-    /// FIFO queue of `Job` records ordered by submission time.
-    /// Used for ordered inspection and for pruning completed jobs by `run_id`.
     active_job_queue: Arc<Mutex<VecDeque<Job>>>,
-
-    /// Routes a task's composite key (`"run_id:task_id"`) to its parent job's `run_id`.
-    /// Populated before dispatch so completion-event handlers can locate the owning job.
     taskid_to_jobid: Arc<DashMap<String, usize>>,
-
-    /// Records which worker endpoint handled each task (`"run_id:task_id"` → worker address).
-    /// Populated after `submit_task_envelope_to_worker` succeeds; used for failure attribution.
     taskid_to_slaveid: Arc<DashMap<String, String>>,
-
-    /// Full set of task keys (`"run_id:task_id"`) belonging to each job (`run_id → keys`).
-    /// Enables bulk cleanup and job-level cancellation without scanning all task maps.
     job_tasks: Arc<DashMap<usize, HashSet<String>>>,
 
     /// Registered worker endpoints, round-robined for task dispatch.
-    /// Populated via `register_worker`; rotated by `next_executor_server` and
-    /// `select_executor_for_artifact`.
     server_uris: Arc<Mutex<VecDeque<SocketAddrV4>>>,
 
-    /// Mutex used to serialise concurrent job creation in `run_registered_wasm_job_with_payload`.
-    /// Prevents two callers from racing on the same `run_id` / `stage_id` allocation window.
     scheduler_lock: Arc<Mutex<bool>>,
-
-    /// Event listener bus for broadcasting job-lifecycle events to registered listeners.
-    /// Started in `new()` and stopped in `Drop`.
     live_listener_bus: LiveListenerBus,
 }
 
@@ -111,7 +70,6 @@ impl DistributedScheduler {
             max_failures,
             attempt_id: Arc::new(AtomicUsize::new(0)),
             worker_capabilities: Arc::new(DashMap::new()),
-            task_registry: Arc::new(Mutex::new(TaskRegistry::default())),
             master,
             active_jobs: Arc::new(DashMap::new()),
             active_job_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -132,96 +90,31 @@ impl DistributedScheduler {
         }
     }
 
-    pub fn register_artifact_descriptor(
+    /// Round-robin pick of the next available worker endpoint.
+    pub fn next_executor(&self) -> LibResult<SocketAddrV4> {
+        let mut servers = self.server_uris.lock();
+        let endpoint = servers.pop_front().ok_or_else(|| {
+            SchedulerError::NoCompatibleWorker("no registered workers".to_string())
+        })?;
+        servers.push_back(endpoint);
+        Ok(endpoint)
+    }
+
+    /// Submit a single `TaskEnvelope` to a worker, retrying up to `max_failures` times.
+    pub async fn submit_native_task(
         &self,
-        descriptor: ArtifactDescriptor,
-    ) -> Option<ArtifactDescriptor> {
-        self.task_registry.lock().register(descriptor)
-    }
-
-    pub fn register_artifact_manifest(&self, manifest: ArtifactManifest) {
-        self.task_registry.lock().register_manifest(manifest);
-    }
-
-    pub fn load_artifact_manifest_toml(&self, path: impl AsRef<Path>) -> LibResult<()> {
-        let registry = TaskRegistry::load_toml_file(path)
-            .map_err(|err| SchedulerError::ArtifactResolution(err.to_string()))?;
-        *self.task_registry.lock() = registry;
-        Ok(())
-    }
-
-    pub fn resolve_artifact(&self, operation_id: &str) -> LibResult<ArtifactDescriptor> {
-        self.task_registry
-            .lock()
-            .resolve(operation_id)
-            .ok_or_else(|| SchedulerError::ArtifactResolution(operation_id.to_string()))
-    }
-
-    pub fn build_registered_task_envelope(
-        &self,
-        run_id: usize,
-        stage_id: usize,
-        task_id: usize,
-        attempt_id: usize,
-        partition_id: usize,
-        trace_id: impl Into<String>,
-        operation_id: &str,
-        payload: Vec<u8>,
-        partition_data: Vec<u8>,
-    ) -> LibResult<TaskEnvelope> {
-        let artifact = self.resolve_artifact(operation_id)?;
-        Ok(TaskEnvelope::new(
-            run_id,
-            stage_id,
-            task_id,
-            attempt_id,
-            partition_id,
-            trace_id.into(),
-            artifact,
-            payload,
-            partition_data,
-        ))
-    }
-
-    /// Submit a single registered task to a compatible worker, retrying up to `max_failures`
-    /// times on transport errors before propagating the failure.
-    ///
-    /// Returns the result envelope together with the address of the worker that succeeded,
-    /// so callers can record the assignment in `taskid_to_slaveid`.
-    pub async fn submit_registered_task(
-        &self,
-        run_id: usize,
-        stage_id: usize,
-        task_id: usize,
-        attempt_id: usize,
-        partition_id: usize,
-        trace_id: impl Into<String>,
-        operation_id: &str,
-        payload: Vec<u8>,
-        partition_data: Vec<u8>,
+        task: &TaskEnvelope,
     ) -> LibResult<(TaskResultEnvelope, SocketAddrV4)> {
-        let task = self.build_registered_task_envelope(
-            run_id,
-            stage_id,
-            task_id,
-            attempt_id,
-            partition_id,
-            trace_id,
-            operation_id,
-            payload,
-            partition_data,
-        )?;
         let mut last_err = None;
         for attempt in 0..=self.max_failures {
-            // Re-select the executor on each attempt so a different worker is tried after failure.
-            let target = self.select_executor_for_artifact(&task.artifact)?;
-            match self.submit_task_envelope_to_worker(&task, target).await {
+            let target = self.next_executor()?;
+            match self.submit_task_envelope_to_worker(task, target).await {
                 Ok(result) => return Ok((result, target)),
                 Err(e) => {
                     log::warn!(
                         "task {}/{} attempt {}/{} failed: {}",
-                        run_id,
-                        task_id,
+                        task.run_id,
+                        task.task_id,
                         attempt + 1,
                         self.max_failures + 1,
                         e
@@ -233,27 +126,17 @@ impl DistributedScheduler {
         Err(last_err.unwrap())
     }
 
-    pub async fn run_registered_wasm_job(
+    /// Run a native (non-artifact) job over a set of pre-encoded partitions.
+    ///
+    /// Sends one `TaskEnvelope` per partition, each carrying `op_id` and `action`.
+    /// Returns raw result bytes per partition in submission order.
+    pub async fn run_native_job(
         &self,
-        operation_id: &str,
+        op_id: &str,
+        action: TaskAction,
+        payload: Vec<u8>,
         partitions: Vec<Vec<u8>>,
     ) -> LibResult<Vec<Vec<u8>>> {
-        self.run_registered_wasm_job_with_payload(
-            operation_id,
-            WasmTaskPayload::raw_bytes(),
-            partitions,
-        )
-        .await
-    }
-
-    pub async fn run_registered_wasm_job_with_payload(
-        &self,
-        operation_id: &str,
-        payload: WasmTaskPayload,
-        partitions: Vec<Vec<u8>>,
-    ) -> LibResult<Vec<Vec<u8>>> {
-        // Serialise job creation to prevent concurrent callers from racing on the same
-        // run_id / stage_id allocation window.
         let (run_id, stage_id) = {
             let _lock = self.scheduler_lock.lock();
             let run_id = self.get_mutators().get_next_job_id();
@@ -264,10 +147,6 @@ impl DistributedScheduler {
             (run_id, stage_id)
         };
 
-        let payload_bytes = payload
-            .encode_wire()
-            .map_err(|err| SchedulerError::Transport(err.to_string()))?;
-
         let submits = partitions
             .into_iter()
             .enumerate()
@@ -275,10 +154,19 @@ impl DistributedScheduler {
                 let task_id = self.get_mutators().get_next_task_id();
                 let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
                 let task_key = format!("{}:{}", run_id, task_id);
-                let payload = payload_bytes.clone();
+                let task = TaskEnvelope::new(
+                    run_id,
+                    stage_id,
+                    task_id,
+                    attempt_id,
+                    partition_id,
+                    format!("native-{}-{}", op_id, partition_id),
+                    op_id.to_string(),
+                    action.clone(),
+                    payload.clone(),
+                    partition_data,
+                );
 
-                // Register the task → job mapping before dispatch so completion handlers can
-                // route events and diagnostics back to the correct job.
                 self.taskid_to_jobid.insert(task_key.clone(), run_id);
                 self.job_tasks
                     .entry(run_id)
@@ -286,32 +174,15 @@ impl DistributedScheduler {
                     .insert(task_key.clone());
 
                 async move {
-                    let trace_id = format!("wasm-{}-{}", operation_id, partition_id);
-                    let (result, worker_addr) = self
-                        .submit_registered_task(
-                            run_id,
-                            stage_id,
-                            task_id,
-                            attempt_id,
-                            partition_id,
-                            trace_id,
-                            operation_id,
-                            payload,
-                            partition_data,
-                        )
-                        .await?;
-
-                    // Record which worker handled this task for failure attribution.
+                    let (result, worker_addr) = self.submit_native_task(&task).await?;
                     self.taskid_to_slaveid
                         .insert(task_key, worker_addr.to_string());
-
                     Ok::<_, SchedulerError>(result)
                 }
             });
 
         let result = try_join_all(submits).await;
 
-        // Clean up all tracking state for this job regardless of success or failure.
         self.active_jobs.remove(&run_id);
         self.active_job_queue
             .lock()
@@ -340,7 +211,7 @@ impl DistributedScheduler {
     {
         let _ = (self, func, final_rdd, evaluator, timeout);
         Err(SchedulerError::UnsupportedOperation(
-            "legacy distributed TaskOption execution has been removed; use registered artifact jobs",
+            "distributed approximate jobs require the local scheduler",
         ))
     }
 
@@ -356,117 +227,8 @@ impl DistributedScheduler {
     {
         let _ = (self, func, final_rdd, partitions, allow_local);
         Err(SchedulerError::UnsupportedOperation(
-            "legacy distributed TaskOption execution has been removed; use registered artifact jobs",
+            "use run_native_job for distributed execution",
         ))
-    }
-
-    async fn event_process_loop<T: Data, U: Data + Clone, F, L>(
-        self: Arc<Self>,
-        allow_local: bool,
-        jt: Arc<JobTracker<F, U, T, L>>,
-    ) -> LibResult<Vec<U>>
-    where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
-        L: JobListener,
-    {
-        if allow_local {
-            if let Some(result) = DistributedScheduler::local_execution(jt.clone())? {
-                return Ok(result);
-            }
-        }
-
-        self.mutators
-            .event_queues
-            .insert(jt.run_id, VecDeque::new());
-
-        let mut results: Vec<Option<U>> = (0..jt.num_output_parts).map(|_| None).collect();
-        let mut fetch_failure_duration = Duration::new(0, 0);
-
-        self.submit_stage(jt.final_stage.clone(), jt.clone())
-            .await?;
-
-        let mut num_finished = 0;
-        while num_finished != jt.num_output_parts {
-            let event_option = self.wait_for_event(jt.run_id, 100);
-            let start = Instant::now();
-
-            if let Some(evt) = event_option {
-                let stage = self
-                    .mutators
-                    .stage_cache
-                    .get(&evt.task.get_stage_id())
-                    .unwrap()
-                    .clone();
-                jt.pending_tasks
-                    .lock()
-                    .await
-                    .get_mut(&stage)
-                    .unwrap()
-                    .remove(&evt.task);
-                use super::dag::TastEndReason::*;
-                match evt.reason {
-                    Success => {
-                        self.on_event_success(evt, &mut results, &mut num_finished, jt.clone())
-                            .await?;
-                    }
-                    FetchFailed(failed_vals) => {
-                        self.on_event_failure(jt.clone(), failed_vals, evt.task.get_stage_id())
-                            .await;
-                        fetch_failure_duration = start.elapsed();
-                    }
-                    Error(error) => panic!("{}", error),
-                    OtherFailure(msg) => panic!("{}", msg),
-                }
-            }
-        }
-
-        if !jt.failed.lock().await.is_empty() && fetch_failure_duration.as_millis() > 3000 {
-            self.update_cache_locs().await?;
-            for stage in jt.failed.lock().await.iter() {
-                self.submit_stage(stage.clone(), jt.clone()).await?;
-            }
-            jt.failed.lock().await.clear();
-        }
-
-        self.mutators.event_queues.remove(&jt.run_id);
-        Ok(results
-            .into_iter()
-            .map(|value| value.expect("some results still missing"))
-            .collect())
-    }
-
-    pub fn select_executor_for_artifact(
-        &self,
-        artifact: &ArtifactDescriptor,
-    ) -> LibResult<SocketAddrV4> {
-        let mut servers = self.server_uris.lock();
-        if servers.is_empty() {
-            return Err(SchedulerError::NoCompatibleWorker(
-                "no registered worker endpoints".to_string(),
-            ));
-        }
-
-        let attempts = servers.len();
-        for _ in 0..attempts {
-            let endpoint = servers.pop_front().ok_or_else(|| {
-                SchedulerError::NoCompatibleWorker("no worker endpoints".to_string())
-            })?;
-            servers.push_back(endpoint);
-
-            if self
-                .worker_capabilities
-                .get(&endpoint)
-                .map(|caps| caps.supports(artifact))
-                .unwrap_or(false)
-            {
-                return Ok(endpoint);
-            }
-        }
-
-        Err(SchedulerError::NoCompatibleWorker(format!(
-            "backend {:?}, artifact {:?}, runtime {:?}",
-            artifact.backend, artifact.kind, artifact.runtime
-        )))
     }
 
     pub async fn submit_task_envelope_to_worker(
@@ -554,9 +316,7 @@ impl NativeScheduler for DistributedScheduler {
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
     {
         let _ = (task, _id_in_job, _target_executor);
-        log::debug!(
-            "ignoring legacy distributed submit_task call; registered artifact jobs are required"
-        );
+        log::debug!("legacy submit_task ignored; use run_native_job");
     }
 
     fn next_executor_server(&self, task: &TaskOption) -> SocketAddrV4 {
@@ -582,7 +342,6 @@ impl NativeScheduler for DistributedScheduler {
     }
 
     async fn update_cache_locs(&self) -> LibResult<()> {
-        // Cache tracker integration is not yet wired — clear local locs only.
         self.mutators.cache_locs.clear();
         Ok(())
     }
@@ -629,94 +388,47 @@ impl Drop for DistributedScheduler {
 mod tests {
     use super::*;
     use atomic_data::distributed::{
-        ArtifactKind, ArtifactManifest, ExecutionBackend, ResourceProfile, RuntimeKind,
-        TaskResultEnvelope, WasmManifestEntry, WireDecode, WireEncode,
-        encode_transport_frame,
+        ResultStatus, TaskAction, TaskResultEnvelope, WireDecode, WireEncode,
+        encode_transport_frame, parse_transport_header, TRANSPORT_HEADER_LEN,
     };
 
-    fn artifact_descriptor(backend: ExecutionBackend, kind: ArtifactKind) -> ArtifactDescriptor {
-        ArtifactDescriptor {
-            op_id: "op.test".to_string(),
-            backend,
-            kind,
-            uri: "registry/test@sha256:abc".to_string(),
-            entrypoint: "run".to_string(),
-            runtime: RuntimeKind::Rust,
-            digest: Some("sha256:abc".to_string()),
-            build_target: Some("wasm32-wasip2".to_string()),
-            profile: ResourceProfile {
-                cpu_millis: 250,
-                memory_mb: 128,
-                timeout_ms: 1_000,
-            },
-        }
-    }
-
     #[test]
-    fn selects_worker_with_matching_capabilities() {
+    fn register_worker_adds_to_server_list() {
         let scheduler = DistributedScheduler::new(4, true);
-        let docker_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31001);
-        let wasm_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31002);
-
+        let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31001);
         scheduler.register_worker(
-            docker_addr,
+            addr,
             WorkerCapabilities {
                 version: 1,
-                worker_id: "docker-1".to_string(),
-                backend: ExecutionBackend::Docker,
-                artifacts: vec![ArtifactKind::Docker],
-                runtimes: vec![RuntimeKind::Rust],
+                worker_id: "native-1".to_string(),
                 max_tasks: 2,
             },
         );
-        scheduler.register_worker(
-            wasm_addr,
-            WorkerCapabilities {
-                version: 1,
-                worker_id: "wasm-1".to_string(),
-                backend: ExecutionBackend::Wasm,
-                artifacts: vec![ArtifactKind::Wasm],
-                runtimes: vec![RuntimeKind::Rust],
-                max_tasks: 2,
-            },
-        );
-
-        let selected = scheduler
-            .select_executor_for_artifact(&artifact_descriptor(
-                ExecutionBackend::Wasm,
-                ArtifactKind::Wasm,
-            ))
-            .expect("should select wasm worker");
-
-        assert_eq!(selected, wasm_addr);
+        let selected = scheduler.next_executor().expect("should select worker");
+        assert_eq!(selected, addr);
     }
 
     #[test]
-    fn registered_task_envelope_uses_manifest_module_path() {
+    fn next_executor_round_robins() {
         let scheduler = DistributedScheduler::new(4, true);
-        scheduler.register_artifact_manifest(ArtifactManifest::new(vec![
-            WasmManifestEntry::new(
-                artifact_descriptor(ExecutionBackend::Wasm, ArtifactKind::Wasm),
-                Some("target/wasm/map_task.wasm".to_string()),
-            ),
-        ]));
-
-        let task = scheduler
-            .build_registered_task_envelope(1, 2, 3, 0, 4, "trace-1", "op.test", vec![9], vec![8])
-            .expect("task envelope should resolve from registry");
-
-        assert_eq!(task.artifact.backend, ExecutionBackend::Wasm);
-        assert_eq!(task.artifact.uri, "target/wasm/map_task.wasm");
+        let addr1 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31011);
+        let addr2 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31012);
+        scheduler.register_worker(addr1, WorkerCapabilities { version: 1, worker_id: "w1".to_string(), max_tasks: 1 });
+        scheduler.register_worker(addr2, WorkerCapabilities { version: 1, worker_id: "w2".to_string(), max_tasks: 1 });
+        let first = scheduler.next_executor().unwrap();
+        let second = scheduler.next_executor().unwrap();
+        assert_ne!(first, second);
     }
 
     #[tokio::test]
-    async fn submits_task_envelope_and_reads_result_frame() {
+    async fn submits_native_task_envelope_and_reads_result() {
         let scheduler = DistributedScheduler::new(4, true);
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
-            .expect("bind listener");
+            .expect("bind");
         let endpoint = listener.local_addr().expect("local addr");
         let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, endpoint.port());
+        scheduler.register_worker(endpoint, WorkerCapabilities { version: 1, worker_id: "w1".to_string(), max_tasks: 1 });
 
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
@@ -724,105 +436,33 @@ mod tests {
             socket.read_exact(&mut header).await.expect("read header");
             let (kind, payload_len) = parse_transport_header(&header).expect("parse header");
             assert_eq!(kind, TransportFrameKind::TaskEnvelope);
-
             let mut payload = vec![0_u8; payload_len];
             socket.read_exact(&mut payload).await.expect("read payload");
-            let task = TaskEnvelope::decode_wire(&payload).expect("deserialize task");
-            assert_eq!(task.artifact.backend, ExecutionBackend::Docker);
-
+            let task = TaskEnvelope::decode_wire(&payload).expect("decode task");
+            assert_eq!(task.op_id, "mycrate::double");
             let response = TaskResultEnvelope::ok(
-                task.run_id,
-                task.stage_id,
-                task.task_id,
-                task.attempt_id,
-                "worker-1".to_string(),
-                vec![1, 2, 3],
+                task.run_id, task.stage_id, task.task_id, task.attempt_id,
+                "worker-1".to_string(), vec![42],
             );
-            let payload = response.encode_wire().expect("serialize response");
-            let frame = encode_transport_frame(TransportFrameKind::TaskResultEnvelope, &payload);
+            let resp_bytes = response.encode_wire().expect("encode response");
+            let frame = encode_transport_frame(TransportFrameKind::TaskResultEnvelope, &resp_bytes);
             socket.write_all(&frame).await.expect("write response");
         });
 
         let task = TaskEnvelope::new(
-            1,
-            2,
-            3,
-            0,
-            4,
+            1, 2, 3, 0, 0,
             "trace-1".to_string(),
-            artifact_descriptor(ExecutionBackend::Docker, ArtifactKind::Docker),
-            vec![9, 9],
-            vec![8, 8],
+            "mycrate::double".to_string(),
+            TaskAction::Map,
+            vec![],
+            vec![1, 2, 3],
         );
         let result = scheduler
             .submit_task_envelope_to_worker(&task, endpoint)
             .await
-            .expect("submit task envelope");
-
-        assert_eq!(result.worker_id, "worker-1");
-        assert_eq!(result.data, vec![1, 2, 3]);
-        server.await.expect("server join");
-    }
-
-    #[tokio::test]
-    async fn registered_wasm_job_returns_partition_results() {
-        let scheduler = DistributedScheduler::new(4, true);
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("bind listener");
-        let endpoint = listener.local_addr().expect("local addr");
-        let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, endpoint.port());
-
-        scheduler.register_worker(
-            endpoint,
-            WorkerCapabilities {
-                version: 1,
-                worker_id: "wasm-1".to_string(),
-                backend: ExecutionBackend::Wasm,
-                artifacts: vec![ArtifactKind::Wasm],
-                runtimes: vec![RuntimeKind::Rust],
-                max_tasks: 2,
-            },
-        );
-        scheduler.register_artifact_manifest(ArtifactManifest::new(vec![
-            WasmManifestEntry::new(
-                artifact_descriptor(ExecutionBackend::Wasm, ArtifactKind::Wasm),
-                Some("target/wasm/map_task.wasm".to_string()),
-            ),
-        ]));
-
-        let server = tokio::spawn(async move {
-            for _ in 0..2 {
-                let (mut socket, _) = listener.accept().await.expect("accept");
-                let mut header = [0_u8; TRANSPORT_HEADER_LEN];
-                socket.read_exact(&mut header).await.expect("read header");
-                let (kind, payload_len) = parse_transport_header(&header).expect("parse header");
-                assert_eq!(kind, TransportFrameKind::TaskEnvelope);
-                let mut payload = vec![0_u8; payload_len];
-                socket.read_exact(&mut payload).await.expect("read payload");
-                let task = TaskEnvelope::decode_wire(&payload).expect("deserialize task");
-
-                let response = TaskResultEnvelope::ok(
-                    task.run_id,
-                    task.stage_id,
-                    task.task_id,
-                    task.attempt_id,
-                    "worker-1".to_string(),
-                    task.data,
-                );
-                let payload = response.encode_wire().expect("serialize response");
-                let frame =
-                    encode_transport_frame(TransportFrameKind::TaskResultEnvelope, &payload);
-                socket.write_all(&frame).await.expect("write response");
-            }
-        });
-
-        let result = scheduler
-            .run_registered_wasm_job("op.test", vec![vec![1, 2], vec![3, 4]])
-            .await
-            .expect("registered wasm job should succeed");
-
-        assert_eq!(result, vec![vec![1, 2], vec![3, 4]]);
+            .expect("submit");
+        assert_eq!(result.status, ResultStatus::Success);
+        assert_eq!(result.data, vec![42]);
         server.await.expect("server join");
     }
 }

@@ -10,15 +10,13 @@ authors = ["Sandip Dey <sandip.dey1988@yahoo.com>"]
 # version.workspace = true
 
 [workspace]
-members = ["crates/*"]
-exclude = ["examples/*"]
+members = ["crates/*", "examples/*", "tests"]
 
 [workspace.dependencies]
 atomic-compute = { path = "crates/atomic-compute" }
 atomic-scheduler = { path = "crates/atomic-scheduler" }
 atomic-data = { path = "crates/atomic-data" }
 atomic-utils = { path = "crates/atomic-utils" }
-atomic-runtime = { path = "crates/atomic-runtime" }
 atomic-runtime-macros = { path = "crates/atomic-runtime-macros" }
 atomic-python = { path = "crates/atomic-python" }
 atomic-js = { path = "crates/atomic-js" }
@@ -67,3 +65,4 @@ clap = { version = "4.6.0", features = ["derive"] }
 num_cpus = "1.16"
 anyhow = "1.0.102"
 toml = "0.9.8"
+env_logger = "0.11"

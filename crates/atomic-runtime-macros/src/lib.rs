@@ -1,71 +1,116 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, ReturnType, Type};
+use syn::{ItemFn, LitStr, ReturnType, Type, parse_macro_input};
 
-/// Attribute macro for defining an Atomic task function.
+/// Attribute macro for defining a distributed Atomic task function.
 ///
-/// Expands differently depending on the compile target:
+/// Annotating a function with `#[task]` does two things at compile time:
 ///
-/// - **`wasm32`**: generates `alloc`/`dealloc` C ABI exports, a bump allocator,
-///   and an exported C ABI entrypoint that decodes the input, calls the user
-///   function, encodes the result, and packs (result_ptr << 32 | result_len) i64.
+/// 1. **Preserves the original function** exactly as written — it can still be
+///    called directly in local mode, tests, or anywhere in the same binary.
 ///
-/// - **native (Docker / local)**: generates `fn main()` that runs a
-///   stdin/stdout framing loop (`serve` or `serve_json`).
+/// 2. **Registers a dispatch handler** into the global compile-time task registry
+///    via the `inventory` crate. When the binary runs as a worker, incoming
+///    `TaskEnvelope` messages are dispatched to the handler by `op_id`.
 ///
-/// # Codec options
+/// The `op_id` defaults to `"<crate>::<module>::<fn_name>"` but can be overridden:
 ///
-/// `#[task]` — default rkyv codec. Input/output types must derive
-/// `rkyv::Archive`, `rkyv::Serialize`, `rkyv::Deserialize`.
-///
-/// `#[task(json)]` — JSON codec via serde_json. Input/output types must
-/// derive `serde::Deserialize` / `serde::Serialize`. Use when the task
-/// needs to be callable from Python or JavaScript.
-///
-/// # Example — rkyv (Rust-native, any rkyv type)
 /// ```ignore
-/// #[atomic_runtime::task]
-/// fn run_word_count(words: Vec<String>) -> Vec<(String, u32)> {
-///     let mut map = std::collections::BTreeMap::new();
-///     for w in words { *map.entry(w).or_insert(0u32) += 1; }
-///     map.into_iter().collect()
-/// }
+/// #[task]                        // op_id = "mycrate::mymod::double"
+/// fn double(x: i32) -> i32 { x * 2 }
+///
+/// #[task(name = "custom.op.v1")]  // op_id = "custom.op.v1"
+/// fn double_v1(x: i32) -> i32 { x * 2 }
 /// ```
 ///
-/// # Example — json (cross-language, callable from Python/JS)
+/// # Dispatch handler
+///
+/// For each `#[task]`-annotated function the macro generates a private function
+/// `__atomic_dispatch_<fn_name>` that accepts a `TaskAction`, a `payload` byte
+/// slice (rkyv-encoded action config), and a `data` byte slice (rkyv-encoded
+/// `Vec<T>` partition elements). It returns `Result<Vec<u8>, String>`.
+///
+/// Supported actions depend on function signature:
+///
+/// **Unary `fn(T) -> U`** (single argument):
+/// - `TaskAction::Map`     — apply element-wise, return `Vec<U>`
+/// - `TaskAction::Filter`  — only if U is `bool`: keep elements where fn returns true
+/// - `TaskAction::FlatMap` — U must implement `IntoIterator`; flatten results
+/// - `TaskAction::Collect` — identity pass-through
+///
+/// **Binary `fn(T, T) -> T`** (two arguments, same type):
+/// - `TaskAction::Fold`    — fold with rkyv-decoded zero from `payload`
+/// - `TaskAction::Reduce`  — reduce using fn as combiner (error on empty partition)
+/// - `TaskAction::Aggregate` — same as Fold
+///
+/// # Input/output requirements
+///
+/// Types must implement rkyv `Archive`, `Serialize`, `Deserialize`, plus
+/// `bytecheck::CheckBytes`. Primitive types satisfy these automatically.
+///
+/// # Example — unary map
 /// ```ignore
-/// use serde::{Deserialize, Serialize};
+/// use atomic_runtime::task;
 ///
-/// #[derive(Deserialize)]
-/// struct Input { words: Vec<String> }
+/// #[task]
+/// fn double(x: i32) -> i32 { x * 2 }
+/// ```
 ///
-/// #[derive(Serialize)]
-/// struct Output { counts: Vec<(String, u32)> }
+/// # Example — binary reduce
+/// ```ignore
+/// #[task]
+/// fn add(a: i32, b: i32) -> i32 { a + b }
 ///
-/// #[atomic_runtime::task(json)]
-/// fn run_word_count(input: Input) -> Output {
-///     let mut map = std::collections::BTreeMap::new();
-///     for w in input.words { *map.entry(w).or_insert(0u32) += 1; }
-///     Output { counts: map.into_iter().collect() }
-/// }
+/// ctx.parallelize_typed(vec![1, 2, 3], 2).fold(0, add)?;
 /// ```
 #[proc_macro_attribute]
 pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
 
-    // Detect `json` flag in attribute args (e.g. `#[task(json)]`).
-    let attr_str = attr.to_string();
-    let use_json = attr_str.contains("json");
+    // Parse optional `name = "custom.op.id"` attribute argument.
+    let custom_name: Option<String> = if attr.is_empty() {
+        None
+    } else {
+        syn::parse::<LitStr>(attr.clone())
+            .ok()
+            .map(|lit| lit.value())
+            .or_else(|| {
+                let attr2: proc_macro2::TokenStream = attr.into();
+                syn::parse2::<syn::MetaNameValue>(attr2).ok().and_then(|mnv| {
+                    if mnv.path.is_ident("name") {
+                        if let syn::Expr::Lit(syn::ExprLit {
+                            lit: syn::Lit::Str(s), ..
+                        }) = mnv.value
+                        {
+                            Some(s.value())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+            })
+    };
 
     let fn_name = &input.sig.ident;
-    let fn_name_impl = syn::Ident::new(&format!("{}_impl", fn_name), Span::call_site());
-    let fn_vis = &input.vis;
-    let fn_inputs = &input.sig.inputs;
-    let fn_block = &input.block;
+    let fn_name_str = fn_name.to_string();
+    let dispatch_fn_name =
+        syn::Ident::new(&format!("__atomic_dispatch_{}", fn_name), Span::call_site());
 
-    // Extract the single argument type (the partition input type).
-    let input_type: proc_macro2::TokenStream = fn_inputs
+    let fn_vis = &input.vis;
+    let fn_sig = &input.sig;
+    let fn_block = &input.block;
+    let fn_attrs = &input.attrs;
+
+    // Number of arguments determines dispatch shape.
+    let num_args = input.sig.inputs.len();
+
+    // First argument type — the partition element type T.
+    let input_type: proc_macro2::TokenStream = input
+        .sig
+        .inputs
         .iter()
         .next()
         .and_then(|arg| match arg {
@@ -75,7 +120,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         .map(|ty| quote! { #ty })
         .unwrap_or_else(|| quote! { Vec<u8> });
 
-    // Extract the return type.
+    // Return type U.
     let output_type: proc_macro2::TokenStream = match &input.sig.output {
         ReturnType::Default => quote! { () },
         ReturnType::Type(_, ty) => {
@@ -84,68 +129,168 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    // Detect compile target at macro expansion time.
-    let is_wasm = std::env::var("CARGO_CFG_TARGET_ARCH")
-        .map(|arch| arch == "wasm32")
-        .unwrap_or(false);
-
-    if is_wasm {
-        // ── WASM target ───────────────────────────────────────────────────────
-        // Generate:
-        //   1. The user function renamed to `{name}_impl`
-        //   2. A static bump allocator (alloc / dealloc exports)
-        //   3. The C ABI entrypoint dispatching to call_wasm or call_wasm_json
-        let call_fn = if use_json {
-            quote! { ::atomic_runtime::__internal::call_wasm_json::<#input_type, #output_type, _> }
-        } else {
-            quote! { ::atomic_runtime::__internal::call_wasm::<#input_type, #output_type, _> }
-        };
-
-        TokenStream::from(quote! {
-            fn #fn_name_impl(#fn_inputs) -> #output_type {
-                #fn_block
+    // Whether the return type is plain `bool` — determines if Filter is generated.
+    let is_bool_return = match &input.sig.output {
+        ReturnType::Type(_, ty) => {
+            if let Type::Path(tp) = ty.as_ref() {
+                tp.path.is_ident("bool")
+            } else {
+                false
             }
+        }
+        _ => false,
+    };
 
-            // Static bump allocator — required by the wasmtime host to write
-            // input bytes into linear memory before calling the entrypoint.
-            static __ATOMIC_HEAP: ::core::sync::atomic::AtomicUsize =
-                ::core::sync::atomic::AtomicUsize::new(65536);
-
-            #[no_mangle]
-            pub unsafe extern "C" fn alloc(len: i32) -> i32 {
-                __ATOMIC_HEAP.fetch_add(
-                    len as usize,
-                    ::core::sync::atomic::Ordering::SeqCst,
-                ) as i32
+    // Whether the return type is `Vec<_>` — determines if FlatMap is generated.
+    let is_vec_return = match &input.sig.output {
+        ReturnType::Type(_, ty) => {
+            if let Type::Path(tp) = ty.as_ref() {
+                tp.path.segments.last()
+                    .map(|s| s.ident == "Vec")
+                    .unwrap_or(false)
+            } else {
+                false
             }
+        }
+        _ => false,
+    };
 
-            #[no_mangle]
-            pub unsafe extern "C" fn dealloc(_ptr: i32, _len: i32) {}
-
-            #[no_mangle]
-            pub unsafe extern "C" fn #fn_name(ptr: i32, len: i32) -> i64 {
-                #call_fn(ptr, len, #fn_name_impl)
-            }
-        })
+    // op_id expression resolved at compile time in the user crate.
+    let op_id_expr: proc_macro2::TokenStream = if let Some(name) = custom_name {
+        quote! { #name }
     } else {
-        // ── Native target (Docker / local binary) ─────────────────────────────
-        // Generate:
-        //   1. The user function renamed to `{name}_impl`
-        //   2. `fn main()` calling serve or serve_json
-        let serve_call = if use_json {
-            quote! { ::atomic_runtime::serve_json(#fn_name_impl); }
-        } else {
-            quote! { ::atomic_runtime::serve(#fn_name_impl); }
-        };
+        quote! { concat!(module_path!(), "::", #fn_name_str) }
+    };
 
-        TokenStream::from(quote! {
-            #fn_vis fn #fn_name_impl(#fn_inputs) -> #output_type {
-                #fn_block
-            }
+    // ── Generate dispatch arms based on function signature ────────────────────
+    //
+    // Unary fns (1 arg): Map, Collect, (Filter if bool), (FlatMap if IntoIterator output)
+    // Binary fns (2 args, T,T->T): Fold, Reduce, Aggregate
+    // All other arms fall through to an unsupported error.
 
-            fn main() {
-                #serve_call
+    let dispatch_body = if num_args == 2 {
+        // Binary function: (T, T) -> T — supports Fold, Reduce, Aggregate.
+        quote! {
+            use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
+            match action {
+                TaskAction::Fold | TaskAction::Aggregate => {
+                    let zero = <#input_type>::decode_wire(payload)
+                        .map_err(|e| e.to_string())?;
+                    let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
+                        .map_err(|e| e.to_string())?;
+                    let result = items.into_iter().fold(zero, |acc, x| #fn_name(acc, x));
+                    result.encode_wire().map_err(|e| e.to_string())
+                }
+                TaskAction::Reduce => {
+                    let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
+                        .map_err(|e| e.to_string())?;
+                    let mut iter = items.into_iter();
+                    let first = iter.next()
+                        .ok_or_else(|| "reduce called on empty partition".to_string())?;
+                    let result = iter.fold(first, |acc, x| #fn_name(acc, x));
+                    result.encode_wire().map_err(|e| e.to_string())
+                }
+                other => Err(::std::format!(
+                    "task '{}' (binary fn) does not support action {:?}",
+                    #fn_name_str, other
+                )),
             }
-        })
-    }
+        }
+    } else if is_bool_return {
+        // Unary function returning bool: supports Map (→ Vec<bool>), Filter, Collect.
+        quote! {
+            use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
+            match action {
+                TaskAction::Map | TaskAction::Collect => {
+                    let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
+                        .map_err(|e| e.to_string())?;
+                    let result: ::std::vec::Vec<bool> =
+                        items.into_iter().map(#fn_name).collect();
+                    result.encode_wire().map_err(|e| e.to_string())
+                }
+                TaskAction::Filter => {
+                    let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
+                        .map_err(|e| e.to_string())?;
+                    let result: ::std::vec::Vec<#input_type> =
+                        items.into_iter().filter(|x| #fn_name(x.clone())).collect();
+                    result.encode_wire().map_err(|e| e.to_string())
+                }
+                other => Err(::std::format!(
+                    "task '{}' (predicate fn) does not support action {:?}",
+                    #fn_name_str, other
+                )),
+            }
+        }
+    } else if is_vec_return {
+        // Unary function T -> Vec<U>: supports Map (returns Vec<Vec<U>>), FlatMap, Collect.
+        quote! {
+            use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
+            match action {
+                TaskAction::Map | TaskAction::Collect => {
+                    let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
+                        .map_err(|e| e.to_string())?;
+                    let result: ::std::vec::Vec<#output_type> =
+                        items.into_iter().map(#fn_name).collect();
+                    result.encode_wire().map_err(|e| e.to_string())
+                }
+                TaskAction::FlatMap => {
+                    let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
+                        .map_err(|e| e.to_string())?;
+                    let result: ::std::vec::Vec<_> =
+                        items.into_iter().flat_map(#fn_name).collect();
+                    result.encode_wire().map_err(|e| e.to_string())
+                }
+                other => Err(::std::format!(
+                    "task '{}' does not support action {:?}",
+                    #fn_name_str, other
+                )),
+            }
+        }
+    } else {
+        // Unary function T -> U (non-bool, non-Vec): supports Map, Collect only.
+        quote! {
+            use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
+            match action {
+                TaskAction::Map | TaskAction::Collect => {
+                    let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
+                        .map_err(|e| e.to_string())?;
+                    let result: ::std::vec::Vec<#output_type> =
+                        items.into_iter().map(#fn_name).collect();
+                    result.encode_wire().map_err(|e| e.to_string())
+                }
+                other => Err(::std::format!(
+                    "task '{}' does not support action {:?}",
+                    #fn_name_str, other
+                )),
+            }
+        }
+    };
+
+    TokenStream::from(quote! {
+        // 1. Preserve the original function unchanged — callable directly anywhere.
+        #(#fn_attrs)*
+        #fn_vis #fn_sig {
+            #fn_block
+        }
+
+        // 2. Dispatch handler: decodes partition bytes, applies the requested action,
+        //    re-encodes the result. Called by NativeBackend when op_id matches.
+        #[doc(hidden)]
+        fn #dispatch_fn_name(
+            action: &::atomic_compute::__macro_support::TaskAction,
+            payload: &[u8],
+            data: &[u8],
+        ) -> ::std::result::Result<::std::vec::Vec<u8>, ::std::string::String> {
+            #dispatch_body
+        }
+
+        // 3. Compile-time registration via inventory.
+        //    The worker binary collects all submitted entries at startup.
+        ::atomic_compute::__macro_support::inventory::submit! {
+            ::atomic_compute::__macro_support::TaskEntry {
+                op_id: #op_id_expr,
+                handler: #dispatch_fn_name,
+            }
+        }
+    })
 }
