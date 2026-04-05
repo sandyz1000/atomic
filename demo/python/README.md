@@ -19,11 +19,11 @@ cd ../..
 
 ### `local_word_count.py` — Pure local job
 
-Classic word count using `PyRdd` transformations. No Docker, no WASM —
-everything runs in-process.
+Classic word count using `PyRdd` transformations. Everything runs in-process.
 
 ```bash
-python examples/python/local_word_count.py
+cd demo/python
+python local_word_count.py
 ```
 
 Expected output:
@@ -44,25 +44,18 @@ tools                1
 world                2
 ```
 
-### `docker_sum_job.py` — Docker dispatch via `PyDockerStub`
+### `local_sum_job.py` — Range sum demo
 
-Partitions a range and dispatches each partition to a Docker container that
-sums the numbers. Demonstrates how Python closures **are not sent to Docker** —
-only the data crosses the wire (as JSON).
+Partitions a numeric range and sums all values using `fold`.
 
 ```bash
-# Build the Docker image first:
-docker build -t docker-json-task:latest \
-  -f examples/docker_json_task/Dockerfile .
-
-python examples/python/docker_sum_job.py
+cd demo/python
+python local_sum_job.py
 ```
 
 Expected output:
 ```
-stub = DockerStub(operation_id="demo.sum.json.v1", image="docker-json-task:latest")
-partition sums = [10.0, 26.0, 42.0]
-Sum of 1..12 = 78
+Sum of 1..100 = 5050
 ```
 
 ## API overview
@@ -90,10 +83,6 @@ rdd.zip(other)                 # element-wise (x, y) pairs
 rdd.cartesian(other)           # all (x, y) combinations
 rdd.coalesce(n)                # reduce to n partitions
 rdd.repartition(n)             # change partition count
-
-# Docker dispatch
-stub = atomic.DockerStub.from_manifest(path, operation_id)
-rdd.map_via(stub)              # dispatch partitions to Docker container
 
 # Actions (eager, return a value)
 rdd.collect()                  # all elements as a Python list

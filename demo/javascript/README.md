@@ -15,7 +15,7 @@ cargo build -p atomic-js --release
 ### `local_word_count.js` — Word count
 
 ```bash
-./target/release/atomic-js examples/javascript/local_word_count.js
+./target/release/atomic-js demo/javascript/local_word_count.js
 ```
 
 Expected output:
@@ -41,7 +41,7 @@ world                2
 Demonstrates every transformation and action available on `Rdd`:
 
 ```bash
-./target/release/atomic-js examples/javascript/map_reduce.js
+./target/release/atomic-js demo/javascript/map_reduce.js
 ```
 
 ## API overview

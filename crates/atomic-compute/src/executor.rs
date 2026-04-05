@@ -2,12 +2,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::backend::{BackendContext, WorkerRuntime};
 use crate::env;
 use crate::error::{Error, LibResult};
+use crate::native_backend::NativeBackend;
 use atomic_data::distributed::{
-    TRANSPORT_HEADER_LEN, TaskEnvelope, TaskResultEnvelope, TransportFrameKind, WireDecode,
-    WireEncode, WorkerCapabilities, encode_transport_frame, parse_transport_header,
+    TRANSPORT_HEADER_LEN, TaskEnvelope, TransportFrameKind, WireDecode, WireEncode,
+    WorkerCapabilities, encode_transport_frame, parse_transport_header,
 };
 
 use atomic_data::shuffle::error::NetworkError;
@@ -20,35 +20,23 @@ use tokio::{
 
 pub struct Executor {
     port: u16,
-    worker_runtime: WorkerRuntime,
-    backend_ctx: BackendContext,
+    worker_id: Arc<str>,
+    backend: NativeBackend,
 }
 
 impl Executor {
     pub fn new(port: u16) -> Self {
-        let conf = env::Configuration::get();
-        let worker_runtime = conf
-            .slave
-            .as_ref()
-            .map(|slave| WorkerRuntime::from_execution_backend(slave.backend))
-            .unwrap_or_else(|| {
-                WorkerRuntime::default_for(conf.deployment_mode == env::DeploymentMode::Distributed)
-            });
         Executor {
             port,
-            worker_runtime,
-            backend_ctx: BackendContext {
-                worker_id: Arc::from(format!("worker-{}", port)),
-            },
+            worker_id: Arc::from(format!("worker-{}", port)),
+            backend: NativeBackend,
         }
     }
 
-    /// Executes the artifact-first distributed envelope protocol.
-    pub fn execute_distributed_task_envelope(
-        &self,
-        task: &TaskEnvelope,
-    ) -> LibResult<TaskResultEnvelope> {
-        self.worker_runtime.execute(&self.backend_ctx, task)
+    pub fn execute_task(&self, task: &TaskEnvelope) -> LibResult<atomic_data::distributed::TaskResultEnvelope> {
+        self.backend
+            .execute(&self.worker_id, task)
+            .map_err(|e| Error::InvalidPayload(e.to_string()))
     }
 
     pub fn worker_capabilities(&self) -> WorkerCapabilities {
@@ -57,12 +45,14 @@ impl Executor {
             .as_ref()
             .map(|slave| slave.max_concurrent_tasks)
             .unwrap_or(1);
-        self.worker_runtime
-            .capabilities(self.backend_ctx.worker_id.to_string(), max_concurrent_tasks)
+        WorkerCapabilities {
+            version: atomic_data::distributed::WIRE_SCHEMA_V1,
+            worker_id: self.worker_id.to_string(),
+            max_tasks: max_concurrent_tasks,
+        }
     }
 
-    /// Worker which spawns threads for received tasks, deserializes them,
-    /// executes the task and sends the result back to the master.
+    /// Worker loop: binds TCP port, reads transport frames, dispatches via NativeBackend.
     #[allow(clippy::drop_copy)]
     pub fn worker(self: Arc<Self>) -> LibResult<Signal> {
         env::Env::run_in_async_rt(move || -> LibResult<Signal> {
@@ -84,6 +74,7 @@ impl Executor {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(NetworkError::TcpListener)?;
+        log::info!("[{}] worker listening on {}", self.worker_id, addr);
         loop {
             let (mut stream, _peer) = match listener.accept().await {
                 Ok(conn) => conn,
@@ -134,7 +125,7 @@ impl Executor {
             TransportFrameKind::TaskEnvelope => {
                 let task = TaskEnvelope::decode_wire(&payload)
                     .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
-                let result = self.execute_distributed_task_envelope(&task)?;
+                let result = self.execute_task(&task)?;
                 let bytes = result
                     .encode_wire()
                     .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
@@ -183,8 +174,7 @@ impl Executor {
         stream.write_all(&frame).await.map_err(Error::OutputWrite)
     }
 
-    /// A listener for exit signal from master to end the whole slave process.
-    /// Signals are sent as 4-byte LE length prefix + serde_json bytes.
+    /// Listens on `port + 10` for graceful or error shutdown signals.
     async fn signal_handler(self: Arc<Self>, send_child: Sender<Signal>) -> LibResult<Signal> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port + 10));
         log::debug!("signal handler port open @ {}", addr.port());
@@ -197,7 +187,6 @@ impl Executor {
                 Ok(conn) => conn,
                 Err(_) => break,
             };
-            // Read length-prefixed serde_json signal
             let mut len_buf = [0u8; 4];
             if stream.read_exact(&mut len_buf).await.is_err() {
                 continue;
@@ -231,7 +220,6 @@ impl Executor {
                 _ => {}
             }
         }
-        // Give executor threads a moment to shut down.
         tokio::time::sleep(Duration::from_millis(1_000)).await;
         signal
     }
@@ -396,8 +384,6 @@ mod tests {
                         .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
                     assert!(!capabilities.worker_id.is_empty());
                     assert!(capabilities.max_tasks >= 1);
-                    // Signal the executor to shut down so worker_fut completes
-                    // and tokio::join! in _start_test can return.
                     if let Ok(mut signal) = connect_to_executor(port, true) {
                         let _ = shutdown_msg(&mut signal);
                     }

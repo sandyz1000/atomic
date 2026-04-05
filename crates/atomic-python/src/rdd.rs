@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyIterator, PyList, PyTuple};
 
-use crate::docker_stub::PyDockerStub;
 
 /// An in-memory distributed dataset (RDD) of Python objects.
 ///
@@ -99,7 +98,7 @@ impl PyRdd {
             .elements
             .iter()
             .map(|item| {
-                let pair = item.bind(py).downcast::<PyTuple>()?;
+                let pair = item.bind(py).cast::<PyTuple>()?;
                 if pair.len() != 2 {
                     return Err(pyo3::exceptions::PyValueError::new_err(
                         "map_values requires elements to be 2-tuples",
@@ -119,7 +118,7 @@ impl PyRdd {
     pub fn flat_map_values(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         let mut elements = Vec::new();
         for item in &self.elements {
-            let pair = item.bind(py).downcast::<PyTuple>()?;
+            let pair = item.bind(py).cast::<PyTuple>()?;
             if pair.len() != 2 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "flat_map_values requires elements to be 2-tuples",
@@ -162,7 +161,7 @@ impl PyRdd {
         let mut order: Vec<String> = Vec::new();
 
         for item in &self.elements {
-            let pair = item.bind(py).downcast::<PyTuple>()?;
+            let pair = item.bind(py).cast::<PyTuple>()?;
             if pair.len() != 2 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "group_by_key requires elements to be 2-tuples",
@@ -204,7 +203,7 @@ impl PyRdd {
         let mut order: Vec<String> = Vec::new();
 
         for item in &self.elements {
-            let pair = item.bind(py).downcast::<PyTuple>()?;
+            let pair = item.bind(py).cast::<PyTuple>()?;
             if pair.len() != 2 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "reduce_by_key requires elements to be 2-tuples",
@@ -296,41 +295,6 @@ impl PyRdd {
     /// execution is in-process).
     pub fn repartition(&self, py: Python, num_partitions: usize) -> PyRdd {
         self.coalesce(py, num_partitions)
-    }
-
-    // ── Artifact dispatch ────────────────────────────────────────────────────
-
-    /// Send each partition to a pre-built Docker container and collect results.
-    ///
-    /// The stub references a pre-built Docker image — the same image that a Rust
-    /// driver would use. Partition data is JSON-encoded and sent to the container
-    /// via stdin; results are JSON-decoded from stdout.
-    ///
-    /// # Example
-    /// ```python
-    /// stub = atomic.DockerStub.from_manifest("manifest.toml", "demo.map.v1")
-    /// result = rdd.map_via(stub)
-    /// ```
-    pub fn map_via(&self, py: Python, stub: &PyDockerStub) -> PyResult<PyRdd> {
-        stub.execute_partitions(py, &self.elements, self.num_partitions)
-    }
-
-    /// Send each partition to Docker and flatten `Vec<T>` results into a single RDD.
-    pub fn collect_via(&self, py: Python, stub: &PyDockerStub) -> PyResult<PyRdd> {
-        // collect_via flattens — same Docker call, then flatten the list results
-        let result_rdd = stub.execute_partitions(py, &self.elements, self.num_partitions)?;
-        let mut flat = Vec::new();
-        for item in &result_rdd.elements {
-            match item.bind(py).downcast::<PyList>() {
-                Ok(list) => {
-                    for v in list.iter() {
-                        flat.push(v.unbind());
-                    }
-                }
-                Err(_) => flat.push(item.clone_ref(py)),
-            }
-        }
-        Ok(PyRdd { elements: flat, num_partitions: self.num_partitions })
     }
 
     // ── Actions ──────────────────────────────────────────────────────────────

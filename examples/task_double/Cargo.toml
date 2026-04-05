@@ -1,0 +1,14 @@
+[package]
+name = "task_double"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "task_double"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute.workspace = true
+tokio.workspace = true
+env_logger.workspace = true
+log.workspace = true

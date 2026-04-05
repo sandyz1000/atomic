@@ -5,7 +5,7 @@ Prerequisites:
   cd crates/atomic-python && maturin develop --release && cd ../..
 
 Run:
-  python examples/python/local_word_count.py
+  python demo/python/local_word_count.py
 """
 
 import atomic

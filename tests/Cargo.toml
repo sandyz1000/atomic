@@ -1,0 +1,9 @@
+[package]
+name = "atomic-tests"
+version.workspace = true
+edition.workspace = true
+
+[dev-dependencies]
+atomic-compute.workspace = true
+tokio.workspace = true
+once_cell.workspace = true

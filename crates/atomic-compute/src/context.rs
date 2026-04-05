@@ -6,10 +6,8 @@ use crate::rdd::{ParallelCollection, UnionRdd};
 use crate::{env, hosts};
 use atomic_data::data::Data;
 use atomic_data::distributed::{
-    ArtifactDescriptor, ArtifactManifest, ExecutionBackend, RkyvWireSerializer, RkyvWireStrategy,
-    RkyvWireValidator, TRANSPORT_HEADER_LEN, TransportFrameKind, WasmTaskPayload,
-    WasmValueEncoding, WireDecode, WireEncode, WorkerCapabilities, encode_transport_frame,
-    parse_transport_header,
+    TRANSPORT_HEADER_LEN, TransportFrameKind, WireDecode, WireEncode, WorkerCapabilities,
+    encode_transport_frame, parse_transport_header,
 };
 use atomic_data::partial::ApproximateEvaluator;
 use atomic_data::partial::result::PartialResult;
@@ -23,7 +21,7 @@ use std::fmt::Debug;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{
     Arc,
@@ -32,61 +30,14 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ExecutionRuntime {
-    Local,
-    Docker,
-    Wasm,
-}
-
-impl Default for ExecutionRuntime {
-    fn default() -> Self {
-        Self::Local
-    }
-}
-
-impl ExecutionRuntime {
-    pub fn default_for(mode: env::DeploymentMode) -> Self {
-        match mode {
-            env::DeploymentMode::Local => Self::Local,
-            env::DeploymentMode::Distributed => Self::Wasm,
-        }
-    }
-}
-
-impl From<ExecutionBackend> for ExecutionRuntime {
-    fn from(value: ExecutionBackend) -> Self {
-        match value {
-            ExecutionBackend::LocalThread => Self::Local,
-            ExecutionBackend::Docker => Self::Docker,
-            ExecutionBackend::Wasm => Self::Wasm,
-        }
-    }
-}
-
-impl From<ExecutionRuntime> for ExecutionBackend {
-    fn from(value: ExecutionRuntime) -> Self {
-        match value {
-            ExecutionRuntime::Local => ExecutionBackend::LocalThread,
-            ExecutionRuntime::Docker => ExecutionBackend::Docker,
-            ExecutionRuntime::Wasm => ExecutionBackend::Wasm,
-        }
-    }
-}
-
 pub struct Context {
     scheduler: Schedulers,
-    execution_runtime: ExecutionRuntime,
     pub next_rdd_id: Arc<AtomicUsize>,
     pub next_shuffle_id: Arc<AtomicUsize>,
     pub address_map: Vec<SocketAddrV4>,
     pub distributed_driver: bool,
-    /// this context/session temp work dir  
     pub work_dir: PathBuf,
 }
-
-// There is a problem with this approach since T needs to satisfy PartialEq, Eq for Range
-// No such restrictions are needed for Vec
 
 impl Drop for Context {
     fn drop(&mut self) {
@@ -117,61 +68,17 @@ pub fn save<R: Data>(ctx: TaskContext, iter: Box<dyn Iterator<Item = R>>, path: 
 }
 
 impl Context {
+    /// Create a context from the environment configuration.
+    ///
+    /// In distributed mode, if `is_driver` is true returns a driver context;
+    /// otherwise starts the worker loop and never returns.
+    /// In local mode, returns a local context.
     pub fn new() -> Result<Arc<Self>, Error> {
         let mode = env::Configuration::get().deployment_mode;
-        Context::with_mode_and_runtime(mode, ExecutionRuntime::default_for(mode))
-    }
-
-    pub fn local() -> Result<Arc<Self>, Error> {
-        Context::with_mode_and_runtime(env::DeploymentMode::Local, ExecutionRuntime::Local)
-    }
-
-    pub fn docker() -> Result<Arc<Self>, Error> {
-        Context::with_mode_and_runtime(env::DeploymentMode::Distributed, ExecutionRuntime::Docker)
-    }
-
-    pub fn wasm() -> Result<Arc<Self>, Error> {
-        Context::with_mode_and_runtime(env::DeploymentMode::Distributed, ExecutionRuntime::Wasm)
-    }
-
-    /// Create a WASM context and load an artifact manifest in one step.
-    pub fn wasm_from_manifest(path: impl AsRef<Path>) -> Result<Arc<Self>, Error> {
-        let ctx = Self::wasm()?;
-        ctx.load_artifact_manifest_toml(path)?;
-        Ok(ctx)
-    }
-
-    /// Create a Docker context and load an artifact manifest in one step.
-    pub fn docker_from_manifest(path: impl AsRef<Path>) -> Result<Arc<Self>, Error> {
-        let ctx = Self::docker()?;
-        ctx.load_artifact_manifest_toml(path)?;
-        Ok(ctx)
-    }
-
-    pub fn with_runtime(runtime: ExecutionRuntime) -> Result<Arc<Self>, Error> {
-        let mode = env::Configuration::get().deployment_mode;
-        Context::with_mode_and_runtime(mode, runtime)
-    }
-
-    // TODO: This method should be moved to TypedRdd or removed
-    // fn save_as_text_file(&self, path: String) -> Result<Vec<()>, Error> {
-    //     let cl = move |(ctx, iter)| save::<Self::Item>(ctx, iter, path.to_string());
-    //     self.run_job_with_context(self.get_rdd(), cl)
-    // }
-
-    pub fn with_mode(mode: env::DeploymentMode) -> Result<Arc<Self>, Error> {
-        Context::with_mode_and_runtime(mode, ExecutionRuntime::default_for(mode))
-    }
-
-    pub fn with_mode_and_runtime(
-        mode: env::DeploymentMode,
-        runtime: ExecutionRuntime,
-    ) -> Result<Arc<Self>, Error> {
-        Context::validate_runtime(mode, runtime)?;
         match mode {
             env::DeploymentMode::Distributed => {
                 if env::Configuration::get().is_driver {
-                    let ctx = Context::init_distributed_driver(runtime)?;
+                    let ctx = Context::init_distributed_driver()?;
                     ctx.set_cleanup_process();
                     Ok(ctx)
                 } else {
@@ -179,39 +86,24 @@ impl Context {
                     unreachable!("worker process always terminates via std::process::exit")
                 }
             }
-            env::DeploymentMode::Local => Context::init_local_scheduler(runtime),
+            env::DeploymentMode::Local => Context::init_local_scheduler(),
         }
     }
 
-    pub fn runtime(&self) -> ExecutionRuntime {
-        self.execution_runtime
+    /// Create a local-only context, ignoring the environment configuration.
+    pub fn local() -> Result<Arc<Self>, Error> {
+        Context::init_local_scheduler()
     }
 
-    fn validate_runtime(mode: env::DeploymentMode, runtime: ExecutionRuntime) -> Result<(), Error> {
-        match (mode, runtime) {
-            (env::DeploymentMode::Local, ExecutionRuntime::Local)
-            | (env::DeploymentMode::Distributed, ExecutionRuntime::Docker)
-            | (env::DeploymentMode::Distributed, ExecutionRuntime::Wasm) => Ok(()),
-            (env::DeploymentMode::Local, _) => Err(Error::UnsupportedOperation(
-                "local deployment mode only supports the local runtime",
-            )),
-            (env::DeploymentMode::Distributed, ExecutionRuntime::Local) => {
-                Err(Error::UnsupportedOperation(
-                    "distributed deployment mode requires the docker or wasm runtime",
-                ))
-            }
-        }
+    pub fn is_distributed(&self) -> bool {
+        self.distributed_driver
     }
 
-    /// Sets a handler to receives any external signal to stop the process
-    /// and shuts down gracefully any ongoing op
     fn set_cleanup_process(&self) {
         let address_map = self.address_map.clone();
         let work_dir = self.work_dir.clone();
         env::Env::run_in_async_rt(|| {
             tokio::spawn(async move {
-                // avoid moving a self clone here or drop won't be potentially called
-                // before termination and never clean up
                 if tokio::signal::ctrl_c().await.is_ok() {
                     log::info!("received termination signal, cleaning up");
                     Context::driver_clean_up_directives(&work_dir, &address_map);
@@ -221,7 +113,7 @@ impl Context {
         })
     }
 
-    fn init_local_scheduler(runtime: ExecutionRuntime) -> Result<Arc<Self>, Error> {
+    fn init_local_scheduler() -> Result<Arc<Self>, Error> {
         let job_id = Uuid::new_v4().to_string();
         let job_work_dir = env::Configuration::get()
             .local_dir
@@ -233,7 +125,6 @@ impl Context {
 
         Ok(Arc::new(Context {
             scheduler,
-            execution_runtime: runtime,
             next_rdd_id: Arc::new(AtomicUsize::new(0)),
             next_shuffle_id: Arc::new(AtomicUsize::new(0)),
             address_map: vec![SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)],
@@ -243,11 +134,10 @@ impl Context {
     }
 
     /// Initialization function for the application driver.
-    /// * Distributes the configuration setup to the workers.
-    /// * Distributes a copy of the application binary to all the active worker host nodes.
-    /// * Launches the workers in the remote machine using the same binary (required).
-    /// * Creates and returns a working Context.
-    fn init_distributed_driver(runtime: ExecutionRuntime) -> Result<Arc<Self>, Error> {
+    ///
+    /// Distributes configuration and the application binary to each worker host,
+    /// launches the worker processes via SSH, and returns a driver context.
+    fn init_distributed_driver() -> Result<Arc<Self>, Error> {
         let mut port: u16 = 10000;
         let mut address_map = Vec::new();
         let job_id = Uuid::new_v4().to_string();
@@ -287,7 +177,6 @@ impl Context {
             let endpoint = SocketAddrV4::new(address_ip, port);
             address_map.push(endpoint);
 
-            // Create work dir:
             Command::new("ssh")
                 .args(&[address, "mkdir", &job_work_dir_str])
                 .output()
@@ -296,7 +185,6 @@ impl Context {
                     command: "ssh mkdir".into(),
                 })?;
 
-            // Copy conf file to remote:
             Context::create_workers_config_file(address_ip, port, conf_path)?;
             let remote_path = format!("{}:{}/config.toml", address, job_work_dir_str);
             Command::new("scp")
@@ -307,7 +195,6 @@ impl Context {
                     command: "scp config".into(),
                 })?;
 
-            // Copy binary:
             let remote_path = format!("{}:{}/{}", address, job_work_dir_str, binary_name);
             Command::new("scp")
                 .args(&[&binary_path_str, &remote_path])
@@ -317,7 +204,6 @@ impl Context {
                     command: "scp executor".into(),
                 })?;
 
-            // Deploy a remote slave:
             let path = format!("{}/{}", job_work_dir_str, binary_name);
             log::debug!("remote path {}", path);
             Command::new("ssh")
@@ -337,7 +223,6 @@ impl Context {
 
         Ok(Arc::new(Context {
             scheduler,
-            execution_runtime: runtime,
             next_rdd_id: Arc::new(AtomicUsize::new(0)),
             next_shuffle_id: Arc::new(AtomicUsize::new(0)),
             address_map,
@@ -387,9 +272,8 @@ impl Context {
         }
     }
 
-    fn driver_clean_up_directives(work_dir: &Path, executors: &[SocketAddrV4]) {
+    fn driver_clean_up_directives(work_dir: &std::path::Path, executors: &[SocketAddrV4]) {
         Context::drop_executors(executors);
-        // Give some time for the executors to shut down and clean up
         std::thread::sleep(std::time::Duration::from_millis(1_500));
         clean_up_work_dir(work_dir, true);
     }
@@ -464,7 +348,6 @@ impl Context {
             if let Ok(mut stream) =
                 TcpStream::connect(format!("{}:{}", socket_addr.ip(), socket_addr.port() + 10))
             {
-                // Serialize signal as 4-byte LE length + serde_json bytes
                 let json = serde_json::to_vec(&Signal::ShutDownGracefully).unwrap();
                 let mut signal = (json.len() as u32).to_le_bytes().to_vec();
                 signal.extend_from_slice(&json);
@@ -509,7 +392,6 @@ impl Context {
         step: usize,
         num_slices: usize,
     ) -> Arc<dyn Rdd<Item = u64>> {
-        // TODO: input validity check
         let seq = (start..=end).step_by(step);
         let rdd = self.parallelize(seq, num_slices);
         rdd.register_op_name("range");
@@ -529,14 +411,6 @@ impl Context {
     }
 
     /// Create a TypedRdd from a collection with explicit typing.
-    ///
-    /// This is a convenience method that returns TypedRdd instead of Arc<dyn Rdd>.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let rdd = ctx.parallelize_typed(vec![1, 2, 3, 4, 5], 2);
-    /// let sum = rdd.reduce(|a, b| a + b)?;
-    /// ```
     pub fn parallelize_typed<T: Data + Clone, I>(
         self: &Arc<Self>,
         seq: I,
@@ -550,7 +424,6 @@ impl Context {
         crate::rdd::TypedRdd::new(rdd, self.clone())
     }
 
-    /// Load from a distributed source and turns it into a parallel collection.
     pub fn read_source<F, C, I: Data, O: Data>(
         self: &Arc<Self>,
         config: C,
@@ -619,94 +492,6 @@ impl Context {
             .map_err(Error::from)
     }
 
-    pub fn run_registered_wasm_job(
-        self: &Arc<Self>,
-        rdd: Arc<dyn Rdd<Item = u8>>,
-        operation_id: &str,
-    ) -> Result<Vec<Vec<u8>>, Error> {
-        let partitions = (0..rdd.number_of_splits())
-            .map(|partition| {
-                rdd.get_rdd_base()
-                    .wasm_bytes(partition)
-                    .ok_or_else(|| {
-                        Error::UnsupportedOperation(
-                            "rdd does not support wasm byte materialization for this partition",
-                        )
-                    })?
-                    .map_err(|err| Error::InvalidPayload(err.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        match &self.scheduler {
-            Schedulers::Distributed(scheduler) => futures::executor::block_on(
-                scheduler.run_registered_wasm_job(operation_id, partitions),
-            )
-            .map_err(|err| Error::InvalidPayload(err.to_string())),
-            Schedulers::Local(_) => Err(Error::UnsupportedOperation(
-                "registered wasm jobs require the distributed scheduler",
-            )),
-        }
-    }
-
-    pub fn run_registered_wasm_job_rkyv<T, U, C>(
-        self: &Arc<Self>,
-        rdd: Arc<dyn Rdd<Item = T>>,
-        operation_id: &str,
-        config: &C,
-    ) -> Result<Vec<U>, Error>
-    where
-        T: Data + Clone,
-        Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
-        U: rkyv::Archive,
-        U::Archived: for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
-            + rkyv::Deserialize<U, RkyvWireStrategy>,
-        C: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
-    {
-        let payload = WasmTaskPayload::with_encodings(
-            WasmValueEncoding::Rkyv,
-            config
-                .encode_wire()
-                .map_err(|err| Error::InvalidPayload(err.to_string()))?,
-            WasmValueEncoding::Rkyv,
-            WasmValueEncoding::Rkyv,
-        );
-
-        let partitions = rdd
-            .splits()
-            .into_iter()
-            .map(|split| {
-                let values = rdd
-                    .iterator(split)
-                    .map_err(|err| Error::InvalidPayload(err.to_string()))?
-                    .collect::<Vec<T>>();
-                values
-                    .encode_wire()
-                    .map_err(|err| Error::InvalidPayload(err.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let outputs = match &self.scheduler {
-            Schedulers::Distributed(scheduler) => futures::executor::block_on(
-                scheduler.run_registered_wasm_job_with_payload(operation_id, payload, partitions),
-            )
-            .map_err(|err| Error::InvalidPayload(err.to_string()))?,
-            Schedulers::Local(_) => {
-                return Err(Error::UnsupportedOperation(
-                    "registered wasm jobs require the distributed scheduler",
-                ));
-            }
-        };
-
-        outputs
-            .into_iter()
-            .map(|bytes| {
-                U::decode_wire(&bytes).map_err(|err| Error::InvalidPayload(err.to_string()))
-            })
-            .collect()
-    }
-
-    /// Run a job that can return approximate results. Returns a partial result
-    /// (how partial depends on whether the job was finished before or after timeout).
     pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
         self: &Arc<Self>,
         func: F,
@@ -724,64 +509,6 @@ impl Context {
             .map_err(Error::from)
     }
 
-    pub fn register_artifact(&self, descriptor: ArtifactDescriptor) -> Result<(), Error> {
-        match &self.scheduler {
-            Schedulers::Distributed(scheduler) => {
-                scheduler.register_artifact_descriptor(descriptor);
-                Ok(())
-            }
-            Schedulers::Local(_) => Err(Error::UnsupportedOperation(
-                "artifact registration requires the distributed scheduler",
-            )),
-        }
-    }
-
-    /// Register a typed artifact stub's descriptor with the scheduler.
-    ///
-    /// This is an alternative to loading the entire manifest: register only the
-    /// specific stubs your pipeline uses.
-    pub fn register_stub<I, O>(
-        &self,
-        stub: &atomic_data::stub::ArtifactStub<I, O>,
-    ) -> Result<(), Error> {
-        self.register_artifact(stub.descriptor.clone())
-    }
-
-    pub fn register_artifact_manifest(&self, manifest: ArtifactManifest) -> Result<(), Error> {
-        match &self.scheduler {
-            Schedulers::Distributed(scheduler) => {
-                scheduler.register_artifact_manifest(manifest);
-                Ok(())
-            }
-            Schedulers::Local(_) => Err(Error::UnsupportedOperation(
-                "artifact registration requires the distributed scheduler",
-            )),
-        }
-    }
-
-    pub fn load_artifact_manifest_toml(&self, path: impl AsRef<Path>) -> Result<(), Error> {
-        match &self.scheduler {
-            Schedulers::Distributed(scheduler) => scheduler
-                .load_artifact_manifest_toml(path)
-                .map_err(|err| Error::ArtifactLoad(err.to_string())),
-            Schedulers::Local(_) => Err(Error::UnsupportedOperation(
-                "artifact registration requires the distributed scheduler",
-            )),
-        }
-    }
-
-    pub fn resolve_registered_wasm_operation<I>(&self, candidates: I) -> Option<String>
-    where
-        I: IntoIterator<Item = String>,
-    {
-        match &self.scheduler {
-            Schedulers::Distributed(scheduler) => candidates
-                .into_iter()
-                .find(|candidate| scheduler.resolve_artifact(candidate).is_ok()),
-            Schedulers::Local(_) => None,
-        }
-    }
-
     pub fn union<T: Data + Clone>(
         self: &Arc<Self>,
         rdds: &[Arc<dyn Rdd<Item = T>>],
@@ -792,19 +519,17 @@ impl Context {
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, ExecutionRuntime};
-    use crate::env::DeploymentMode;
+    use super::Context;
 
     #[test]
-    fn local_mode_rejects_non_local_runtime() {
-        let result = Context::with_mode_and_runtime(DeploymentMode::Local, ExecutionRuntime::Wasm);
-        assert!(result.is_err());
+    fn local_context_creates_successfully() {
+        let ctx = Context::local();
+        assert!(ctx.is_ok());
     }
 
     #[test]
-    fn distributed_mode_rejects_local_runtime() {
-        let result =
-            Context::with_mode_and_runtime(DeploymentMode::Distributed, ExecutionRuntime::Local);
-        assert!(result.is_err());
+    fn local_context_is_not_distributed() {
+        let ctx = Context::local().unwrap();
+        assert!(!ctx.is_distributed());
     }
 }

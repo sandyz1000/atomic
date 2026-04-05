@@ -1,23 +1,20 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use sha2::{Digest, Sha256};
+use clap::{Args, Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 
-const DEFAULT_MAP_OP_ID: &str = "demo.map.v1";
-const DEFAULT_REDUCE_OP_ID: &str = "demo.reduce.v1";
-const DEFAULT_MAP_ENTRYPOINT: &str = "run_map";
-const DEFAULT_REDUCE_ENTRYPOINT: &str = "run_reduce";
-const DEFAULT_WAT_BUILD_TARGET: &str = "wasm32-wasip2";
-const DEFAULT_RUST_BUILD_TARGET: &str = "wasm32-unknown-unknown";
-const WAT_TEMPLATE_FILE: &str = "task.wat";
-const CARGO_MANIFEST_FILE: &str = "Cargo.toml";
+const DEFAULT_BUILD_TARGET: &str = "x86_64-unknown-linux-musl";
+const CLUSTER_CONFIG_PATH: &str = ".atomic/cluster.toml";
 
 #[derive(Parser)]
 #[command(name = "atomic")]
-#[command(about = "Atomic CLI")]
+#[command(about = "Atomic — distributed compute CLI (build, deploy, submit, stop)")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -25,483 +22,450 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Wasm(WasmCommands),
-}
-
-#[derive(Args)]
-struct WasmCommands {
-    #[command(subcommand)]
-    command: WasmSubcommand,
-}
-
-#[derive(Subcommand)]
-enum WasmSubcommand {
-    Init(InitArgs),
+    /// Cross-compile the project binary for worker deployment
     Build(BuildArgs),
+    /// Ship a compiled binary to remote workers and start them
+    Deploy(DeployArgs),
+    /// Build, deploy, and run the driver in one command
+    Submit(SubmitArgs),
+    /// Send a graceful shutdown to all workers in .atomic/cluster.toml
+    Stop(StopArgs),
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-enum WasmTemplate {
-    Rust,
-    Wat,
-}
-
-#[derive(Args)]
-struct InitArgs {
-    #[arg(long)]
-    dir: PathBuf,
-
-    #[arg(long, default_value = "map_reduce_task")]
-    name: String,
-
-    #[arg(long, value_enum, default_value_t = WasmTemplate::Rust)]
-    template: WasmTemplate,
-
-    #[arg(long, default_value_t = false)]
-    force: bool,
-}
+// ── Build ────────────────────────────────────────────────────────────────────
 
 #[derive(Args)]
 struct BuildArgs {
+    /// Target triple for cross-compilation
+    #[arg(long, default_value = DEFAULT_BUILD_TARGET)]
+    target: String,
+
+    /// Build in release mode (always true for worker targets)
+    #[arg(long, default_value_t = true)]
+    release: bool,
+
+    /// Extra flags forwarded to `cargo build`
+    #[arg(last = true)]
+    cargo_args: Vec<String>,
+}
+
+// ── Deploy ───────────────────────────────────────────────────────────────────
+
+#[derive(Args)]
+struct DeployArgs {
+    /// Comma-separated list of worker host names or IPs
+    #[arg(long, value_delimiter = ',', required = true)]
+    workers: Vec<String>,
+
+    /// Path to the compiled binary to ship
+    #[arg(long, required = true)]
+    binary: PathBuf,
+
+    /// Port each worker should listen on
+    #[arg(long, default_value_t = 10000)]
+    port: u16,
+
+    /// SSH private key for authenticating to workers
     #[arg(long)]
-    source: PathBuf,
+    key: Option<PathBuf>,
 
+    /// SSH user
+    #[arg(long, default_value = "ubuntu")]
+    user: String,
+
+    /// Skip health-check after deploying
+    #[arg(long, default_value_t = false)]
+    no_healthcheck: bool,
+}
+
+// ── Submit ───────────────────────────────────────────────────────────────────
+
+#[derive(Args)]
+struct SubmitArgs {
+    /// Comma-separated list of worker host names or IPs
+    #[arg(long, value_delimiter = ',')]
+    workers: Vec<String>,
+
+    /// Target triple for cross-compilation (passed to `atomic build`)
+    #[arg(long, default_value = DEFAULT_BUILD_TARGET)]
+    target: String,
+
+    /// Port each worker should listen on
+    #[arg(long, default_value_t = 10000)]
+    port: u16,
+
+    /// SSH private key for authenticating to workers
     #[arg(long)]
-    out: PathBuf,
+    key: Option<PathBuf>,
 
-    #[arg(long)]
-    build_target: Option<String>,
+    /// SSH user
+    #[arg(long, default_value = "ubuntu")]
+    user: String,
 
-    #[arg(long, default_value = DEFAULT_MAP_OP_ID)]
-    map_op_id: String,
+    /// Driver arguments passed after `--`
+    #[arg(last = true)]
+    driver_args: Vec<String>,
+}
 
-    #[arg(long, default_value = DEFAULT_REDUCE_OP_ID)]
-    reduce_op_id: String,
+// ── Stop ─────────────────────────────────────────────────────────────────────
 
-    #[arg(long, default_value = DEFAULT_MAP_ENTRYPOINT)]
-    map_entrypoint: String,
+#[derive(Args)]
+struct StopArgs {
+    /// Comma-separated list of worker addresses (host:port). If omitted, reads .atomic/cluster.toml
+    #[arg(long, value_delimiter = ',')]
+    workers: Vec<String>,
+}
 
-    #[arg(long, default_value = DEFAULT_REDUCE_ENTRYPOINT)]
-    reduce_entrypoint: String,
+// ── Cluster config ────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Default)]
+struct ClusterConfig {
+    workers: Vec<WorkerEntry>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct WorkerEntry {
+    address: String,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Wasm(wasm) => match wasm.command {
-            WasmSubcommand::Init(args) => init_task(args),
-            WasmSubcommand::Build(args) => build_task(args),
-        },
+        Commands::Build(args) => cmd_build(args),
+        Commands::Deploy(args) => cmd_deploy(args),
+        Commands::Submit(args) => cmd_submit(args),
+        Commands::Stop(args) => cmd_stop(args),
     }
 }
 
-fn init_task(args: InitArgs) -> Result<()> {
-    let root = args.dir.join(&args.name);
-    if root.exists() {
-        if !args.force {
-            bail!(
-                "destination already exists: {} (use --force to overwrite files in place)",
-                root.display()
-            );
+// ── Build implementation ──────────────────────────────────────────────────────
+
+fn cmd_build(args: BuildArgs) -> Result<()> {
+    println!("Building for target: {}", args.target);
+
+    let cross = which_cross()?;
+    let mut cmd = Command::new(&cross);
+    cmd.arg("build");
+
+    if args.release {
+        cmd.arg("--release");
+    }
+
+    cmd.arg("--target").arg(&args.target);
+
+    for extra in &args.cargo_args {
+        cmd.arg(extra);
+    }
+
+    println!("Running: {} {}", cross, format_args_display(&cmd));
+
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to run `{cross}`"))?;
+
+    if !status.success() {
+        bail!("`{cross}` exited with status {}", status);
+    }
+
+    let profile = if args.release { "release" } else { "debug" };
+    let bin_dir = PathBuf::from("target").join(&args.target).join(profile);
+    println!("Build succeeded. Binaries in: {}", bin_dir.display());
+    Ok(())
+}
+
+fn which_cross() -> Result<String> {
+    // Prefer `cross` on PATH; fall back to `cargo` with a warning.
+    if Command::new("cross").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+        return Ok("cross".to_string());
+    }
+    eprintln!(
+        "Warning: `cross` not found. Using `cargo build` directly — \
+        cross-compilation for {DEFAULT_BUILD_TARGET} may fail without a matching toolchain.\n\
+        Install cross: cargo install cross"
+    );
+    Ok("cargo".to_string())
+}
+
+fn format_args_display(cmd: &Command) -> String {
+    let prog = cmd.get_program().to_string_lossy().to_string();
+    let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+    format!("{} {}", prog, args.join(" "))
+}
+
+// ── Deploy implementation ─────────────────────────────────────────────────────
+
+fn cmd_deploy(args: DeployArgs) -> Result<()> {
+    if !args.binary.exists() {
+        bail!("binary not found: {}", args.binary.display());
+    }
+
+    let mut deployed: Vec<WorkerEntry> = Vec::new();
+
+    for host in &args.workers {
+        println!("Deploying to {}…", host);
+        deploy_to_worker(host, &args)?;
+
+        let address = format!("{}:{}", host, args.port);
+        if !args.no_healthcheck {
+            healthcheck(&address).with_context(|| format!("health-check failed for {}", address))?;
+            println!("  ✓ {} is healthy", address);
         }
-    } else {
-        fs::create_dir_all(&root)
-            .with_context(|| format!("failed to create {}", root.display()))?;
+
+        deployed.push(WorkerEntry { address });
     }
 
-    match args.template {
-        WasmTemplate::Rust => init_rust_task(&root, &args.name)?,
-        WasmTemplate::Wat => init_wat_task(&root, &args.name)?,
-    }
-
+    save_cluster_config(&deployed)?;
     println!(
-        "Created {} WASM task scaffold at {}",
-        match args.template {
-            WasmTemplate::Rust => "Rust",
-            WasmTemplate::Wat => "WAT",
-        },
-        root.display()
+        "\nDeployed {} worker(s). Addresses written to {}",
+        deployed.len(),
+        CLUSTER_CONFIG_PATH
     );
-    println!("Next step:");
-    println!(
-        "  cargo run -p atomic-cli -- wasm build --source {} --out {}",
-        root.display(),
-        root.join("build").display()
-    );
+    for w in &deployed {
+        println!("  {}", w.address);
+    }
     Ok(())
 }
 
-fn build_task(args: BuildArgs) -> Result<()> {
-    if !args.source.exists() {
-        bail!("source path not found: {}", args.source.display());
+fn deploy_to_worker(host: &str, args: &DeployArgs) -> Result<()> {
+    let remote_dir = "/tmp/atomic-worker";
+    let remote_path = format!("{}/worker", remote_dir);
+    let user_host = format!("{}@{}", args.user, host);
+
+    // 1. Create remote directory
+    ssh_run(host, &args.user, args.key.as_deref(), &format!("mkdir -p {}", remote_dir))?;
+
+    // 2. SCP binary
+    let mut scp = Command::new("scp");
+    if let Some(key) = &args.key {
+        scp.arg("-i").arg(key);
+    }
+    scp.args(["-o", "StrictHostKeyChecking=no"])
+        .arg(args.binary.as_os_str())
+        .arg(format!("{}:{}", user_host, remote_path));
+
+    let status = scp.status().context("failed to run scp")?;
+    if !status.success() {
+        bail!("scp failed for {}", host);
     }
 
-    if let Some(manifest_path) = resolve_rust_manifest(&args.source) {
-        build_rust_task(args, manifest_path)
+    // 3. chmod and launch worker in background
+    let launch_cmd = format!(
+        "chmod +x {path} && nohup {path} --worker --port {port} > /tmp/atomic-worker.log 2>&1 &",
+        path = remote_path,
+        port = args.port,
+    );
+    ssh_run(host, &args.user, args.key.as_deref(), &launch_cmd)?;
+
+    Ok(())
+}
+
+fn ssh_run(host: &str, user: &str, key: Option<&std::path::Path>, cmd: &str) -> Result<()> {
+    let mut ssh = Command::new("ssh");
+    if let Some(key) = key {
+        ssh.arg("-i").arg(key);
+    }
+    ssh.args(["-o", "StrictHostKeyChecking=no"])
+        .arg(format!("{}@{}", user, host))
+        .arg(cmd);
+
+    let status = ssh.status().with_context(|| format!("failed to ssh into {}", host))?;
+    if !status.success() {
+        bail!("ssh command failed on {}: {}", host, cmd);
+    }
+    Ok(())
+}
+
+/// TCP health-check: connect and read the WorkerCapabilities frame header (4 bytes).
+/// If the worker accepts the connection within 10 seconds it is considered healthy.
+fn healthcheck(address: &str) -> Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match TcpStream::connect_timeout(
+            &address.parse().with_context(|| format!("invalid address: {}", address))?,
+            Duration::from_secs(1),
+        ) {
+            Ok(mut stream) => {
+                // Just connecting is enough — the worker accepts connections once ready.
+                // Drain any greeting bytes so the worker doesn't error on our disconnect.
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                let mut buf = [0u8; 16];
+                let _ = stream.read(&mut buf);
+                return Ok(());
+            }
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => bail!("could not connect to {}: {}", address, e),
+        }
+    }
+}
+
+// ── Submit implementation ─────────────────────────────────────────────────────
+
+fn cmd_submit(args: SubmitArgs) -> Result<()> {
+    // 1. Build
+    cmd_build(BuildArgs {
+        target: args.target.clone(),
+        release: true,
+        cargo_args: vec![],
+    })?;
+
+    // 2. Locate the built binary (first bin in release profile)
+    let bin_dir = PathBuf::from("target").join(&args.target).join("release");
+    let binary = find_binary(&bin_dir)
+        .with_context(|| format!("no binary found in {}", bin_dir.display()))?;
+
+    // 3. Deploy (if workers given)
+    if !args.workers.is_empty() {
+        cmd_deploy(DeployArgs {
+            workers: args.workers.clone(),
+            binary,
+            port: args.port,
+            key: args.key.clone(),
+            user: args.user.clone(),
+            no_healthcheck: false,
+        })?;
+    }
+
+    // 4. Run driver
+    let worker_addrs: Vec<String> = if args.workers.is_empty() {
+        load_cluster_config()?
+            .workers
+            .into_iter()
+            .map(|w| w.address)
+            .collect()
     } else {
-        build_wat_task(args)
-    }
-}
-
-fn init_rust_task(root: &Path, name: &str) -> Result<()> {
-    let src_dir = root.join("src");
-    fs::create_dir_all(&src_dir)
-        .with_context(|| format!("failed to create {}", src_dir.display()))?;
-
-    write_text_file(&root.join(CARGO_MANIFEST_FILE), &rust_cargo_template(name))?;
-    write_text_file(&src_dir.join("lib.rs"), rust_lib_template())?;
-    write_text_file(&root.join("README.md"), &rust_readme_template(name))?;
-    Ok(())
-}
-
-fn init_wat_task(root: &Path, name: &str) -> Result<()> {
-    write_text_file(&root.join(WAT_TEMPLATE_FILE), wat_task_template())?;
-    write_text_file(&root.join("README.md"), &wat_readme_template(name))?;
-    Ok(())
-}
-
-fn build_rust_task(args: BuildArgs, manifest_path: PathBuf) -> Result<()> {
-    let crate_dir = manifest_path
-        .parent()
-        .context("rust wasm source manifest must have a parent directory")?;
-    let package_name = read_package_name(&manifest_path)?;
-    let artifact_name = sanitize_artifact_name(&package_name);
-    let build_target = args
-        .build_target
-        .clone()
-        .unwrap_or_else(|| DEFAULT_RUST_BUILD_TARGET.to_string());
-
-    let output = Command::new("cargo")
-        .arg("build")
-        .arg("--manifest-path")
-        .arg(&manifest_path)
-        .arg("--release")
-        .arg("--lib")
-        .arg("--target")
-        .arg(&build_target)
-        .current_dir(crate_dir)
-        .output()
-        .with_context(|| format!("failed to run cargo for {}", manifest_path.display()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let details = if stderr.trim().is_empty() { stdout } else { stderr };
-        bail!(
-            "cargo build failed for {}\n{}",
-            manifest_path.display(),
-            details.trim()
-        );
-    }
-
-    let built_wasm = crate_dir
-        .join("target")
-        .join(&build_target)
-        .join("release")
-        .join(format!("{}.wasm", artifact_name));
-    let wasm = fs::read(&built_wasm)
-        .with_context(|| format!("failed to read built wasm artifact {}", built_wasm.display()))?;
-
-    emit_build_outputs(&args, &artifact_name, &wasm, &build_target)
-}
-
-fn build_wat_task(args: BuildArgs) -> Result<()> {
-    if !args.source.is_file() {
-        bail!(
-            "WAT sources must be files; for Rust tasks pass a crate directory or Cargo.toml"
-        );
-    }
-
-    let wat = fs::read_to_string(&args.source)
-        .with_context(|| format!("failed to read {}", args.source.display()))?;
-    let wasm = wat::parse_str(&wat)
-        .with_context(|| format!("failed to compile WAT source {}", args.source.display()))?;
-    let module_name = args
-        .source
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("task")
-        .to_string();
-    let build_target = args
-        .build_target
-        .clone()
-        .unwrap_or_else(|| DEFAULT_WAT_BUILD_TARGET.to_string());
-
-    emit_build_outputs(&args, &module_name, &wasm, &build_target)
-}
-
-fn emit_build_outputs(
-    args: &BuildArgs,
-    module_name: &str,
-    wasm: &[u8],
-    build_target: &str,
-) -> Result<()> {
-    fs::create_dir_all(&args.out)
-        .with_context(|| format!("failed to create output dir {}", args.out.display()))?;
-
-    let wasm_path = args.out.join(format!("{}.wasm", module_name));
-    fs::write(&wasm_path, wasm)
-        .with_context(|| format!("failed to write {}", wasm_path.display()))?;
-
-    let digest = format!(
-        "sha256:{}",
-        Sha256::digest(wasm)
+        args.workers
             .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<String>()
-    );
-    let manifest = manifest_template(
-        &wasm_path,
-        &digest,
-        &args.map_op_id,
-        &args.reduce_op_id,
-        &args.map_entrypoint,
-        &args.reduce_entrypoint,
-        build_target,
-    );
-    let manifest_path = args.out.join("manifest.toml");
-    fs::write(&manifest_path, manifest)
-        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+            .map(|h| format!("{}:{}", h, args.port))
+            .collect()
+    };
 
-    let build_info_path = args.out.join("build.env");
-    fs::write(
-        &build_info_path,
-        format!(
-            "ATOMIC_WASM_MANIFEST={}\nATOMIC_WASM_MAP_MODULE={}\nATOMIC_WASM_REDUCE_MODULE={}\n",
-            manifest_path.display(),
-            wasm_path.display(),
-            wasm_path.display(),
-        ),
-    )
-    .with_context(|| format!("failed to write {}", build_info_path.display()))?;
+    let driver_binary = find_binary(&PathBuf::from("target/release"))
+        .or_else(|_| find_binary(&PathBuf::from("target/debug")))
+        .context("no local driver binary found — run `cargo build` first")?;
 
-    println!("Built WASM artifact: {}", wasm_path.display());
-    println!("Manifest: {}", manifest_path.display());
-    println!("Digest: {}", digest);
-    println!("Build target: {}", build_target);
-    println!("Run with:");
-    println!(
-        "  ATOMIC_RUN_WASM_EXAMPLE=1 ATOMIC_WASM_MANIFEST={} cargo run --example wasm_map_reduce",
-        manifest_path.display()
-    );
+    let mut driver_cmd = Command::new(&driver_binary);
+    driver_cmd.arg("--driver");
+    if !worker_addrs.is_empty() {
+        driver_cmd.arg("--workers").arg(worker_addrs.join(","));
+    }
+    for extra in &args.driver_args {
+        driver_cmd.arg(extra);
+    }
+
+    println!("Running driver: {}", driver_binary.display());
+    let status = driver_cmd.status().context("failed to run driver")?;
+    if !status.success() {
+        bail!("driver exited with status {}", status);
+    }
     Ok(())
 }
 
-fn resolve_rust_manifest(source: &Path) -> Option<PathBuf> {
-    if source.is_dir() {
-        let manifest = source.join(CARGO_MANIFEST_FILE);
-        return manifest.is_file().then_some(manifest);
+fn find_binary(dir: &std::path::Path) -> Result<PathBuf> {
+    if !dir.exists() {
+        bail!("directory does not exist: {}", dir.display());
+    }
+    let entries = fs::read_dir(dir)?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            // Skip known non-binary extensions
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(ext, "d" | "rlib" | "rmeta" | "pdb" | "so" | "dylib" | "dll") {
+                continue;
+            }
+            // On Unix, check executable bit
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if entry.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false) {
+                    return Ok(path);
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                if ext == "exe" || ext.is_empty() {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+    bail!("no executable binary found in {}", dir.display());
+}
+
+// ── Stop implementation ───────────────────────────────────────────────────────
+
+fn cmd_stop(args: StopArgs) -> Result<()> {
+    let addresses: Vec<String> = if args.workers.is_empty() {
+        load_cluster_config()?
+            .workers
+            .into_iter()
+            .map(|w| w.address)
+            .collect()
+    } else {
+        args.workers
+    };
+
+    if addresses.is_empty() {
+        println!("No workers to stop (no --workers given and {} is empty).", CLUSTER_CONFIG_PATH);
+        return Ok(());
     }
 
-    source
-        .is_file()
-        .then_some(source)
-        .and_then(|path| path.file_name().and_then(|name| name.to_str()).map(|name| (path, name)))
-        .and_then(|(path, name)| (name == CARGO_MANIFEST_FILE).then(|| path.to_path_buf()))
-}
-
-fn read_package_name(manifest_path: &Path) -> Result<String> {
-    let manifest = fs::read_to_string(manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let value: toml::Value = toml::from_str(&manifest)
-        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
-    value
-        .get("package")
-        .and_then(|package| package.get("name"))
-        .and_then(toml::Value::as_str)
-        .map(ToOwned::to_owned)
-        .context("Cargo.toml is missing package.name")
-}
-
-fn sanitize_artifact_name(name: &str) -> String {
-    name.replace('-', "_")
-}
-
-fn write_text_file(path: &Path, contents: &str) -> Result<()> {
-    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn manifest_template(
-    wasm_path: &Path,
-    digest: &str,
-    map_op_id: &str,
-    reduce_op_id: &str,
-    map_entrypoint: &str,
-    reduce_entrypoint: &str,
-    build_target: &str,
-) -> String {
-    format!(
-        "schema_version = 1\n\n[[wasm_artifacts]]\nabi_version = 1\nmodule_path = \"{}\"\n\n[wasm_artifacts.descriptor]\noperation_id = \"{}\"\nexecution_backend = \"wasm\"\nartifact_kind = \"wasm\"\nartifact_ref = \"{}\"\nentrypoint = \"{}\"\nruntime = \"rust\"\nartifact_digest = \"{}\"\nbuild_target = \"{}\"\n\n[wasm_artifacts.descriptor.profile]\ncpu_millis = 250\nmemory_mb = 128\ntimeout_ms = 1000\n\n[[wasm_artifacts]]\nabi_version = 1\nmodule_path = \"{}\"\n\n[wasm_artifacts.descriptor]\noperation_id = \"{}\"\nexecution_backend = \"wasm\"\nartifact_kind = \"wasm\"\nartifact_ref = \"{}\"\nentrypoint = \"{}\"\nruntime = \"rust\"\nartifact_digest = \"{}\"\nbuild_target = \"{}\"\n\n[wasm_artifacts.descriptor.profile]\ncpu_millis = 250\nmemory_mb = 128\ntimeout_ms = 1000\n",
-        wasm_path.display(),
-        map_op_id,
-        wasm_path.display(),
-        map_entrypoint,
-        digest,
-        build_target,
-        wasm_path.display(),
-        reduce_op_id,
-        wasm_path.display(),
-        reduce_entrypoint,
-        digest,
-        build_target,
-    )
-}
-
-fn rust_cargo_template(name: &str) -> String {
-    format!(
-        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[profile.release]\nlto = true\nopt-level = \"s\"\npanic = \"abort\"\ncodegen-units = 1\nstrip = true\n\n[workspace]\n",
-        name
-    )
-}
-
-fn rust_readme_template(name: &str) -> String {
-    format!(
-        "# {}\n\nThis scaffold defines a Rust-authored WASM task for Atomic's current map/reduce runtime.\n\nFiles:\n- `Cargo.toml`: standalone crate manifest for a `cdylib` wasm build\n- `src/lib.rs`: exports `alloc`, `run_map`, and `run_reduce` for the worker ABI\n\nBuild it with:\n\n```sh\ncargo run -p atomic-cli -- wasm build --source . --out ./build\n```\n\nThen run the driver example with the generated manifest:\n\n```sh\nATOMIC_RUN_WASM_EXAMPLE=1 ATOMIC_WASM_MANIFEST=./build/manifest.toml cargo run --example wasm_map_reduce\n```\n\nThe default Rust target for this flow is `wasm32-unknown-unknown` because the worker expects a plain wasm module with exported memory and allocator symbols.\n",
-        name
-    )
-}
-
-fn rust_lib_template() -> &'static str {
-    r#"use std::alloc::{Layout, alloc, dealloc};
-use std::slice;
-
-fn pack_result(ptr: *mut u8, len: usize) -> i64 {
-    ((ptr as u64) << 32 | len as u64) as i64
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn alloc(len: i32) -> i32 {
-    let layout = Layout::from_size_align(len.max(1) as usize, 1).unwrap();
-    unsafe { alloc(layout) as i32 }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dealloc(ptr: i32, len: i32) {
-    if ptr == 0 || len <= 0 {
-        return;
+    for address in &addresses {
+        print!("Stopping {}… ", address);
+        match stop_worker(address) {
+            Ok(()) => println!("done"),
+            Err(e) => println!("warning: {}", e),
+        }
     }
 
-    let layout = Layout::from_size_align(len as usize, 1).unwrap();
-    unsafe { dealloc(ptr as *mut u8, layout) };
+    // Clear cluster config
+    if PathBuf::from(CLUSTER_CONFIG_PATH).exists() {
+        save_cluster_config(&[])?;
+    }
+
+    Ok(())
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn run_map(ptr: i32, len: i32) -> i64 {
-    let input = unsafe { slice::from_raw_parts(ptr as *const u8, len as usize) };
-    let mut output = input
-        .iter()
-        .map(|byte| byte.wrapping_add(1))
-        .collect::<Vec<u8>>();
-    let packed = pack_result(output.as_mut_ptr(), output.len());
-    std::mem::forget(output);
-    packed
+/// Send a graceful shutdown frame to a worker.
+///
+/// The wire protocol sends a 4-byte big-endian length followed by a single
+/// byte `0x01` (ShutdownRequest opcode as used by the executor's transport layer).
+/// If the worker has already stopped, the connection error is treated as success.
+fn stop_worker(address: &str) -> Result<()> {
+    let addr = address
+        .parse()
+        .with_context(|| format!("invalid address: {}", address))?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+        .with_context(|| format!("could not connect to {}", address))?;
+    stream.set_write_timeout(Some(Duration::from_secs(3))).ok();
+
+    // Frame: 4-byte BE length (1) + 1-byte opcode (0x01 = shutdown)
+    let frame: [u8; 5] = [0, 0, 0, 1, 0x01];
+    let _ = stream.write_all(&frame);
+    Ok(())
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn run_reduce(ptr: i32, len: i32) -> i64 {
-    let input = unsafe { slice::from_raw_parts(ptr as *const u8, len as usize) };
-    let sum = input.iter().fold(0_u32, |acc, byte| acc + u32::from(*byte));
-    let mut output = sum.to_le_bytes().to_vec();
-    let packed = pack_result(output.as_mut_ptr(), output.len());
-    std::mem::forget(output);
-    packed
-}
-"#
-}
+// ── Cluster config helpers ────────────────────────────────────────────────────
 
-fn wat_readme_template(name: &str) -> String {
-    format!(
-        "# {}\n\nThis scaffold defines a byte-oriented WAT task for Atomic's current map/reduce runtime.\n\nFiles:\n- `task.wat`: exports `memory`, `alloc`, `run_map`, and `run_reduce`.\n\nBuild it with:\n\n```sh\ncargo run -p atomic-cli -- wasm build --source ./task.wat --out ./build\n```\n\nThen run the driver example with the generated manifest:\n\n```sh\nATOMIC_RUN_WASM_EXAMPLE=1 ATOMIC_WASM_MANIFEST=./build/manifest.toml cargo run --example wasm_map_reduce\n```\n",
-        name
-    )
+fn save_cluster_config(workers: &[WorkerEntry]) -> Result<()> {
+    let config_path = PathBuf::from(CLUSTER_CONFIG_PATH);
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).context("failed to create .atomic directory")?;
+    }
+    let config = ClusterConfig { workers: workers.to_vec() };
+    let toml = toml::to_string_pretty(&config).context("failed to serialize cluster config")?;
+    fs::write(&config_path, toml)
+        .with_context(|| format!("failed to write {}", config_path.display()))
 }
 
-fn wat_task_template() -> &'static str {
-    r#"(module
-  (memory (export "memory") 1)
-  (global $heap (mut i32) (i32.const 1024))
-
-  (func $alloc (export "alloc") (param $len i32) (result i32)
-    (local $ptr i32)
-    global.get $heap
-    local.set $ptr
-    global.get $heap
-    local.get $len
-    i32.add
-    global.set $heap
-    local.get $ptr)
-
-  (func (export "run_map") (param $ptr i32) (param $len i32) (result i64)
-    (local $out i32)
-    (local $i i32)
-    local.get $len
-    call $alloc
-    local.set $out
-    block $done
-      loop $copy
-        local.get $i
-        local.get $len
-        i32.ge_u
-        br_if $done
-        local.get $out
-        local.get $i
-        i32.add
-        local.get $ptr
-        local.get $i
-        i32.add
-        i32.load8_u
-        i32.const 1
-        i32.add
-        i32.store8
-        local.get $i
-        i32.const 1
-        i32.add
-        local.set $i
-        br $copy
-      end
-    end
-    local.get $out
-    i64.extend_i32_u
-    i64.const 32
-    i64.shl
-    local.get $len
-    i64.extend_i32_u
-    i64.or)
-
-  (func (export "run_reduce") (param $ptr i32) (param $len i32) (result i64)
-    (local $out i32)
-    (local $i i32)
-    (local $sum i32)
-    i32.const 4
-    call $alloc
-    local.set $out
-    block $done
-      loop $sum_loop
-        local.get $i
-        local.get $len
-        i32.ge_u
-        br_if $done
-        local.get $sum
-        local.get $ptr
-        local.get $i
-        i32.add
-        i32.load8_u
-        i32.add
-        local.set $sum
-        local.get $i
-        i32.const 1
-        i32.add
-        local.set $i
-        br $sum_loop
-      end
-    end
-    local.get $out
-    local.get $sum
-    i32.store
-    local.get $out
-    i64.extend_i32_u
-    i64.const 32
-    i64.shl
-    i64.const 4
-    i64.or))"#
+fn load_cluster_config() -> Result<ClusterConfig> {
+    let config_path = PathBuf::from(CLUSTER_CONFIG_PATH);
+    if !config_path.exists() {
+        return Ok(ClusterConfig::default());
+    }
+    let text = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    toml::from_str(&text).with_context(|| format!("failed to parse {}", config_path.display()))
 }
