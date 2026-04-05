@@ -5,7 +5,7 @@ use crate::rdd::map_partitions::MapPartitionsRdd;
 use crate::rdd::mapper::MapperRdd;
 use crate::rdd::wasm::WasmRddExt;
 use atomic_data::dependency::Dependency;
-use atomic_data::distributed::{AggregateActionConfig, FoldActionConfig};
+use atomic_data::distributed::{AggregateConfig, FoldActionConfig};
 use atomic_data::distributed::{RkyvWireSerializer, RkyvWireStrategy, RkyvWireValidator};
 use atomic_data::error::BaseError;
 use atomic_data::fn_traits::{RddFlatMapFn, RddFn};
@@ -627,7 +627,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         U::Archived: for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
             + rkyv::Deserialize<U, RkyvWireStrategy>,
         Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
-        AggregateActionConfig<U>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        AggregateConfig<U>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
         SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
         CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
     {
@@ -635,7 +635,7 @@ impl<T: Data + Clone> TypedRdd<T> {
             ExecMode::Local => self.aggregate_local(init, seq_fn, comb_fn),
             ExecMode::Wasm(operation_id) => {
                 let _ = seq_fn;
-                let config = AggregateActionConfig { zero: init.clone() };
+                let config = AggregateConfig { zero: init.clone() };
                 let partials = self.run_wasm_cfg::<U, _>(&operation_id, &config)?;
                 Ok(partials.into_iter().fold(init, comb_fn))
             }
@@ -652,13 +652,13 @@ impl<T: Data + Clone> TypedRdd<T> {
         U::Archived: for<'a> CheckBytes<RkyvWireValidator<'a>>
             + rkyv::Deserialize<U, RkyvWireStrategy>,
         Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
-        AggregateActionConfig<U>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        AggregateConfig<U>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
         CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
     {
         match self.exec_mode("aggregate")? {
             ExecMode::Local => Ok(None),
             ExecMode::Wasm(operation_id) => {
-                let config = AggregateActionConfig { zero: init.clone() };
+                let config = AggregateConfig { zero: init.clone() };
                 let partials = self.run_wasm_cfg::<U, _>(&operation_id, &config)?;
                 Ok(Some(partials.into_iter().fold(init, comb_fn)))
             }
@@ -675,7 +675,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         U::Archived: for<'a> CheckBytes<RkyvWireValidator<'a>>
             + rkyv::Deserialize<U, RkyvWireStrategy>,
         Vec<T>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
-        AggregateActionConfig<U>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
+        AggregateConfig<U>: for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>,
         CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
     {
         self.try_agg_wasm(init, comb_fn)

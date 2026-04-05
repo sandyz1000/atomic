@@ -2,20 +2,20 @@ use crate::error::Error;
 use crate::executor::{Executor, Signal};
 use crate::io::ReaderConfiguration;
 use crate::rdd::typed::TypedRdd;
+use crate::rdd::{ParallelCollection, UnionRdd};
 use crate::{env, hosts};
-use atomic_data::distributed::{
-    ArtifactDescriptor, ArtifactManifest, ExecutionBackend, RkyvWireSerializer,
-    RkyvWireStrategy, RkyvWireValidator, TRANSPORT_HEADER_LEN, TransportFrameKind,
-    WasmTaskPayload, WasmValueEncoding, WorkerCapabilities, WireDecode, WireEncode,
-    encode_transport_frame, parse_transport_header,
-};
 use atomic_data::data::Data;
+use atomic_data::distributed::{
+    ArtifactDescriptor, ArtifactManifest, ExecutionBackend, RkyvWireSerializer, RkyvWireStrategy,
+    RkyvWireValidator, TRANSPORT_HEADER_LEN, TransportFrameKind, WasmTaskPayload,
+    WasmValueEncoding, WireDecode, WireEncode, WorkerCapabilities, encode_transport_frame,
+    parse_transport_header,
+};
 use atomic_data::partial::ApproximateEvaluator;
 use atomic_data::partial::result::PartialResult;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::task_context::TaskContext;
 use atomic_scheduler::{DistributedScheduler, LocalScheduler, Schedulers};
-use crate::rdd::{ParallelCollection, UnionRdd};
 use atomic_utils::clean_up_work_dir;
 use log::error;
 use once_cell::sync::OnceCell;
@@ -127,10 +127,7 @@ impl Context {
     }
 
     pub fn docker() -> Result<Arc<Self>, Error> {
-        Context::with_mode_and_runtime(
-            env::DeploymentMode::Distributed,
-            ExecutionRuntime::Docker,
-        )
+        Context::with_mode_and_runtime(env::DeploymentMode::Distributed, ExecutionRuntime::Docker)
     }
 
     pub fn wasm() -> Result<Arc<Self>, Error> {
@@ -190,10 +187,7 @@ impl Context {
         self.execution_runtime
     }
 
-    fn validate_runtime(
-        mode: env::DeploymentMode,
-        runtime: ExecutionRuntime,
-    ) -> Result<(), Error> {
+    fn validate_runtime(mode: env::DeploymentMode, runtime: ExecutionRuntime) -> Result<(), Error> {
         match (mode, runtime) {
             (env::DeploymentMode::Local, ExecutionRuntime::Local)
             | (env::DeploymentMode::Distributed, ExecutionRuntime::Docker)
@@ -579,12 +573,14 @@ impl Context {
     {
         let cl = move |(_task_context, iter)| (func)(iter);
         let func = Arc::new(cl);
-        self.scheduler.run_job(
-            func,
-            rdd.clone(),
-            (0..rdd.number_of_splits()).collect(),
-            false,
-        ).map_err(Error::from)
+        self.scheduler
+            .run_job(
+                func,
+                rdd.clone(),
+                (0..rdd.number_of_splits()).collect(),
+                false,
+            )
+            .map_err(Error::from)
     }
 
     pub fn run_job_with_partitions<T: Data, U: Data + Clone, F, P>(
@@ -613,12 +609,14 @@ impl Context {
     {
         log::debug!("inside run job in context");
         let func = Arc::new(func);
-        self.scheduler.run_job(
-            func,
-            rdd.clone(),
-            (0..rdd.number_of_splits()).collect(),
-            false,
-        ).map_err(Error::from)
+        self.scheduler
+            .run_job(
+                func,
+                rdd.clone(),
+                (0..rdd.number_of_splits()).collect(),
+                false,
+            )
+            .map_err(Error::from)
     }
 
     pub fn run_registered_wasm_job(
@@ -666,7 +664,9 @@ impl Context {
     {
         let payload = WasmTaskPayload::with_encodings(
             WasmValueEncoding::Rkyv,
-            config.encode_wire().map_err(|err| Error::InvalidPayload(err.to_string()))?,
+            config
+                .encode_wire()
+                .map_err(|err| Error::InvalidPayload(err.to_string()))?,
             WasmValueEncoding::Rkyv,
             WasmValueEncoding::Rkyv,
         );
@@ -679,7 +679,9 @@ impl Context {
                     .iterator(split)
                     .map_err(|err| Error::InvalidPayload(err.to_string()))?
                     .collect::<Vec<T>>();
-                values.encode_wire().map_err(|err| Error::InvalidPayload(err.to_string()))
+                values
+                    .encode_wire()
+                    .map_err(|err| Error::InvalidPayload(err.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -698,15 +700,14 @@ impl Context {
         outputs
             .into_iter()
             .map(|bytes| {
-                U::decode_wire(&bytes)
-                    .map_err(|err| Error::InvalidPayload(err.to_string()))
+                U::decode_wire(&bytes).map_err(|err| Error::InvalidPayload(err.to_string()))
             })
             .collect()
     }
 
     /// Run a job that can return approximate results. Returns a partial result
     /// (how partial depends on whether the job was finished before or after timeout).
-    pub(crate) fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
+    pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
         self: &Arc<Self>,
         func: F,
         rdd: Arc<dyn Rdd<Item = T>>,
@@ -758,10 +759,7 @@ impl Context {
         }
     }
 
-    pub fn load_artifact_manifest_toml(
-        &self,
-        path: impl AsRef<Path>,
-    ) -> Result<(), Error> {
+    pub fn load_artifact_manifest_toml(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         match &self.scheduler {
             Schedulers::Distributed(scheduler) => scheduler
                 .load_artifact_manifest_toml(path)
@@ -772,7 +770,7 @@ impl Context {
         }
     }
 
-    pub(crate) fn resolve_registered_wasm_operation<I>(&self, candidates: I) -> Option<String>
+    pub fn resolve_registered_wasm_operation<I>(&self, candidates: I) -> Option<String>
     where
         I: IntoIterator<Item = String>,
     {
@@ -784,7 +782,10 @@ impl Context {
         }
     }
 
-    pub fn union<T: Data + Clone>(self: &Arc<Self>, rdds: &[Arc<dyn Rdd<Item = T>>]) -> std::result::Result<UnionRdd<T>, Error> {
+    pub fn union<T: Data + Clone>(
+        self: &Arc<Self>,
+        rdds: &[Arc<dyn Rdd<Item = T>>],
+    ) -> std::result::Result<UnionRdd<T>, Error> {
         UnionRdd::new(self.new_rdd_id(), rdds)
     }
 }
@@ -807,4 +808,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-

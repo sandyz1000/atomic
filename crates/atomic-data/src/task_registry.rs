@@ -132,8 +132,8 @@ impl TaskRegistry {
 #[cfg(test)]
 mod tests {
     use crate::distributed::{
-        ArtifactDescriptor, ArtifactKind, ArtifactManifest, DockerArtifactManifestEntry,
-        ExecutionBackend, ResourceProfile, RuntimeKind, WasmArtifactManifestEntry,
+        ArtifactDescriptor, ArtifactKind, ArtifactManifest, DockerManifestEntry,
+        ExecutionBackend, ResourceProfile, RuntimeKind, WasmManifestEntry,
     };
 
     use super::TaskRegistry;
@@ -183,11 +183,11 @@ mod tests {
     #[test]
     fn loads_registry_from_manifest() {
         let manifest = ArtifactManifest::new(vec![
-            WasmArtifactManifestEntry::new(
+            WasmManifestEntry::new(
                 wasm_descriptor("wc.map.v1"),
                 Some("target/wasm/map_words.wasm".into()),
             ),
-            WasmArtifactManifestEntry::new(
+            WasmManifestEntry::new(
                 wasm_descriptor("wc.reduce.v1"),
                 Some("target/wasm/reduce_words.wasm".into()),
             ),
@@ -265,7 +265,7 @@ timeout_ms = 5000
     #[test]
     fn resolve_docker_payload_returns_args() {
         let mut manifest = ArtifactManifest::new(vec![]);
-        manifest.docker.push(DockerArtifactManifestEntry {
+        manifest.docker.push(DockerManifestEntry {
             descriptor: docker_descriptor("sum.v1"),
             image: "registry/image:latest".into(),
             args: vec!["/worker".into(), "--op".into(), "sum".into()],

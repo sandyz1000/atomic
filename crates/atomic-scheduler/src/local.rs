@@ -1,3 +1,10 @@
+use atomic_data::data::Data;
+use atomic_data::dependency::ShuffleDependencyBox;
+use atomic_data::partial::result::PartialResult;
+use atomic_data::partial::{ApproxListener, ApproximateEvaluator};
+use atomic_data::rdd::Rdd;
+use atomic_data::task::{TaskOption, TaskResult};
+use atomic_data::task_context::TaskContext;
 use std::clone::Clone;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
@@ -8,21 +15,14 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
-use atomic_data::partial::result::PartialResult;
-use atomic_data::partial::{ApproximateActionListener, ApproximateEvaluator};
-use atomic_data::task_context::TaskContext;
-use atomic_data::data::Data;
-use atomic_data::dependency::ShuffleDependencyBox;
-use atomic_data::rdd::Rdd;
-use atomic_data::task::{TaskOption, TaskResult};
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
-use crate::base::{EventQueue, MutatorsAndGetter, NativeScheduler};
+use crate::base::{Mutators, NativeScheduler};
 use crate::dag::{CompletionEvent, TastEndReason};
 use crate::error::{LibResult, SchedulerError};
-use crate::job::{Job, JobTracker};
+use crate::job::JobTracker;
 use crate::listener::{
     JobEndListener, JobListener, JobStartListener, LiveListenerBus, NoOpListener,
 };
@@ -34,26 +34,9 @@ pub struct LocalScheduler {
     attempt_id: Arc<AtomicUsize>,
     resubmit_timeout: u128,
     poll_timeout: u64,
-    event_queues: EventQueue,
-    mutators: MutatorsAndGetter,
-    pub next_job_id: Arc<AtomicUsize>,
-    next_run_id: Arc<AtomicUsize>,
-    next_task_id: Arc<AtomicUsize>,
-    next_stage_id: Arc<AtomicUsize>,
-    stage_cache: Arc<DashMap<usize, Stage>>,
-    shuffle_to_map_stage: Arc<DashMap<usize, Stage>>,
-    cache_locs: Arc<DashMap<usize, Vec<Vec<Ipv4Addr>>>>,
+    /// Shared mutable state: stage cache, event queues, map-output tracker, and ID counters.
+    mutators: Mutators,
     master: bool,
-    framework_name: String,
-    is_registered: bool, // TODO: check if it is necessary
-    active_jobs: HashMap<usize, Job>,
-    active_job_queue: Vec<Job>,
-    taskid_to_jobid: HashMap<String, usize>,
-    taskid_to_slaveid: HashMap<String, String>,
-    job_tasks: HashMap<usize, HashSet<String>>,
-    slaves_with_executors: HashSet<String>,
-    // map_output_tracker: Arc<dyn MapOutputTracker>,
-    // TODO: fix proper locking mechanism
     scheduler_lock: Arc<Mutex<()>>,
     live_listener_bus: LiveListenerBus,
 }
@@ -62,31 +45,13 @@ impl LocalScheduler {
     pub fn new(max_failures: usize, master: bool) -> Self {
         let mut live_listener_bus = LiveListenerBus::new();
         live_listener_bus.start().unwrap();
-        let mutators = MutatorsAndGetter::new();
         LocalScheduler {
-            mutators,
+            mutators: Mutators::new(),
             max_failures,
             attempt_id: Arc::new(AtomicUsize::new(0)),
             resubmit_timeout: 2000,
             poll_timeout: 50,
-            event_queues: Arc::new(DashMap::new()),
-            next_job_id: Arc::new(AtomicUsize::new(0)),
-            next_run_id: Arc::new(AtomicUsize::new(0)),
-            next_task_id: Arc::new(AtomicUsize::new(0)),
-            next_stage_id: Arc::new(AtomicUsize::new(0)),
-            stage_cache: Arc::new(DashMap::new()),
-            shuffle_to_map_stage: Arc::new(DashMap::new()),
-            cache_locs: Arc::new(DashMap::new()),
             master,
-            framework_name: "spark".to_string(),
-            is_registered: true, // TODO: check if it is necessary
-            active_jobs: HashMap::new(),
-            active_job_queue: Vec::new(),
-            taskid_to_jobid: HashMap::new(),
-            taskid_to_slaveid: HashMap::new(),
-            job_tasks: HashMap::new(),
-            slaves_with_executors: HashSet::new(),
-            // map_output_tracker: env::Env::get().map_output_tracker.clone(),
             scheduler_lock: Arc::new(Mutex::new(())),
             live_listener_bus,
         }
@@ -115,7 +80,7 @@ impl LocalScheduler {
         // Run async code directly - tokio runtime should already be available
         futures::executor::block_on(async move {
             let partitions: Vec<_> = (0..final_rdd.number_of_splits()).collect();
-            let listener = ApproximateActionListener::new(evaluator, timeout, partitions.len());
+            let listener = ApproxListener::new(evaluator, timeout, partitions.len());
             let jt =
                 JobTracker::from_scheduler(&*self, func, final_rdd.clone(), partitions, listener)
                     .await
@@ -133,14 +98,15 @@ impl LocalScheduler {
                     time,
                     job_result: true,
                 }));
-                let res = PartialResult::new(
-                    jt.listener.evaluator.lock().await.current_result(),
-                    true,
-                );
+                let res =
+                    PartialResult::new(jt.listener.evaluator.lock().await.current_result(), true);
                 return Ok(res);
             }
             tokio::spawn(self.event_process_loop(false, jt.clone()));
-            jt.listener.get_result().await.map_err(|s| SchedulerError::PartialJobError(s))
+            jt.listener
+                .get_result()
+                .await
+                .map_err(|s| SchedulerError::PartialJobError(s))
         })
     }
 
@@ -192,7 +158,9 @@ impl LocalScheduler {
             }
         }
 
-        self.event_queues.insert(jt.run_id, VecDeque::new());
+        self.mutators
+            .event_queues
+            .insert(jt.run_id, VecDeque::new());
 
         let mut results: Vec<Option<U>> = (0..jt.num_output_parts).map(|_| None).collect();
         let mut fetch_failure_duration = Duration::new(0, 0);
@@ -217,6 +185,7 @@ impl LocalScheduler {
             if let Some(evt) = event_option {
                 log::debug!("event starting");
                 let stage = self
+                    .mutators
                     .stage_cache
                     .get(&evt.task.get_stage_id())
                     .unwrap()
@@ -259,7 +228,7 @@ impl LocalScheduler {
             jt.failed.lock().await.clear();
         }
 
-        self.event_queues.remove(&jt.run_id);
+        self.mutators.event_queues.remove(&jt.run_id);
         Ok(results
             .into_iter()
             .map(|s| match s {
@@ -332,8 +301,8 @@ impl LocalScheduler {
 
 #[async_trait::async_trait]
 impl NativeScheduler for LocalScheduler {
-    fn get_mutators(&self) -> MutatorsAndGetter {
-        todo!()
+    fn get_mutators(&self) -> Mutators {
+        self.mutators.clone()
     }
 
     /// Every single task is run in the local thread pool
@@ -347,7 +316,7 @@ impl NativeScheduler for LocalScheduler {
     {
         log::debug!("inside submit task");
         let my_attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
-        let event_queues = self.event_queues.clone();
+        let event_queues = self.mutators.event_queues.clone();
 
         // No need to serialize for local execution
         tokio::task::spawn_blocking(move || {
@@ -369,7 +338,10 @@ impl NativeScheduler for LocalScheduler {
 
     async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependencyBox>) -> LibResult<Stage> {
         log::debug!("getting shuffle map stage");
-        let stage = self.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
+        let stage = self
+            .mutators
+            .shuffle_to_map_stage
+            .get(&shuf.get_shuffle_id());
         match stage {
             Some(stage) => Ok(stage.clone()),
             None => {
@@ -377,7 +349,8 @@ impl NativeScheduler for LocalScheduler {
                 let stage = self
                     .new_stage(shuf.get_rdd_base(), Some(shuf.clone()))
                     .await?;
-                self.shuffle_to_map_stage
+                self.mutators
+                    .shuffle_to_map_stage
                     .insert(shuf.get_shuffle_id(), stage.clone());
                 log::debug!("finished inserting newly created shuffle stage");
                 Ok(stage)
@@ -401,9 +374,9 @@ impl Drop for LocalScheduler {
     }
 }
 
-// Implement JobListener for ApproximateActionListener
+// Implement JobListener for ApproxListener
 #[async_trait::async_trait]
-impl<U, R, E> JobListener for ApproximateActionListener<U, R, E>
+impl<U, R, E> JobListener for ApproxListener<U, R, E>
 where
     U: Debug + Send + Sync + 'static,
     R: Clone + Debug + Send + Sync + 'static,
@@ -418,35 +391,3 @@ where
         Ok(())
     }
 }
-
-
-
-// #[async_trait::async_trait]
-// impl<E, U, R> JobListener for ApproximateActionListener<U, R, E>
-// where
-//     E: ApproximateEvaluator<U, R> + Send + Sync,
-//     R: Clone + Debug + Send + Sync + 'static,
-//     U: Send + Sync + 'static,
-// {
-//     async fn task_succeeded(&self, index: usize, result: &dyn Data) -> Result<()> {
-//         let result = result.as_any().downcast_ref::<U>().ok_or_else(|| {
-//             PartialJobError::DowncastFailure(
-//                 "failed converting to generic type param @ ApproximateActionListener",
-//             )
-//         })?;
-//         self.evaluator.lock().await.merge(index, result);
-//         let current_finished = self.finished_tasks.fetch_add(1, Ordering::SeqCst) + 1;
-//         if current_finished == self.total_tasks {
-//             // If we had already returned a PartialResult, set its final value
-//             if let Some(ref mut value) = *self.result_object.lock().await {
-//                 value.set_final_value(self.evaluator.lock().await.current_result())?;
-//             }
-//         }
-//         Ok(())
-//     }
-
-//     async fn job_failed(&self, err: Error) {
-//         let mut failure = self.failure.lock().await;
-//         *failure = Some(err);
-//     }
-// }

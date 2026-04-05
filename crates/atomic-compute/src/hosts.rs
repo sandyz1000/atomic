@@ -1,15 +1,14 @@
-use std::net::SocketAddr;
-use std::path::Path;
 use crate::error::{Error, Result};
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
-
+use std::net::SocketAddr;
+use std::path::Path;
 
 pub static HOSTS: OnceCell<Hosts> = OnceCell::new();
 
 /// Handles loading of the hosts configuration.
 #[derive(Debug, Deserialize)]
-pub(crate) struct Hosts {
+pub struct Hosts {
     pub master: SocketAddr,
     /// The slaves have the format "user@address", e.g. "worker@192.168.0.2"
     pub slaves: Vec<String>,

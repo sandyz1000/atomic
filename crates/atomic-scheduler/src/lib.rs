@@ -8,11 +8,11 @@ pub mod local;
 pub mod stage;
 
 use atomic_data::partial::{ApproximateEvaluator, result::PartialResult};
-use atomic_data::{task_context::TaskContext, data::Data, rdd::Rdd};
+use atomic_data::{data::Data, rdd::Rdd, task_context::TaskContext};
 use std::sync::Arc;
 
+pub use crate::{base::NativeScheduler, error::LibResult};
 pub use crate::{distributed::DistributedScheduler, local::LocalScheduler};
-pub(crate) use crate::{base::NativeScheduler, error::LibResult};
 
 pub trait Scheduler {
     fn start(&self);

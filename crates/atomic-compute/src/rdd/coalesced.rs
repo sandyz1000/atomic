@@ -33,7 +33,7 @@ impl<T: Data> CoalescedRdd<T> {
     /// ## Arguments
     ///
     /// max_partitions: number of desired partitions in the coalesced RDD
-    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, max_partitions: usize) -> Self {
+    pub fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, max_partitions: usize) -> Self {
         let vals = RddVals::new(id);
         CoalescedRdd {
             vals: Arc::new(vals),

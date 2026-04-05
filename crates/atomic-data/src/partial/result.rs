@@ -149,7 +149,7 @@ where
         (selfc._get_final_value)(selfc.clone())
     }
 
-    pub(crate) fn set_final_value(&mut self, value: R) -> Result<()> {
+    pub fn set_final_value(&mut self, value: R) -> Result<()> {
         let final_value = &mut *self.final_value.lock();
         if final_value.is_some() {
             return Err(PartialJobError::SetFinalValTwice.into());
@@ -163,7 +163,7 @@ where
     }
 
     /// Transform this PartialResult into a PartialResult of type T.
-    pub(crate) fn map<T>(self: Arc<Self>) -> Result<PartialResult<T>>
+    pub fn map<T>(self: Arc<Self>) -> Result<PartialResult<T>>
     where
         T: From<R> + Debug + Send + Sync + Clone + 'static,
     {
@@ -204,7 +204,7 @@ where
         Ok(new_partial_res)
     }
 
-    pub(crate) fn set_failure(&mut self, err: Error) -> Result<()> {
+    pub fn set_failure(&mut self, err: Error) -> Result<()> {
         let mut failure = self.failure.lock();
         if failure.is_some() {
             // We already have a failure, so let's call the handler

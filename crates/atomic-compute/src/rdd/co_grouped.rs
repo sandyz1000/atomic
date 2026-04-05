@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::*;
-use bincode::Encode;
 use atomic_data::aggregator::Aggregator;
 use atomic_data::dependency::{Dependency, ShuffleDependency, ShuffleDependencyBox};
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::split::{CoGroupSplit, CoGroupSplitDep, Split};
+use bincode::Encode;
 
 // Note: CoGroupedRdd uses Arc<dyn Data> instead of Box<dyn Data> for values
 // because Arc is Clone-able while Box is not. This allows the Item type to
@@ -18,10 +18,10 @@ use atomic_data::split::{CoGroupSplit, CoGroupSplitDep, Split};
 
 #[derive(Clone)]
 pub struct CoGroupedRdd<K: Data> {
-    pub(crate) vals: Arc<RddVals>,
-    pub(crate) rdds: Vec<Arc<dyn RddBase>>,
+    pub vals: Arc<RddVals>,
+    pub rdds: Vec<Arc<dyn RddBase>>,
 
-    pub(crate) part: Partitioner,
+    pub part: Partitioner,
     _marker: PhantomData<K>,
 }
 

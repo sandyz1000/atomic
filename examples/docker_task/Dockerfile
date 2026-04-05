@@ -11,6 +11,6 @@ RUN cargo build --release --manifest-path examples/docker_json_task/Cargo.toml
 # ── Stage 2: minimal runtime image ─────────────────────────────────────────────
 FROM debian:bookworm-slim
 
-COPY --from=builder /build/target/release/docker-json-task /usr/local/bin/docker-json-task
+COPY --from=builder /build/target/release/docker-task /usr/local/bin/docker-task
 
-ENTRYPOINT ["docker-json-task"]
+ENTRYPOINT ["docker-task"]

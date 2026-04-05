@@ -26,7 +26,7 @@ pub use atomic_data::{
     rdd::{Rdd, RddBase},
 };
 
-pub(crate) fn rdd_wasm_bytes<T: Data>(
+pub fn rdd_wasm_bytes<T: Data>(
     rdd: &dyn Rdd<Item = T>,
     partition: usize,
     error_message: impl FnOnce() -> String,
@@ -44,7 +44,7 @@ pub(crate) fn rdd_wasm_bytes<T: Data>(
     Some(bytes.ok_or_else(|| BaseError::Other(error_message())))
 }
 
-pub(crate) fn inherited_wasm_bytes<T: Data>(
+pub fn inherited_wasm_bytes<T: Data>(
     prev: &Arc<dyn Rdd<Item = T>>,
     partition: usize,
     error_message: impl FnOnce() -> String,

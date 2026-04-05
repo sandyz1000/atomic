@@ -56,7 +56,7 @@ impl<T: Data, U: Data, F> MapperRdd<T, U, F>
 where
     F: RddFn<T, U>,
 {
-    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+    pub fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
         let rdd_base = prev.get_rdd_base();
         let mut vals = RddVals::new(id);
         vals.dependencies.push(Dependency::OneToOne { rdd_base });
@@ -71,7 +71,7 @@ where
         }
     }
 
-    pub(crate) fn pin(self) -> Self {
+    pub fn pin(self) -> Self {
         self.pinned.store(true, SeqCst);
         self
     }
@@ -187,7 +187,7 @@ impl<T: Data + Clone, K: Data + Clone, V: Data + Clone, F> MapperPairRdd<T, K, V
 where
     F: RddFn<T, (K, V)>,
 {
-    pub(crate) fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
+    pub fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
         let rdd_base = prev.get_rdd_base();
         let mut vals = RddVals::new(id);
         vals.dependencies.push(Dependency::OneToOne { rdd_base });
@@ -202,7 +202,7 @@ where
         }
     }
 
-    pub(crate) fn pin(self) -> Self {
+    pub fn pin(self) -> Self {
         self.pinned.store(true, SeqCst);
         self
     }

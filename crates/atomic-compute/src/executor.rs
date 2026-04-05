@@ -6,20 +6,19 @@ use crate::backend::{BackendContext, WorkerRuntime};
 use crate::env;
 use crate::error::{Error, LibResult};
 use atomic_data::distributed::{
-    TaskEnvelope, TaskResultEnvelope, TransportFrameKind, WorkerCapabilities,
-    TRANSPORT_HEADER_LEN, WireDecode, WireEncode, encode_transport_frame,
-    parse_transport_header,
+    TRANSPORT_HEADER_LEN, TaskEnvelope, TaskResultEnvelope, TransportFrameKind, WireDecode,
+    WireEncode, WorkerCapabilities, encode_transport_frame, parse_transport_header,
 };
 
-use crossbeam::channel::{Receiver, Sender, bounded};
 use atomic_data::shuffle::error::NetworkError;
+use crossbeam::channel::{Receiver, Sender, bounded};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     task::{spawn, spawn_blocking},
 };
 
-pub(crate) struct Executor {
+pub struct Executor {
     port: u16,
     worker_runtime: WorkerRuntime,
     backend_ctx: BackendContext,
@@ -107,10 +106,9 @@ impl Executor {
                 log::debug!("received new task @{} executor", selfc.port);
                 let (frame_kind, payload) = selfc.read_transport_frame(&mut stream).await?;
                 let selfc2 = Arc::clone(&selfc);
-                let (result_kind, result_payload) = spawn_blocking(move || {
-                    selfc2.handle_transport_frame(frame_kind, payload)
-                })
-                .await??;
+                let (result_kind, result_payload) =
+                    spawn_blocking(move || selfc2.handle_transport_frame(frame_kind, payload))
+                        .await??;
                 selfc
                     .write_transport_frame(&mut stream, result_kind, &result_payload)
                     .await?;
@@ -252,7 +250,7 @@ pub fn run_worker_from_config() -> LibResult<()> {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) enum Signal {
+pub enum Signal {
     ShutDownError,
     ShutDownGracefully,
     Continue,
@@ -263,13 +261,12 @@ mod tests {
     #![allow(unused_must_use)]
 
     use super::*;
-    use core::time;
     use atomic_data::distributed::{
-        TransportFrameKind, TRANSPORT_HEADER_LEN, encode_transport_frame,
-        parse_transport_header,
+        TRANSPORT_HEADER_LEN, TransportFrameKind, encode_transport_frame, parse_transport_header,
     };
-    use crossbeam::channel::{Receiver, Sender, unbounded};
     use atomic_utils::get_dynamic_port;
+    use core::time;
+    use crossbeam::channel::{Receiver, Sender, unbounded};
     use std::io::Write;
     use std::thread;
     use std::time::Duration;
@@ -304,9 +301,8 @@ mod tests {
         Err(Error::Other)
     }
 
-    fn send_shutdown_signal_msg(stream: &mut std::net::TcpStream) -> LibResult<()> {
-        let json = serde_json::to_vec(&Signal::ShutDownGracefully)
-            .map_err(|_| Error::Other)?;
+    fn shutdown_msg(stream: &mut std::net::TcpStream) -> LibResult<()> {
+        let json = serde_json::to_vec(&Signal::ShutDownGracefully).map_err(|_| Error::Other)?;
         let len = (json.len() as u32).to_le_bytes();
         stream.write_all(&len).map_err(Error::OutputWrite)?;
         stream.write_all(&json).map_err(Error::OutputWrite)?;
@@ -352,7 +348,7 @@ mod tests {
                     _ => {}
                 }
                 if let Ok(mut stream) = connect_to_executor(port, true) {
-                    send_shutdown_signal_msg(&mut stream)?;
+                    shutdown_msg(&mut stream)?;
                     return Ok(());
                 }
                 thread::sleep(time::Duration::from_millis(5));
@@ -360,7 +356,10 @@ mod tests {
             Err(Error::Other)
         }
 
-        fn result_checker(sender: Sender<ComputeResult>, result: LibResult<Signal>) -> LibResult<()> {
+        fn result_checker(
+            sender: Sender<ComputeResult>,
+            result: LibResult<Signal>,
+        ) -> LibResult<()> {
             match result {
                 Ok(Signal::ShutDownGracefully) => {
                     sender.send(Ok(()));
@@ -397,6 +396,11 @@ mod tests {
                         .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
                     assert!(!capabilities.worker_id.is_empty());
                     assert!(capabilities.max_tasks >= 1);
+                    // Signal the executor to shut down so worker_fut completes
+                    // and tokio::join! in _start_test can return.
+                    if let Ok(mut signal) = connect_to_executor(port, true) {
+                        let _ = shutdown_msg(&mut signal);
+                    }
                     return Ok(());
                 }
             }
@@ -404,7 +408,10 @@ mod tests {
             Err(Error::Other)
         }
 
-        fn result_checker(sender: Sender<ComputeResult>, result: LibResult<Signal>) -> LibResult<()> {
+        fn result_checker(
+            sender: Sender<ComputeResult>,
+            result: LibResult<Signal>,
+        ) -> LibResult<()> {
             match result {
                 Ok(Signal::ShutDownGracefully) => Ok(()),
                 Ok(_) => {

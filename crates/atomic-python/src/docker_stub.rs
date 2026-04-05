@@ -23,7 +23,7 @@ use crate::rdd::PyRdd;
 /// ```
 #[pyclass(name = "DockerStub")]
 pub struct PyDockerStub {
-    pub(crate) descriptor: ArtifactDescriptor,
+    pub descriptor: ArtifactDescriptor,
 }
 
 #[pymethods]

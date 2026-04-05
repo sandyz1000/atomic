@@ -11,13 +11,13 @@ use crate::error::LibResult;
 use crate::listener::JobListener;
 use crate::stage::Stage;
 
-use atomic_data::task_context::TaskContext;
 use atomic_data::data::Data;
 use atomic_data::task::TaskOption;
+use atomic_data::task_context::TaskContext;
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug)]
-pub(crate) struct Job {
+pub struct Job {
     run_id: usize,
     job_id: usize,
 }
