@@ -4,6 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "atomic"
+version = "0.1.0"
 requires-python = ">=3.11"
 description = "Atomic compute engine — Python bindings"
 license = { text = "MIT" }

@@ -39,11 +39,18 @@ impl AtomicApp {
                 .and_then(|w| w[1].parse::<u16>().ok())
                 .unwrap_or(10000);
 
+            // Initialize the logger inside the worker path so that startup
+            // messages are always visible when RUST_LOG is set, regardless of
+            // whether the caller initialized it before build().
+            let _ = env_logger::try_init();
+            log::info!("[worker-{}] process started pid={}", port, std::process::id());
+
             crate::env::Env::run_in_async_rt(move || -> crate::error::LibResult<()> {
                 let executor = Arc::new(crate::executor::Executor::new(port));
                 executor.worker().map(|_| ())
             })?;
 
+            log::info!("[worker-{}] shutting down", port);
             std::process::exit(0);
         }
 

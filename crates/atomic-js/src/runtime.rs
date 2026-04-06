@@ -1,7 +1,26 @@
+use std::cell::RefCell;
+use std::sync::Arc;
+
 use rquickjs::{Array, Class, Context, Ctx, IntoJs, Runtime, Value};
 use rquickjs::prelude::{Opt, Rest};
 
 use crate::rdd::JsRdd;
+
+// QuickJS is single-threaded, so thread_local is the right tool for sharing
+// the compute context into named `'js` functions without lifetime gymnastics.
+thread_local! {
+    static ATOMIC_CTX: RefCell<Option<Arc<atomic_compute::context::Context>>> =
+        RefCell::new(None);
+}
+
+fn take_atomic_ctx() -> Arc<atomic_compute::context::Context> {
+    ATOMIC_CTX.with(|c| {
+        c.borrow()
+            .as_ref()
+            .expect("atomic context not set; call eval_script only via AtomicJsRuntime")
+            .clone()
+    })
+}
 
 /// The Atomic JS runtime — embeds QuickJS and exposes the `atomic` global.
 ///
@@ -22,18 +41,23 @@ use crate::rdd::JsRdd;
 /// ```
 pub struct AtomicJsRuntime {
     runtime: Runtime,
+    context: Arc<atomic_compute::context::Context>,
 }
 
 impl AtomicJsRuntime {
-    pub fn new() -> rquickjs::Result<Self> {
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let runtime = Runtime::new()?;
         runtime.set_memory_limit(512 * 1024 * 1024); // 512 MB
         runtime.set_max_stack_size(4 * 1024 * 1024); // 4 MB
-        Ok(Self { runtime })
+        let context = atomic_compute::context::Context::new()
+            .map_err(|e| format!("atomic context init: {e}"))?;
+        Ok(Self { runtime, context })
     }
 
     /// Evaluate a JS script string in a fresh context with the `atomic` global.
     pub fn eval_script(&self, script: &str) -> rquickjs::Result<()> {
+        // Install the compute context into the thread-local before entering QuickJS.
+        ATOMIC_CTX.with(|c| *c.borrow_mut() = Some(Arc::clone(&self.context)));
         let ctx = Context::full(&self.runtime)?;
         ctx.with(|ctx| -> rquickjs::Result<()> {
             setup_atomic_global(&ctx)?;
@@ -55,16 +79,17 @@ impl Default for AtomicJsRuntime {
     }
 }
 
-// ── Named helpers so that explicit `'js` lifetimes satisfy Class invariance ───
+// ── Named helpers — explicit `'js` lifetime is required by rquickjs ──────────
 
 fn js_parallelize<'js>(
     ctx: Ctx<'js>,
     arr: Array<'js>,
     num_partitions: Opt<usize>,
 ) -> rquickjs::Result<Class<'js, JsRdd>> {
+    let atomic_ctx = take_atomic_ctx();
     let np = num_partitions.0.unwrap_or(2).max(1);
     let elements: Vec<Value<'js>> = arr.iter::<Value>().collect::<rquickjs::Result<_>>()?;
-    let rdd = JsRdd::from_js_values(&ctx, elements, np)?;
+    let rdd = JsRdd::from_js_values(&ctx, elements, np, atomic_ctx)?;
     Class::instance(ctx, rdd)
 }
 
@@ -75,6 +100,7 @@ fn js_range<'js>(
     step: Opt<i64>,
     num_partitions: Opt<usize>,
 ) -> rquickjs::Result<Class<'js, JsRdd>> {
+    let atomic_ctx = take_atomic_ctx();
     let step_val = step.0.unwrap_or(1);
     let np = num_partitions.0.unwrap_or(2).max(1);
     if step_val == 0 {
@@ -84,7 +110,7 @@ fn js_range<'js>(
         .step_by(step_val.unsigned_abs() as usize)
         .map(|i| i.into_js(&ctx))
         .collect::<rquickjs::Result<_>>()?;
-    let rdd = JsRdd::from_js_values(&ctx, values, np)?;
+    let rdd = JsRdd::from_js_values(&ctx, values, np, atomic_ctx)?;
     Class::instance(ctx, rdd)
 }
 

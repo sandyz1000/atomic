@@ -10,6 +10,7 @@ authors = ["Sandip Dey <sandip.dey1988@yahoo.com>"]
 # version.workspace = true
 
 [workspace]
+resolver = "2"
 members = ["crates/*", "examples/*", "tests"]
 
 [workspace.dependencies]
@@ -20,7 +21,8 @@ atomic-utils = { path = "crates/atomic-utils" }
 atomic-runtime-macros = { path = "crates/atomic-runtime-macros" }
 atomic-python = { path = "crates/atomic-python" }
 atomic-js = { path = "crates/atomic-js" }
-pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
+atomic-worker = { path = "crates/atomic-worker" }
+pyo3 = { version = "0.28.3" }
 rquickjs = { version = "0.11.0", features = ["full"] }
 syn = { version = "2.0.117", features = ["full"] }
 quote = "1"

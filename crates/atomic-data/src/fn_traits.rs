@@ -4,7 +4,7 @@
 /// This eliminates the need to repeat these bounds in every impl block.
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// // Before:
 /// impl<T, U, F> RddBase for MapperRdd<T, U, F>
 /// where

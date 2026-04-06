@@ -11,3 +11,4 @@ syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
 inventory = "0.3"
+heck = "0.5"
