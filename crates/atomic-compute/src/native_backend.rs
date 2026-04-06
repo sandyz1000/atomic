@@ -1,4 +1,4 @@
-use atomic_data::distributed::{TaskEnvelope, TaskResultEnvelope};
+use atomic_data::distributed::{TaskAction, TaskEnvelope, TaskResultEnvelope};
 
 use crate::error::{Error, LibResult};
 use crate::task_registry::TASK_REGISTRY;
@@ -6,9 +6,9 @@ use crate::task_registry::TASK_REGISTRY;
 /// Native in-process task executor.
 ///
 /// Replaces `DockerBackend` and `WasmBackend`. Instead of spawning a container
-/// or a WASM module, `NativeBackend` looks up the `op_id` from the incoming
-/// [`TaskEnvelope`] in the compile-time [`TASK_REGISTRY`] and calls the
-/// registered dispatch handler directly.
+/// or a WASM module, `NativeBackend` looks up each `op_id` from the incoming
+/// [`TaskEnvelope`]'s pipeline in the compile-time [`TASK_REGISTRY`] and calls
+/// the registered dispatch handlers in sequence, threading data through each step.
 ///
 /// This is only valid when the driver and worker run the same binary — the
 /// dispatch table is built at compile time from all `#[task]`-annotated functions
@@ -17,77 +17,91 @@ use crate::task_registry::TASK_REGISTRY;
 pub struct NativeBackend;
 
 impl NativeBackend {
-    /// Execute a task envelope by dispatching to the registered handler.
+    /// Execute a task envelope by running its pipeline of ops in order.
     ///
-    /// Returns a [`TaskResultEnvelope`] in all cases — errors are wrapped as
-    /// `FatalFailure` rather than propagated, so the scheduler can handle them
-    /// uniformly.
+    /// Each op's output becomes the next op's input. Returns a [`TaskResultEnvelope`]
+    /// in all cases — errors are wrapped as `FatalFailure` rather than propagated,
+    /// so the scheduler can handle them uniformly.
     pub fn execute(
         &self,
         worker_id: &str,
         task: &TaskEnvelope,
     ) -> LibResult<TaskResultEnvelope> {
-        let handler = TASK_REGISTRY
-            .get(task.op_id.as_str())
-            .ok_or_else(|| Error::UnknownOperation(task.op_id.clone()))?;
-
-        log::info!(
-            "[{}] dispatching op_id='{}' action={:?} data_bytes={}",
-            worker_id,
-            task.op_id,
-            task.action,
-            task.data.len(),
-        );
-
-        match handler(&task.action, &task.payload, &task.data) {
-            Ok(result_data) => {
-                log::info!(
-                    "[{}] op_id='{}' completed ok result_bytes={}",
-                    worker_id,
-                    task.op_id,
-                    result_data.len(),
-                );
-                Ok(TaskResultEnvelope::ok(
-                    task.run_id,
-                    task.stage_id,
-                    task.task_id,
-                    task.attempt_id,
-                    worker_id.to_string(),
-                    result_data,
-                ))
-            }
-            Err(err) => {
-                log::error!(
-                    "[{}] op_id='{}' FAILED: {}",
-                    worker_id,
-                    task.op_id,
-                    err,
-                );
-                Ok(TaskResultEnvelope::fatal_failure(
-                    task.run_id,
-                    task.stage_id,
-                    task.task_id,
-                    task.attempt_id,
-                    worker_id.to_string(),
-                    err,
-                ))
-            }
+        if task.ops.is_empty() {
+            return Err(Error::UnknownOperation("empty pipeline".to_string()));
         }
+
+        let mut data = task.data.clone();
+
+        for op in &task.ops {
+            log::info!(
+                "[{}] pipeline op '{}' {:?} data_bytes={}",
+                worker_id,
+                op.op_id,
+                op.action,
+                data.len(),
+            );
+
+            let op_result = match &op.action {
+                TaskAction::PythonUdf => {
+                    crate::udf_backend::execute_python_udf(&op.payload, &data)
+                }
+                TaskAction::JavaScriptUdf => {
+                    crate::udf_backend::execute_js_udf(&op.payload, &data)
+                }
+                _ => {
+                    let handler = TASK_REGISTRY
+                        .get(op.op_id.as_str())
+                        .ok_or_else(|| Error::UnknownOperation(op.op_id.clone()))?;
+                    handler(&op.action, &op.payload, &data).map_err(|e| e)
+                }
+            };
+
+            data = match op_result {
+                Ok(result) => {
+                    log::info!(
+                        "[{}] op '{}' ok result_bytes={}",
+                        worker_id,
+                        op.op_id,
+                        result.len(),
+                    );
+                    result
+                }
+                Err(err) => {
+                    log::error!("[{}] op '{}' FAILED: {}", worker_id, op.op_id, err);
+                    return Ok(TaskResultEnvelope::fatal_failure(
+                        task.run_id,
+                        task.stage_id,
+                        task.task_id,
+                        task.attempt_id,
+                        worker_id.to_string(),
+                        err,
+                    ));
+                }
+            };
+        }
+
+        Ok(TaskResultEnvelope::ok(
+            task.run_id,
+            task.stage_id,
+            task.task_id,
+            task.attempt_id,
+            worker_id.to_string(),
+            data,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atomic_data::distributed::{ResultStatus, TaskAction, WireEncode};
+    use atomic_data::distributed::{PipelineOp, ResultStatus, TaskAction, WireEncode};
 
     fn make_task(op_id: &str, action: TaskAction, data: Vec<u8>) -> TaskEnvelope {
         TaskEnvelope::new(
             1, 2, 3, 0, 0,
             "test-trace".to_string(),
-            op_id.to_string(),
-            action,
-            vec![],
+            vec![PipelineOp { op_id: op_id.to_string(), action, payload: vec![] }],
             data,
         )
     }
@@ -96,7 +110,7 @@ mod tests {
     fn returns_fatal_failure_for_unknown_op() {
         let backend = NativeBackend;
         let task = make_task("no.such.op", TaskAction::Map, vec![]);
-        // unknown op_id → Err from execute
+        // unknown op_id → Err from execute (not in registry)
         let result = backend.execute("worker-1", &task);
         assert!(result.is_err());
     }

@@ -1,13 +1,14 @@
 use crate::error::Error;
 use crate::executor::{Executor, Signal};
 use crate::io::ReaderConfiguration;
+use crate::native_backend::NativeBackend;
 use crate::rdd::typed::TypedRdd;
 use crate::rdd::{ParallelCollection, UnionRdd};
 use crate::{env, hosts};
 use atomic_data::data::Data;
 use atomic_data::distributed::{
-    TRANSPORT_HEADER_LEN, TransportFrameKind, WireDecode, WireEncode, WorkerCapabilities,
-    encode_transport_frame, parse_transport_header,
+    TRANSPORT_HEADER_LEN, PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TransportFrameKind,
+    WireDecode, WireEncode, WorkerCapabilities, encode_transport_frame, parse_transport_header,
 };
 use atomic_data::partial::ApproximateEvaluator;
 use atomic_data::partial::result::PartialResult;
@@ -22,7 +23,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -31,7 +31,12 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub struct Context {
+    /// Routes native `#[task]` jobs: local `NativeBackend` or distributed TCP dispatch.
     scheduler: Schedulers,
+    /// Always-local scheduler used by `run_job` for closure-based driver operations.
+    /// Closures cannot be sent to remote workers, so all `collect()`, `count()`,
+    /// `fold()`, `take()` etc. execute here regardless of deployment mode.
+    driver_scheduler: Arc<LocalScheduler>,
     pub next_rdd_id: Arc<AtomicUsize>,
     pub next_shuffle_id: Arc<AtomicUsize>,
     pub address_map: Vec<SocketAddrV4>,
@@ -121,10 +126,12 @@ impl Context {
         fs::create_dir_all(&job_work_dir).unwrap();
 
         let _ = env_logger::try_init();
-        let scheduler = Schedulers::Local(Arc::new(LocalScheduler::new(20, true)));
+        let local = Arc::new(LocalScheduler::new(20, true));
+        let scheduler = Schedulers::Local(local.clone());
 
         Ok(Arc::new(Context {
             scheduler,
+            driver_scheduler: local,
             next_rdd_id: Arc::new(AtomicUsize::new(0)),
             next_shuffle_id: Arc::new(AtomicUsize::new(0)),
             address_map: vec![SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)],
@@ -138,91 +145,48 @@ impl Context {
     /// Distributes configuration and the application binary to each worker host,
     /// launches the worker processes via SSH, and returns a driver context.
     fn init_distributed_driver() -> Result<Arc<Self>, Error> {
-        let mut port: u16 = 10000;
         let mut address_map = Vec::new();
         let job_id = Uuid::new_v4().to_string();
         let job_work_dir = env::Configuration::get()
             .local_dir
             .join(format!("ns-session-{}", job_id));
-        let job_work_dir_str = job_work_dir
-            .to_str()
-            .ok_or_else(|| Error::PathToString(job_work_dir.clone()))?;
-
-        let binary_path = std::env::current_exe().map_err(|_| Error::CurrentBinaryPath)?;
-        let binary_path_str = binary_path
-            .to_str()
-            .ok_or_else(|| Error::PathToString(binary_path.clone()))?
-            .into();
-        let binary_name = binary_path
-            .file_name()
-            .ok_or(Error::CurrentBinaryName)?
-            .to_os_string()
-            .into_string()
-            .map_err(Error::OsStringToString)?;
 
         fs::create_dir_all(&job_work_dir).unwrap();
-        let conf_path = job_work_dir.join("config.toml");
-        let conf_path = conf_path.to_str().unwrap();
         let _ = env_logger::try_init();
         let scheduler = Arc::new(DistributedScheduler::new(20, true));
 
+        // Workers are pre-started by `atomic deploy` (or manually with --worker).
+        // The driver just connects to each one and registers its capabilities.
+        //
+        // Slave format in hosts.conf: "user@ip:port"
+        //   e.g. "sandip.dey@127.0.0.1:10001"
         for address in &hosts::Hosts::get()?.slaves {
-            log::debug!("deploying executor at address {:?}", address);
-            let address_ip: Ipv4Addr = address
+            let host_port = address
                 .split('@')
                 .nth(1)
-                .ok_or_else(|| Error::ParseHostAddress(address.into()))?
+                .ok_or_else(|| Error::ParseHostAddress(address.into()))?;
+
+            let endpoint: SocketAddrV4 = host_port
                 .parse()
-                .map_err(|x| Error::ParseHostAddress(format!("{}", x)))?;
-            let endpoint = SocketAddrV4::new(address_ip, port);
-            address_map.push(endpoint);
+                .map_err(|_| Error::ParseHostAddress(address.into()))?;
 
-            Command::new("ssh")
-                .args(&[address, "mkdir", &job_work_dir_str])
-                .output()
-                .map_err(|e| Error::CommandOutput {
-                    source: e,
-                    command: "ssh mkdir".into(),
-                })?;
-
-            Context::create_workers_config_file(address_ip, port, conf_path)?;
-            let remote_path = format!("{}:{}/config.toml", address, job_work_dir_str);
-            Command::new("scp")
-                .args(&[conf_path, &remote_path])
-                .output()
-                .map_err(|e| Error::CommandOutput {
-                    source: e,
-                    command: "scp config".into(),
-                })?;
-
-            let remote_path = format!("{}:{}/{}", address, job_work_dir_str, binary_name);
-            Command::new("scp")
-                .args(&[&binary_path_str, &remote_path])
-                .output()
-                .map_err(|e| Error::CommandOutput {
-                    source: e,
-                    command: "scp executor".into(),
-                })?;
-
-            let path = format!("{}/{}", job_work_dir_str, binary_name);
-            log::debug!("remote path {}", path);
-            Command::new("ssh")
-                .args(&[address, &path])
-                .spawn()
-                .map_err(|e| Error::CommandOutput {
-                    source: e,
-                    command: "ssh run".into(),
-                })?;
-
+            log::info!("connecting to worker at {}", endpoint);
             let capabilities = Context::request_worker_capabilities(endpoint)?;
+            log::info!(
+                "worker {} ready (max_tasks={})",
+                capabilities.worker_id,
+                capabilities.max_tasks,
+            );
             scheduler.register_worker(endpoint, capabilities);
-            port += 5000;
+            address_map.push(endpoint);
         }
 
         let scheduler = Schedulers::Distributed(scheduler);
+        let driver_scheduler = Arc::new(LocalScheduler::new(20, false));
 
         Ok(Arc::new(Context {
             scheduler,
+            driver_scheduler,
             next_rdd_id: Arc::new(AtomicUsize::new(0)),
             next_shuffle_id: Arc::new(AtomicUsize::new(0)),
             address_map,
@@ -276,22 +240,6 @@ impl Context {
         Context::drop_executors(executors);
         std::thread::sleep(std::time::Duration::from_millis(1_500));
         clean_up_work_dir(work_dir, true);
-    }
-
-    fn create_workers_config_file(
-        local_ip: Ipv4Addr,
-        port: u16,
-        config_path: &str,
-    ) -> Result<(), Error> {
-        let mut current_config = env::Configuration::get().clone();
-        current_config.local_ip = local_ip;
-        current_config.slave = Some(std::convert::From::<(bool, u16)>::from((true, port)));
-        current_config.is_driver = false;
-
-        let config_string = toml::to_string_pretty(&current_config).unwrap();
-        let mut config_file = fs::File::create(config_path).unwrap();
-        config_file.write_all(config_string.as_bytes()).unwrap();
-        Ok(())
     }
 
     fn request_worker_capabilities(endpoint: SocketAddrV4) -> Result<WorkerCapabilities, Error> {
@@ -444,11 +392,13 @@ impl Context {
     where
         F: Fn(Box<dyn Iterator<Item = T>>) -> U + Send + Sync + 'static,
     {
+        // Closures cannot be sent to remote workers; always execute on the driver
+        // using the dedicated local scheduler, regardless of deployment mode.
         let cl = move |(_task_context, iter)| (func)(iter);
-        let func = Arc::new(cl);
-        self.scheduler
+        self.driver_scheduler
+            .clone()
             .run_job(
-                func,
+                Arc::new(cl),
                 rdd.clone(),
                 (0..rdd.number_of_splits()).collect(),
                 false,
@@ -467,7 +417,8 @@ impl Context {
         P: IntoIterator<Item = usize>,
     {
         let cl = move |(_task_context, iter)| (func)(iter);
-        self.scheduler
+        self.driver_scheduler
+            .clone()
             .run_job(Arc::new(cl), rdd, partitions.into_iter().collect(), false)
             .map_err(Error::from)
     }
@@ -482,7 +433,8 @@ impl Context {
     {
         log::debug!("inside run job in context");
         let func = Arc::new(func);
-        self.scheduler
+        self.driver_scheduler
+            .clone()
             .run_job(
                 func,
                 rdd.clone(),
@@ -514,6 +466,156 @@ impl Context {
         rdds: &[Arc<dyn Rdd<Item = T>>],
     ) -> std::result::Result<UnionRdd<T>, Error> {
         UnionRdd::new(self.new_rdd_id(), rdds)
+    }
+
+    /// Dispatch a `#[task]`-registered Map/Filter/FlatMap over every partition,
+    /// returning decoded `Vec<U>` per partition.
+    ///
+    /// Thin wrapper over [`dispatch_pipeline`] for single-op map jobs.
+    pub fn run_native_job_map<T, U>(
+        self: &Arc<Self>,
+        op_id: &str,
+        action: TaskAction,
+        payload: Vec<u8>,
+        rdd: Arc<dyn Rdd<Item = T>>,
+    ) -> Result<Vec<Vec<U>>, Error>
+    where
+        T: Data + Clone + WireEncode,
+        Vec<T>: WireEncode,
+        U: Data + Clone + WireDecode,
+        Vec<U>: WireDecode,
+    {
+        let ops = vec![PipelineOp { op_id: op_id.to_string(), action, payload }];
+        let encoded = Self::encode_rdd_partitions(rdd)?;
+        let result_bytes = self.dispatch_pipeline(encoded, ops)?;
+        result_bytes
+            .into_iter()
+            .map(|bytes| {
+                Vec::<U>::decode_wire(&bytes).map_err(|e| Error::InvalidPayload(e.to_string()))
+            })
+            .collect()
+    }
+
+    /// Dispatch a `#[task]`-registered binary Fold over every partition,
+    /// then combine the per-partition results into a single value on the driver.
+    ///
+    /// Thin wrapper over [`dispatch_pipeline`] for single-op fold jobs.
+    pub fn run_native_job_fold<T>(
+        self: &Arc<Self>,
+        op_id: &str,
+        zero: T,
+        rdd: Arc<dyn Rdd<Item = T>>,
+    ) -> Result<T, Error>
+    where
+        T: Data + Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        let payload =
+            zero.encode_wire().map_err(|e| Error::InvalidPayload(e.to_string()))?;
+        let ops = vec![PipelineOp { op_id: op_id.to_string(), action: TaskAction::Fold, payload }];
+        let encoded = Self::encode_rdd_partitions(rdd)?;
+        let partition_results_raw = self.dispatch_pipeline(encoded, ops.clone())?;
+
+        let mut partition_values: Vec<T> = partition_results_raw
+            .into_iter()
+            .map(|bytes| T::decode_wire(&bytes).map_err(|e| Error::InvalidPayload(e.to_string())))
+            .collect::<Result<_, _>>()?;
+
+        if partition_values.is_empty() {
+            return Ok(zero);
+        }
+        if partition_values.len() == 1 {
+            return Ok(partition_values.remove(0));
+        }
+
+        // Combine partition results via Reduce on the driver using NativeBackend.
+        let combined_data = partition_values
+            .encode_wire()
+            .map_err(|e| Error::InvalidPayload(e.to_string()))?;
+        let reduce_ops = vec![PipelineOp {
+            op_id: op_id.to_string(),
+            action: TaskAction::Reduce,
+            payload: vec![],
+        }];
+        let task = TaskEnvelope::new(
+            0, 0, 0, 0, 0,
+            format!("driver-reduce-{}", op_id),
+            reduce_ops,
+            combined_data,
+        );
+        let result = NativeBackend::default()
+            .execute("local-driver", &task)
+            .map_err(|e| Error::InvalidPayload(e.to_string()))?;
+        match result.status {
+            ResultStatus::Success => T::decode_wire(&result.data)
+                .map_err(|e| Error::InvalidPayload(e.to_string())),
+            _ => Err(Error::InvalidPayload(
+                result.error.unwrap_or_else(|| "reduce failed".to_string()),
+            )),
+        }
+    }
+
+    /// Dispatch a full pipeline of ops over pre-encoded partition bytes.
+    ///
+    /// - **Local mode**: runs all ops via [`NativeBackend`] in-process.
+    /// - **Distributed mode**: sends one `TaskEnvelope` per partition to a worker via TCP.
+    ///
+    /// Returns raw result bytes per partition; callers decode into the concrete type.
+    pub fn dispatch_pipeline(
+        &self,
+        source_partitions: Vec<Vec<u8>>,
+        ops: Vec<PipelineOp>,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        match &self.scheduler {
+            Schedulers::Local(_) => {
+                let backend = NativeBackend::default();
+                source_partitions
+                    .into_iter()
+                    .enumerate()
+                    .map(|(part_id, data)| {
+                        let task = TaskEnvelope::new(
+                            0, 0, part_id, 0, part_id,
+                            format!("local-pipeline-{}", part_id),
+                            ops.clone(),
+                            data,
+                        );
+                        let result = backend
+                            .execute("local-driver", &task)
+                            .map_err(|e| Error::InvalidPayload(e.to_string()))?;
+                        match result.status {
+                            ResultStatus::Success => Ok(result.data),
+                            _ => Err(Error::InvalidPayload(
+                                result.error.unwrap_or_else(|| "task failed".to_string()),
+                            )),
+                        }
+                    })
+                    .collect()
+            }
+            Schedulers::Distributed(sched) => {
+                env::Env::run_in_async_rt(|| {
+                    futures::executor::block_on(sched.run_native_job(ops, source_partitions))
+                })
+                .map_err(|e| Error::InvalidPayload(e.to_string()))
+            }
+        }
+    }
+
+    /// Encode every partition of an RDD into rkyv bytes.
+    pub(crate) fn encode_rdd_partitions<T>(rdd: Arc<dyn Rdd<Item = T>>) -> Result<Vec<Vec<u8>>, Error>
+    where
+        T: Data + Clone + WireEncode,
+        Vec<T>: WireEncode,
+    {
+        rdd.splits()
+            .iter()
+            .map(|split| {
+                let items: Vec<T> = rdd
+                    .compute(split.clone())
+                    .map_err(|e| Error::InvalidPayload(e.to_string()))?
+                    .collect();
+                items.encode_wire().map_err(|e| Error::InvalidPayload(e.to_string()))
+            })
+            .collect()
     }
 }
 

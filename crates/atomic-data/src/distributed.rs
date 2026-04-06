@@ -102,6 +102,21 @@ where
     }
 }
 
+/// One step in a multi-op pipeline sent to a worker.
+///
+/// A [`TaskEnvelope`] carries a sequence of these; the worker threads partition
+/// data through them in order, feeding each step's output as the next step's input.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+pub struct PipelineOp {
+    /// Registered op_id, e.g. `"task_double::double"`. Looked up in the worker's
+    /// compile-time dispatch table.
+    pub op_id: String,
+    /// Which action to perform with this function.
+    pub action: TaskAction,
+    /// rkyv-encoded config: fold zero value for Fold/Aggregate, empty for Map/Filter.
+    pub payload: Vec<u8>,
+}
+
 /// The action the worker should apply over the partition data using the named task function.
 ///
 /// The driver sets this based on which RDD operation triggered the task submission.
@@ -127,6 +142,37 @@ pub enum TaskAction {
     Collect,
     /// Shuffle map phase: repartition elements by key into `num_output_partitions` buckets.
     ShuffleMap { shuffle_id: usize, num_output_partitions: usize },
+    /// Execute a Python UDF. `payload` is a serde_json-encoded `PythonUdfPayload`.
+    /// Partition `data` is a JSON-encoded `Vec` of elements.
+    PythonUdf,
+    /// Execute a JavaScript UDF. `payload` is a serde_json-encoded `JsUdfPayload`.
+    /// Partition `data` is a JSON-encoded `Vec` of elements.
+    JavaScriptUdf,
+}
+
+/// Metadata carried in `PipelineOp.payload` for a Python UDF step.
+///
+/// Serialized as JSON so both Python (via `json` stdlib) and Rust (`serde_json`) can
+/// produce and consume it without a shared binary format.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PythonUdfPayload {
+    /// The RDD operation: `"map"`, `"filter"`, `"flat_map"`, or `"fold"`.
+    pub action: String,
+    /// `cloudpickle`/`pickle`-serialized Python callable.
+    pub fn_bytes: Vec<u8>,
+    /// `pickle`-serialized fold zero value (empty for non-fold operations).
+    pub zero_bytes: Vec<u8>,
+}
+
+/// Metadata carried in `PipelineOp.payload` for a JavaScript UDF step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsUdfPayload {
+    /// The RDD operation: `"map"`, `"filter"`, `"flat_map"`, or `"fold"`.
+    pub action: String,
+    /// JavaScript function source obtained via `fn.toString()`.
+    pub fn_source: String,
+    /// JSON-encoded zero value for fold (empty string for non-fold).
+    pub zero_json: String,
 }
 
 /// Result status codes for task execution.
@@ -140,10 +186,10 @@ pub enum ResultStatus {
 /// The wire envelope sent from driver to worker for every distributed task.
 ///
 /// Contains everything the worker needs to execute one partition of work:
-/// - which function to call (`op_id`)
-/// - what to do with it (`action`)
-/// - configuration data for the action (`payload`, e.g. fold zero value)
+/// - an ordered pipeline of operations (`ops`) — each carries an `op_id`, `action`, and `payload`
 /// - the partition elements (`data`, rkyv-encoded `Vec<T>`)
+///
+/// Workers execute `ops` in order, threading partition data through each step.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct TaskEnvelope {
     pub version: u16,
@@ -154,13 +200,9 @@ pub struct TaskEnvelope {
     pub partition_id: usize,
     /// Correlates scheduler logs and worker logs.
     pub trace_id: String,
-    /// Registered task op_id, e.g. `"mycrate::double"`. The worker looks this up
-    /// in its compile-time dispatch table.
-    pub op_id: String,
-    /// The action to perform on the partition using the named task function.
-    pub action: TaskAction,
-    /// Action configuration (rkyv-encoded): zero value for Fold/Aggregate, empty for Map/Reduce.
-    pub payload: Vec<u8>,
+    /// Ordered pipeline of operations to apply to the partition.
+    /// Workers execute these in sequence, feeding each result as the next step's input.
+    pub ops: Vec<PipelineOp>,
     /// Serialized partition elements (rkyv-encoded `Vec<T>`).
     pub data: Vec<u8>,
 }
@@ -174,9 +216,7 @@ impl TaskEnvelope {
         attempt_id: usize,
         partition_id: usize,
         trace_id: String,
-        op_id: String,
-        action: TaskAction,
-        payload: Vec<u8>,
+        ops: Vec<PipelineOp>,
         data: Vec<u8>,
     ) -> Self {
         Self {
@@ -187,9 +227,7 @@ impl TaskEnvelope {
             attempt_id,
             partition_id,
             trace_id,
-            op_id,
-            action,
-            payload,
+            ops,
             data,
         }
     }
@@ -298,18 +336,17 @@ mod tests {
 
     #[test]
     fn task_envelope_round_trips_with_rkyv() {
-        let envelope = TaskEnvelope::new(
-            1, 2, 3, 0, 4,
-            "trace-1".to_string(),
-            "mycrate::double".to_string(),
-            TaskAction::Map,
-            vec![],
-            vec![1, 2, 3],
-        );
+        let ops = vec![PipelineOp {
+            op_id: "mycrate::double".to_string(),
+            action: TaskAction::Map,
+            payload: vec![],
+        }];
+        let envelope = TaskEnvelope::new(1, 2, 3, 0, 4, "trace-1".to_string(), ops, vec![1, 2, 3]);
         let bytes = envelope.encode_wire().expect("serialize envelope");
         let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize envelope");
-        assert_eq!(decoded.op_id, "mycrate::double");
-        assert_eq!(decoded.action, TaskAction::Map);
+        assert_eq!(decoded.ops.len(), 1);
+        assert_eq!(decoded.ops[0].op_id, "mycrate::double");
+        assert_eq!(decoded.ops[0].action, TaskAction::Map);
         assert_eq!(decoded.data, vec![1, 2, 3]);
     }
 
@@ -325,37 +362,61 @@ mod tests {
 
     #[test]
     fn task_action_fold_round_trips() {
-        let envelope = TaskEnvelope::new(
-            1, 2, 3, 0, 4,
-            "trace-2".to_string(),
-            "mycrate::sum".to_string(),
-            TaskAction::Fold,
-            0_i32.to_le_bytes().to_vec(), // zero value
-            vec![1, 2, 3],
-        );
+        let ops = vec![PipelineOp {
+            op_id: "mycrate::sum".to_string(),
+            action: TaskAction::Fold,
+            payload: 0_i32.to_le_bytes().to_vec(),
+        }];
+        let envelope =
+            TaskEnvelope::new(1, 2, 3, 0, 4, "trace-2".to_string(), ops, vec![1, 2, 3]);
         let bytes = envelope.encode_wire().expect("serialize");
         let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
-        assert_eq!(decoded.action, TaskAction::Fold);
-        assert_eq!(decoded.payload, 0_i32.to_le_bytes().to_vec());
+        assert_eq!(decoded.ops[0].action, TaskAction::Fold);
+        assert_eq!(decoded.ops[0].payload, 0_i32.to_le_bytes().to_vec());
     }
 
     #[test]
     fn shuffle_map_action_carries_ids() {
-        let action = TaskAction::ShuffleMap { shuffle_id: 7, num_output_partitions: 4 };
-        let envelope = TaskEnvelope::new(
-            1, 2, 3, 0, 4,
-            "trace-3".to_string(),
-            "sys.shuffle_map".to_string(),
-            action,
-            vec![],
-            vec![],
-        );
+        let ops = vec![PipelineOp {
+            op_id: "sys.shuffle_map".to_string(),
+            action: TaskAction::ShuffleMap { shuffle_id: 7, num_output_partitions: 4 },
+            payload: vec![],
+        }];
+        let envelope = TaskEnvelope::new(1, 2, 3, 0, 4, "trace-3".to_string(), ops, vec![]);
         let bytes = envelope.encode_wire().expect("serialize");
         let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
         assert!(matches!(
-            decoded.action,
+            decoded.ops[0].action,
             TaskAction::ShuffleMap { shuffle_id: 7, num_output_partitions: 4 }
         ));
+    }
+
+    #[test]
+    fn multi_op_pipeline_round_trips() {
+        let ops = vec![
+            PipelineOp {
+                op_id: "myapp::double".to_string(),
+                action: TaskAction::Map,
+                payload: vec![],
+            },
+            PipelineOp {
+                op_id: "myapp::is_positive".to_string(),
+                action: TaskAction::Filter,
+                payload: vec![],
+            },
+            PipelineOp {
+                op_id: "myapp::add".to_string(),
+                action: TaskAction::Fold,
+                payload: 0_i32.to_le_bytes().to_vec(),
+            },
+        ];
+        let envelope = TaskEnvelope::new(1, 2, 3, 0, 0, "trace-multi".to_string(), ops, vec![]);
+        let bytes = envelope.encode_wire().expect("serialize");
+        let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
+        assert_eq!(decoded.ops.len(), 3);
+        assert_eq!(decoded.ops[0].op_id, "myapp::double");
+        assert_eq!(decoded.ops[1].action, TaskAction::Filter);
+        assert_eq!(decoded.ops[2].op_id, "myapp::add");
     }
 
     #[test]

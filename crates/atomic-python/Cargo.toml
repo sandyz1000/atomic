@@ -6,8 +6,15 @@ edition.workspace = true
 [lib]
 name = "atomic"
 crate-type = ["cdylib", "rlib"]
+# Tests must be run via `maturin develop` + Python, not `cargo test`.
+# The cdylib target requires Python C symbols that are only available when
+# loaded by a Python interpreter; standalone cargo test binaries will fail to link.
+test = false
+doctest = false
 
 [dependencies]
 pyo3 = { workspace = true, features = ["extension-module", "abi3-py311"] }
+atomic-compute = { workspace = true }
 atomic-data = { workspace = true }
 serde_json = { workspace = true }
+rayon = { workspace = true }

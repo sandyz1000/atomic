@@ -13,7 +13,7 @@ use atomic_data::{
     data::Data,
     dependency::ShuffleDependencyBox,
     distributed::{
-        TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope, TaskResultEnvelope, TransportFrameKind,
+        TRANSPORT_HEADER_LEN, PipelineOp, TaskEnvelope, TaskResultEnvelope, TransportFrameKind,
         WireDecode, WireEncode, WorkerCapabilities, encode_transport_frame, parse_transport_header,
     },
     partial::{ApproximateEvaluator, result::PartialResult},
@@ -128,15 +128,15 @@ impl DistributedScheduler {
 
     /// Run a native (non-artifact) job over a set of pre-encoded partitions.
     ///
-    /// Sends one `TaskEnvelope` per partition, each carrying `op_id` and `action`.
+    /// Sends one `TaskEnvelope` per partition, each carrying the full `ops` pipeline.
+    /// Workers execute ops in order, threading data through each step.
     /// Returns raw result bytes per partition in submission order.
     pub async fn run_native_job(
         &self,
-        op_id: &str,
-        action: TaskAction,
-        payload: Vec<u8>,
+        ops: Vec<PipelineOp>,
         partitions: Vec<Vec<u8>>,
     ) -> LibResult<Vec<Vec<u8>>> {
+        let pipeline_label = ops.iter().map(|o| o.op_id.as_str()).collect::<Vec<_>>().join("→");
         let (run_id, stage_id) = {
             let _lock = self.scheduler_lock.lock();
             let run_id = self.get_mutators().get_next_job_id();
@@ -160,10 +160,8 @@ impl DistributedScheduler {
                     task_id,
                     attempt_id,
                     partition_id,
-                    format!("native-{}-{}", op_id, partition_id),
-                    op_id.to_string(),
-                    action.clone(),
-                    payload.clone(),
+                    format!("native-pipeline-{}-{}", partition_id, pipeline_label),
+                    ops.clone(),
                     partition_data,
                 );
 
@@ -439,7 +437,7 @@ mod tests {
             let mut payload = vec![0_u8; payload_len];
             socket.read_exact(&mut payload).await.expect("read payload");
             let task = TaskEnvelope::decode_wire(&payload).expect("decode task");
-            assert_eq!(task.op_id, "mycrate::double");
+            assert_eq!(task.ops[0].op_id, "mycrate::double");
             let response = TaskResultEnvelope::ok(
                 task.run_id, task.stage_id, task.task_id, task.attempt_id,
                 "worker-1".to_string(), vec![42],
@@ -452,9 +450,7 @@ mod tests {
         let task = TaskEnvelope::new(
             1, 2, 3, 0, 0,
             "trace-1".to_string(),
-            "mycrate::double".to_string(),
-            TaskAction::Map,
-            vec![],
+            vec![PipelineOp { op_id: "mycrate::double".to_string(), action: TaskAction::Map, payload: vec![] }],
             vec![1, 2, 3],
         );
         let result = scheduler

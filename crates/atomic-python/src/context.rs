@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -5,21 +7,31 @@ use crate::rdd::PyRdd;
 
 /// The Atomic execution context.
 ///
-/// Entry point for creating RDDs. Each `Context` tracks a logical execution
-/// environment — currently in-process (local thread) for Python tasks, with
-/// Docker dispatch available via `DockerStub`.
+/// Entry point for creating RDDs. In **local mode** (default) transformations run
+/// eagerly in the calling thread. In **distributed mode** (set `VEGA_DEPLOYMENT_MODE=distributed`)
+/// the context connects to remote workers and dispatches pipeline ops over TCP.
 ///
-/// # Example
+/// # Local mode
 /// ```python
 /// import atomic
-///
 /// ctx = atomic.Context()
 /// result = ctx.parallelize([1, 2, 3, 4]).map(lambda x: x + 1).collect()
 /// # [2, 3, 4, 5]
 /// ```
+///
+/// # Distributed mode
+/// ```python
+/// import os
+/// os.environ["VEGA_DEPLOYMENT_MODE"] = "distributed"
+/// os.environ["VEGA_LOCAL_IP"] = "127.0.0.1"
+/// # Workers are listed in ~/hosts.conf or via VEGA_SLAVES env var.
+/// import atomic
+/// ctx = atomic.Context()
+/// result = ctx.parallelize(range(100), num_partitions=4).map(lambda x: x * 2).collect()
+/// ```
 #[pyclass(name = "Context")]
 pub struct PyContext {
-    /// Number of default partitions when not specified by the caller.
+    pub inner: Arc<atomic_compute::context::Context>,
     default_parallelism: usize,
 }
 
@@ -27,16 +39,14 @@ pub struct PyContext {
 impl PyContext {
     #[new]
     #[pyo3(signature = (default_parallelism=None))]
-    pub fn new(default_parallelism: Option<usize>) -> Self {
-        Self {
-            default_parallelism: default_parallelism.unwrap_or_else(num_cpus),
-        }
+    pub fn new(default_parallelism: Option<usize>) -> PyResult<Self> {
+        let inner = atomic_compute::context::Context::new()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let parallelism = default_parallelism.unwrap_or_else(num_cpus);
+        Ok(Self { inner, default_parallelism: parallelism })
     }
 
-    /// Distribute a Python list as an RDD, optionally across `num_partitions` partitions.
-    ///
-    /// Elements are stored in-memory. Partitions are logical — local execution
-    /// processes all elements in the calling thread.
+    /// Distribute a Python list as an RDD across `num_partitions` partitions.
     ///
     /// # Example
     /// ```python
@@ -51,18 +61,10 @@ impl PyContext {
     ) -> PyResult<PyRdd> {
         let elements: Vec<Py<PyAny>> = data.iter().map(|item| item.unbind()).collect();
         let partitions = num_partitions.unwrap_or(self.default_parallelism).max(1);
-        Ok(PyRdd::from_data(py, elements, partitions))
+        Ok(PyRdd::from_data(py, elements, partitions, Arc::clone(&self.inner)))
     }
 
     /// Create an RDD from lines of a text file.
-    ///
-    /// Each line becomes one element (trailing newline stripped).
-    ///
-    /// # Example
-    /// ```python
-    /// lines = ctx.text_file("words.txt")
-    /// words = lines.flat_map(lambda line: line.split())
-    /// ```
     pub fn text_file(&self, py: Python, path: &str) -> PyResult<PyRdd> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
@@ -71,15 +73,10 @@ impl PyContext {
             .map(|line| line.to_string().into_pyobject(py).unwrap().into_any().unbind())
             .collect();
         let partitions = self.default_parallelism.max(1);
-        Ok(PyRdd::from_data(py, elements, partitions))
+        Ok(PyRdd::from_data(py, elements, partitions, Arc::clone(&self.inner)))
     }
 
     /// Create an RDD of integers in `[start, end)` with optional `step`.
-    ///
-    /// # Example
-    /// ```python
-    /// rdd = ctx.range(0, 100, step=2)
-    /// ```
     #[pyo3(signature = (start, end, step=None, num_partitions=None))]
     pub fn range(
         &self,
@@ -99,7 +96,7 @@ impl PyContext {
             .map(|i| i.into_pyobject(py).unwrap().into_any().unbind())
             .collect();
         let partitions = num_partitions.unwrap_or(self.default_parallelism).max(1);
-        Ok(PyRdd::from_data(py, elements, partitions))
+        Ok(PyRdd::from_data(py, elements, partitions, Arc::clone(&self.inner)))
     }
 
     pub fn default_parallelism(&self) -> usize {
