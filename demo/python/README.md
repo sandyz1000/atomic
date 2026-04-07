@@ -1,7 +1,7 @@
 # Python Examples
 
 Spark-like jobs written in Python using the `atomic` extension module
-(built from `crates/atomic-python` via PyO3).
+(built from `crates/atomic-py` via PyO3).
 
 ## Setup
 
@@ -10,7 +10,7 @@ Spark-like jobs written in Python using the `atomic` extension module
 pip install maturin
 
 # Build and install the atomic Python module in dev mode
-cd crates/atomic-python
+cd crates/atomic-py
 maturin develop --release
 cd ../..
 ```

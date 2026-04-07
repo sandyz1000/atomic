@@ -263,7 +263,7 @@ where
             partition
         );
 
-        // ✅ Use typed compute() - no iterator_any, no unsafe downcasting!
+        // Use typed compute() - no iterator_any, no unsafe downcasting!
         match self.rdd.compute(split) {
             Ok(iter) => {
                 for (count, (k, v)) in iter.enumerate() {
@@ -296,7 +296,7 @@ where
             let set: Vec<(K, C)> = bucket.into_iter().collect();
             let config = bincode::config::standard();
             match bincode::encode_to_vec(&set, config) {
-                Ok(_ser_bytes) => {
+                Ok(ser_bytes) => {
                     log::debug!(
                         "shuffle dependency map task set from bucket #{} in shuffle id #{}, partition #{}: {:?}",
                         i,
@@ -304,8 +304,14 @@ where
                         partition,
                         set.first()
                     );
-                    // TODO: Resolve the import of env here
-                    // env::SHUFFLE_CACHE.insert((self.shuffle_id, partition, i), ser_bytes);
+                    if let Some(cache) = crate::env::SHUFFLE_CACHE.get() {
+                        cache.insert((self.shuffle_id, partition, i), ser_bytes);
+                    } else {
+                        log::warn!(
+                            "SHUFFLE_CACHE not initialized — shuffle data for ({},{},{}) dropped",
+                            self.shuffle_id, partition, i
+                        );
+                    }
                 }
                 Err(e) => {
                     log::error!("Error serializing shuffle data: {:?}", e);
@@ -318,9 +324,10 @@ where
             self.shuffle_id
         );
 
-        // TODO: Resolve the import of env here
-        // env::Env::get().shuffle_manager.get_server_uri()
-        "".to_string()
+        crate::env::SHUFFLE_SERVER_URI
+            .get()
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

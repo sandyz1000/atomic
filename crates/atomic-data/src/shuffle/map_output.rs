@@ -78,9 +78,7 @@ impl MapOutputTracker {
 
         // Serialize the shuffle_id request
         let shuffle_id_bytes = bincode::encode_to_vec(&shuffle_id, bincode::config::standard())
-            .map_err(|e| {
-                NetworkError::BincodeError(format!("Failed to serialize shuffle_id: {}", e))
-            })?;
+            .map_err(NetworkError::from)?;
 
         // Connect to master with retry
         let stream = loop {
@@ -98,7 +96,7 @@ impl MapOutputTracker {
         // Handshake and establish HTTP connection
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
-            .map_err(|e| NetworkError::HttpError(format!("Handshake failed: {}", e)))?;
+            .map_err(NetworkError::from)?;
 
         // Spawn connection task
         tokio::spawn(async move {
@@ -110,26 +108,17 @@ impl MapOutputTracker {
         // Build HTTP request
         let uri: hyper::Uri = format!("http://{}/shuffle", self.master_addr)
             .parse()
-            .map_err(|e| {
-                MapOutputError::NetworkError(NetworkError::InvalidUri(format!("{}", e)))
-            })?;
+            .map_err(NetworkError::from)?;
 
         let req = hyper::Request::builder()
             .method(hyper::Method::POST)
             .uri(uri)
             .header("content-type", "application/octet-stream")
             .body(Full::new(Bytes::from(shuffle_id_bytes)))
-            .map_err(|e| {
-                MapOutputError::NetworkError(NetworkError::HttpError(format!(
-                    "Failed to build request: {}",
-                    e
-                )))
-            })?;
+            .map_err(NetworkError::from)?;
 
         // Send request
-        let resp = sender.send_request(req).await.map_err(|e| {
-            MapOutputError::NetworkError(NetworkError::HttpError(format!("Request failed: {}", e)))
-        })?;
+        let resp = sender.send_request(req).await.map_err(NetworkError::from)?;
 
         // Check status
         if resp.status() != hyper::StatusCode::OK {
@@ -143,22 +132,13 @@ impl MapOutputTracker {
             .into_body()
             .collect()
             .await
-            .map_err(|e| {
-                MapOutputError::NetworkError(NetworkError::HttpError(format!(
-                    "Failed to read response: {}",
-                    e
-                )))
-            })?
+            .map_err(NetworkError::from)?
             .to_bytes();
 
         // Deserialize the Vec<String> response
         let (locs, _): (Vec<String>, _) =
-            bincode::decode_from_slice(&body_bytes, bincode::config::standard()).map_err(|e| {
-                MapOutputError::NetworkError(NetworkError::BincodeError(format!(
-                    "Failed to deserialize response: {}",
-                    e
-                )))
-            })?;
+            bincode::decode_from_slice(&body_bytes, bincode::config::standard())
+                .map_err(NetworkError::from)?;
 
         log::debug!(
             "received {} locations for shuffle task #{}",

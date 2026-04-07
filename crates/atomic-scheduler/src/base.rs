@@ -78,7 +78,7 @@ pub trait NativeScheduler: Send + Sync {
         Ok(stage)
     }
 
-    async fn visit_for_missing_parent_stages<'s>(
+    async fn visit_missing_parent<'s>(
         &'s self,
         missing: &'s mut BTreeSet<Stage>,
         visited: &'s mut HashSet<usize>,
@@ -118,7 +118,7 @@ pub trait NativeScheduler: Send + Sync {
                                 prev: _,
                             } => {
                                 log::debug!("narrow stage in missing stages");
-                                self.visit_for_missing_parent_stages(missing, visited, rdd_base)
+                                self.visit_missing_parent(missing, visited, rdd_base)
                                     .await?;
                             }
                         }
@@ -575,7 +575,7 @@ impl Mutators {
     pub fn new() -> Self {
         Self {
             stage_cache: Arc::new(DashMap::new()),
-            map_output_tracker: None,
+            map_output_tracker: atomic_data::env::MAP_OUTPUT_TRACKER.get().cloned(),
             shuffle_to_map_stage: Arc::new(DashMap::new()),
             event_queues: Arc::new(DashMap::new()),
             cache_locs: Arc::new(DashMap::new()),

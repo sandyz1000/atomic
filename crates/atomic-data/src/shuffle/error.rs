@@ -72,6 +72,36 @@ pub enum NetworkError {
     InvalidUri(String),
 }
 
+impl From<hyper::Error> for NetworkError {
+    fn from(e: hyper::Error) -> Self {
+        NetworkError::HttpError(e.to_string())
+    }
+}
+
+impl From<http::Error> for NetworkError {
+    fn from(e: http::Error) -> Self {
+        NetworkError::HttpError(e.to_string())
+    }
+}
+
+impl From<http::uri::InvalidUri> for NetworkError {
+    fn from(e: http::uri::InvalidUri) -> Self {
+        NetworkError::InvalidUri(e.to_string())
+    }
+}
+
+impl From<bincode::error::EncodeError> for NetworkError {
+    fn from(e: bincode::error::EncodeError) -> Self {
+        NetworkError::BincodeError(e.to_string())
+    }
+}
+
+impl From<bincode::error::DecodeError> for NetworkError {
+    fn from(e: bincode::error::DecodeError) -> Self {
+        NetworkError::BincodeError(e.to_string())
+    }
+}
+
 impl From<ShuffleError> for Response<Body> {
     fn from(err: ShuffleError) -> Response<Body> {
         match err {

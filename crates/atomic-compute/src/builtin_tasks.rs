@@ -237,3 +237,239 @@ inventory::submit! {
         },
     }
 }
+
+// ── TopKTask ──────────────────────────────────────────────────────────────────
+
+/// Built-in: return the top K elements in descending order from a partition.
+///
+/// Used by `TypedRdd::top(k)` in distributed mode. Each partition produces its
+/// local top-K; the driver merges them and takes the global top-K.
+///
+/// `payload` must be a wire-encoded `u64` (the K value).
+pub struct TopKTask<T>(std::marker::PhantomData<T>);
+
+impl<T> Default for TopKTask<T> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+macro_rules! impl_top_k_task {
+    ($ty:ty) => {
+        inventory::submit! {
+            TaskEntry {
+                op_id: concat!("atomic::builtin::top_k::", stringify!($ty)),
+                handler: |action, payload, data| {
+                    use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
+                    match action {
+                        TaskAction::Collect => {
+                            let k = u64::decode_wire(payload)
+                                .map_err(|e| e.to_string())? as usize;
+                            let mut items = ::std::vec::Vec::<$ty>::decode_wire(data)
+                                .map_err(|e| e.to_string())?;
+                            items.sort_by(|a, b| b.partial_cmp(a).unwrap_or(::std::cmp::Ordering::Equal));
+                            items.truncate(k);
+                            items.encode_wire().map_err(|e| e.to_string())
+                        }
+                        other => Err(format!("TopKTask does not support action {:?}", other)),
+                    }
+                },
+            }
+        }
+    };
+}
+
+// ── TakeOrderedTask ───────────────────────────────────────────────────────────
+
+/// Built-in: return the first K elements in ascending order from a partition.
+///
+/// Used by `TypedRdd::take_ordered(k)` in distributed mode. Each partition
+/// produces its local first-K ascending; the driver merges and re-truncates.
+///
+/// `payload` must be a wire-encoded `u64` (the K value).
+pub struct TakeOrderedTask<T>(std::marker::PhantomData<T>);
+
+impl<T> Default for TakeOrderedTask<T> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+macro_rules! impl_take_ordered_task {
+    ($ty:ty) => {
+        inventory::submit! {
+            TaskEntry {
+                op_id: concat!("atomic::builtin::take_ordered::", stringify!($ty)),
+                handler: |action, payload, data| {
+                    use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
+                    match action {
+                        TaskAction::Collect => {
+                            let k = u64::decode_wire(payload)
+                                .map_err(|e| e.to_string())? as usize;
+                            let mut items = ::std::vec::Vec::<$ty>::decode_wire(data)
+                                .map_err(|e| e.to_string())?;
+                            items.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
+                            items.truncate(k);
+                            items.encode_wire().map_err(|e| e.to_string())
+                        }
+                        other => Err(format!("TakeOrderedTask does not support action {:?}", other)),
+                    }
+                },
+            }
+        }
+    };
+}
+
+// ── DistinctTask ──────────────────────────────────────────────────────────────
+
+/// Built-in: remove duplicate elements within a partition.
+///
+/// Used as the local combine step in `TypedRdd::distinct()`. After each
+/// partition deduplicates locally, a shuffle groups all copies of each element
+/// to one partition, where a final `DistinctTask` pass finishes the job.
+pub struct DistinctTask<T>(std::marker::PhantomData<T>);
+
+impl<T> Default for DistinctTask<T> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+macro_rules! impl_distinct_task {
+    ($ty:ty) => {
+        inventory::submit! {
+            TaskEntry {
+                op_id: concat!("atomic::builtin::distinct::", stringify!($ty)),
+                handler: |action, _payload, data| {
+                    use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
+                    use ::std::collections::HashSet;
+                    match action {
+                        TaskAction::Map | TaskAction::Collect => {
+                            let items = ::std::vec::Vec::<$ty>::decode_wire(data)
+                                .map_err(|e| e.to_string())?;
+                            let unique: Vec<$ty> = items
+                                .into_iter()
+                                .collect::<HashSet<_>>()
+                                .into_iter()
+                                .collect();
+                            unique.encode_wire().map_err(|e| e.to_string())
+                        }
+                        other => Err(format!("DistinctTask does not support action {:?}", other)),
+                    }
+                },
+            }
+        }
+    };
+}
+
+// ── MeanTask ──────────────────────────────────────────────────────────────────
+
+/// Built-in: compute per-partition `(f64_sum, u64_count)` for mean calculation.
+///
+/// Used by `TypedRdd::mean()`. Each worker returns `(sum, count)` for its
+/// partition; the driver combines them: `total_sum / total_count as f64`.
+///
+/// The driver reduce step uses a `SumTask<f64>` for the sum component and
+/// `SumTask<u64>` for the count component, or combines the tuple directly.
+pub struct MeanTask<T>(std::marker::PhantomData<T>);
+
+impl<T> Default for MeanTask<T> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+macro_rules! impl_mean_task {
+    ($ty:ty) => {
+        inventory::submit! {
+            TaskEntry {
+                op_id: concat!("atomic::builtin::mean::", stringify!($ty)),
+                handler: |action, _payload, data| {
+                    use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
+                    match action {
+                        TaskAction::Aggregate | TaskAction::Collect => {
+                            let items = ::std::vec::Vec::<$ty>::decode_wire(data)
+                                .map_err(|e| e.to_string())?;
+                            let count = items.len() as u64;
+                            let sum: f64 = items.into_iter().map(|x| x as f64).sum();
+                            (sum, count).encode_wire().map_err(|e| e.to_string())
+                        }
+                        other => Err(format!("MeanTask does not support action {:?}", other)),
+                    }
+                },
+            }
+        }
+    };
+}
+
+// ── SortTask ──────────────────────────────────────────────────────────────────
+
+/// Built-in: sort all elements within a partition in ascending order.
+///
+/// Used by `TypedRdd::sort_within_partitions()` and as the local sort step
+/// before a merge-sort across partitions for `sort_by` / `sort_by_key`.
+pub struct SortTask<T>(std::marker::PhantomData<T>);
+
+impl<T> Default for SortTask<T> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+macro_rules! impl_sort_task {
+    ($ty:ty) => {
+        inventory::submit! {
+            TaskEntry {
+                op_id: concat!("atomic::builtin::sort::", stringify!($ty)),
+                handler: |action, _payload, data| {
+                    use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
+                    match action {
+                        TaskAction::Map | TaskAction::Collect => {
+                            let mut items = ::std::vec::Vec::<$ty>::decode_wire(data)
+                                .map_err(|e| e.to_string())?;
+                            items.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
+                            items.encode_wire().map_err(|e| e.to_string())
+                        }
+                        other => Err(format!("SortTask does not support action {:?}", other)),
+                    }
+                },
+            }
+        }
+    };
+}
+
+// Instantiate new built-in tasks for common primitive types.
+impl_top_k_task!(i32);
+impl_top_k_task!(i64);
+impl_top_k_task!(u32);
+impl_top_k_task!(u64);
+impl_top_k_task!(f32);
+impl_top_k_task!(f64);
+
+impl_take_ordered_task!(i32);
+impl_take_ordered_task!(i64);
+impl_take_ordered_task!(u32);
+impl_take_ordered_task!(u64);
+impl_take_ordered_task!(f32);
+impl_take_ordered_task!(f64);
+
+impl_distinct_task!(i32);
+impl_distinct_task!(i64);
+impl_distinct_task!(u32);
+impl_distinct_task!(u64);
+impl_distinct_task!(String);
+
+// MeanTask uses `x as f64` so only integer and float primitives apply.
+impl_mean_task!(i32);
+impl_mean_task!(i64);
+impl_mean_task!(u32);
+impl_mean_task!(u64);
+impl_mean_task!(f32);
+impl_mean_task!(f64);
+
+impl_sort_task!(i32);
+impl_sort_task!(i64);
+impl_sort_task!(u32);
+impl_sort_task!(u64);
+impl_sort_task!(f32);
+impl_sort_task!(f64);

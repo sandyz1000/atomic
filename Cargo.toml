@@ -4,10 +4,6 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Sandip Dey <sandip.dey1988@yahoo.com>"]
 
-# [package]
-# name = "atomic"
-# edition.workspace = true
-# version.workspace = true
 
 [workspace]
 resolver = "2"
@@ -19,7 +15,7 @@ atomic-scheduler = { path = "crates/atomic-scheduler" }
 atomic-data = { path = "crates/atomic-data" }
 atomic-utils = { path = "crates/atomic-utils" }
 atomic-runtime-macros = { path = "crates/atomic-runtime-macros" }
-atomic-python = { path = "crates/atomic-python" }
+atomic-py = { path = "crates/atomic-py" }
 atomic-js = { path = "crates/atomic-js" }
 atomic-worker = { path = "crates/atomic-worker" }
 pyo3 = { version = "0.28.3" }

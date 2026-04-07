@@ -2,9 +2,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::backend::NativeBackend;
 use crate::env;
 use crate::error::{Error, LibResult};
-use crate::native_backend::NativeBackend;
 use atomic_data::distributed::{
     TRANSPORT_HEADER_LEN, TaskEnvelope, TransportFrameKind, WireDecode, WireEncode,
     WorkerCapabilities, encode_transport_frame, parse_transport_header,
@@ -33,7 +33,10 @@ impl Executor {
         }
     }
 
-    pub fn execute_task(&self, task: &TaskEnvelope) -> LibResult<atomic_data::distributed::TaskResultEnvelope> {
+    pub fn execute_task(
+        &self,
+        task: &TaskEnvelope,
+    ) -> LibResult<atomic_data::distributed::TaskResultEnvelope> {
         self.backend
             .execute(&self.worker_id, task)
             .map_err(|e| Error::InvalidPayload(e.to_string()))
@@ -81,28 +84,29 @@ impl Executor {
                 Err(_) => break,
             };
             let rcv_main = rcv_main.clone();
-            let selfc = Arc::clone(&self);
+            let exec = Arc::clone(&self);
             let res: LibResult<Signal> = spawn(async move {
                 match rcv_main.try_recv() {
                     Ok(Signal::ShutDownError) => {
-                        log::info!("shutting down executor @{} due to error", selfc.port);
+                        log::info!("shutting down executor @{} due to error", exec.port);
                         return Err(Error::ExecutorShutdown);
                     }
                     Ok(Signal::ShutDownGracefully) => {
-                        log::info!("shutting down executor @{} gracefully", selfc.port);
+                        log::info!("shutting down executor @{} gracefully", exec.port);
                         return Ok(Signal::ShutDownGracefully);
                     }
                     _ => {}
                 }
-                log::debug!("received new task @{} executor", selfc.port);
-                let (frame_kind, payload) = selfc.read_transport_frame(&mut stream).await?;
-                let selfc2 = Arc::clone(&selfc);
+                log::debug!("received new task @{} executor", exec.port);
+                let (frame_kind, payload) = exec.read_transport_frame(&mut stream).await?;
+                let exec_clone = Arc::clone(&exec);
                 let (result_kind, result_payload) =
-                    spawn_blocking(move || selfc2.handle_transport_frame(frame_kind, payload))
+                    spawn_blocking(move || exec_clone.handle_transport_frame(frame_kind, payload))
                         .await??;
-                selfc
-                    .write_transport_frame(&mut stream, result_kind, &result_payload)
+
+                exec.write_transport_frame(&mut stream, result_kind, &result_payload)
                     .await?;
+
                 log::debug!("sent result data to driver");
                 Ok(Signal::Continue)
             })
@@ -126,9 +130,11 @@ impl Executor {
                 let task = TaskEnvelope::decode_wire(&payload)
                     .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
                 let result = self.execute_task(&task)?;
+
                 let bytes = result
                     .encode_wire()
                     .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
+
                 Ok((TransportFrameKind::TaskResultEnvelope, bytes))
             }
             TransportFrameKind::WorkerCapabilities => {
@@ -136,6 +142,7 @@ impl Executor {
                     .worker_capabilities()
                     .encode_wire()
                     .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
+
                 Ok((TransportFrameKind::WorkerCapabilities, bytes))
             }
             other => Err(Error::InvalidTransportFrame(format!(

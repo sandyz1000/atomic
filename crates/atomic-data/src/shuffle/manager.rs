@@ -108,7 +108,11 @@ impl ShuffleManager {
 
     pub fn check_status(&self) -> LibResult<StatusCode> {
         self.ask_status.send(()).unwrap();
-        self.rcv_status.recv().map_err(|_| ShuffleError::Other)?
+        // Use a timeout so this doesn't hang when the status-checker task can't run
+        // (e.g. when called from a sync context inside a current-thread Tokio runtime).
+        self.rcv_status
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| ShuffleError::Other)?
     }
 
     /// Returns the shuffle server URI as a string.

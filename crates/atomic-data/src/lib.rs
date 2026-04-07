@@ -3,6 +3,7 @@ pub mod cache;
 pub mod data;
 pub mod dependency;
 pub mod distributed;
+pub mod env;
 pub mod error;
 pub mod fn_traits;
 pub mod partial;

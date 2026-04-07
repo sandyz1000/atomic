@@ -1,7 +1,7 @@
 use crate::error::Error;
 use crate::executor::{Executor, Signal};
 use crate::io::ReaderConfiguration;
-use crate::native_backend::NativeBackend;
+use crate::backend::NativeBackend;
 use crate::rdd::typed::TypedRdd;
 use crate::rdd::{ParallelCollection, UnionRdd};
 use crate::{env, hosts};
@@ -75,21 +75,19 @@ pub fn save<R: Data>(ctx: TaskContext, iter: Box<dyn Iterator<Item = R>>, path: 
 impl Context {
     /// Create a context from the environment configuration.
     ///
-    /// In distributed mode, if `is_driver` is true returns a driver context;
-    /// otherwise starts the worker loop and never returns.
+    /// In distributed mode, returns a driver context connected to the workers
+    /// listed in `hosts.conf`.
     /// In local mode, returns a local context.
+    ///
+    /// To start a worker process use [`start_worker`] instead — it reads the
+    /// slave configuration from the environment and never returns.
     pub fn new() -> Result<Arc<Self>, Error> {
         let mode = env::Configuration::get().deployment_mode;
         match mode {
             env::DeploymentMode::Distributed => {
-                if env::Configuration::get().is_driver {
-                    let ctx = Context::init_distributed_driver()?;
-                    ctx.set_cleanup_process();
-                    Ok(ctx)
-                } else {
-                    Context::init_distributed_worker()?;
-                    unreachable!("worker process always terminates via std::process::exit")
-                }
+                let ctx = Context::init_distributed_driver()?;
+                ctx.set_cleanup_process();
+                Ok(ctx)
             }
             env::DeploymentMode::Local => Context::init_local_scheduler(),
         }
@@ -126,6 +124,9 @@ impl Context {
         fs::create_dir_all(&job_work_dir).unwrap();
 
         let _ = env_logger::try_init();
+        if let Err(e) = env::Env::run_in_async_rt(env::init_shuffle) {
+            log::warn!("shuffle service could not start (wide transforms will be local-only): {e}");
+        }
         let local = Arc::new(LocalScheduler::new(20, true));
         let scheduler = Schedulers::Local(local.clone());
 
@@ -153,6 +154,9 @@ impl Context {
 
         fs::create_dir_all(&job_work_dir).unwrap();
         let _ = env_logger::try_init();
+        if let Err(e) = env::init_shuffle() {
+            log::warn!("shuffle service could not start: {e}");
+        }
         let scheduler = Arc::new(DistributedScheduler::new(20, true));
 
         // Workers are pre-started by `atomic deploy` (or manually with --worker).
@@ -193,33 +197,6 @@ impl Context {
             distributed_driver: true,
             work_dir: job_work_dir,
         }))
-    }
-
-    fn init_distributed_worker() -> Result<(), Error> {
-        let mut work_dir = PathBuf::from("");
-        match std::env::current_exe().map_err(|_| Error::CurrentBinaryPath) {
-            Ok(binary_path) => {
-                match binary_path.parent().ok_or_else(|| Error::CurrentBinaryPath) {
-                    Ok(dir) => work_dir = dir.into(),
-                    Err(err) => Context::worker_clean_up_directives(Err(err), work_dir),
-                };
-                let _ = env_logger::try_init();
-            }
-            Err(err) => Context::worker_clean_up_directives(Err(err), work_dir),
-        }
-
-        log::debug!("starting worker");
-        let port = match env::Configuration::get()
-            .slave
-            .as_ref()
-            .map(|c| c.port)
-            .ok_or(Error::GetOrCreateConfig("executor port not set"))
-        {
-            Ok(port) => port,
-            Err(err) => Context::worker_clean_up_directives(Err(err), work_dir),
-        };
-        let executor = Arc::new(Executor::new(port));
-        Context::worker_clean_up_directives(executor.worker(), work_dir)
     }
 
     fn worker_clean_up_directives(run_result: Result<Signal, Error>, work_dir: PathBuf) -> ! {
@@ -318,6 +295,12 @@ impl Context {
 
     pub fn new_shuffle_id(self: &Arc<Self>) -> usize {
         self.next_shuffle_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Default number of output partitions for wide transformations (reduce_by_key, group_by_key).
+    /// Uses the number of CPUs, clamped to a sensible range.
+    pub fn default_parallelism(self: &Arc<Self>) -> usize {
+        num_cpus::get().clamp(1, 64)
     }
 
     pub fn make_rdd<T: Data + Clone, I>(
@@ -490,9 +473,7 @@ impl Context {
         let result_bytes = self.dispatch_pipeline(encoded, ops)?;
         result_bytes
             .into_iter()
-            .map(|bytes| {
-                Vec::<U>::decode_wire(&bytes).map_err(|e| Error::InvalidPayload(e.to_string()))
-            })
+            .map(|bytes| Vec::<U>::decode_wire(&bytes).map_err(Error::from))
             .collect()
     }
 
@@ -510,15 +491,14 @@ impl Context {
         T: Data + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        let payload =
-            zero.encode_wire().map_err(|e| Error::InvalidPayload(e.to_string()))?;
+        let payload = zero.encode_wire()?;
         let ops = vec![PipelineOp { op_id: op_id.to_string(), action: TaskAction::Fold, payload }];
         let encoded = Self::encode_rdd_partitions(rdd)?;
         let partition_results_raw = self.dispatch_pipeline(encoded, ops.clone())?;
 
         let mut partition_values: Vec<T> = partition_results_raw
             .into_iter()
-            .map(|bytes| T::decode_wire(&bytes).map_err(|e| Error::InvalidPayload(e.to_string())))
+            .map(|bytes| T::decode_wire(&bytes).map_err(Error::from))
             .collect::<Result<_, _>>()?;
 
         if partition_values.is_empty() {
@@ -529,9 +509,7 @@ impl Context {
         }
 
         // Combine partition results via Reduce on the driver using NativeBackend.
-        let combined_data = partition_values
-            .encode_wire()
-            .map_err(|e| Error::InvalidPayload(e.to_string()))?;
+        let combined_data = partition_values.encode_wire()?;
         let reduce_ops = vec![PipelineOp {
             op_id: op_id.to_string(),
             action: TaskAction::Reduce,
@@ -543,12 +521,9 @@ impl Context {
             reduce_ops,
             combined_data,
         );
-        let result = NativeBackend::default()
-            .execute("local-driver", &task)
-            .map_err(|e| Error::InvalidPayload(e.to_string()))?;
+        let result = NativeBackend::default().execute("local-driver", &task)?;
         match result.status {
-            ResultStatus::Success => T::decode_wire(&result.data)
-                .map_err(|e| Error::InvalidPayload(e.to_string())),
+            ResultStatus::Success => T::decode_wire(&result.data).map_err(Error::from),
             _ => Err(Error::InvalidPayload(
                 result.error.unwrap_or_else(|| "reduce failed".to_string()),
             )),
@@ -579,9 +554,7 @@ impl Context {
                             ops.clone(),
                             data,
                         );
-                        let result = backend
-                            .execute("local-driver", &task)
-                            .map_err(|e| Error::InvalidPayload(e.to_string()))?;
+                        let result = backend.execute("local-driver", &task)?;
                         match result.status {
                             ResultStatus::Success => Ok(result.data),
                             _ => Err(Error::InvalidPayload(
@@ -595,7 +568,7 @@ impl Context {
                 env::Env::run_in_async_rt(|| {
                     futures::executor::block_on(sched.run_native_job(ops, source_partitions))
                 })
-                .map_err(|e| Error::InvalidPayload(e.to_string()))
+                .map_err(Error::from)
             }
         }
     }
@@ -609,14 +582,55 @@ impl Context {
         rdd.splits()
             .iter()
             .map(|split| {
-                let items: Vec<T> = rdd
-                    .compute(split.clone())
-                    .map_err(|e| Error::InvalidPayload(e.to_string()))?
-                    .collect();
-                items.encode_wire().map_err(|e| Error::InvalidPayload(e.to_string()))
+                let items: Vec<T> = rdd.compute(split.clone())?.collect();
+                items.encode_wire().map_err(Error::from)
             })
             .collect()
     }
+}
+
+/// Start the worker process.
+///
+/// Reads slave configuration from the environment (`VEGA_SLAVE_PORT`,
+/// `VEGA_LOCAL_IP`, etc.), initialises the shuffle service, then enters the
+/// TCP task-executor loop. This function **never returns** — it terminates the
+/// process when the executor shuts down.
+///
+/// # Typical usage
+///
+/// Set environment variables before calling:
+/// ```no_run
+/// unsafe {
+///     std::env::set_var("VEGA_DEPLOYMENT_MODE", "distributed");
+///     std::env::set_var("VEGA_SLAVE_DEPLOYMENT", "true");
+///     std::env::set_var("VEGA_SLAVE_PORT", "10001");
+///     std::env::set_var("VEGA_LOCAL_IP", "127.0.0.1");
+/// }
+/// atomic_compute::context::start_worker();
+/// ```
+pub fn start_worker() -> ! {
+    let work_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_default();
+
+    let _ = env_logger::try_init();
+
+    if let Err(e) = env::init_shuffle() {
+        log::warn!("shuffle service could not start on worker: {e}");
+    }
+
+    let result = env::Configuration::get()
+        .slave
+        .as_ref()
+        .map(|c| c.port)
+        .ok_or(Error::GetOrCreateConfig("executor port not configured — set VEGA_SLAVE_PORT"))
+        .and_then(|port| {
+            let executor = Arc::new(Executor::new(port));
+            executor.worker()
+        });
+
+    Context::worker_clean_up_directives(result, work_dir)
 }
 
 #[cfg(test)]

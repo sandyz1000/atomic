@@ -142,22 +142,42 @@ pub enum TaskAction {
     Collect,
     /// Shuffle map phase: repartition elements by key into `num_output_partitions` buckets.
     ShuffleMap { shuffle_id: usize, num_output_partitions: usize },
-    /// Execute a Python UDF. `payload` is a serde_json-encoded `PythonUdfPayload`.
+    /// Execute a Python UDF with the given operation.
+    /// `payload` is a serde_json-encoded [`PythonUdfPayload`].
     /// Partition `data` is a JSON-encoded `Vec` of elements.
-    PythonUdf,
-    /// Execute a JavaScript UDF. `payload` is a serde_json-encoded `JsUdfPayload`.
+    PythonUdf(UdfAction),
+    /// Execute a JavaScript UDF with the given operation.
+    /// `payload` is a serde_json-encoded [`JsUdfPayload`].
     /// Partition `data` is a JSON-encoded `Vec` of elements.
-    JavaScriptUdf,
+    JavaScriptUdf(UdfAction),
+}
+
+/// Which operation a UDF pipeline step should perform.
+///
+/// Embedded directly in [`TaskAction::PythonUdf`] and [`TaskAction::JavaScriptUdf`] so
+/// the UDF runtime does not need to store a separate action string in the payload.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum UdfAction {
+    Map,
+    Filter,
+    FlatMap,
+    MapValues,
+    FlatMapValues,
+    KeyBy,
+    Reduce,
+    Fold,
 }
 
 /// Metadata carried in `PipelineOp.payload` for a Python UDF step.
 ///
 /// Serialized as JSON so both Python (via `json` stdlib) and Rust (`serde_json`) can
 /// produce and consume it without a shared binary format.
+/// The operation to perform is carried in [`TaskAction::PythonUdf`], not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PythonUdfPayload {
-    /// The RDD operation: `"map"`, `"filter"`, `"flat_map"`, or `"fold"`.
-    pub action: String,
     /// `cloudpickle`/`pickle`-serialized Python callable.
     pub fn_bytes: Vec<u8>,
     /// `pickle`-serialized fold zero value (empty for non-fold operations).
@@ -165,10 +185,9 @@ pub struct PythonUdfPayload {
 }
 
 /// Metadata carried in `PipelineOp.payload` for a JavaScript UDF step.
+/// The operation to perform is carried in [`TaskAction::JavaScriptUdf`], not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsUdfPayload {
-    /// The RDD operation: `"map"`, `"filter"`, `"flat_map"`, or `"fold"`.
-    pub action: String,
     /// JavaScript function source obtained via `fn.toString()`.
     pub fn_source: String,
     /// JSON-encoded zero value for fold (empty string for non-fold).
@@ -240,10 +259,15 @@ pub struct TaskResultEnvelope {
     pub stage_id: usize,
     pub task_id: usize,
     pub attempt_id: usize,
+    pub partition_id: usize,
     pub status: ResultStatus,
     pub data: Vec<u8>,
     pub error: Option<String>,
     pub worker_id: String,
+    /// Set by the worker when the task contained a `ShuffleMap` action op.
+    /// Carries the worker's `ShuffleManager` base URI so the driver can register
+    /// it with `MapOutputTracker` without decoding `data`.
+    pub shuffle_server_uri: Option<String>,
 }
 
 impl TaskResultEnvelope {
@@ -252,8 +276,10 @@ impl TaskResultEnvelope {
         stage_id: usize,
         task_id: usize,
         attempt_id: usize,
+        partition_id: usize,
         worker_id: String,
         data: Vec<u8>,
+        shuffle_server_uri: Option<String>,
     ) -> Self {
         Self {
             version: WIRE_SCHEMA_V1,
@@ -261,10 +287,12 @@ impl TaskResultEnvelope {
             stage_id,
             task_id,
             attempt_id,
+            partition_id,
             status: ResultStatus::Success,
             data,
             error: None,
             worker_id,
+            shuffle_server_uri,
         }
     }
 
@@ -273,9 +301,11 @@ impl TaskResultEnvelope {
         stage_id: usize,
         task_id: usize,
         attempt_id: usize,
+        partition_id: usize,
         worker_id: String,
         error: String,
         data: Vec<u8>,
+        shuffle_server_uri: Option<String>,
     ) -> Self {
         Self {
             version: WIRE_SCHEMA_V1,
@@ -283,10 +313,12 @@ impl TaskResultEnvelope {
             stage_id,
             task_id,
             attempt_id,
+            partition_id,
             status: ResultStatus::RetryableFailure,
             data,
             error: Some(error),
             worker_id,
+            shuffle_server_uri,
         }
     }
 
@@ -295,6 +327,7 @@ impl TaskResultEnvelope {
         stage_id: usize,
         task_id: usize,
         attempt_id: usize,
+        partition_id: usize,
         worker_id: String,
         error: String,
     ) -> Self {
@@ -304,10 +337,12 @@ impl TaskResultEnvelope {
             stage_id,
             task_id,
             attempt_id,
+            partition_id,
             status: ResultStatus::FatalFailure,
             data: Vec::new(),
             error: Some(error),
             worker_id,
+            shuffle_server_uri: None,
         }
     }
 }
@@ -352,7 +387,7 @@ mod tests {
 
     #[test]
     fn task_result_envelope_ok_round_trips() {
-        let result = TaskResultEnvelope::ok(1, 2, 3, 0, "worker-1".to_string(), vec![4, 5, 6]);
+        let result = TaskResultEnvelope::ok(1, 2, 3, 0, 0, "worker-1".to_string(), vec![4, 5, 6], None);
         let bytes = result.encode_wire().expect("serialize result");
         let decoded = TaskResultEnvelope::decode_wire(&bytes).expect("deserialize result");
         assert_eq!(decoded.status, ResultStatus::Success);

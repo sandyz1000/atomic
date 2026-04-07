@@ -90,7 +90,7 @@ impl Stage {
             partition,
             host
         );
-        if !self.output_locs[partition].is_empty() {
+        if self.output_locs[partition].is_empty() {
             self.num_available_outputs += 1;
         }
         self.output_locs[partition].push(host);

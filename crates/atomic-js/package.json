@@ -1,17 +1,24 @@
 {
   "name": "@atomic-compute/js",
   "version": "0.1.0",
-  "description": "Atomic compute engine — JavaScript runtime (QuickJS-based)",
-  "bin": {
-    "atomic-js": "./bin/atomic-js.sh"
-  },
+  "description": "Atomic compute engine — Spark-like Node.js driver API backed by stable Rust",
+  "main": "index.js",
+  "types": "index.d.ts",
   "scripts": {
-    "build": "cargo build --release -p atomic-js --manifest-path ../../Cargo.toml",
-    "postinstall": "npm run build"
+    "build": "napi build --platform --release --manifest-path ../../Cargo.toml",
+    "build:debug": "napi build --platform --manifest-path ../../Cargo.toml",
+    "prepublishOnly": "npm run build"
   },
+  "devDependencies": {
+    "@napi-rs/cli": "^2"
+  },
+  "keywords": ["compute", "distributed", "napi", "rdd", "spark"],
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["compute", "distributed", "quickjs", "rdd"],
-  "license": "MIT"
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sandip-dey/atomic"
+  }
 }

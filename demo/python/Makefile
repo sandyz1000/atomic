@@ -1,4 +1,4 @@
-ATOMIC_CRATE := ../../crates/atomic-python
+ATOMIC_CRATE := ../../crates/atomic-py
 
 .PHONY: install run-local run-sum
 

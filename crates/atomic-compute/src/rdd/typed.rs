@@ -935,6 +935,10 @@ where
 
     /// Reduce values for each key using an associative function.
     ///
+    /// Produces a globally correct result by creating a shuffle dependency (like Spark).
+    /// The shuffle stage repartitions data by key; each output partition is independently
+    /// reduced. `collect()` triggers the full map → shuffle → reduce pipeline.
+    ///
     /// # Example
     /// ```ignore
     /// let sums = pair_rdd.reduce_by_key(|a, b| a + b);
@@ -942,44 +946,84 @@ where
     pub fn reduce_by_key<F>(self, f: F) -> TypedRdd<(K, V)>
     where
         F: Fn(V, V) -> V + Clone + Send + Sync + 'static,
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
     {
-        use std::collections::HashMap;
+        use crate::rdd::shuffled::ShuffledRdd;
+        use atomic_data::aggregator::Aggregator;
+        use atomic_data::shuffle::fetcher::ShuffleFetcher;
 
-        let reduce_partition = move |_idx: usize, iter: Box<dyn Iterator<Item = (K, V)>>| {
-            let mut map: HashMap<K, V> = HashMap::new();
-            for (k, v) in iter {
-                map.entry(k)
-                    .and_modify(|existing| *existing = f(existing.clone(), v.clone()))
-                    .or_insert(v);
-            }
-            Box::new(map.into_iter()) as Box<dyn Iterator<Item = (K, V)>>
-        };
+        let f2 = f.clone();
+        let f3 = f.clone();
+        let aggregator = Arc::new(Aggregator::<K, V, V>::new(
+            Arc::new(|v: V| v),
+            Arc::new(move |c: &mut V, v: V| *c = f(c.clone(), v)),
+            Arc::new(move |c1: &mut V, c2: V| *c1 = f2(c1.clone(), c2)),
+        ));
 
-        let id = self.context.new_rdd_id();
-        let reduced_rdd = MapPartitionsRdd::new(id, self.rdd, reduce_partition);
-        TypedRdd::new(Arc::new(reduced_rdd), self.context)
+        let num_output_partitions = self.context.default_parallelism().max(1);
+        let partitioner = Partitioner::hash::<K>(num_output_partitions);
+        let shuffle_id = self.context.new_shuffle_id();
+        let rdd_id = self.context.new_rdd_id();
+
+        let tracker = atomic_data::env::MAP_OUTPUT_TRACKER
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(atomic_data::shuffle::MapOutputTracker::default()));
+        let fetcher = Arc::new(ShuffleFetcher::new(tracker));
+
+        let shuffled = ShuffledRdd::<K, V, V>::new(
+            rdd_id,
+            shuffle_id,
+            self.rdd,
+            aggregator,
+            partitioner,
+            fetcher,
+        );
+        TypedRdd::new(Arc::new(shuffled), self.context)
     }
 
     /// Group values for each key.
+    ///
+    /// Produces a globally correct result by creating a shuffle dependency (like Spark).
+    /// All values for a key are gathered from across partitions into a single `Vec<V>`
+    /// per key after the shuffle stage completes.
     ///
     /// # Example
     /// ```ignore
     /// let grouped = pair_rdd.group_by_key();
     /// ```
-    pub fn group_by_key(self) -> TypedRdd<(K, Vec<V>)> {
-        use std::collections::HashMap;
+    pub fn group_by_key(self) -> TypedRdd<(K, Vec<V>)>
+    where
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
+    {
+        use crate::rdd::shuffled::ShuffledRdd;
+        use atomic_data::aggregator::Aggregator;
+        use atomic_data::shuffle::fetcher::ShuffleFetcher;
 
-        let group_partition = move |_idx: usize, iter: Box<dyn Iterator<Item = (K, V)>>| {
-            let mut map: HashMap<K, Vec<V>> = HashMap::new();
-            for (k, v) in iter {
-                map.entry(k).or_insert_with(Vec::new).push(v);
-            }
-            Box::new(map.into_iter()) as Box<dyn Iterator<Item = (K, Vec<V>)>>
-        };
+        let aggregator = Arc::new(Aggregator::<K, V, Vec<V>>::default());
 
-        let id = self.context.new_rdd_id();
-        let grouped_rdd = MapPartitionsRdd::new(id, self.rdd, group_partition);
-        TypedRdd::new(Arc::new(grouped_rdd), self.context)
+        let num_output_partitions = self.context.default_parallelism().max(1);
+        let partitioner = Partitioner::hash::<K>(num_output_partitions);
+        let shuffle_id = self.context.new_shuffle_id();
+        let rdd_id = self.context.new_rdd_id();
+
+        let tracker = atomic_data::env::MAP_OUTPUT_TRACKER
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(atomic_data::shuffle::MapOutputTracker::default()));
+        let fetcher = Arc::new(ShuffleFetcher::new(tracker));
+
+        let shuffled = ShuffledRdd::<K, V, Vec<V>>::new(
+            rdd_id,
+            shuffle_id,
+            self.rdd,
+            aggregator,
+            partitioner,
+            fetcher,
+        );
+        TypedRdd::new(Arc::new(shuffled), self.context)
     }
 
     /// Count the number of values for each key.
@@ -1103,8 +1147,8 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Group elements by a key function, returning `TypedRdd<(K, Vec<T>)>`.
     pub fn group_by<K, F>(self, f: F) -> TypedRdd<(K, Vec<T>)>
     where
-        K: Data + Eq + std::hash::Hash + Clone,
-        T: Clone,
+        K: Data + Eq + std::hash::Hash + Clone + bincode::Encode + bincode::Decode<()>,
+        T: Clone + bincode::Encode + bincode::Decode<()>,
         F: Fn(&T) -> K + Clone + Send + Sync + 'static,
     {
         self.key_by(f).group_by_key()

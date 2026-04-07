@@ -2,7 +2,7 @@
 Local word count job using the atomic Python API.
 
 Prerequisites:
-  cd crates/atomic-python && maturin develop --release && cd ../..
+  cd crates/atomic-py && maturin develop --release && cd ../..
 
 Run:
   python demo/python/local_word_count.py

@@ -1,5 +1,5 @@
 [package]
-name = "atomic-python"
+name = "atomic-py"
 version.workspace = true
 edition.workspace = true
 
