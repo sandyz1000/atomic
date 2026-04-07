@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use atomic_data::error::BaseError;
 use atomic_data::partial::PartialJobError;
 use atomic_data::shuffle::{
     error::{NetworkError, ShuffleError},
@@ -129,8 +130,14 @@ impl From<atomic_scheduler::error::SchedulerError> for Error {
     }
 }
 
-impl From<Error> for atomic_data::error::BaseError {
+impl From<Error> for BaseError {
     fn from(err: Error) -> Self {
-        atomic_data::error::BaseError::Other(format!("{}", err))
+        BaseError::Other(format!("{}", err))
+    }
+}
+
+impl From<BaseError> for Error {
+    fn from(e: BaseError) -> Self {
+        Error::InvalidPayload(e.to_string())
     }
 }

@@ -3,7 +3,19 @@ name = "atomic-tests"
 version.workspace = true
 edition.workspace = true
 
+# Expose the `integration` example binary so that `CARGO_BIN_EXE_integration`
+# is set when running tests, enabling test_distributed.rs to locate the worker.
+[[bin]]
+name = "integration"
+path = "../examples/integration/src/main.rs"
+
 [dev-dependencies]
 atomic-compute.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 once_cell.workspace = true
+
+[dependencies]
+atomic-compute.workspace = true
+serde_json.workspace = true
+env_logger.workspace = true

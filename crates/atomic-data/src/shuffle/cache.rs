@@ -17,3 +17,29 @@ pub trait ShuffleCache: Send + Sync + Debug {
     /// Clear all shuffle data
     fn clear(&self);
 }
+
+/// In-memory shuffle cache backed by a DashMap.
+///
+/// Key is `(shuffle_id, map_id, reduce_id)` matching the shuffle wire protocol.
+#[derive(Debug, Default)]
+pub struct DashMapShuffleCache {
+    inner: dashmap::DashMap<(usize, usize, usize), Vec<u8>>,
+}
+
+impl ShuffleCache for DashMapShuffleCache {
+    fn insert(&self, key: (usize, usize, usize), value: Vec<u8>) {
+        self.inner.insert(key, value);
+    }
+
+    fn get(&self, key: &(usize, usize, usize)) -> Option<Vec<u8>> {
+        self.inner.get(key).map(|r| r.value().clone())
+    }
+
+    fn remove(&self, key: &(usize, usize, usize)) -> Option<Vec<u8>> {
+        self.inner.remove(key).map(|(_, v)| v)
+    }
+
+    fn clear(&self) {
+        self.inner.clear();
+    }
+}

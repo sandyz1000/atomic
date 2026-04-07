@@ -140,31 +140,73 @@ fn main() -> Result<()> {
 
 // ── Build implementation ──────────────────────────────────────────────────────
 
+/// Which tool drives the cross-compilation build.
+#[derive(Debug, Clone, Copy)]
+enum BuildDriver {
+    /// `cargo zigbuild` — Zig as linker, no Docker, preferred.
+    ZigBuild,
+    /// `cross build` — Docker-based, wider target support.
+    Cross,
+    /// `cargo build` — plain Cargo, requires matching toolchain already installed.
+    Cargo,
+}
+
+impl BuildDriver {
+    /// Construct a `Command` pre-loaded with the right binary and subcommand.
+    fn command(self) -> Command {
+        match self {
+            // cargo-zigbuild is a cargo subcommand: `cargo zigbuild ...`
+            BuildDriver::ZigBuild => {
+                let mut cmd = Command::new("cargo");
+                cmd.arg("zigbuild");
+                cmd
+            }
+            // cross is a standalone binary: `cross build ...`
+            BuildDriver::Cross => {
+                let mut cmd = Command::new("cross");
+                cmd.arg("build");
+                cmd
+            }
+            // plain cargo: `cargo build ...`
+            BuildDriver::Cargo => {
+                let mut cmd = Command::new("cargo");
+                cmd.arg("build");
+                cmd
+            }
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            BuildDriver::ZigBuild => "cargo zigbuild",
+            BuildDriver::Cross => "cross",
+            BuildDriver::Cargo => "cargo",
+        }
+    }
+}
+
 fn cmd_build(args: BuildArgs) -> Result<()> {
     println!("Building for target: {}", args.target);
 
-    let cross = which_cross()?;
-    let mut cmd = Command::new(&cross);
-    cmd.arg("build");
+    let driver = detect_build_driver()?;
+    let mut cmd = driver.command();
 
     if args.release {
         cmd.arg("--release");
     }
-
     cmd.arg("--target").arg(&args.target);
-
     for extra in &args.cargo_args {
         cmd.arg(extra);
     }
 
-    println!("Running: {} {}", cross, format_args_display(&cmd));
+    println!("Running: {}", format_args_display(&cmd));
 
     let status = cmd
         .status()
-        .with_context(|| format!("failed to run `{cross}`"))?;
+        .with_context(|| format!("failed to run `{}`", driver.name()))?;
 
     if !status.success() {
-        bail!("`{cross}` exited with status {}", status);
+        bail!("`{}` exited with status {}", driver.name(), status);
     }
 
     let profile = if args.release { "release" } else { "debug" };
@@ -173,17 +215,53 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     Ok(())
 }
 
-fn which_cross() -> Result<String> {
-    // Prefer `cross` on PATH; fall back to `cargo` with a warning.
-    if Command::new("cross").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
-        return Ok("cross".to_string());
+/// Locate the best available cross-compilation driver:
+///
+/// 1. `cargo-zigbuild` — preferred: uses Zig as a linker, no Docker required.
+///    Install: `cargo install cargo-zigbuild` + Zig from <https://ziglang.org/download/>
+/// 2. `cross` — Docker-based, broader platform support (especially Windows targets).
+///    Install: `cargo install cross` + Docker
+/// 3. Plain `cargo build` — last resort; works only when the target toolchain is installed.
+///
+/// Missing tools are auto-installed via `cargo install` before falling through.
+fn detect_build_driver() -> Result<BuildDriver> {
+    // 1. cargo-zigbuild (no Docker, Zig as linker).
+    if is_available("cargo-zigbuild") {
+        return Ok(BuildDriver::ZigBuild);
     }
+    eprintln!("`cargo-zigbuild` not found — installing…");
+    if try_cargo_install(&["install", "cargo-zigbuild"]) {
+        eprintln!("`cargo-zigbuild` installed successfully.");
+        return Ok(BuildDriver::ZigBuild);
+    }
+
+    // 2. cross (Docker-based).
+    if is_available("cross") {
+        return Ok(BuildDriver::Cross);
+    }
+    eprintln!("`cross` not found — installing (requires Docker)…");
+    if try_cargo_install(&["install", "cross", "--git", "https://github.com/cross-rs/cross"]) {
+        eprintln!("`cross` installed successfully.");
+        return Ok(BuildDriver::Cross);
+    }
+
+    // 3. Plain cargo — warn and continue.
     eprintln!(
-        "Warning: `cross` not found. Using `cargo build` directly — \
-        cross-compilation for {DEFAULT_BUILD_TARGET} may fail without a matching toolchain.\n\
-        Install cross: cargo install cross"
+        "Warning: neither `cargo-zigbuild` nor `cross` could be installed.\n\
+        Falling back to `cargo build` — cross-compilation may fail without a matching toolchain.\n\
+        Install options:\n\
+          • cargo install cargo-zigbuild  (then install zig: https://ziglang.org/download/)\n\
+          • cargo install cross           (then install Docker)"
     );
-    Ok("cargo".to_string())
+    Ok(BuildDriver::Cargo)
+}
+
+fn is_available(bin: &str) -> bool {
+    Command::new(bin).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+fn try_cargo_install(args: &[&str]) -> bool {
+    Command::new("cargo").args(args).status().map(|s| s.success()).unwrap_or(false)
 }
 
 fn format_args_display(cmd: &Command) -> String {

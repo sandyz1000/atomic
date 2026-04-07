@@ -1,0 +1,14 @@
+[package]
+name = "integration"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "integration"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+env_logger.workspace = true

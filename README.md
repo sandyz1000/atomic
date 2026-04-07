@@ -1,297 +1,178 @@
-# 🔥 Atomic
+# Atomic
 
-## A distributed data processing framework written in Rust
-
----
-
-## Overview
-
-**atomic** is a distributed data processing framework written in **Rust**, inspired by **Apache Spark** — designed for type-safe, efficient, and resilient data processing.
-
-atomic provides a **Spark-like RDD API** with familiar transformations and actions, backed by a **DAG-based execution engine** that optimizes task scheduling and execution across single machines or distributed clusters.
-
-**Current Features:**
-
-* Type-safe RDD API with lazy evaluation
-* DAG-based task scheduling
-* Local and distributed execution modes
-* Shuffle operations for wide transformations
-* Task result tracking and caching
-* Deterministic, sandboxed execution
-* Architecture portability
-* Safety and isolation for untrusted code
-
-This project is heavily inspired by [vega](https://github.com/rajasekarv/vega/tree/master). The original project is no longer maintained. atomic adopts a similar distributed execution model where compiled binaries are distributed to remote nodes, with communication handled via rkyv-based RPC for data and control messages.
+A distributed data processing framework written in stable Rust.
 
 ---
 
-## ⚙️ Core Architecture
+## What is Atomic?
 
-```
-┌─────────────────────────────────────────────────────┐
-│                   atomic Framework                    │
-├─────────────────────────────────────────────────────┤
-│                                                      │
-│  ┌────────────┐      ┌─────────────────────────┐   │
-│  │  RDD API   │─────▶│   DAG Scheduler         │   │
-│  │ (map, etc) │      │  - Job Tracker          │   │
-│  └────────────┘      │  - Stage Generation     │   │
-│                      │  - Task Scheduling       │   │
-│                      └──────────┬──────────────┘   │
-│                                 │                   │
-│                      ┌──────────▼──────────────┐   │
-│                      │   Execution Modes       │   │
-│                      ├─────────────────────────┤   │
-│                      │  Local Scheduler        │   │
-│                      │  - Thread pool exec     │   │
-│                      │  - In-process tasks     │   │
-│                      └─────────────────────────┘   │
-│                                                      │
-│  ┌─────────────────────────────────────────────┐   │
-│  │         Supporting Components                │   │
-│  ├─────────────────────────────────────────────┤   │
-│  │  • Shuffle Manager (data exchange)          │   │
-│  │  • Cache Tracker (RDD caching)              │   │
-│  │  • Dependency Management (narrow/shuffle)   │   │
-│  │  • Split/Partition abstraction              │   │
-│  └─────────────────────────────────────────────┘   │
-│                                                      │
-└─────────────────────────────────────────────────────┘
-```
+Atomic is a rewrite and redesign of [vega](https://github.com/rajasekarv/vega), a Spark-inspired distributed compute engine for Rust. Vega proved that Rust could support a Spark-like RDD model, but it required **nightly Rust** to serialize closures across the network — a fragile foundation that made the project difficult to maintain and eventually unmaintained.
 
-### Distributed Execution Model
-
-Atomic's distributed mode follows a **Vega-inspired architecture** where compiled binaries are distributed to worker nodes, and communication happens via **rkyv-based RPC** for efficient serialization of data and control messages.
-
-#### Binary Distribution Strategies
-
-##### Option 1: SSH + rsync/Ansible
-
-* Build your Rust binary once
-* Use rsync or Ansible to distribute the binary to remote nodes
-* Suitable for static clusters or bare-metal deployments
-
-##### Option 2: Container Registry (Kubernetes, Nomad, ECS)
-
-* Package your atomic-based app into a Docker image (binary + config)
-* Deploy the same image across all nodes
-* Let the orchestrator handle image distribution
-
-#### Communication Protocol
-
-In distributed mode, atomic nodes communicate over **rkyv RPC** to move:
-
-* **RDD partitions** — Serialized data chunks
-* **Control messages** — Heartbeats, task status, errors
-* **Task metadata** — Stage info, partition locations
-
-The rkyv crate provides zero-copy deserialization for efficient data transfer between nodes.
-
-#### Python/JavaScript Task Execution
-
-For Python and JavaScript tasks, atomic follows a **Ray-inspired strategy**:
-
-* Language-specific runtimes embedded on worker nodes
-* Task definitions serialized and dispatched to appropriate workers
-* Results collected and aggregated back to the driver
-
-#### Kubernetes Deployment Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                  Kubernetes Cluster                      │
-├─────────────────────────────────────────────────────────┤
-│                                                          │
-│  ┌──────────────────────┐                               │
-│  │  Driver/Master Pod   │                               │
-│  │  ┌────────────────┐  │                               │
-│  │  │ DAG Scheduler  │  │◄──── rkyv RPC ────┐          │
-│  │  │ Job Tracker    │  │                    │          │
-│  │  │ Result Agg     │  │                    │          │
-│  │  └────────────────┘  │                    │          │
-│  │   (atomic:latest)    │                    │          │
-│  └──────────────────────┘                    │          │
-│           ▲                                   │          │
-│           │                                   │          │
-│           │  Service Discovery                │          │
-│           │  (env vars, DNS)                  │          │
-│           │                                   │          │
-│  ┌────────┴───────────────────────────────────┐│          │
-│  │                                           ││          │
-│  │  ┌──────────────┐    ┌──────────────┐   ││          │
-│  │  │ Worker Pod 1 │    │ Worker Pod 2 │   ││          │
-│  │  │ ┌──────────┐ │    │ ┌──────────┐ │   ││          │
-│  │  │ │ Executor │─┼────┼─│ Executor │ │◄──┘│          │
-│  │  │ │ Shuffle  │ │    │ │ Shuffle  │ │    │          │
-│  │  │ │ Cache    │ │    │ │ Cache    │ │    │          │
-│  │  │ └──────────┘ │    │ └──────────┘ │    │          │
-│  │  │ (atomic:latest)    │ (atomic:latest)   │          │
-│  │  └──────────────┘    └──────────────┘   │          │
-│  │                                           │          │
-│  │              Worker Deployment            │          │
-│  │         (Deployment/StatefulSet)          │          │
-│  └───────────────────────────────────────────┘          │
-│                                                          │
-└─────────────────────────────────────────────────────────┘
-
-        Container Registry
-        ┌──────────────┐
-        │ atomic:latest│  ← Build once, pull everywhere
-        │ atomic:v1.2.3│
-        └──────────────┘
-```
-
-**How It Works on Kubernetes:**
-
-1. **Build & Package**
-   * Compile your atomic-based application
-   * Create a Docker image containing the binary, config, and dependencies
-   * Push to a container registry (Docker Hub, GCR, ECR, etc.)
-
-2. **Deploy**
-   * **Driver Pod**: Single pod (Deployment or Job) that runs the DAG scheduler
-   * **Worker Pods**: Multiple pods (Deployment, StatefulSet, or DaemonSet) that execute tasks
-   * All pods use the **same image tag** (e.g., `atomic:latest`)
-
-3. **Service Discovery**
-   * Configure Kubernetes Service for the driver pod
-   * Use environment variables (e.g., `ATOMIC_DRIVER_HOST`, `ATOMIC_LOCAL_IP`) for node registration
-   * Workers discover and connect to the driver via DNS or injected config
-
-4. **Runtime Behavior**
-   * **Binary distribution**: Handled automatically by Kubernetes image-pull mechanism
-   * **Data transfer**: Only serialized RDD partitions, task metadata, and control messages flow over rkyv RPC
-   * **No per-job binary shipping**: Code updates happen via rolling image updates
-
-5. **Scaling**
-   * Scale workers via `kubectl scale` or HorizontalPodAutoscaler
-   * Driver remains single-instance; workers are stateless (or use StatefulSet for caching)
-
-**Benefits:**
-
-* **Efficient**: No binary shipping at runtime—only data and metadata
-* **Standard**: Leverage existing K8s tools for deployment, scaling, and monitoring
-* **Versioned**: Image tags provide clear versioning and rollback capability
-* **Isolated**: Each pod has resource limits and network isolation
+Atomic solves this by replacing closure serialization entirely. Tasks are registered at compile time via a `#[task]` macro and dispatched to workers by a stable string ID. There are no nightly features, no unsafe closure transmutes, and no runtime reflection. The result is a framework that compiles on stable Rust and has a clear, auditable boundary between driver code and worker execution.
 
 ---
 
-## Key Concepts
+## How Atomic improves on Vega
 
-* **RDD (Resilient Distributed Datasets)** — Immutable, partitioned collections that support transformations and actions
-* **Lazy Evaluation** — Transformations are recorded as a DAG and executed only when an action is called
-* **Type-Safe API** — Leverages Rust's type system to catch errors at compile time
-* **Dependency Tracking** — Narrow (one-to-one, range) and shuffle (wide) dependencies for efficient execution
-* **Task Scheduling** — DAG-based scheduler that generates stages and distributes tasks
+**Vega's core limitation** was that sending a closure from a driver to a worker required serializing a Rust function pointer — something only possible on nightly Rust via unstable intrinsics. This made Vega dependent on a specific nightly toolchain and blocked it from ever stabilizing.
+
+**Atomic's approach:**
+
+- Tasks are plain Rust functions annotated with `#[task]`. The macro registers them into a compile-time dispatch table (via `inventory`). Workers look up tasks by ID — no closure, no unsafe transmute.
+- Partition data is encoded with `rkyv` for zero-copy deserialization on the worker side, replacing Vega's `serde`-based wire format.
+- The driver API (`ctx.parallelize(...).map(...).filter(...).collect()`) looks identical to Vega and Spark, but under the hood it builds a `PipelineOp` chain that is executed locally or dispatched to workers over TCP without any function serialization.
+- Python and JavaScript UDFs are supported as first-class distributed operations. Python functions are serialized via `pickle`, JS functions via `fn.toString()`. Workers execute them through embedded PyO3 and QuickJS runtimes. This gives Python and JS developers a Spark-like experience without requiring Rust.
+- Local and distributed execution share the same `dispatch_pipeline` contract. Switching between modes is an environment variable, not a code change.
 
 ---
 
-## 🦀 Example: Word Count in atomic
+## Quick example
+
+**Rust native task:**
 
 ```rust
-use atomic::prelude::*;
+#[task]
+fn double(x: i32) -> i32 { x * 2 }
 
-fn main() -> Result<()> {
-    let sc = Context::new("wordcount")?;
+let ctx = Context::new()?;
+let result = ctx.parallelize_typed(vec![1, 2, 3, 4], 2)
+    .map_task("double")
+    .collect()?;
+// [2, 4, 6, 8]
+```
 
-    let lines = sc.text_file("data/input.txt", 4)?;
-    
-    let words = lines.flat_map(|line| {
-        line.split_whitespace()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-    });
-    
-    let pairs = words.map(|word| (word, 1));
-    let counts = pairs.reduce_by_key(|a, b| a + b, 4)?;
-    
-    counts.save_as_text_file("output/wordcount")?;
-    
-    Ok(())
-}
+**Python UDF (local or distributed):**
+
+```python
+import atomic
+
+ctx = atomic.Context()
+result = ctx.parallelize([1, 2, 3, 4], num_partitions=2) \
+            .map(lambda x: x * 2) \
+            .filter(lambda x: x > 4) \
+            .collect()
+# [6, 8]
 ```
 
 ---
 
-## Core Components
+## Crate layout
 
-### RDD Operations
-
-**Transformations** (lazy):
-
-* `map` — Apply a function to each element
-* `flat_map` — Map and flatten results
-* `filter` — Keep elements matching a predicate
-* `map_partitions` — Transform entire partitions
-* `union` — Combine two RDDs
-* `cartesian` — Cartesian product of two RDDs
-* `coalesce` — Reduce number of partitions
-
-**Actions** (trigger execution):
-
-* `collect` — Return all elements to driver
-* `reduce` — Aggregate elements using a function
-* `count` — Count number of elements
-* `take` — Return first n elements
-* `save_as_text_file` — Write to disk
-
-### Shuffle Operations
-
-For key-value RDDs:
-
-* `reduce_by_key` — Combine values for each key
-* `group_by_key` — Group values by key
-* `join` — Inner join two RDDs by key
-* `co_group` — Group multiple RDDs by key
+| Crate | Purpose |
+| --- | --- |
+| `atomic-data` | Shared types: RDD traits, task envelopes, wire protocol, distributed structs |
+| `atomic-compute` | Execution runtime: context, executor, backends, UDF dispatch |
+| `atomic-scheduler` | Local thread-pool and distributed TCP schedulers |
+| `atomic-utils` | Shared utilities |
+| `atomic-runtime-macros` | `#[task]` proc-macro for compile-time task registration |
+| `atomic-py` | Python extension module (maturin/PyO3) — Spark-like Python driver API |
+| `atomic-js` | JavaScript library (rquickjs) — Spark-like JS driver API |
+| `atomic-worker` | Polyglot worker binary with embedded Python + QuickJS runtimes |
 
 ---
 
 ## Roadmap
 
-**Completed:**
+### Completed
 
-* [x] RDD API (transformations & actions)
-* [x] Local scheduler implementation
-* [x] Shuffle operations
-* [x] Cache tracking system
-* [x] Dependency management (narrow/shuffle)
-* [x] Task execution framework
+- [x] Stable-Rust task dispatch via `#[task]` macro — no nightly required
+- [x] rkyv zero-copy wire protocol for partition data
+- [x] Local thread-pool execution via `LocalScheduler`
+- [x] Distributed TCP execution via `DistributedScheduler`
+- [x] `dispatch_pipeline` — unified local/distributed execution contract
+- [x] Multi-op lazy pipeline staging (`PipelineOp` chains)
+- [x] Python UDF support — `pickle`-serialized lambdas dispatched to workers via PyO3
+- [x] JavaScript UDF support — `fn.toString()` source dispatched to workers via QuickJS
+- [x] `atomic-py` — Spark-like Python driver API (`parallelize`, `map`, `filter`, `fold`, `collect`, etc.)
+- [x] `atomic-js` — Spark-like JavaScript driver API
+- [x] `atomic-worker` — polyglot worker binary (native + Python + JS tasks)
+- [x] RDD transformations: `map`, `filter`, `flat_map`, `map_values`, `flat_map_values`, `key_by`, `reduce_by_key`, `group_by_key`, `count_by_value`, `count_by_key`, `group_by`, `union`, `zip`, `cartesian`, `coalesce`
+- [x] RDD actions: `collect`, `count`, `fold`, `reduce`, `take`, `first`
+- [x] Narrow and shuffle dependency tracking with two-phase (map stage → reduce stage) execution
+- [x] Worker capability handshake and capacity-aware task placement (`max_tasks` respected)
 
-**In Progress:**
+### In Progress / Recently Completed
 
-* [ ] Distributed scheduler
-* [ ] Network communication layer
-* [ ] Result aggregation
+- [x] **Lazy shuffle pipeline** — `reduce_by_key` and `group_by_key` now build a `ShuffleDependency + ShuffledRdd` DAG lazily (Spark-style). Execution is deferred to actions (`collect`, `count`, etc.). The scheduler detects shuffle stage boundaries, runs a two-phase map → reduce, stores buckets in `DashMapShuffleCache`, and reads them back via HTTP through the embedded `ShuffleManager`.
+- [x] **`DashMapShuffleCache`** — concrete in-memory shuffle cache implementation; replaces the stub trait-only definition.
+- [x] **Shuffle infrastructure wired end-to-end** — `SHUFFLE_CACHE`, `MAP_OUTPUT_TRACKER`, and `SHUFFLE_SERVER_URI` globals initialized on context start; `do_shuffle_task_typed()` stubs replaced with real cache writes and URI returns.
+- [x] **`partition_id` in `TaskResultEnvelope`** — result envelopes now carry `partition_id` so the distributed scheduler can reconstruct partition order correctly after retries.
+- [x] **Capacity-aware worker placement** — `next_executor_with_capacity()` skips workers whose `max_tasks` is 0; distributed scheduler routes tasks only to available workers.
+- [x] **Scheduler infinite-loop fix** — two bugs in `LocalScheduler` / `Stage`: (1) `add_output_loc` had an inverted condition that never incremented `num_available_outputs`; (2) `get_shuffle_map_stage` returned a stale clone instead of the live `stage_cache` entry, so shuffle stages always appeared unavailable.
 
-**Future:**
+### Pending — Essential Before Production / Distribution
 
-* [ ] Checkpointing and recovery
-* [ ] Query optimizer (predicate pushdown, pipelining)
-* [ ] Python bindings for client API
-* [ ] Web dashboard (metrics + job UI)
-* [ ] Advanced shuffle optimizations
-* Multi-language support (Python/JavaScript via embedded runtimes)
+- [x] **Distributed shuffle correctness** — workers each run their own `ShuffleManager` HTTP server; URIs are registered with the driver's `MapOutputTracker` via `shuffle_server_uri` and `run_shuffle_map_stage`. Verified end-to-end.
+- [x] **`ShuffleFetcher` HTTP retry and error recovery** — `fetch_chunk_with_retry` implements exponential backoff; transient network errors during shuffle reads are retried automatically.
+- [x] **Fault recovery** — per-task failure counter, resubmit queue, and `MaxTaskFailures` error implemented; failed stages are detected and requeued.
+- [ ] **Distributed integration test** — automated test that spawns a real worker over TCP and runs a full `#[task]` job end-to-end; not yet written.
+- [ ] **PyPI release** — `maturin publish` workflow for `atomic-py` not yet set up.
+- [ ] **npm release** — `npm publish @atomic-compute/js` workflow not yet set up.
+- [ ] **DAG optimizer** — no predicate pushdown, pipeline fusion, or partition pruning; every transformation becomes a separate stage boundary.
+- [ ] **Checkpointing** — no RDD lineage truncation or checkpoint storage; a long lineage chain will recompute from the source on any failure.
+- [ ] **Web dashboard** — job progress, stage timing, and partition metrics are logged but not exposed via a UI or metrics endpoint.
+
+### Planned (Post-Stabilization)
+
+- [ ] Adaptive query execution — dynamic partition coalescing based on shuffle output sizes
+- [ ] Broadcast variables — driver-side values replicated to all workers without serializing into every task envelope
+- [ ] Accumulator API — distributed counters and aggregators updated from task closures
+- [ ] Structured streaming / micro-batch mode
 
 ---
 
-## Design Philosophy
+## Installation
 
-> "Atomic brings Spark's proven RDD model to Rust, with a vision for distributed execution that prioritizes efficiency, portability, and safety through compiled binaries and efficient serialization."
+### Rust (native tasks)
+
+```bash
+# Add atomic-compute to your Cargo.toml
+# [dependencies]
+# atomic-compute = { path = "path/to/atomic/crates/atomic-compute" }
+
+cargo build --release
+```
+
+### Python
+
+```bash
+cd crates/atomic-py
+pip install maturin
+maturin develop --release        # dev install (editable)
+# or: maturin build --release && pip install ../../target/wheels/atomic-*.whl
+```
+
+### JavaScript / Node.js
+
+```bash
+# Build the native Node.js module
+cargo build --release -p atomic-js
+
+# Load in your script
+const { Context } = require('./crates/atomic-js');
+```
+
+### Worker binary
+
+```bash
+# Build the polyglot worker (supports native, Python, and JS tasks)
+cargo build --release -p atomic-worker
+
+# Start a worker on port 10001
+RUST_LOG=info ./target/release/atomic-worker --worker --port 10001
+```
 
 ---
 
-## 📍 Roadmap
+## Design notes
 
-* [x] Flow definition API (DAG)
-* [x] Local scheduler prototype
-* [ ] Distributed cluster mode
-* [ ] Checkpointing and recovery
-* [ ] Optimizer (predicate pushdown, pipelining)
-* [ ] Python bindings for client API
-* [ ] Web dashboard (metrics + job UI)
+- Distributed tasks reference pre-registered functions by ID via the `#[task]` macro and `TASK_REGISTRY`. Workers cannot receive arbitrary Rust code at runtime — only data payloads and op IDs. This is intentional: it makes the execution model auditable and keeps the worker surface area small.
+- Python/JS UDFs are the explicit escape hatch for dynamic code. They go through a clearly bounded path (`PythonUdf` / `JavaScriptUdf` actions) with their own serialization format (JSON data, pickle/source function encoding).
+- rkyv is used for the Rust native path; JSON is used for the Python/JS path. Both sides can encode and decode their own format without sharing a schema.
+- `atomic-py` is a `cdylib` — it must be built with `maturin`, not `cargo build`. `atomic-worker` must be excluded from `cargo test --workspace` because it activates PyO3's `auto-initialize` feature which requires linking against libpython.
 
 ---
 
-## 📜 License
+## License
 
 Licensed under the [Apache 2.0 License](LICENSE).

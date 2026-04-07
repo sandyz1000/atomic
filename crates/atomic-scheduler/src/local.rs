@@ -164,6 +164,9 @@ impl LocalScheduler {
 
         let mut results: Vec<Option<U>> = (0..jt.num_output_parts).map(|_| None).collect();
         let mut fetch_failure_duration = Duration::new(0, 0);
+        // Per-task failure counter: key = (stage_id, task_id).
+        // Prevents a repeatedly-failing task from being retried indefinitely.
+        let mut task_failure_counts: HashMap<(usize, usize), usize> = HashMap::new();
 
         self.submit_stage(jt.final_stage.clone(), jt.clone())
             .await?;
@@ -212,8 +215,48 @@ impl LocalScheduler {
                             .await;
                         fetch_failure_duration = start.elapsed();
                     }
-                    Error(error) => panic!("{}", error),
-                    OtherFailure(msg) => panic!("{}", msg),
+                    Error(error) => {
+                        let key = (evt.task.get_stage_id(), evt.task.get_task_id());
+                        let count = task_failure_counts.entry(key).or_insert(0);
+                        *count += 1;
+                        if *count >= self.max_failures {
+                            return Err(SchedulerError::MaxTaskFailures(error.to_string()));
+                        }
+                        log::warn!(
+                            "task {}/{} error (attempt {}/{}): retrying stage",
+                            evt.task.get_stage_id(),
+                            evt.task.get_task_id(),
+                            count,
+                            self.max_failures,
+                        );
+                        let m = self.get_mutators();
+                        jt.failed
+                            .lock()
+                            .await
+                            .insert(m.fetch_from_stage_cache(evt.task.get_stage_id()));
+                        fetch_failure_duration = start.elapsed();
+                    }
+                    OtherFailure(msg) => {
+                        let key = (evt.task.get_stage_id(), evt.task.get_task_id());
+                        let count = task_failure_counts.entry(key).or_insert(0);
+                        *count += 1;
+                        if *count >= self.max_failures {
+                            return Err(SchedulerError::MaxTaskFailures(msg));
+                        }
+                        log::warn!(
+                            "task {}/{} failure (attempt {}/{}): retrying stage",
+                            evt.task.get_stage_id(),
+                            evt.task.get_task_id(),
+                            count,
+                            self.max_failures,
+                        );
+                        let m = self.get_mutators();
+                        jt.failed
+                            .lock()
+                            .await
+                            .insert(m.fetch_from_stage_cache(evt.task.get_stage_id()));
+                        fetch_failure_duration = start.elapsed();
+                    }
                 }
             }
         }
@@ -352,12 +395,17 @@ impl NativeScheduler for LocalScheduler {
 
     async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependencyBox>) -> LibResult<Stage> {
         log::debug!("getting shuffle map stage");
-        let stage = self
+        let stage_id = self
             .mutators
             .shuffle_to_map_stage
-            .get(&shuf.get_shuffle_id());
-        match stage {
-            Some(stage) => Ok(stage.clone()),
+            .get(&shuf.get_shuffle_id())
+            .map(|s| s.id);
+        match stage_id {
+            Some(id) => {
+                // Return the up-to-date copy from stage_cache — shuffle_to_map_stage holds a
+                // stale clone that never sees add_output_loc_to_stage updates.
+                Ok(self.mutators.stage_cache.get(&id).unwrap().clone())
+            }
             None => {
                 log::debug!("started creating shuffle map stage before");
                 let stage = self
@@ -376,7 +424,7 @@ impl NativeScheduler for LocalScheduler {
         log::debug!("getting missing parent stages");
         let mut missing: BTreeSet<Stage> = BTreeSet::new();
         let mut visited: HashSet<usize> = HashSet::new();
-        self.visit_for_missing_parent_stages(&mut missing, &mut visited, stage.get_rdd())
+        self.visit_missing_parent(&mut missing, &mut visited, stage.get_rdd())
             .await?;
         Ok(missing.into_iter().collect())
     }

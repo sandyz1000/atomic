@@ -1,4 +1,4 @@
-# atomic-python
+# atomic-py
 
 Python bindings for the Atomic distributed compute engine — a Spark-like API for local and distributed data processing.
 
@@ -13,14 +13,14 @@ Python bindings for the Atomic distributed compute engine — a Spark-like API f
 ### Development (editable)
 
 ```bash
-cd crates/atomic-python
+cd crates/atomic-py
 maturin develop --release
 ```
 
 ### Build a wheel
 
 ```bash
-cd crates/atomic-python
+cd crates/atomic-py
 maturin build --release
 # wheel lands in ../../target/wheels/atomic-*.whl
 pip install ../../target/wheels/atomic-*.whl
@@ -44,7 +44,7 @@ result = ctx.parallelize([1, 2, 3, 4]) \
 
 ```bash
 # Install first (dev mode is fine)
-cd crates/atomic-python && maturin develop --release && cd ../..
+cd crates/atomic-py && maturin develop --release && cd ../..
 
 # Word count
 python demo/python/local_word_count.py

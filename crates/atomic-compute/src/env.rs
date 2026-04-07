@@ -1,6 +1,7 @@
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::error::Error;
 use log::LevelFilter;
@@ -244,6 +245,50 @@ impl Configuration {
             None
         }
     }
+}
+
+/// Initialize the shuffle infrastructure: starts the `ShuffleManager` HTTP server and
+/// populates the `SHUFFLE_CACHE` and `SHUFFLE_SERVER_URI` statics in `atomic_data::env`.
+///
+/// This is idempotent — calling it multiple times is safe (subsequent calls are no-ops).
+/// Must be called before submitting any jobs that involve wide transformations
+/// (`reduce_by_key`, `group_by_key`, etc.).
+pub fn init_shuffle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use atomic_data::shuffle::cache::DashMapShuffleCache;
+    use atomic_data::shuffle::config::ShuffleConfig;
+    use atomic_data::shuffle::manager::ShuffleManager;
+
+    // Idempotent: if already initialized, skip.
+    if atomic_data::env::SHUFFLE_CACHE.get().is_some() {
+        return Ok(());
+    }
+
+    let conf = Configuration::get();
+
+    let cache: Arc<dyn atomic_data::shuffle::cache::ShuffleCache> =
+        Arc::new(DashMapShuffleCache::default());
+    let _ = atomic_data::env::SHUFFLE_CACHE.set(cache.clone());
+
+    let tracker = Arc::new(atomic_data::shuffle::MapOutputTracker::default());
+    let _ = atomic_data::env::MAP_OUTPUT_TRACKER.set(tracker);
+
+    let shuffle_config = ShuffleConfig::new(
+        conf.local_ip,
+        conf.local_dir.clone(),
+        conf.shuffle_svc_port,
+        conf.loggin.log_cleanup,
+    );
+
+    // ShuffleManager::new starts the HTTP server in a background tokio task.
+    // We extract the URI and let the manager drop — the HTTP server survives
+    // as long as the tokio runtime is alive.
+    let mgr = ShuffleManager::new(shuffle_config, cache)
+        .map_err(|e| format!("failed to start ShuffleManager: {e}"))?;
+
+    let _ = atomic_data::env::SHUFFLE_SERVER_URI.set(mgr.get_server_uri());
+
+    log::info!("shuffle service started at {}", mgr.get_server_uri());
+    Ok(())
 }
 
 /// Concatenate prefix + suffix at compile time equivalent (runtime concat for env var names).

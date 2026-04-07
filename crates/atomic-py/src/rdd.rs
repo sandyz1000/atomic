@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use atomic_data::distributed::{PipelineOp, PythonUdfPayload, TaskAction};
+use atomic_compute::context::Context;
+use atomic_data::distributed::{PipelineOp, PythonUdfPayload, TaskAction, UdfAction};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyIterator, PyList, PyTuple};
 
@@ -32,7 +33,7 @@ pub struct PyRdd {
     pub elements: Vec<Py<PyAny>>,
     pub num_partitions: usize,
     /// Always-present reference to the compute context for dispatch.
-    pub context: Arc<atomic_compute::context::Context>,
+    pub context: Arc<Context>,
     /// `Some(...)` when distributed mode has started staging ops.
     staged: Option<StagedPyPipeline>,
 }
@@ -42,7 +43,7 @@ impl PyRdd {
         _py: Python,
         elements: Vec<Py<PyAny>>,
         num_partitions: usize,
-        context: Arc<atomic_compute::context::Context>,
+        context: Arc<Context>,
     ) -> Self {
         Self { elements, num_partitions, context, staged: None }
     }
@@ -92,18 +93,14 @@ impl PyRdd {
     }
 
     /// Build a Python UDF op and push it into the staged pipeline.
-    fn stage_python_udf(&mut self, py: Python, f: &Py<PyAny>, action: &str) -> PyResult<()> {
+    fn stage_python_udf(&mut self, py: Python, f: &Py<PyAny>, action: UdfAction) -> PyResult<()> {
         let fn_bytes = Self::pickle_fn(py, f)?;
-        let payload_struct = PythonUdfPayload {
-            action: action.to_string(),
-            fn_bytes,
-            zero_bytes: vec![],
-        };
+        let payload_struct = PythonUdfPayload { fn_bytes, zero_bytes: vec![] };
         let payload = serde_json::to_vec(&payload_struct)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let op = PipelineOp {
             op_id: "atomic::udf::python".to_string(),
-            action: TaskAction::PythonUdf,
+            action: TaskAction::PythonUdf(action),
             payload,
         };
         self.push_op(py, op)
@@ -132,7 +129,7 @@ impl PyRdd {
     /// Apply `f` to each element, returning a new RDD.
     pub fn map(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            self.stage_python_udf(py, &f, "map")?;
+            self.stage_python_udf(py, &f, UdfAction::Map)?;
             // Return self with updated staged pipeline (move semantics emulated via clone of non-data fields)
             return Ok(self.take_as_new(py));
         }
@@ -148,7 +145,7 @@ impl PyRdd {
     /// Keep only elements for which `f` returns truthy.
     pub fn filter(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            self.stage_python_udf(py, &f, "filter")?;
+            self.stage_python_udf(py, &f, UdfAction::Filter)?;
             return Ok(self.take_as_new(py));
         }
         // Local eager
@@ -170,7 +167,7 @@ impl PyRdd {
     /// Apply `f` to each element and flatten the results (f must return an iterable).
     pub fn flat_map(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            self.stage_python_udf(py, &f, "flat_map")?;
+            self.stage_python_udf(py, &f, UdfAction::FlatMap)?;
             return Ok(self.take_as_new(py));
         }
         // Local eager
@@ -188,7 +185,7 @@ impl PyRdd {
     /// Apply `f` only to the value in each `(key, value)` pair.
     pub fn map_values(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            self.stage_python_udf(py, &f, "map_values")?;
+            self.stage_python_udf(py, &f, UdfAction::MapValues)?;
             return Ok(self.take_as_new(py));
         }
         let elements = self
@@ -212,7 +209,7 @@ impl PyRdd {
     /// Apply `f` to each value in `(key, value)` pairs and flatten.
     pub fn flat_map_values(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            self.stage_python_udf(py, &f, "flat_map_values")?;
+            self.stage_python_udf(py, &f, UdfAction::FlatMapValues)?;
             return Ok(self.take_as_new(py));
         }
         let mut elements = Vec::new();
@@ -237,7 +234,7 @@ impl PyRdd {
     /// Produce `(f(element), element)` pairs.
     pub fn key_by(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            self.stage_python_udf(py, &f, "key_by")?;
+            self.stage_python_udf(py, &f, UdfAction::KeyBy)?;
             return Ok(self.take_as_new(py));
         }
         let elements = self
@@ -447,16 +444,12 @@ impl PyRdd {
     pub fn reduce(&mut self, py: Python, f: Py<PyAny>) -> PyResult<Py<PyAny>> {
         if self.context.is_distributed() {
             let fn_bytes = Self::pickle_fn(py, &f)?;
-            let payload_struct = PythonUdfPayload {
-                action: "reduce".to_string(),
-                fn_bytes,
-                zero_bytes: vec![],
-            };
+            let payload_struct = PythonUdfPayload { fn_bytes, zero_bytes: vec![] };
             let payload = serde_json::to_vec(&payload_struct)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let op = PipelineOp {
                 op_id: "atomic::udf::python".to_string(),
-                action: TaskAction::PythonUdf,
+                action: TaskAction::PythonUdf(UdfAction::Reduce),
                 payload,
             };
             self.push_op(py, op)?;
@@ -512,16 +505,12 @@ impl PyRdd {
                 let b: Bound<'_, PyAny> = pickle.call_method1("dumps", (zero.bind(py),))?;
                 b.extract::<Vec<u8>>()?
             };
-            let payload_struct = PythonUdfPayload {
-                action: "fold".to_string(),
-                fn_bytes,
-                zero_bytes: zero_bytes.clone(),
-            };
+            let payload_struct = PythonUdfPayload { fn_bytes, zero_bytes: zero_bytes.clone() };
             let payload = serde_json::to_vec(&payload_struct)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let op = PipelineOp {
                 op_id: "atomic::udf::python".to_string(),
-                action: TaskAction::PythonUdf,
+                action: TaskAction::PythonUdf(UdfAction::Fold),
                 payload,
             };
             self.push_op(py, op)?;

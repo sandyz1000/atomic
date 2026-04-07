@@ -9,7 +9,15 @@ use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::{Arc, atomic, atomic::AtomicBool};
+use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// Maximum number of per-chunk fetch attempts before giving up.
+const MAX_FETCH_RETRIES: usize = 3;
+/// Initial backoff before the first retry (doubles on each attempt).
+const INITIAL_RETRY_MS: u64 = 100;
+/// TCP connection timeout per attempt.
+const CONNECT_TIMEOUT_SECS: u64 = 5;
 
 type Body = Full<Bytes>;
 type LibResult<T> = Result<T, ShuffleError>;
@@ -94,8 +102,8 @@ impl ShuffleFetcher {
                             reduce_id,
                         )?;
 
-                        // Modern Hyper 1.x client connection
-                        let data_bytes = match Self::fetch_chunk(chunk_uri).await {
+                        // Fetch with retry + exponential backoff.
+                        let data_bytes = match Self::fetch_chunk_with_retry(chunk_uri).await {
                             Ok(bytes) => bytes,
                             Err(e) => {
                                 log::error!("Failed to fetch chunk: {:?}", e);
@@ -163,13 +171,44 @@ impl ShuffleFetcher {
         Ok(Uri::try_from(chunk.as_str())?)
     }
 
+    /// Retry wrapper around [`fetch_chunk`] with exponential backoff.
+    ///
+    /// Attempts the fetch up to `MAX_FETCH_RETRIES` times. On each transient
+    /// failure, waits `delay` ms (doubling each time) before the next attempt.
+    /// The final failure is returned as-is.
+    async fn fetch_chunk_with_retry(uri: Uri) -> LibResult<Vec<u8>> {
+        let mut delay_ms = INITIAL_RETRY_MS;
+        for attempt in 0..MAX_FETCH_RETRIES {
+            match Self::fetch_chunk(uri.clone()).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) if attempt + 1 < MAX_FETCH_RETRIES => {
+                    log::warn!(
+                        "shuffle fetch attempt {}/{} failed: {:?}; retrying in {}ms",
+                        attempt + 1,
+                        MAX_FETCH_RETRIES,
+                        e,
+                        delay_ms,
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    delay_ms = delay_ms.saturating_mul(2);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
     async fn fetch_chunk(uri: Uri) -> LibResult<Vec<u8>> {
         let host = uri.host().ok_or(ShuffleError::FailedFetchOp)?;
         let port = uri.port_u16().unwrap_or(80);
 
-        let stream = tokio::net::TcpStream::connect((host, port))
-            .await
-            .map_err(|_| ShuffleError::FailedFetchOp)?;
+        let stream = tokio::time::timeout(
+            Duration::from_secs(CONNECT_TIMEOUT_SECS),
+            tokio::net::TcpStream::connect((host, port)),
+        )
+        .await
+        .map_err(|_| ShuffleError::FailedFetchOp)? // elapsed → FailedFetchOp
+        .map_err(|_| ShuffleError::FailedFetchOp)?; // connect error → FailedFetchOp
         let io = TokioIo::new(stream);
 
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)

@@ -5,7 +5,7 @@ Partitions the range [1, 101) across 4 partitions and folds the
 elements into a single sum on the driver.
 
 Prerequisites:
-  cd crates/atomic-python && maturin develop --release && cd ../..
+  cd crates/atomic-py && maturin develop --release && cd ../..
 
 Run:
   python demo/python/local_sum_job.py

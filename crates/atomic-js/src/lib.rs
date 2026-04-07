@@ -1,4 +1,7 @@
-pub mod rdd;
-pub mod runtime;
+#![deny(clippy::all)]
 
-pub use runtime::AtomicJsRuntime;
+mod context;
+mod rdd;
+
+pub use context::JsContext;
+pub use rdd::JsRdd;

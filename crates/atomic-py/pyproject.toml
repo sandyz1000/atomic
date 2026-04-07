@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "atomic"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Atomic compute engine — Spark-like Python driver API backed by stable Rust"
+license = { text = "Apache-2.0" }
+readme = "../../README.md"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Distributed Computing",
+]
+
+[project.urls]
+Homepage = "https://github.com/sandip-dey/atomic"
+Repository = "https://github.com/sandip-dey/atomic"
+
+[tool.maturin]
+module-name = "atomic"
+features = ["pyo3/extension-module"]
+# Pick up type stubs from python/atomic/__init__.pyi
+python-packages = ["python/atomic"]

@@ -2,7 +2,7 @@
 Atomic Python UDF demo — local mode.
 
 Run with:
-    maturin develop -m crates/atomic-python/Cargo.toml
+    maturin develop -m crates/atomic-py/Cargo.toml
     python examples/python_udf/job.py
 
 Expected output:
