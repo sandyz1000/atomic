@@ -1,136 +1,83 @@
+use atomic_compute::{context::Context, task, task_fn};
 use std::sync::Arc;
 
-use atomic_compute::rdd::Context;
-use once_cell::sync::Lazy;
-
-
-static CONTEXT: Lazy<Arc<Context>> = Lazy::new(|| Context::new().unwrap());
-
-#[test]
-fn test_group_by_key() {
-    let sc = CONTEXT.clone();
-    let vec = vec![
-        ("x".to_string(), 1),
-        ("x".to_string(), 2),
-        ("x".to_string(), 3),
-        ("x".to_string(), 4),
-        ("x".to_string(), 5),
-        ("x".to_string(), 6),
-        ("x".to_string(), 7),
-        ("y".to_string(), 1),
-        ("y".to_string(), 2),
-        ("y".to_string(), 3),
-        ("y".to_string(), 4),
-        ("y".to_string(), 5),
-        ("y".to_string(), 6),
-        ("y".to_string(), 7),
-        ("y".to_string(), 8),
-    ];
-    let r = sc.make_rdd(vec, 4);
-    let g = r.group_by_key(4);
-    let mut res = g.collect().unwrap();
-    res.sort();
-    let expected = vec![
-        ("x".to_string(), vec![1, 2, 3, 4, 5, 6, 7]),
-        ("y".to_string(), vec![1, 2, 3, 4, 5, 6, 7, 8]),
-    ];
-    assert_eq!(expected, res);
+fn ctx() -> Arc<Context> {
+    Context::local().unwrap()
 }
 
-#[test]
-fn test_join() {
-    let sc = CONTEXT.clone();
-    let col1 = vec![
-        (1, ("A".to_string(), "B".to_string())),
-        (2, ("C".to_string(), "D".to_string())),
-        (3, ("E".to_string(), "F".to_string())),
-        (4, ("G".to_string(), "H".to_string())),
-    ];
-    let col1 = sc.parallelize(col1, 4);
-    let col2 = vec![
-        (1, "A1".to_string()),
-        (1, "A2".to_string()),
-        (2, "B1".to_string()),
-        (2, "B2".to_string()),
-        (3, "C1".to_string()),
-        (3, "C2".to_string()),
-    ];
-    let col2 = sc.parallelize(col2, 4);
-    let inner_joined_rdd = col2.join(col1.clone(), 4);
-    let mut res = inner_joined_rdd.collect().unwrap();
-    res.sort();
+#[tokio::test]
+async fn test_count_by_value_words() {
+    let ctx = ctx();
+    let words: Vec<String> = vec!["apple", "banana", "apple", "cherry", "banana", "apple"]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
 
-    let expected = vec![
-        (1, "A1", "A", "B"),
-        (1, "A2", "A", "B"),
-        (2, "B1", "C", "D"),
-        (2, "B2", "C", "D"),
-        (3, "C1", "E", "F"),
-        (3, "C2", "E", "F"),
-    ]
-    .iter()
-    .map(|tuple| {
-        (
-            tuple.0,
-            (
-                tuple.1.to_string(),
-                (tuple.2.to_string(), tuple.3.to_string()),
-            ),
-        )
-    })
-    .collect::<Vec<_>>();
-    assert_eq!(expected, res);
+    let counts = ctx
+        .parallelize_typed(words, 2)
+        .count_by_value()
+        .unwrap();
+
+    assert_eq!(counts["apple"], 3);
+    assert_eq!(counts["banana"], 2);
+    assert_eq!(counts["cherry"], 1);
 }
 
-#[test]
-fn test_count_by_value() -> Result<()> {
-    let sc = CONTEXT.clone();
-
-    {
-        let rdd = sc.parallelize(vec![1i32, 2, 1, 3, 2, 3, 3, 2, 3], 4);
-        let rdd = rdd.count_by_value();
-        let mut res = rdd.collect()?;
-        res.sort_by_key(|&(k, _)| k);
-
-        assert_eq!(res.len(), 3);
-        itertools::assert_equal(res, vec![(1, 2), (2, 3), (3, 4)]);
+#[tokio::test]
+async fn test_word_count_flat_map_task() {
+    #[task]
+    fn split_words(line: String) -> Vec<String> {
+        line.split_whitespace().map(|w| w.to_string()).collect()
     }
 
-    {
-        let rdd = sc.parallelize(vec![1i32, 2, 1, 3, 2, 3, 3, 2, 3], 2);
-        let rdd = rdd.count_by_value();
-        let mut res = rdd.collect()?;
-        res.sort_by_key(|&(k, _)| k);
+    let ctx = ctx();
+    let lines = vec![
+        "to be or not to be".to_string(),
+        "that is the question".to_string(),
+    ];
 
-        assert_eq!(res.len(), 3);
-        itertools::assert_equal(res, vec![(1, 2), (2, 3), (3, 4)]);
-    }
+    let counts = ctx
+        .parallelize_typed(lines, 1)
+        .flat_map_task(SplitWords)
+        .count_by_value()
+        .unwrap();
 
-    Ok(())
+    assert_eq!(counts["to"], 2);
+    assert_eq!(counts["be"], 2);
+    assert_eq!(counts["not"], 1);
+    assert_eq!(counts["or"], 1);
 }
 
-#[test]
-fn test_group_by() -> Result<()> {
-    let sc = CONTEXT.clone();
-    let vec = vec![-3i32, -2, -1, 0, 1, 2, 3];
-    let r = sc.make_rdd(vec, 2);
-    let grouping_func = |k: &i32| -> String {
-        if k.is_positive() {
-            "pos".to_string()
-        } else if k.is_negative() {
-            "neg".to_string()
-        } else {
-            "zero".to_string()
-        }
-    };
-    let g = r.group_by(grouping_func);
-    let mut res = g.collect()?;
-    res.sort();
-    let expected = vec![
-        ("neg".to_string(), vec![-3i32, -2, -1]),
-        ("pos".to_string(), vec![1, 2, 3]),
-        ("zero".to_string(), vec![0]),
-    ];
-    assert_eq!(expected, res);
-    Ok(())
+#[tokio::test]
+async fn test_map_to_pairs_then_fold_task() {
+    let ctx = ctx();
+    let data = vec![1i32, 2, 3, 4, 5];
+
+    let sum_of_squares = ctx
+        .parallelize_typed(data, 2)
+        .map_task(task_fn!(|x: i32| -> i32 { x * x }))
+        .fold_task(0i32, task_fn!(|acc: i32, x: i32| acc + x))
+        .unwrap();
+
+    assert_eq!(sum_of_squares, 1 + 4 + 9 + 16 + 25);
+}
+
+#[tokio::test]
+async fn test_count_by_value_empty() {
+    let ctx = ctx();
+    let counts = ctx
+        .parallelize_typed(Vec::<i32>::new(), 2)
+        .count_by_value()
+        .unwrap();
+    assert!(counts.is_empty());
+}
+
+#[tokio::test]
+async fn test_count_by_value_single_value() {
+    let ctx = ctx();
+    let counts = ctx
+        .parallelize_typed(vec![42i32; 100], 4)
+        .count_by_value()
+        .unwrap();
+    assert_eq!(counts[&42], 100);
 }

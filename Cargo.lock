@@ -103,6 +103,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic"
+version = "0.1.0"
+dependencies = [
+ "atomic-compute",
+ "env_logger",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "atomic-cli"
 version = "0.1.0"
 dependencies = [
@@ -241,17 +251,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "atomic-tests"
-version = "0.1.0"
-dependencies = [
- "atomic-compute",
- "env_logger",
- "once_cell",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -404,9 +403,9 @@ checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
 
 [[package]]
 name = "cc"
-version = "1.2.58"
+version = "1.2.59"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1e928d4b69e3077709075a938a05ffbedfa53a84c8f766efbf8220bb1ff60e1"
+checksum = "b7a4d3ec6524d28a329fc53654bbadc9bdd7b0431f5d65f1a56ffb28a1ee5283"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -1035,16 +1034,6 @@ dependencies = [
  "hashbrown 0.16.1",
  "serde",
  "serde_core",
-]
-
-[[package]]
-name = "integration"
-version = "0.1.0"
-dependencies = [
- "atomic-compute",
- "env_logger",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

@@ -17,6 +17,61 @@ Atomic is a stable-Rust rewrite and refactor of Vega.
 - `crates/atomic-utils`: shared utilities.
 - `notes/`: architecture notes and design documents.
 
+## RDD API Convention
+
+### The `_task` family — canonical API for local and distributed execution
+
+All narrow transforms and reductions have a `_task` variant. Always use these:
+
+| Method | Trait required | TaskAction |
+|---|---|---|
+| `rdd.map_task(F)` | `UnaryTask<T, U>` | `Map` |
+| `rdd.filter_task(F)` | `UnaryTask<T, bool>` | `Filter` |
+| `rdd.flat_map_task(F)` | `UnaryTask<T, Vec<U>>` | `FlatMap` |
+| `rdd.fold_task(zero, F)` | `BinaryTask<T>` | `Fold` |
+| `rdd.reduce_task(F)` | `BinaryTask<T>` | `Reduce` |
+
+In **local mode**: execute in-process (same result as closure variants).
+In **distributed mode**: accumulate lazily into a `StagedPipeline`; the full op chain is dispatched as one `TaskEnvelope` per partition when an action fires.
+
+Closure-based variants (`map`, `filter`, `flat_map`, `reduce`, `fold`) are **deprecated** — they always run on the driver's local scheduler and cannot dispatch to workers.
+
+### Two equivalent ways to register a task function
+
+```rust
+// Named — preferred for reuse across pipeline stages
+#[task]
+fn double(x: i32) -> i32 { x * 2 }
+rdd.map_task(Double)         // #[task] generates PascalCase struct
+
+// Inline — preferred for one-off lambdas
+rdd.map_task(task_fn!(|x: i32| -> i32 { x * 2 }))
+```
+
+`task_fn!` generates a zero-sized struct with a stable `file!:line!:col!` op_id registered via `inventory::submit!` — identical to `#[task]` at the dispatch level.
+
+### How the staged pipeline works
+
+```
+parallelize_typed(data, n)
+  └─ flat_map_task(Tokenize)  → encodes partitions → StagedPipeline{source, ops:[FlatMap]}
+       └─ map_task(PairOne)   → appends op          → StagedPipeline{source, ops:[FlatMap,Map]}
+            └─ collect()      → dispatches to workers → results collected on driver
+```
+
+All action methods (`collect`, `count`, `take`, `fold_task`, `reduce_task`, …) check `self.staged`. When a pipeline is staged, they dispatch the full op chain to workers and aggregate the results on the driver.
+
+### Entry point for distributed programs
+
+Build a `Config` at the entry point and pass it to `Context::new_with_config()`. For programs with both worker and driver modes, use `AtomicApp::build()`:
+
+```rust
+let app = AtomicApp::build().await?;   // parses --worker / --workers / --local-ip
+let ctx = app.driver_context()?;
+```
+
+Workers are started with the same binary: `./my_app --worker --port 10001`.
+
 ## Architecture Rules
 
 ### Serialization
@@ -58,6 +113,7 @@ Distributed tasks use types from `atomic_data::distributed`.
 ### Done
 
 - `#[task]` proc-macro + `TASK_REGISTRY` compile-time dispatch.
+- `task_fn!` macro for inline task lambdas — identical to `#[task]` at dispatch level.
 - `NativeBackend` — executes task pipelines by op_id lookup.
 - `LocalScheduler` — full DAG/stage/shuffle support, thread-pool execution.
 - `DistributedScheduler` — TCP dispatch, capacity-aware placement.
@@ -67,13 +123,17 @@ Distributed tasks use types from `atomic_data::distributed`.
 - `ShuffleFetcher` + `MapOutputTracker`.
 - `partition_id` in `TaskResultEnvelope` for correct result ordering after retries.
 - Python UDF support (PyO3 / pickle) and JavaScript UDF support (QuickJS).
+- Unified `_task` API: `map_task`, `filter_task`, `flat_map_task`, `fold_task`, `reduce_task` — work identically in local and distributed mode.
+- All action methods (`collect`, `count`, `take`, `first`, `reduce`, `fold`, `aggregate`, `for_each`, `for_each_partition`, `count_by_value`, `is_empty`, `top`, `take_ordered`, `max`, `min`) dispatch staged pipelines to workers in distributed mode.
+- `AtomicApp::build()` — unified entry point; reads `--worker`/`--workers`/`--local-ip` from CLI.
+- Explicit `Config` struct at entry point — replaces global `OnceCell<Configuration>` env-var reading.
+- Distributed integration test (driver + real worker over TCP, `cargo test -p atomic-tests test_distributed`).
 
 ### Not Done Yet
 
 - Distributed shuffle end-to-end: each worker needs to run its own `ShuffleManager` and register its URI with the driver's `MapOutputTracker`.
 - `ShuffleFetcher` retry on transient network errors.
 - Failed shuffle-map stage recompute / fault recovery.
-- Distributed integration test (driver + real worker over TCP).
 
 ## Guardrails For Future Changes
 

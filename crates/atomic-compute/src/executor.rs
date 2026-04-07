@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::backend::NativeBackend;
 use crate::env;
+use num_cpus;
 use crate::error::{Error, LibResult};
 use atomic_data::distributed::{
     TRANSPORT_HEADER_LEN, TaskEnvelope, TransportFrameKind, WireDecode, WireEncode,
@@ -20,14 +21,16 @@ use tokio::{
 
 pub struct Executor {
     port: u16,
+    max_concurrent_tasks: u16,
     worker_id: Arc<str>,
     backend: NativeBackend,
 }
 
 impl Executor {
-    pub fn new(port: u16) -> Self {
+    pub fn new(port: u16, max_concurrent_tasks: u16) -> Self {
         Executor {
             port,
+            max_concurrent_tasks,
             worker_id: Arc::from(format!("worker-{}", port)),
             backend: NativeBackend,
         }
@@ -43,15 +46,10 @@ impl Executor {
     }
 
     pub fn worker_capabilities(&self) -> WorkerCapabilities {
-        let max_concurrent_tasks = env::Configuration::get()
-            .slave
-            .as_ref()
-            .map(|slave| slave.max_concurrent_tasks)
-            .unwrap_or(1);
         WorkerCapabilities {
             version: atomic_data::distributed::WIRE_SCHEMA_V1,
             worker_id: self.worker_id.to_string(),
-            max_tasks: max_concurrent_tasks,
+            max_tasks: self.max_concurrent_tasks,
         }
     }
 
@@ -84,27 +82,27 @@ impl Executor {
                 Err(_) => break,
             };
             let rcv_main = rcv_main.clone();
-            let exec = Arc::clone(&self);
+            let executor = Arc::clone(&self);
             let res: LibResult<Signal> = spawn(async move {
                 match rcv_main.try_recv() {
                     Ok(Signal::ShutDownError) => {
-                        log::info!("shutting down executor @{} due to error", exec.port);
+                        log::info!("shutting down executor @{} due to error", executor.port);
                         return Err(Error::ExecutorShutdown);
                     }
                     Ok(Signal::ShutDownGracefully) => {
-                        log::info!("shutting down executor @{} gracefully", exec.port);
+                        log::info!("shutting down executor @{} gracefully", executor.port);
                         return Ok(Signal::ShutDownGracefully);
                     }
                     _ => {}
                 }
-                log::debug!("received new task @{} executor", exec.port);
-                let (frame_kind, payload) = exec.read_transport_frame(&mut stream).await?;
-                let exec_clone = Arc::clone(&exec);
+                log::debug!("received new task @{} executor", executor.port);
+                let (frame_kind, payload) = executor.read_transport_frame(&mut stream).await?;
+                let exec_clone = Arc::clone(&executor);
                 let (result_kind, result_payload) =
                     spawn_blocking(move || exec_clone.handle_transport_frame(frame_kind, payload))
                         .await??;
 
-                exec.write_transport_frame(&mut stream, result_kind, &result_payload)
+                executor.write_transport_frame(&mut stream, result_kind, &result_payload)
                     .await?;
 
                 log::debug!("sent result data to driver");
@@ -114,6 +112,12 @@ impl Executor {
             match res {
                 Ok(Signal::Continue) => continue,
                 Ok(s) => return Ok(s),
+                // Peer disconnected mid-frame (e.g. a health-check probe that immediately
+                // drops the connection). Log and keep the listener running.
+                Err(Error::InputRead(_)) | Err(Error::OutputWrite(_)) => {
+                    log::debug!("[{}] peer disconnected, resuming listen", self.port);
+                    continue;
+                }
                 Err(s) => return Err(s),
             }
         }
@@ -232,17 +236,6 @@ impl Executor {
     }
 }
 
-pub fn run_worker_from_config() -> LibResult<()> {
-    let port = env::Configuration::get()
-        .slave
-        .as_ref()
-        .map(|slave| slave.port)
-        .ok_or(Error::GetOrCreateConfig(
-            "worker port not configured for slave deployment",
-        ))?;
-    let executor = Arc::new(Executor::new(port));
-    executor.worker().map(|_| ())
-}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Signal {
@@ -271,7 +264,7 @@ mod tests {
 
     fn initialize_exec() -> Arc<Executor> {
         let port = get_dynamic_port();
-        Arc::new(Executor::new(port))
+        Arc::new(Executor::new(port, num_cpus::get().max(1) as u16))
     }
 
     fn connect_to_executor(mut port: u16, signal_handler: bool) -> LibResult<std::net::TcpStream> {

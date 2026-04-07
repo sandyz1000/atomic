@@ -49,10 +49,11 @@ pyo3 = { workspace = true, features = ["auto-initialize"], optional = true }
 rquickjs = { workspace = true, optional = true }
 
 [features]
-# Enable Python UDF execution via embedded PyO3 interpreter.
+# Enable Python UDF execution via embedded CPython interpreter (PyO3).
 # Only for worker binaries — NOT for extension modules (atomic-python cdylib).
 python-udf = ["pyo3"]
-# Enable JavaScript UDF execution via embedded QuickJS.
+# Enable JavaScript UDF execution via embedded QuickJS (rquickjs).
+# Workers use this to eval fn.toString() payloads sent by the atomic-js napi module.
 js-udf = ["rquickjs"]
 # Enable both UDF runtimes (for the atomic-worker binary).
 udf = ["python-udf", "js-udf"]

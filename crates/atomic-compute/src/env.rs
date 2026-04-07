@@ -1,21 +1,17 @@
-use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::Error;
 use log::LevelFilter;
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::{Handle, Runtime};
 
-const ENV_VAR_PREFIX: &str = "VEGA_";
 pub const THREAD_PREFIX: &str = "_VEGA";
-static CONF: OnceCell<Configuration> = OnceCell::new();
 static ASYNC_RT: Lazy<Option<Runtime>> = Lazy::new(Env::build_async_executor);
 
 /// Minimal env handle — only provides the async-runtime helper.
-/// (Shuffle/cache trackers were removed as part of the Vega→Atomic rewrite.)
 pub struct Env;
 
 impl Env {
@@ -49,6 +45,8 @@ impl Env {
     }
 }
 
+// ── Types ──────────────────────────────────────────────────────────────────────
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -61,11 +59,7 @@ pub enum LogLevel {
 
 impl LogLevel {
     pub fn is_debug_or_lower(self) -> bool {
-        use LogLevel::*;
-        match self {
-            Debug | Trace => true,
-            _ => false,
-        }
+        matches!(self, LogLevel::Debug | LogLevel::Trace)
     }
 }
 
@@ -94,176 +88,211 @@ impl DeploymentMode {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Configuration {
-    pub is_driver: bool,
-    pub local_ip: Ipv4Addr,
-    pub local_dir: std::path::PathBuf,
-    pub deployment_mode: DeploymentMode,
-    pub shuffle_svc_port: Option<u16>,
-    pub slave: Option<SlaveConfig>,
-    pub loggin: LogConfig,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct SlaveConfig {
-    pub deployment: bool,
-    pub port: u16,
-    pub max_concurrent_tasks: u16,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LogConfig {
     pub log_level: LogLevel,
     pub log_cleanup: bool,
 }
 
-impl From<(bool, u16)> for SlaveConfig {
-    fn from(config: (bool, u16)) -> Self {
-        let (deployment, port) = config;
-        SlaveConfig {
-            deployment,
+impl Default for LogConfig {
+    fn default() -> Self {
+        LogConfig {
+            log_level: LogLevel::Info,
+            log_cleanup: !cfg!(debug_assertions),
+        }
+    }
+}
+
+// ── WorkerConfig ───────────────────────────────────────────────────────────────
+
+/// Configuration for a worker process.
+#[derive(Clone, Debug)]
+pub struct WorkerConfig {
+    pub port: u16,
+    pub max_concurrent_tasks: u16,
+}
+
+impl WorkerConfig {
+    pub fn new(port: u16) -> Self {
+        WorkerConfig {
             port,
             max_concurrent_tasks: num_cpus::get().max(1) as u16,
         }
     }
 }
 
-impl Default for Configuration {
-    fn default() -> Self {
-        use DeploymentMode::*;
+// ── Config ─────────────────────────────────────────────────────────────────────
 
-        // This may be a worker — try to get config from file first.
-        if let Some(config) = Configuration::get_from_file() {
-            return config;
+/// Runtime configuration for a driver or worker process.
+///
+/// Build this at the program entry point — using [`Config::local`],
+/// [`Config::distributed_driver`], or [`Config::worker`] — and pass it to
+/// [`Context::new_with_config`] or [`start_worker`].
+///
+/// This replaces the global `OnceCell<Configuration>` pattern: configuration is
+/// loaded once, up front, and flows through the program rather than being read
+/// from environment variables on demand.
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// IP address of this host (used by shuffle server and worker registration).
+    pub local_ip: Ipv4Addr,
+    /// Directory for temporary job / shuffle files.
+    pub work_dir: PathBuf,
+    /// Deployment mode.
+    pub mode: DeploymentMode,
+    /// Port for the shuffle HTTP server (None = OS-assigned).
+    pub shuffle_port: Option<u16>,
+    /// Remote worker addresses (distributed-driver only).
+    pub workers: Vec<SocketAddrV4>,
+    /// Worker-specific settings; `Some` only for worker processes.
+    pub worker: Option<WorkerConfig>,
+    /// Logging configuration.
+    pub log: LogConfig,
+}
+
+impl Config {
+    /// Local-mode driver: all tasks run in-process on the driver.
+    pub fn local() -> Self {
+        Config {
+            local_ip: Ipv4Addr::LOCALHOST,
+            work_dir: std::env::temp_dir(),
+            mode: DeploymentMode::Local,
+            shuffle_port: None,
+            workers: vec![],
+            worker: None,
+            log: LogConfig::default(),
         }
+    }
 
-        // Load .env file if present, then read individual vars with VEGA_ prefix.
+    /// Distributed-mode driver: dispatches tasks to the given workers.
+    pub fn distributed_driver(local_ip: Ipv4Addr, workers: Vec<SocketAddrV4>) -> Self {
+        Config {
+            local_ip,
+            work_dir: std::env::temp_dir(),
+            mode: DeploymentMode::Distributed,
+            shuffle_port: None,
+            workers,
+            worker: None,
+            log: LogConfig::default(),
+        }
+    }
+
+    /// Distributed-mode worker: listens for tasks on the given port.
+    pub fn worker(local_ip: Ipv4Addr, port: u16) -> Self {
+        Config {
+            local_ip,
+            work_dir: std::env::temp_dir(),
+            mode: DeploymentMode::Distributed,
+            shuffle_port: None,
+            workers: vec![],
+            worker: Some(WorkerConfig::new(port)),
+            log: LogConfig::default(),
+        }
+    }
+
+    /// Load configuration from environment variables.
+    ///
+    /// Use this when you cannot explicitly construct `Config` at the entry point
+    /// (e.g. Python/JS bindings, legacy code). Prefers explicit constructors for
+    /// new Rust programs.
+    pub fn from_env() -> Self {
         let _ = dotenvy::dotenv();
+        const PREFIX: &str = "VEGA_";
 
-        let deployment_mode = std::env::var(concat_prefix(ENV_VAR_PREFIX, "DEPLOYMENT_MODE"))
+        let mode = std::env::var(format!("{PREFIX}DEPLOYMENT_MODE"))
             .ok()
             .and_then(|s| {
                 serde_json::from_str::<DeploymentMode>(&format!("\"{}\"", s.to_lowercase())).ok()
             })
-            .unwrap_or(Local);
+            .unwrap_or(DeploymentMode::Local);
 
-        let local_dir = std::env::var(concat_prefix(ENV_VAR_PREFIX, "LOCAL_DIR"))
+        let work_dir = std::env::var(format!("{PREFIX}LOCAL_DIR"))
             .ok()
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
 
-        let log_level = std::env::var(concat_prefix(ENV_VAR_PREFIX, "LOG_LEVEL"))
+        let log_level = std::env::var(format!("{PREFIX}LOG_LEVEL"))
             .ok()
             .and_then(|s| {
                 serde_json::from_str::<LogLevel>(&format!("\"{}\"", s.to_lowercase())).ok()
             })
             .unwrap_or(LogLevel::Info);
 
-        let log_cleanup = std::env::var(concat_prefix(ENV_VAR_PREFIX, "LOG_CLEANUP"))
+        let log_cleanup = std::env::var(format!("{PREFIX}LOG_CLEANUP"))
             .ok()
             .and_then(|s| s.parse::<bool>().ok())
             .unwrap_or(!cfg!(debug_assertions));
 
-        log::debug!("Setting max log level to: {:?}", log_level);
-        log::set_max_level(log_level.into());
-
-        let local_ip: Ipv4Addr = std::env::var(concat_prefix(ENV_VAR_PREFIX, "LOCAL_IP"))
+        let local_ip: Ipv4Addr = std::env::var(format!("{PREFIX}LOCAL_IP"))
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| {
-                if deployment_mode == Distributed {
-                    panic!("Local IP required while deploying in distributed mode.")
-                } else {
-                    Ipv4Addr::LOCALHOST
+                if mode == DeploymentMode::Distributed {
+                    panic!("VEGA_LOCAL_IP is required in distributed mode");
                 }
+                Ipv4Addr::LOCALHOST
             });
 
-        let shuffle_service_port =
-            std::env::var(concat_prefix(ENV_VAR_PREFIX, "SHUFFLE_SERVICE_PORT"))
-                .ok()
-                .and_then(|s| s.parse().ok());
+        let shuffle_port = std::env::var(format!("{PREFIX}SHUFFLE_SERVICE_PORT"))
+            .ok()
+            .and_then(|s| s.parse().ok());
 
-        let slave_deployment = std::env::var(concat_prefix(ENV_VAR_PREFIX, "SLAVE_DEPLOYMENT"))
+        let slave_deployment = std::env::var(format!("{PREFIX}SLAVE_DEPLOYMENT"))
             .ok()
             .and_then(|s| s.parse::<bool>().ok())
             .unwrap_or(false);
 
-        let (is_master, slave) = if slave_deployment {
-            let port = std::env::var(concat_prefix(ENV_VAR_PREFIX, "SLAVE_PORT"))
+        let worker = if slave_deployment {
+            let port = std::env::var(format!("{PREFIX}SLAVE_PORT"))
                 .ok()
                 .and_then(|s| s.parse::<u16>().ok())
-                .expect("Port required while deploying a worker.");
-                let max_concurrent_tasks =
-                std::env::var(concat_prefix(ENV_VAR_PREFIX, "WORKER_MAX_CONCURRENT_TASKS"))
+                .expect("VEGA_SLAVE_PORT is required for worker processes");
+            let max_concurrent_tasks =
+                std::env::var(format!("{PREFIX}WORKER_MAX_CONCURRENT_TASKS"))
                     .ok()
                     .and_then(|s| s.parse::<u16>().ok())
                     .unwrap_or_else(|| num_cpus::get().max(1) as u16);
-            (
-                false,
-                Some(SlaveConfig {
-                    deployment: true,
-                    port,
-                    max_concurrent_tasks,
-                }),
-            )
-        } else {
-            (true, None)
-        };
-
-        Configuration {
-            is_driver: is_master,
-            local_ip,
-            local_dir,
-            deployment_mode,
-            loggin: LogConfig {
-                log_level,
-                log_cleanup,
-            },
-            shuffle_svc_port: shuffle_service_port,
-            slave,
-        }
-    }
-}
-
-impl Configuration {
-    pub fn get() -> &'static Configuration {
-        CONF.get_or_init(Self::default)
-    }
-
-    fn get_from_file() -> Option<Configuration> {
-        let binary_path = std::env::current_exe()
-            .map_err(|_| Error::CurrentBinaryPath)
-            .ok()?;
-        let conf_file = binary_path.parent()?.join("config.toml");
-        if conf_file.exists() {
-            fs::read_to_string(conf_file)
-                .map(|content| toml::from_str::<Configuration>(&content).ok())
-                .ok()
-                .flatten()
+            Some(WorkerConfig { port, max_concurrent_tasks })
         } else {
             None
+        };
+
+        // In env-var mode, workers come from hosts.conf — resolved by the caller.
+        Config {
+            local_ip,
+            work_dir,
+            mode,
+            shuffle_port,
+            workers: vec![],
+            worker,
+            log: LogConfig { log_level, log_cleanup },
         }
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.mode == DeploymentMode::Local
+    }
+
+    pub fn is_distributed(&self) -> bool {
+        self.mode == DeploymentMode::Distributed
     }
 }
 
-/// Initialize the shuffle infrastructure: starts the `ShuffleManager` HTTP server and
+// ── Shuffle initialisation ─────────────────────────────────────────────────────
+
+/// Initialise the shuffle infrastructure: starts the `ShuffleManager` HTTP server and
 /// populates the `SHUFFLE_CACHE` and `SHUFFLE_SERVER_URI` statics in `atomic_data::env`.
 ///
-/// This is idempotent — calling it multiple times is safe (subsequent calls are no-ops).
-/// Must be called before submitting any jobs that involve wide transformations
-/// (`reduce_by_key`, `group_by_key`, etc.).
-pub fn init_shuffle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// This is idempotent — subsequent calls are no-ops.
+/// Must be called before submitting any jobs that involve wide transformations.
+pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use atomic_data::shuffle::cache::DashMapShuffleCache;
     use atomic_data::shuffle::config::ShuffleConfig;
     use atomic_data::shuffle::manager::ShuffleManager;
 
-    // Idempotent: if already initialized, skip.
     if atomic_data::env::SHUFFLE_CACHE.get().is_some() {
         return Ok(());
     }
-
-    let conf = Configuration::get();
 
     let cache: Arc<dyn atomic_data::shuffle::cache::ShuffleCache> =
         Arc::new(DashMapShuffleCache::default());
@@ -273,15 +302,12 @@ pub fn init_shuffle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _ = atomic_data::env::MAP_OUTPUT_TRACKER.set(tracker);
 
     let shuffle_config = ShuffleConfig::new(
-        conf.local_ip,
-        conf.local_dir.clone(),
-        conf.shuffle_svc_port,
-        conf.loggin.log_cleanup,
+        config.local_ip,
+        config.work_dir.clone(),
+        config.shuffle_port,
+        config.log.log_cleanup,
     );
 
-    // ShuffleManager::new starts the HTTP server in a background tokio task.
-    // We extract the URI and let the manager drop — the HTTP server survives
-    // as long as the tokio runtime is alive.
     let mgr = ShuffleManager::new(shuffle_config, cache)
         .map_err(|e| format!("failed to start ShuffleManager: {e}"))?;
 
@@ -289,10 +315,4 @@ pub fn init_shuffle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     log::info!("shuffle service started at {}", mgr.get_server_uri());
     Ok(())
-}
-
-/// Concatenate prefix + suffix at compile time equivalent (runtime concat for env var names).
-#[inline]
-fn concat_prefix(prefix: &str, suffix: &str) -> String {
-    format!("{}{}", prefix, suffix)
 }

@@ -1,19 +1,17 @@
 /// Key-value grouping — demonstrates pair RDD operations.
 ///
-/// Shows: reduce_by_key (single-partition), group_by_key, map_values, count_by_key.
+/// Shows: reduce_by_key, group_by_key, map_values, count_by_key.
 ///
-/// Note: `reduce_by_key` and `group_by_key` are narrow partition-local transformations.
-/// For globally correct results without a shuffle they are shown here on a single
-/// partition. `count_by_key` performs a driver-side merge and is correct across
-/// any number of partitions.
+/// **Local-only example**: `reduce_by_key` and `group_by_key` use closure-based
+/// aggregation functions that always run on the driver's local scheduler. They
+/// cannot dispatch work to remote workers. Use `Context::local()` here.
+///
+/// For distributed grouping, use task-based pipelines with explicit key extraction
+/// and `flat_map_task` / `map_task` to prepare key-value pairs on workers, then
+/// aggregate on the driver.
 ///
 /// Run locally:
-///   cargo run --manifest-path examples/group_by/Cargo.toml
-///
-/// Run distributed (after `atomic deploy`):
-///   ATOMIC_DEPLOYMENT_MODE=distributed ATOMIC_IS_DRIVER=true \
-///   ATOMIC_SLAVES=host1@10.0.0.1 \
-///   cargo run --manifest-path examples/group_by/Cargo.toml
+///   cargo run -p group_by
 use atomic_compute::context::Context;
 
 #[tokio::main]

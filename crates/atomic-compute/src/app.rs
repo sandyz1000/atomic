@@ -1,7 +1,8 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 
-use crate::context::Context;
+use crate::context::{Context, start_worker};
+use crate::env::Config;
 use crate::error::Error;
 
 /// The role this binary plays at runtime.
@@ -25,13 +26,17 @@ pub struct AtomicApp {
 }
 
 impl AtomicApp {
-    /// Parse CLI arguments and build the application.
+    /// Parse CLI arguments, build a [`Config`], and launch the appropriate role.
     ///
-    /// Flags recognised:
-    /// - `--worker [--port N]`  — start the worker loop on port N (default 10000)
-    /// - `--driver`             — return a driver context (default if no flag given)
+    /// Recognised flags:
+    /// - `--worker [--port N] [--local-ip ADDR]`  — start the worker loop (never returns)
+    /// - `--workers addr:port,...`                  — driver connecting to these workers
+    /// - `--local-ip ADDR`                          — override the local IP for the driver
+    /// - no flags                                   — local driver (single-process)
     pub async fn build() -> Result<Self, Error> {
         let args: Vec<String> = std::env::args().collect();
+
+        // ── Worker path ──────────────────────────────────────────────────────
         if args.iter().any(|a| a == "--worker") {
             let port = args
                 .windows(2)
@@ -39,22 +44,28 @@ impl AtomicApp {
                 .and_then(|w| w[1].parse::<u16>().ok())
                 .unwrap_or(10000);
 
-            // Initialize the logger inside the worker path so that startup
-            // messages are always visible when RUST_LOG is set, regardless of
-            // whether the caller initialized it before build().
+            let local_ip = Self::parse_local_ip(&args);
+            let config = Config::worker(local_ip, port);
+
             let _ = env_logger::try_init();
             log::info!("[worker-{}] process started pid={}", port, std::process::id());
 
-            crate::env::Env::run_in_async_rt(move || -> crate::error::LibResult<()> {
-                let executor = Arc::new(crate::executor::Executor::new(port));
-                executor.worker().map(|_| ())
-            })?;
-
-            log::info!("[worker-{}] shutting down", port);
-            std::process::exit(0);
+            // start_worker never returns.
+            start_worker(config);
         }
 
-        let ctx = Context::new()?;
+        // ── Driver path ──────────────────────────────────────────────────────
+        let worker_addrs = Self::worker_addresses(&args);
+        let local_ip = Self::parse_local_ip(&args);
+
+        let config = if worker_addrs.is_empty() {
+            // No --workers given: run fully local.
+            Config::local()
+        } else {
+            Config::distributed_driver(local_ip, worker_addrs)
+        };
+
+        let ctx = Context::new_with_config(config)?;
         Ok(AtomicApp {
             role: AppRole::Driver,
             ctx: Some(ctx),
@@ -70,9 +81,10 @@ impl AtomicApp {
             .ok_or(Error::UnsupportedOperation("driver_context called on a worker"))
     }
 
-    /// Worker addresses parsed from `--workers host1:port,host2:port,...`
-    pub fn worker_addresses() -> Vec<SocketAddrV4> {
-        let args: Vec<String> = std::env::args().collect();
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// Parse `--workers host:port,...` into a `Vec<SocketAddrV4>`.
+    pub fn worker_addresses(args: &[String]) -> Vec<SocketAddrV4> {
         args.windows(2)
             .find(|w| w[0] == "--workers")
             .map(|w| {
@@ -87,19 +99,17 @@ impl AtomicApp {
             })
             .unwrap_or_default()
     }
+
+    /// Parse `--local-ip ADDR`, falling back to `127.0.0.1`.
+    fn parse_local_ip(args: &[String]) -> Ipv4Addr {
+        args.windows(2)
+            .find(|w| w[0] == "--local-ip")
+            .and_then(|w| w[1].parse().ok())
+            .unwrap_or(Ipv4Addr::LOCALHOST)
+    }
 }
 
 /// Convenience macro that builds the [`AtomicApp`] entry point.
-///
-/// ```ignore
-/// #[tokio::main]
-/// async fn main() -> atomic_compute::error::Result<()> {
-///     let app = atomic::app!().await?;
-///     let ctx = app.driver_context()?;
-///     // ...
-///     Ok(())
-/// }
-/// ```
 #[macro_export]
 macro_rules! app {
     () => {

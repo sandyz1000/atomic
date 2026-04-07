@@ -15,15 +15,10 @@ use std::time::{Duration, Instant};
 const WORKER_PORT: u16 = 19201;
 
 fn integration_bin() -> std::path::PathBuf {
-    // CARGO_BIN_EXE_integration is set by Cargo when integration is declared
-    // as a [[bin]] target in this test crate's Cargo.toml.
-    std::env::var("CARGO_BIN_EXE_integration")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            // Fallback: look next to the test binary (useful for manual invocation)
-            let exe = std::env::current_exe().expect("current_exe");
-            exe.parent().expect("parent").join("integration")
-        })
+    // CARGO_BIN_EXE_integration is a compile-time env var set by Cargo when
+    // `integration` is declared as a [[bin]] in this crate's Cargo.toml.
+    // Use env!() (compile-time), not std::env::var() (runtime).
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration"))
 }
 
 fn start_worker() -> Child {

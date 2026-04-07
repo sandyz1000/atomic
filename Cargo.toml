@@ -1,13 +1,34 @@
 [workspace.package]
-name = "atomic"
 version = "0.1.0"
 edition = "2024"
 authors = ["Sandip Dey <sandip.dey1988@yahoo.com>"]
 
-
 [workspace]
 resolver = "2"
-members = ["crates/*", "examples/*", "tests"]
+members = ["crates/*", "examples/*"]
+
+# ── Root package ──────────────────────────────────────────────────────────────
+# The workspace root is also the "atomic" package that owns:
+#   - the integration test binary (integration/src/main.rs)
+#   - integration test suites in tests/
+[package]
+name = "atomic"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "integration"
+path = "integration/main.rs"
+
+[dependencies]
+atomic-compute = { workspace = true }
+serde_json = { workspace = true }
+env_logger = { workspace = true }
+
+[dev-dependencies]
+atomic-compute = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
 
 [workspace.dependencies]
 atomic-compute = { path = "crates/atomic-compute" }

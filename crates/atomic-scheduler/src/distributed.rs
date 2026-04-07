@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use atomic_data::{
@@ -17,7 +17,7 @@ use atomic_data::{
         WireDecode, WireEncode, WorkerCapabilities, encode_transport_frame, parse_transport_header,
     },
     partial::{ApproximateEvaluator, result::PartialResult},
-    rdd::{Rdd, RddBase},
+    rdd::Rdd,
     task::TaskOption,
     task_context::TaskContext,
 };
@@ -220,7 +220,9 @@ impl DistributedScheduler {
                             // submit_native_task already retried at the TCP layer;
                             // promote to a job-level failure.
                             return Err(SchedulerError::TaskFailed(
-                                result.error.unwrap_or_else(|| "retryable failure exhausted".to_string()),
+                                result
+                                    .error
+                                    .unwrap_or_else(|| "retryable failure exhausted".to_string()),
                             ));
                         }
                         atomic_data::distributed::ResultStatus::Success => {}
@@ -289,13 +291,15 @@ impl DistributedScheduler {
                 match result.status {
                     atomic_data::distributed::ResultStatus::FatalFailure => {
                         return Err(SchedulerError::TaskFailed(
-                            result.error.unwrap_or_else(|| "shuffle map fatal failure".to_string()),
+                            result
+                                .error
+                                .unwrap_or_else(|| "shuffle map fatal failure".to_string()),
                         ));
                     }
                     atomic_data::distributed::ResultStatus::RetryableFailure => {
-                        return Err(SchedulerError::TaskFailed(
-                            result.error.unwrap_or_else(|| "shuffle map retryable failure exhausted".to_string()),
-                        ));
+                        return Err(SchedulerError::TaskFailed(result.error.unwrap_or_else(
+                            || "shuffle map retryable failure exhausted".to_string(),
+                        )));
                     }
                     atomic_data::distributed::ResultStatus::Success => {}
                 }
