@@ -6,7 +6,7 @@ use atomic_data::dependency::Dependency;
 use atomic_data::error::BaseError;
 use atomic_data::split::{ParallelCollectionSplit, Split};
 use parking_lot::Mutex;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 /// A collection of objects which can be sliced into partitions with a partitioning function.
 pub trait Chunkable<D>

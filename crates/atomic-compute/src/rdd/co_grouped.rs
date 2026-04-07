@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::*;
 use atomic_data::aggregator::Aggregator;
-use atomic_data::dependency::{Dependency, ShuffleDependency, ShuffleDependencyBox};
+use atomic_data::dependency::Dependency;
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::split::{CoGroupSplit, CoGroupSplitDep, Split};

@@ -1,3 +1,4 @@
+use crate::env::{Config, DeploymentMode};
 use crate::error::Error;
 use crate::executor::{Executor, Signal};
 use crate::io::ReaderConfiguration;
@@ -12,12 +13,11 @@ use atomic_data::distributed::{
 };
 use atomic_data::partial::ApproximateEvaluator;
 use atomic_data::partial::result::PartialResult;
-use atomic_data::rdd::{Rdd, RddBase};
+use atomic_data::rdd::Rdd;
 use atomic_data::task_context::TaskContext;
 use atomic_scheduler::{DistributedScheduler, LocalScheduler, Schedulers};
 use atomic_utils::clean_up_work_dir;
 use log::error;
-use once_cell::sync::OnceCell;
 use std::fmt::Debug;
 use std::fs;
 use std::io::{Read, Write};
@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub struct Context {
+    /// Runtime configuration — built at the entry point and passed in.
+    config: Arc<Config>,
     /// Routes native `#[task]` jobs: local `NativeBackend` or distributed TCP dispatch.
     scheduler: Schedulers,
     /// Always-local scheduler used by `run_job` for closure-based driver operations.
@@ -48,11 +50,8 @@ impl Drop for Context {
     fn drop(&mut self) {
         #[cfg(debug_assertions)]
         {
-            let deployment_mode = env::Configuration::get().deployment_mode;
-            if self.distributed_driver && deployment_mode == env::DeploymentMode::Distributed {
+            if self.distributed_driver {
                 log::info!("inside context drop in master");
-            } else if deployment_mode == env::DeploymentMode::Distributed {
-                log::info!("inside context drop in executor");
             }
         }
         Context::driver_clean_up_directives(&self.work_dir, &self.address_map);
@@ -73,29 +72,50 @@ pub fn save<R: Data>(ctx: TaskContext, iter: Box<dyn Iterator<Item = R>>, path: 
 }
 
 impl Context {
-    /// Create a context from the environment configuration.
+    /// Create a context using an explicit [`Config`] built at the program entry point.
     ///
-    /// In distributed mode, returns a driver context connected to the workers
-    /// listed in `hosts.conf`.
-    /// In local mode, returns a local context.
+    /// This is the preferred constructor for new Rust programs. Build the config
+    /// at `main()` using [`Config::local`], [`Config::distributed_driver`], or
+    /// [`Config::worker`], then pass it here.
     ///
-    /// To start a worker process use [`start_worker`] instead — it reads the
-    /// slave configuration from the environment and never returns.
-    pub fn new() -> Result<Arc<Self>, Error> {
-        let mode = env::Configuration::get().deployment_mode;
-        match mode {
-            env::DeploymentMode::Distributed => {
-                let ctx = Context::init_distributed_driver()?;
+    /// For a worker process, use [`start_worker`] instead — it takes a `Config`
+    /// and never returns.
+    pub fn new_with_config(config: Config) -> Result<Arc<Self>, Error> {
+        match config.mode {
+            DeploymentMode::Distributed => {
+                let ctx = Context::init_distributed_driver(config)?;
                 ctx.set_cleanup_process();
                 Ok(ctx)
             }
-            env::DeploymentMode::Local => Context::init_local_scheduler(),
+            DeploymentMode::Local => Context::init_local_scheduler(config),
         }
     }
 
-    /// Create a local-only context, ignoring the environment configuration.
+    /// Create a context from environment variables.
+    ///
+    /// Reads `VEGA_DEPLOYMENT_MODE`, `VEGA_LOCAL_IP`, `VEGA_SLAVE_PORT`, etc.
+    /// Prefer [`Context::new_with_config`] for new Rust programs; this exists for
+    /// Python/JS bindings and legacy code where explicit config is not practical.
+    pub fn new() -> Result<Arc<Self>, Error> {
+        let mut config = Config::from_env();
+        // In env-var mode, load workers from hosts.conf for distributed drivers.
+        if config.mode == DeploymentMode::Distributed && config.workers.is_empty() {
+            if let Ok(hosts) = hosts::Hosts::get() {
+                config.workers = hosts.slaves
+                    .iter()
+                    .filter_map(|s| {
+                        let hp = s.split('@').nth(1)?;
+                        hp.parse().ok()
+                    })
+                    .collect();
+            }
+        }
+        Context::new_with_config(config)
+    }
+
+    /// Create a local-only context.
     pub fn local() -> Result<Arc<Self>, Error> {
-        Context::init_local_scheduler()
+        Context::new_with_config(Config::local())
     }
 
     pub fn is_distributed(&self) -> bool {
@@ -116,21 +136,21 @@ impl Context {
         })
     }
 
-    fn init_local_scheduler() -> Result<Arc<Self>, Error> {
+    fn init_local_scheduler(config: Config) -> Result<Arc<Self>, Error> {
         let job_id = Uuid::new_v4().to_string();
-        let job_work_dir = env::Configuration::get()
-            .local_dir
-            .join(format!("ns-session-{}", job_id));
+        let job_work_dir = config.work_dir.join(format!("ns-session-{}", job_id));
         fs::create_dir_all(&job_work_dir).unwrap();
 
         let _ = env_logger::try_init();
-        if let Err(e) = env::Env::run_in_async_rt(env::init_shuffle) {
+        let config = Arc::new(config);
+        if let Err(e) = env::Env::run_in_async_rt(|| env::init_shuffle(&config)) {
             log::warn!("shuffle service could not start (wide transforms will be local-only): {e}");
         }
         let local = Arc::new(LocalScheduler::new(20, true));
         let scheduler = Schedulers::Local(local.clone());
 
         Ok(Arc::new(Context {
+            config,
             scheduler,
             driver_scheduler: local,
             next_rdd_id: Arc::new(AtomicUsize::new(0)),
@@ -141,39 +161,25 @@ impl Context {
         }))
     }
 
-    /// Initialization function for the application driver.
-    ///
-    /// Distributes configuration and the application binary to each worker host,
-    /// launches the worker processes via SSH, and returns a driver context.
-    fn init_distributed_driver() -> Result<Arc<Self>, Error> {
-        let mut address_map = Vec::new();
+    /// Connect to all registered workers and return a distributed driver context.
+    fn init_distributed_driver(config: Config) -> Result<Arc<Self>, Error> {
         let job_id = Uuid::new_v4().to_string();
-        let job_work_dir = env::Configuration::get()
-            .local_dir
-            .join(format!("ns-session-{}", job_id));
+        let job_work_dir = config.work_dir.join(format!("ns-session-{}", job_id));
 
         fs::create_dir_all(&job_work_dir).unwrap();
         let _ = env_logger::try_init();
-        if let Err(e) = env::init_shuffle() {
+
+        let config = Arc::new(config);
+
+        // init_shuffle starts an async HTTP server — wrap in the tokio runtime.
+        if let Err(e) = env::Env::run_in_async_rt(|| env::init_shuffle(&config)) {
             log::warn!("shuffle service could not start: {e}");
         }
+
         let scheduler = Arc::new(DistributedScheduler::new(20, true));
+        let mut address_map = Vec::new();
 
-        // Workers are pre-started by `atomic deploy` (or manually with --worker).
-        // The driver just connects to each one and registers its capabilities.
-        //
-        // Slave format in hosts.conf: "user@ip:port"
-        //   e.g. "sandip.dey@127.0.0.1:10001"
-        for address in &hosts::Hosts::get()?.slaves {
-            let host_port = address
-                .split('@')
-                .nth(1)
-                .ok_or_else(|| Error::ParseHostAddress(address.into()))?;
-
-            let endpoint: SocketAddrV4 = host_port
-                .parse()
-                .map_err(|_| Error::ParseHostAddress(address.into()))?;
-
+        for &endpoint in &config.workers {
             log::info!("connecting to worker at {}", endpoint);
             let capabilities = Context::request_worker_capabilities(endpoint)?;
             log::info!(
@@ -189,6 +195,7 @@ impl Context {
         let driver_scheduler = Arc::new(LocalScheduler::new(20, false));
 
         Ok(Arc::new(Context {
+            config,
             scheduler,
             driver_scheduler,
             next_rdd_id: Arc::new(AtomicUsize::new(0)),
@@ -213,9 +220,10 @@ impl Context {
         }
     }
 
-    fn driver_clean_up_directives(work_dir: &std::path::Path, executors: &[SocketAddrV4]) {
-        Context::drop_executors(executors);
-        std::thread::sleep(std::time::Duration::from_millis(1_500));
+    fn driver_clean_up_directives(work_dir: &std::path::Path, _executors: &[SocketAddrV4]) {
+        // Workers are long-running daemons — the driver does NOT send shutdown
+        // signals on completion. Workers stay alive for subsequent driver runs
+        // and must be stopped explicitly (Ctrl-C or a dedicated stop command).
         clean_up_work_dir(work_dir, true);
     }
 
@@ -259,8 +267,15 @@ impl Context {
         )))
     }
 
-    fn drop_executors(address_map: &[SocketAddrV4]) {
-        if env::Configuration::get().deployment_mode.is_local() {
+    /// Send a graceful-shutdown signal to every registered worker.
+    ///
+    /// Not called automatically — reserved for an explicit `atomic stop` command.
+    /// Send a graceful-shutdown signal to every registered worker.
+    ///
+    /// Not called automatically — reserved for an explicit `atomic stop` command.
+    #[allow(dead_code)]
+    pub fn drop_executors(address_map: &[SocketAddrV4]) {
+        if address_map.is_empty() {
             return;
         }
 
@@ -346,13 +361,13 @@ impl Context {
         self: &Arc<Self>,
         seq: I,
         num_slices: usize,
-    ) -> crate::rdd::TypedRdd<T>
+    ) -> TypedRdd<T>
     where
         I: IntoIterator<Item = T>,
     {
         let id = self.new_rdd_id();
         let rdd = Arc::new(ParallelCollection::new(id, seq, num_slices));
-        crate::rdd::TypedRdd::new(rdd, self.clone())
+        TypedRdd::new(rdd, self.clone())
     }
 
     pub fn read_source<F, C, I: Data, O: Data>(
@@ -591,24 +606,20 @@ impl Context {
 
 /// Start the worker process.
 ///
-/// Reads slave configuration from the environment (`VEGA_SLAVE_PORT`,
-/// `VEGA_LOCAL_IP`, etc.), initialises the shuffle service, then enters the
-/// TCP task-executor loop. This function **never returns** — it terminates the
+/// Initialises the shuffle service from `config`, then enters the TCP
+/// task-executor loop. This function **never returns** — it terminates the
 /// process when the executor shuts down.
 ///
-/// # Typical usage
-///
-/// Set environment variables before calling:
+/// # Example
 /// ```no_run
-/// unsafe {
-///     std::env::set_var("VEGA_DEPLOYMENT_MODE", "distributed");
-///     std::env::set_var("VEGA_SLAVE_DEPLOYMENT", "true");
-///     std::env::set_var("VEGA_SLAVE_PORT", "10001");
-///     std::env::set_var("VEGA_LOCAL_IP", "127.0.0.1");
-/// }
-/// atomic_compute::context::start_worker();
+/// use atomic_compute::env::Config;
+/// use atomic_compute::context::start_worker;
+/// use std::net::Ipv4Addr;
+///
+/// let config = Config::worker(Ipv4Addr::LOCALHOST, 10001);
+/// start_worker(config);
 /// ```
-pub fn start_worker() -> ! {
+pub fn start_worker(config: Config) -> ! {
     let work_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -616,17 +627,20 @@ pub fn start_worker() -> ! {
 
     let _ = env_logger::try_init();
 
-    if let Err(e) = env::init_shuffle() {
+    // init_shuffle starts an async HTTP server — run it inside the tokio runtime.
+    if let Err(e) = env::Env::run_in_async_rt(|| env::init_shuffle(&config)) {
         log::warn!("shuffle service could not start on worker: {e}");
     }
 
-    let result = env::Configuration::get()
-        .slave
+    let result = config
+        .worker
         .as_ref()
-        .map(|c| c.port)
-        .ok_or(Error::GetOrCreateConfig("executor port not configured — set VEGA_SLAVE_PORT"))
-        .and_then(|port| {
-            let executor = Arc::new(Executor::new(port));
+        .map(|w| (w.port, w.max_concurrent_tasks))
+        .ok_or(Error::GetOrCreateConfig(
+            "start_worker called without a WorkerConfig — use Config::worker(ip, port)",
+        ))
+        .and_then(|(port, max_tasks)| {
+            let executor = Arc::new(Executor::new(port, max_tasks));
             executor.worker()
         });
 

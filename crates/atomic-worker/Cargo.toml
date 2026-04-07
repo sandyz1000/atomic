@@ -16,9 +16,8 @@ name = "atomic-worker"
 path = "src/main.rs"
 
 [dependencies]
-# The `udf` feature enables both `python-udf` (PyO3 auto-initialize) and
-# `js-udf` (rquickjs) inside atomic-compute. No need to repeat the direct
-# pyo3/rquickjs deps here — they are pulled in transitively.
+# The `udf` feature enables both `python-udf` (PyO3) and `js-udf` (QuickJS) inside
+# atomic-compute. Dependencies are pulled in transitively.
 atomic-compute = { workspace = true, features = ["udf"] }
 tokio = { workspace = true }
 env_logger = { workspace = true }

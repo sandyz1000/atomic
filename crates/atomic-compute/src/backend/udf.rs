@@ -1,7 +1,11 @@
 //! UDF execution backends — Python (via PyO3) and JavaScript (via QuickJS).
 //!
 //! Both backends implement the [`UdfExecutor`] trait, which executes a single
-//! pipeline op over JSON-encoded partition data.
+//! pipeline op over JSON-encoded partition data. Workers embed both runtimes so
+//! they can evaluate UDF payloads sent by drivers:
+//!
+//! - Python: driver `pickle.dumps(lambda)` → worker eval via embedded CPython
+//! - JavaScript: driver `fn.toString()` → worker eval via embedded QuickJS
 //!
 //! # Feature flags
 //!
@@ -343,16 +347,21 @@ impl UdfExecutor for PythonUdfExecutor {
 
 // ── JavaScript UDF ────────────────────────────────────────────────────────────
 
-/// Executes JavaScript UDF pipeline ops via QuickJS (embedded via rquickjs).
+/// Executes JavaScript UDF pipeline ops via an embedded QuickJS runtime.
 ///
-/// Requires the `js-udf` crate feature.
+/// Workers receive a [`JsUdfPayload`] containing the function's source string
+/// (captured by `fn.toString()` in the napi module). QuickJS evaluates it and
+/// returns JSON-encoded results — identical to how Python workers evaluate
+/// pickled lambdas via PyO3.
+///
+/// Requires the `js-udf` crate feature (enabled automatically via `udf`).
+///
+/// [`JsUdfPayload`]: atomic_data::distributed::JsUdfPayload
 pub struct JsUdfExecutor;
 
 #[cfg(feature = "js-udf")]
 impl UdfExecutor for JsUdfExecutor {
     fn execute(&self, action: UdfAction, payload: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
-        use atomic_data::distributed::JsUdfPayload;
-
         let spec = Self::decode_payload(payload)?;
         let data_str = std::str::from_utf8(data).map_err(|e| format!("data utf8: {e}"))?;
         let script = Self::build_script(action, &spec, data_str);
@@ -369,8 +378,8 @@ impl JsUdfExecutor {
 
     /// Build the QuickJS eval script for the given action.
     ///
-    /// All data encoding/decoding stays inside the script so the QuickJS
-    /// context handles only strings — no Rust↔JS type conversion needed.
+    /// All data encoding/decoding stays inside the script — the QuickJS context
+    /// handles only strings, so no Rust↔JS type marshalling is needed.
     fn build_script(
         action: UdfAction,
         spec: &atomic_data::distributed::JsUdfPayload,
@@ -439,6 +448,7 @@ impl UdfExecutor for JsUdfExecutor {
         _payload: &[u8],
         _data: &[u8],
     ) -> Result<Vec<u8>, String> {
-        Err("js-udf feature not enabled in this build; use the atomic-worker binary".to_string())
+        Err("js-udf feature not enabled; build atomic-worker with the udf feature".to_string())
     }
 }
+

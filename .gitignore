@@ -26,3 +26,6 @@ target
 /target
 
 /notes
+
+.venv
+node_modules

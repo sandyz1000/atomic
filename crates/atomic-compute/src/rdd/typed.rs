@@ -6,9 +6,8 @@ use crate::rdd::mapper::MapperRdd;
 use crate::rdd::parallel_collection::ParallelCollection;
 use crate::task_traits::{BinaryTask, UnaryTask};
 use atomic_data::dependency::Dependency;
-use atomic_data::distributed::{PipelineOp, TaskAction, WireDecode, WireEncode};
+use atomic_data::distributed::{PipelineOp, TaskAction, TaskEnvelope, WireDecode, WireEncode};
 use atomic_data::error::BaseError;
-use atomic_data::fn_traits::{RddFlatMapFn, RddFn};
 use atomic_data::partitioner::Partitioner;
 
 use crate::rdd::{Data, Rdd, RddBase};
@@ -180,69 +179,8 @@ where
 // TRANSFORMATION METHODS - These are the preferred API for TypedRdd
 // ============================================================================
 
-impl<T: Data> TypedRdd<T> {
-    /// Apply a function to each element, returning a new TypedRdd with transformed elements.
-    ///
-    /// This is a narrow transformation (no shuffle).
-    ///
-    /// # Example
-    /// ```ignore
-    /// let rdd = context.parallelize_typed(vec![1, 2, 3]);
-    /// let doubled = rdd.map(|x| x * 2);
-    /// ```
-    pub fn map<U, F>(self, f: F) -> TypedRdd<U>
-    where
-        U: Data + Clone,
-        F: RddFn<T, U>,
-    {
-        let id = self.context.new_rdd_id();
-        let mapped_rdd = MapperRdd::new(id, self.rdd, f);
-        TypedRdd::new(Arc::new(mapped_rdd), self.context)
-    }
-
-    /// Filter elements using a predicate function.
-    ///
-    /// Returns a new TypedRdd containing only elements for which the predicate returns true.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let rdd = context.parallelize_typed(vec![1, 2, 3, 4, 5]);
-    /// let evens = rdd.filter(|x| x % 2 == 0);
-    /// ```
-    pub fn filter<F>(self, f: F) -> TypedRdd<T>
-    where
-        T: Clone,
-        F: Fn(&T) -> bool + Send + Sync + Clone + 'static,
-    {
-        let f = Arc::new(f);
-        let filter_fn = move |_idx: usize, iter: Box<dyn Iterator<Item = T>>| {
-            let f = Arc::clone(&f);
-            Box::new(iter.filter(move |x| f(x))) as Box<dyn Iterator<Item = T>>
-        };
-        let id = self.context.new_rdd_id();
-        let filtered_rdd = MapPartitionsRdd::new(id, self.rdd, filter_fn);
-        TypedRdd::new(Arc::new(filtered_rdd), self.context)
-    }
-
-    /// FlatMap each element to multiple elements.
-    ///
-    /// Each input element can produce zero or more output elements.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let rdd = context.parallelize_typed(vec![1, 2, 3]);
-    /// let expanded = rdd.flat_map(|x| Box::new(vec![x, x * 10].into_iter()));
-    /// ```
-    pub fn flat_map<U, F>(self, f: F) -> TypedRdd<U>
-    where
-        U: Data + Clone,
-        F: RddFlatMapFn<T, U>,
-    {
-        let id = self.context.new_rdd_id();
-        let flatmapped_rdd = FlatMapperRdd::new(id, self.rdd, f);
-        TypedRdd::new(Arc::new(flatmapped_rdd), self.context)
-    }
-}
+// map, filter, flat_map (closure-based) have been removed.
+// Use map_task, filter_task, flat_map_task with #[task] functions or task_fn! instead.
 
 // ============================================================================
 // ACTION METHODS
@@ -310,15 +248,23 @@ impl<T: Data + Clone> TypedRdd<T> {
 
     /// Take the first n elements from the RDD.
     ///
-    /// # Example
-    /// ```ignore
-    /// let first_three = rdd.take(3)?;
-    /// ```
-    pub fn take(&self, num: usize) -> Result<Vec<T>, BaseError> {
-        const SCALE_UP_FACTOR: f64 = 2.0;
+    /// In distributed mode, dispatches any staged pipeline to workers and takes
+    /// the first `n` elements from the collected results. In local mode uses a
+    /// partition-scanning strategy to minimise data read.
+    pub fn take(&self, num: usize) -> Result<Vec<T>, BaseError>
+    where
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
         if num == 0 {
             return Ok(vec![]);
         }
+        if self.context.is_distributed() {
+            let elements = self.collect_distributed()?;
+            return Ok(elements.into_iter().take(num).collect());
+        }
+        // Local: partition-scanning strategy to minimise data read.
+        const SCALE_UP_FACTOR: f64 = 2.0;
         let mut buf = vec![];
         let total_parts = self.num_partitions() as u32;
         let mut parts_scanned = 0_u32;
@@ -364,7 +310,11 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Get the first element of the RDD.
     ///
     /// Returns an error if the RDD is empty.
-    pub fn first(&self) -> Result<T, BaseError> {
+    pub fn first(&self) -> Result<T, BaseError>
+    where
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
         if let Some(result) = self.take(1)?.into_iter().next() {
             Ok(result)
         } else {
@@ -372,67 +322,39 @@ impl<T: Data + Clone> TypedRdd<T> {
         }
     }
 
-    /// Reduce the elements using an associative and commutative function.
-    pub fn reduce<F>(&self, f: F) -> Result<Option<T>, BaseError>
-    where
-        F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
-    {
-        let f_clone = f.clone();
-        let reduce_partition = move |iter: Box<dyn Iterator<Item = T>>| {
-            let acc = iter.reduce(&f_clone);
-            match acc {
-                None => vec![],
-                Some(e) => vec![e],
-            }
-        };
-        let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
-        Ok(results.into_iter().flatten().reduce(f))
-    }
-
-    /// Fold/aggregate the elements using an initial value and associative function.
-    pub fn fold<F>(&self, init: T, f: F) -> Result<T, BaseError>
-    where
-        F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
-    {
-        let f_clone = f.clone();
-        let zero = init.clone();
-        let reduce_partition =
-            move |iter: Box<dyn Iterator<Item = T>>| iter.fold(zero.clone(), &f_clone);
-        let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
-        Ok(results.into_iter().fold(init, f))
-    }
+    // reduce and fold (closure-based) have been removed.
+    // Use reduce_task and fold_task with #[task] functions or task_fn! instead.
 
     /// Check if the RDD is empty.
-    pub fn is_empty(&self) -> Result<bool, BaseError> {
+    pub fn is_empty(&self) -> Result<bool, BaseError>
+    where
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        if self.context.is_distributed() {
+            let elements = self.collect_distributed()?;
+            return Ok(elements.is_empty());
+        }
         Ok(self.take(1)?.is_empty())
     }
 
     /// Aggregate elements with different accumulator and result types.
     ///
-    /// This is a more general version of fold that allows different types for
-    /// the accumulator (U) and the elements (T).
-    ///
-    /// # Arguments
-    /// * `init` - Initial value for the accumulator
-    /// * `seq_fn` - Function to accumulate results within a partition (U, T) -> U
-    /// * `comb_fn` - Function to combine results from different partitions (U, U) -> U
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Sum of squares
-    /// let sum_of_squares = rdd.aggregate(
-    ///     0,
-    ///     |acc, x| acc + x * x,  // seq_fn: accumulate within partition
-    ///     |acc1, acc2| acc1 + acc2,  // comb_fn: combine partitions
-    /// )?;
-    /// ```
-    /// Aggregate elements with different accumulator and result types.
+    /// In distributed mode, collects all elements from workers then applies
+    /// `seq_fn` on the driver. `comb_fn` is unused in distributed mode since
+    /// all elements are aggregated in a single pass on the driver.
     pub fn aggregate<U, SF, CF>(&self, init: U, seq_fn: SF, comb_fn: CF) -> Result<U, BaseError>
     where
         U: Data + Clone,
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
         SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
         CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
     {
+        if self.context.is_distributed() {
+            let elements = self.collect_distributed()?;
+            return Ok(elements.into_iter().fold(init, seq_fn));
+        }
         let zero = init.clone();
         let reduce_partition =
             move |iter: Box<dyn Iterator<Item = T>>| iter.fold(zero.clone(), &seq_fn);
@@ -442,14 +364,19 @@ impl<T: Data + Clone> TypedRdd<T> {
 
     /// Apply a function to each element (for side effects).
     ///
-    /// # Example
-    /// ```ignore
-    /// rdd.for_each(|x| println!("{}", x))?;
-    /// ```
+    /// In distributed mode, collects all elements from workers and applies `f`
+    /// on the driver. The function runs on the driver, not on workers.
     pub fn for_each<F>(&self, f: F) -> Result<(), BaseError>
     where
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
         F: Fn(&T) + Clone + Send + Sync + 'static,
     {
+        if self.context.is_distributed() {
+            let elements = self.collect_distributed()?;
+            elements.iter().for_each(|x| f(x));
+            return Ok(());
+        }
         let for_each_partition = move |iter: Box<dyn Iterator<Item = T>>| {
             iter.for_each(|x| f(&x));
         };
@@ -459,33 +386,43 @@ impl<T: Data + Clone> TypedRdd<T> {
 
     /// Apply a function to each partition (for side effects).
     ///
-    /// # Example
-    /// ```ignore
-    /// rdd.for_each_partition(|iter| {
-    ///     for x in iter {
-    ///         println!("{}", x);
-    ///     }
-    /// })?;
-    /// ```
+    /// In distributed mode, collects all elements from workers and passes them
+    /// as a single iterator to `f` on the driver (partition boundaries are not
+    /// preserved across the wire).
     pub fn for_each_partition<F>(&self, f: F) -> Result<(), BaseError>
     where
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
         F: Fn(Box<dyn Iterator<Item = T>>) + Clone + Send + Sync + 'static,
     {
+        if self.context.is_distributed() {
+            let elements = self.collect_distributed()?;
+            f(Box::new(elements.into_iter()));
+            return Ok(());
+        }
         self.context.run_job(self.rdd.clone(), f)?;
         Ok(())
     }
 
     /// Count the number of occurrences of each unique value.
     ///
-    /// # Example
-    /// ```ignore
-    /// let counts = rdd.count_by_value()?;
-    /// ```
+    /// In distributed mode, collects all elements from workers then counts on
+    /// the driver.
     pub fn count_by_value(&self) -> Result<std::collections::HashMap<T, u64>, BaseError>
     where
-        T: Eq + std::hash::Hash + Clone,
+        T: Eq + std::hash::Hash + Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
     {
         use std::collections::HashMap;
+
+        if self.context.is_distributed() {
+            let elements = self.collect_distributed()?;
+            let mut counts = HashMap::new();
+            for item in elements {
+                *counts.entry(item).or_insert(0) += 1;
+            }
+            return Ok(counts);
+        }
 
         let count_partition = move |iter: Box<dyn Iterator<Item = T>>| {
             let mut counts = HashMap::new();
@@ -586,53 +523,55 @@ impl<T: Data + Clone> TypedRdd<T> {
 
     /// Return the top k elements in descending order.
     ///
-    /// # Example
-    /// ```ignore
-    /// let top_5 = rdd.top(5)?;
-    /// ```
+    /// In distributed mode, collects all elements from workers then sorts on the driver.
     pub fn top(&self, k: usize) -> Result<Vec<T>, BaseError>
     where
-        T: Ord + Clone,
+        T: Ord + Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
     {
+        if self.context.is_distributed() {
+            let mut all_items = self.collect_distributed()?;
+            all_items.sort_by(|a, b| b.cmp(a));
+            all_items.truncate(k);
+            return Ok(all_items);
+        }
         let top_partition = move |iter: Box<dyn Iterator<Item = T>>| {
             let mut items: Vec<T> = iter.collect();
-            items.sort_by(|a, b| b.cmp(a)); // Descending
+            items.sort_by(|a, b| b.cmp(a));
             items.truncate(k);
             items
         };
-
         let partition_tops = self.context.run_job(self.rdd.clone(), top_partition)?;
-
         let mut all_items: Vec<T> = partition_tops.into_iter().flatten().collect();
         all_items.sort_by(|a, b| b.cmp(a));
         all_items.truncate(k);
-
         Ok(all_items)
     }
 
     /// Return the first k elements in ascending order.
     ///
-    /// # Example
-    /// ```ignore
-    /// let ordered = rdd.take_ordered(5)?;
-    /// ```
+    /// In distributed mode, collects all elements from workers then sorts on the driver.
     pub fn take_ordered(&self, k: usize) -> Result<Vec<T>, BaseError>
     where
-        T: Ord + Clone,
+        T: Ord + Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
     {
+        if self.context.is_distributed() {
+            let mut all_items = self.collect_distributed()?;
+            all_items.sort();
+            all_items.truncate(k);
+            return Ok(all_items);
+        }
         let take_partition = move |iter: Box<dyn Iterator<Item = T>>| {
             let mut items: Vec<T> = iter.collect();
-            items.sort(); // Ascending
+            items.sort();
             items.truncate(k);
             items
         };
-
         let partition_tops = self.context.run_job(self.rdd.clone(), take_partition)?;
-
         let mut all_items: Vec<T> = partition_tops.into_iter().flatten().collect();
         all_items.sort();
         all_items.truncate(k);
-
         Ok(all_items)
     }
 }
@@ -900,37 +839,25 @@ where
     V: Data + Clone,
 {
     /// Extract just the keys from a pair RDD.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let keys = pair_rdd.keys();
-    /// ```
     pub fn keys(self) -> TypedRdd<K> {
-        self.map(|(k, _v)| k)
+        let id = self.context.new_rdd_id();
+        TypedRdd::new(Arc::new(MapperRdd::new(id, self.rdd, |(k, _v)| k)), self.context)
     }
 
     /// Extract just the values from a pair RDD.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let values = pair_rdd.values();
-    /// ```
     pub fn values(self) -> TypedRdd<V> {
-        self.map(|(_k, v)| v)
+        let id = self.context.new_rdd_id();
+        TypedRdd::new(Arc::new(MapperRdd::new(id, self.rdd, |(_k, v)| v)), self.context)
     }
 
     /// Transform only the values in a pair RDD, keeping the keys unchanged.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let mapped = pair_rdd.map_values(|v| v * 2);
-    /// ```
     pub fn map_values<U, F>(self, f: F) -> TypedRdd<(K, U)>
     where
         U: Data + Clone,
         F: Fn(V) -> U + Clone + Send + Sync + 'static,
     {
-        self.map(move |(k, v)| (k, f(v)))
+        let id = self.context.new_rdd_id();
+        TypedRdd::new(Arc::new(MapperRdd::new(id, self.rdd, move |(k, v)| (k, f(v)))), self.context)
     }
 
     /// Reduce values for each key using an associative function.
@@ -1094,10 +1021,14 @@ impl<T: Data> TypedRdd<T> {
         T: Clone,
         F: Fn(&T) -> K + Clone + Send + Sync + 'static,
     {
-        self.map(move |x| {
-            let key = f(&x);
-            (key, x)
-        })
+        let id = self.context.new_rdd_id();
+        TypedRdd::new(
+            Arc::new(MapperRdd::new(id, self.rdd, move |x| {
+                let key = f(&x);
+                (key, x)
+            })),
+            self.context,
+        )
     }
 
     /// Convert each element to a string and save to a text file.
@@ -1344,6 +1275,93 @@ where
 
         // Combine per-partition fold results via Reduce on the driver.
         Ok(partition_values.into_iter().reduce(F::call).unwrap_or(init))
+    }
+
+    /// Reduce all elements using a `#[task]`-registered binary function.
+    ///
+    /// Works identically in **local** and **distributed** mode. Returns `None`
+    /// if the RDD is empty. Prefer [`fold_task`] when a known identity value exists.
+    ///
+    /// In distributed mode, dispatches the full staged pipeline (if any) plus a
+    /// `Reduce` op to workers; each partition is reduced to a single element.
+    /// The driver then combines the per-partition results with a second local Reduce.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let total = ctx.parallelize_typed(data, 2).reduce_task(task_fn!(|a: i32, b: i32| a + b))?;
+    /// ```
+    pub fn reduce_task<F>(&self, _task: F) -> Result<Option<T>, BaseError>
+    where
+        F: BinaryTask<T>,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        if !self.context.is_distributed() {
+            // Local: reduce within each partition, then reduce across partitions.
+            let reduce_partition = |iter: Box<dyn Iterator<Item = T>>| {
+                iter.reduce(F::call).into_iter().collect::<Vec<_>>()
+            };
+            let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
+            return Ok(results.into_iter().flatten().reduce(F::call));
+        }
+
+        let reduce_op = PipelineOp {
+            op_id: F::NAME.to_string(),
+            action: TaskAction::Reduce,
+            payload: vec![],
+        };
+
+        let (source_partitions, mut ops) = match &self.staged {
+            None => {
+                let src = Context::encode_rdd_partitions(self.rdd.clone())
+                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                (src, vec![])
+            }
+            Some(s) => (s.source_partitions.clone(), s.ops.clone()),
+        };
+        ops.push(reduce_op);
+
+        let partition_results_raw = self
+            .context
+            .dispatch_pipeline(source_partitions, ops)
+            .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+
+        let mut values: Vec<T> = partition_results_raw
+            .into_iter()
+            .map(|b| T::decode_wire(&b).map_err(|e| BaseError::DowncastFailure(e.to_string())))
+            .collect::<Result<_, _>>()?;
+
+        match values.len() {
+            0 => Ok(None),
+            1 => Ok(Some(values.remove(0))),
+            _ => {
+                // Combine per-partition results via a second driver-local Reduce.
+                let combined = values.encode_wire()
+                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                let driver_ops = vec![PipelineOp {
+                    op_id: F::NAME.to_string(),
+                    action: TaskAction::Reduce,
+                    payload: vec![],
+                }];
+                let task = TaskEnvelope::new(
+                    0, 0, 0, 0, 0,
+                    "driver-reduce".to_string(),
+                    driver_ops,
+                    combined,
+                );
+                let result = crate::backend::NativeBackend::default()
+                    .execute("local-driver", &task)
+                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                match result.status {
+                    atomic_data::distributed::ResultStatus::Success =>
+                        T::decode_wire(&result.data)
+                            .map(Some)
+                            .map_err(|e| BaseError::DowncastFailure(e.to_string())),
+                    _ => Err(BaseError::DowncastFailure(
+                        result.error.unwrap_or_else(|| "reduce_task failed".to_string()),
+                    )),
+                }
+            }
+        }
     }
 
     /// Build (or extend) a `StagedPipeline` for distributed lazy dispatch.

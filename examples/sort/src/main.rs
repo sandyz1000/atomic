@@ -1,15 +1,14 @@
-/// Distributed sort — demonstrates per-partition sort + k-way merge on the driver.
+/// Per-partition sort + k-way merge on the driver.
 ///
 /// Each partition sorts its own elements independently (narrow transformation).
 /// The driver merges sorted partition outputs into a globally sorted sequence.
 ///
-/// Run locally:
-///   cargo run --manifest-path examples/sort/Cargo.toml
+/// **Local-only example**: the merge-sort strategy uses closures that cannot
+/// be expressed as registered `#[task]` functions and cannot be dispatched
+/// to remote workers. Use `Context::local()` for this example.
 ///
-/// Run distributed (after `atomic deploy`):
-///   ATOMIC_DEPLOYMENT_MODE=distributed ATOMIC_IS_DRIVER=true \
-///   ATOMIC_SLAVES=host1@10.0.0.1 \
-///   cargo run --manifest-path examples/sort/Cargo.toml
+/// Run locally:
+///   cargo run -p sort
 use atomic_compute::context::Context;
 
 #[tokio::main]
