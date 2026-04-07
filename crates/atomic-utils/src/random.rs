@@ -1,4 +1,4 @@
-use rand::{Rng, RngExt, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_distr::{Distribution, Poisson};
 use rand_pcg::Pcg64;
 
@@ -125,7 +125,7 @@ pub struct BernoulliSampler {
 
 impl BernoulliSampler {
     pub fn new(fraction: f64) -> BernoulliSampler {
-        assert!(fraction >= (0.0 - ROUNDING_EPSILON) && fraction <= (1.0 + ROUNDING_EPSILON));
+        assert!(((0.0 - ROUNDING_EPSILON)..=(1.0 + ROUNDING_EPSILON)).contains(&fraction));
         BernoulliSampler { fraction }
     }
 

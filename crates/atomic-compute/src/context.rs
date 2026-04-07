@@ -13,7 +13,7 @@ use atomic_data::distributed::{
 };
 use atomic_data::partial::ApproximateEvaluator;
 use atomic_data::partial::result::PartialResult;
-use atomic_data::rdd::Rdd;
+use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::task_context::TaskContext;
 use atomic_scheduler::{DistributedScheduler, LocalScheduler, Schedulers};
 use atomic_utils::clean_up_work_dir;
@@ -99,8 +99,8 @@ impl Context {
     pub fn new() -> Result<Arc<Self>, Error> {
         let mut config = Config::from_env();
         // In env-var mode, load workers from hosts.conf for distributed drivers.
-        if config.mode == DeploymentMode::Distributed && config.workers.is_empty() {
-            if let Ok(hosts) = hosts::Hosts::get() {
+        if config.mode == DeploymentMode::Distributed && config.workers.is_empty()
+            && let Ok(hosts) = hosts::Hosts::get() {
                 config.workers = hosts.slaves
                     .iter()
                     .filter_map(|s| {
@@ -109,7 +109,6 @@ impl Context {
                     })
                     .collect();
             }
-        }
         Context::new_with_config(config)
     }
 
@@ -536,7 +535,7 @@ impl Context {
             reduce_ops,
             combined_data,
         );
-        let result = NativeBackend::default().execute("local-driver", &task)?;
+        let result = NativeBackend.execute("local-driver", &task)?;
         match result.status {
             ResultStatus::Success => T::decode_wire(&result.data).map_err(Error::from),
             _ => Err(Error::InvalidPayload(
@@ -558,7 +557,7 @@ impl Context {
     ) -> Result<Vec<Vec<u8>>, Error> {
         match &self.scheduler {
             Schedulers::Local(_) => {
-                let backend = NativeBackend::default();
+                let backend = NativeBackend;
                 source_partitions
                     .into_iter()
                     .enumerate()
@@ -601,6 +600,71 @@ impl Context {
                 items.encode_wire().map_err(Error::from)
             })
             .collect()
+    }
+
+/// In distributed mode, find all pending `ShuffleDependency` nodes in the DAG,
+    /// run their map stages on remote workers, and register all shuffle server URIs
+    /// with `MapOutputTracker`.
+    ///
+    /// After this returns, `ShuffleFetcher::fetch()` can read the shuffle data from
+    /// workers via HTTP — enabling the reduce phase to run on the driver.
+    ///
+    /// # Arguments
+    /// - `rdd`: the RDD whose shuffle dependencies should be computed on workers
+    ///          (e.g. the parent of a `ShuffledRdd`).
+    /// - `preceding_ops`: staged `PipelineOp`s from prior `_task` transforms that
+    ///                     should run on workers *before* the shuffle-write op.
+    pub fn run_pending_shuffle_stages(
+        self: &Arc<Self>,
+        rdd: &Arc<dyn RddBase>,
+        preceding_ops: Vec<PipelineOp>,
+    ) -> Result<(), Error> {
+        use atomic_data::dependency::Dependency;
+
+        let sched = match &self.scheduler {
+            Schedulers::Distributed(s) => s.clone(),
+            Schedulers::Local(_) => return Ok(()), // local mode: no-op, DAG handles it
+        };
+
+        for dep in rdd.get_dependencies() {
+            if let Dependency::Shuffle(shuffle_dep) = dep {
+                // Encode the parent RDD partitions (the shuffle map input).
+                // The typed closure on ShuffleDependencyBox rkyv-encodes Vec<(K,V)> per partition.
+                let parent_partitions = (shuffle_dep.encode_partitions)()
+                    .map_err(Error::InvalidPayload)?;
+
+                // Build the shuffle-map op. The payload carries the type_id string so
+                // the worker can look up the correct SHUFFLE_MAP_REGISTRY handler.
+                let shuffle_op = PipelineOp {
+                    op_id: format!("shuffle-map-{}", shuffle_dep.shuffle_id),
+                    action: TaskAction::ShuffleMap {
+                        shuffle_id: shuffle_dep.shuffle_id,
+                        num_output_partitions: shuffle_dep.num_output_partitions,
+                    },
+                    payload: shuffle_dep.type_id.as_bytes().to_vec(),
+                };
+
+                let mut ops = preceding_ops.clone();
+                ops.push(shuffle_op);
+
+                env::Env::run_in_async_rt(|| {
+                    futures::executor::block_on(sched.run_shuffle_map_stage(
+                        shuffle_dep.shuffle_id,
+                        ops,
+                        parent_partitions,
+                    ))
+                })
+                .map_err(Error::from)?;
+
+                log::info!(
+                    "shuffle map stage complete: shuffle_id={} num_reduce_partitions={}",
+                    shuffle_dep.shuffle_id,
+                    shuffle_dep.num_output_partitions,
+                );
+            }
+        }
+
+        Ok(())
     }
 }
 

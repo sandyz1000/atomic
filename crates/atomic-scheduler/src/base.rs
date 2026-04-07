@@ -45,7 +45,7 @@ pub trait NativeScheduler: Send + Sync {
                 .final_rdd
                 .iterator(split)
                 .map_err(|_| SchedulerError::Other)?;
-            Ok(Some(vec![(&jt.func)((task_context, iter))]))
+            Ok(Some(vec![(jt.func)((task_context, iter))]))
         } else {
             Ok(None)
         }
@@ -96,7 +96,7 @@ pub trait NativeScheduler: Send + Sync {
             for _ in 0..rdd.number_of_splits() {
                 let locs = self.get_mutators().get_cache_locs(rdd.clone());
                 log::debug!("cache locs: {:?}", locs);
-                if locs == None {
+                if locs.is_none() {
                     for dep in rdd.get_dependencies() {
                         log::debug!("for dep in missing stages ");
                         match dep {
@@ -228,7 +228,7 @@ pub trait NativeScheduler: Send + Sync {
                 let result = completed_event
                     .result
                     .take()
-                    .ok_or_else(|| SchedulerError::Other)?;
+                    .ok_or(SchedulerError::Other)?;
 
                 jt.listener.task_succeeded(rt.output_id, &*result).await?;
 
@@ -252,7 +252,7 @@ pub trait NativeScheduler: Send + Sync {
                 let shuffle_server_uri = completed_event
                     .result
                     .take()
-                    .ok_or_else(|| SchedulerError::Other)?
+                    .ok_or(SchedulerError::Other)?
                     .as_any()
                     .downcast_ref::<String>()
                     .ok_or_else(|| SchedulerError::DowncastFailure("String".to_string()))?
@@ -280,7 +280,7 @@ pub trait NativeScheduler: Send + Sync {
                         .lock()
                         .await
                         .get(&stage)
-                        .ok_or_else(|| SchedulerError::Other)?
+                        .ok_or(SchedulerError::Other)?
                         .iter()
                         .map(|x| x.get_task_id())
                         .collect::<Vec<_>>()
@@ -310,7 +310,7 @@ pub trait NativeScheduler: Send + Sync {
                         .lock()
                         .await
                         .get(&stage)
-                        .ok_or_else(|| SchedulerError::Other)?
+                        .ok_or(SchedulerError::Other)?
                         .is_empty()
                 {
                     log::debug!("started registering map outputs");
@@ -324,7 +324,7 @@ pub trait NativeScheduler: Send + Sync {
                         let locs = stage
                             .output_locs
                             .iter()
-                            .map(|x| x.get(0).map(|s| s.to_owned()))
+                            .map(|x| x.first().map(|s| s.to_owned()))
                             .collect();
                         log::debug!("locs for shuffle id #{}: {:?}", dep.get_shuffle_id(), locs);
                         m.register_map_outputs(dep.get_shuffle_id(), locs);
@@ -341,7 +341,7 @@ pub trait NativeScheduler: Send + Sync {
                             stage.id,
                             missing_stages.iter().map(|x| x.id).collect::<Vec<_>>()
                         );
-                        if missing_stages.iter().next().is_none() {
+                        if missing_stages.is_empty() {
                             newly_runnable.push(stage.clone())
                         }
                     }
@@ -442,7 +442,7 @@ pub trait NativeScheduler: Send + Sync {
                         stage
                             .shuffle_dependency
                             .clone()
-                            .ok_or_else(|| SchedulerError::Other)?,
+                            .ok_or(SchedulerError::Other)?,
                     ));
                     let shuffle_map_task = ShuffleMapTask::new(
                         m.get_next_task_id(),
@@ -515,11 +515,10 @@ pub trait NativeScheduler: Send + Sync {
 
     fn get_preferred_locs(&self, rdd: Arc<dyn RddBase>, partition: usize) -> Vec<Ipv4Addr> {
         // TODO: have to implement this completely
-        if let Some(cached) = self.get_mutators().get_cache_locs(rdd.clone()) {
-            if let Some(cached) = cached.get(partition) {
+        if let Some(cached) = self.get_mutators().get_cache_locs(rdd.clone())
+            && let Some(cached) = cached.get(partition) {
                 return cached.clone();
             }
-        }
         let rdd_prefs = rdd.preferred_locations(rdd.splits()[partition].clone());
         if !rdd.is_pinned() {
             if !rdd_prefs.is_empty() {

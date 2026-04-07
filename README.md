@@ -2,6 +2,10 @@
 
 A distributed data processing framework written in stable Rust.
 
+> **Not production-ready.** Atomic is an experimental research project. It is missing fault
+> tolerance for distributed shuffle, persistent shuffle storage, checkpointing, and a test suite
+> that covers distributed execution at scale. Do not use it in production systems.
+
 ---
 
 ## What is Atomic?
@@ -170,6 +174,43 @@ RUST_LOG=info ./target/release/atomic-worker --worker --port 10001
 - Python/JS UDFs are the explicit escape hatch for dynamic code. They go through a clearly bounded path (`PythonUdf` / `JavaScriptUdf` actions) with their own serialization format (JSON data, pickle/source function encoding).
 - rkyv is used for the Rust native path; JSON is used for the Python/JS path. Both sides can encode and decode their own format without sharing a schema.
 - `atomic-py` is a `cdylib` — it must be built with `maturin`, not `cargo build`. `atomic-worker` must be excluded from `cargo test --workspace` because it activates PyO3's `auto-initialize` feature which requires linking against libpython.
+
+---
+
+## Future Work
+
+### Performance comparison with Apache Spark
+
+Atomic has not been benchmarked against Spark. A meaningful comparison would cover:
+
+- **Throughput** — GB/s of data processed through a multi-stage pipeline (map → shuffle → reduce).
+- **Latency** — time-to-first-result for small interactive jobs.
+- **Memory efficiency** — Spark uses JVM GC pressure and off-heap tricks; Atomic uses Rust's ownership model with rkyv zero-copy reads. Rust's allocator should win on per-partition memory, but the JVM's JIT can close gaps on CPU-bound transforms.
+- **Worker startup cost** — JVM startup is slow; Rust workers start in milliseconds. This matters for short-lived jobs.
+
+Atomic is likely faster for small-to-medium jobs on CPU-bound workloads where JVM overhead dominates. Spark has the advantage for very large jobs where its DAG optimizer, speculative execution, and dynamic resource management offset startup costs.
+
+### Features missing compared to Apache Spark
+
+| Feature | Spark | Atomic |
+| ------- | ----- | ------ |
+| SQL / DataFrame API | `spark.sql(...)`, `DataFrame` | Not implemented |
+| Structured Streaming | `readStream` / `writeStream` | Not implemented |
+| MLlib | Built-in ML library | Not implemented |
+| GraphX | Graph processing | Not implemented |
+| Adaptive Query Execution | Automatic partition coalescing | Not implemented |
+| Broadcast variables | Driver → all workers, one copy | Not implemented |
+| Accumulators | Distributed counters | Not implemented |
+| Dynamic resource allocation | Elastic worker count | Not implemented |
+| Speculative execution | Re-runs slow tasks | Not implemented |
+| Checkpointing | Truncate long RDD lineage | Not implemented |
+| Fault recovery for shuffle | Re-run lost shuffle-map partitions | Not implemented |
+| Persistent shuffle storage | Disk spill when shuffle exceeds memory | Not implemented |
+| Web UI / metrics | Stage/task timing dashboard | Not implemented |
+| Kerberos / SASL auth | Secure cluster communication | Not implemented |
+| HDFS / S3 / GCS connectors | Cloud storage integration | Not implemented |
+
+Most of these are engineering work, not architectural blockers. The RDD model Atomic uses is the same foundation Spark built on before adding DataFrame and Streaming layers.
 
 ---
 

@@ -123,10 +123,7 @@ impl From<ShuffleError> for Response<Body> {
 
 impl ShuffleError {
     pub fn no_port(&self) -> bool {
-        match self {
-            ShuffleError::NetworkError(NetworkError::FreePortNotFound(_, _)) => true,
-            _ => false,
-        }
+        matches!(self, ShuffleError::NetworkError(NetworkError::FreePortNotFound(_, _)))
     }
 }
 

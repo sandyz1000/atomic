@@ -77,7 +77,7 @@ impl MapOutputTracker {
         );
 
         // Serialize the shuffle_id request
-        let shuffle_id_bytes = bincode::encode_to_vec(&shuffle_id, bincode::config::standard())
+        let shuffle_id_bytes = bincode::encode_to_vec(shuffle_id, bincode::config::standard())
             .map_err(NetworkError::from)?;
 
         // Connect to master with retry
@@ -241,7 +241,7 @@ impl MapOutputTracker {
                                     kv.value()
                                         .iter()
                                         .cloned()
-                                        .filter_map(|x| x)
+                                        .flatten()
                                         .collect::<Vec<_>>()
                                 })
                                 .unwrap_or_default();
@@ -336,8 +336,7 @@ impl MapOutputTracker {
         if self
             .server_uris
             .get(&shuffle_id)
-            .map(|some| some.iter().filter_map(|x| x.clone()).next())
-            .flatten()
+            .and_then(|some| some.iter().find_map(|x| x.clone()))
             .is_none()
         {
             if self.fetching.contains(&shuffle_id) {
@@ -350,8 +349,7 @@ impl MapOutputTracker {
                     .get(&shuffle_id)
                     .ok_or_else(|| MapOutputError::ShuffleIdNotFound(shuffle_id))?
                     .iter()
-                    .filter(|x| !x.is_none())
-                    .map(|x| x.clone().unwrap())
+                    .filter_map(|x| x.clone())
                     .collect::<Vec<_>>();
                 log::debug!("returning after fetching done, return: {:?}", servers);
                 return Ok(servers);
@@ -374,8 +372,7 @@ impl MapOutputTracker {
                 .get(&shuffle_id)
                 .ok_or_else(|| MapOutputError::ShuffleIdNotFound(shuffle_id))?
                 .iter()
-                .filter(|x| !x.is_none())
-                .map(|x| x.clone().unwrap())
+                .filter_map(|x| x.clone())
                 .collect())
         }
     }

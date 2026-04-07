@@ -5,7 +5,7 @@ use rand::{Rng, RngExt};
 
 
 /// Shuffle the elements of a vec into a random order in place, modifying it.
-pub fn randomize_in_place<T, R>(iter: &mut Vec<T>, rand: &mut R)
+pub fn randomize_in_place<T, R>(iter: &mut [T], rand: &mut R)
 where
     R: Rng,
 {
@@ -25,13 +25,13 @@ pub fn get_dynamic_port() -> u16 {
 pub fn clean_up_work_dir(work_dir: &Path, log_cleanup: bool) {
     if log_cleanup {
         // Remove created files.
-        if fs::remove_dir_all(&work_dir).is_err() {
+        if fs::remove_dir_all(work_dir).is_err() {
             log::error!("failed removing tmp work dir: {}", work_dir.display());
         }
     } else if let Ok(dir) = fs::read_dir(work_dir) {
         for e in dir {
-            if let Ok(p) = e {
-                if let Ok(m) = p.metadata() {
+            if let Ok(p) = e
+                && let Ok(m) = p.metadata() {
                     if m.is_dir() {
                         fs::remove_dir_all(p.path());
                     } else {
@@ -45,7 +45,6 @@ pub fn clean_up_work_dir(work_dir: &Path, log_cleanup: bool) {
                         }
                     }
                 }
-            }
         }
     }
 }

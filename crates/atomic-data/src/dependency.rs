@@ -2,6 +2,7 @@ use bincode::Encode;
 
 use crate::aggregator::Aggregator;
 use crate::data::Data;
+use crate::distributed::WireEncode;
 // use crate::env;
 use crate::partitioner::Partitioner;
 use crate::rdd::RddBase;
@@ -148,7 +149,18 @@ pub struct ShuffleDependencyBox {
     pub rdd_base: Arc<dyn RddBase>,
     pub is_cogroup: bool,
     pub num_output_partitions: usize,
-    // Type-erased executor: stores a closure that runs the actual shuffle task
+    /// Identifies the registered `SHUFFLE_MAP_REGISTRY` handler for the `(K, V)` type pair.
+    ///
+    /// Set to `std::any::type_name::<(K, V)>()` when the dependency is created.
+    /// Workers look this up to find the correctly-typed shuffle-write function.
+    /// Required for distributed shuffle; unused in local mode.
+    pub type_id: &'static str,
+    /// Encodes all parent RDD partitions as rkyv bytes (one `Vec<u8>` per partition).
+    ///
+    /// Used by the driver in distributed mode to build the shuffle-map `TaskEnvelope`
+    /// sent to workers. Captures the typed parent RDD so encoding is exact.
+    pub encode_partitions: Arc<dyn Fn() -> Result<Vec<Vec<u8>>, String> + Send + Sync>,
+    // Type-erased executor: stores a closure that runs the actual shuffle task (local mode)
     do_shuffle: Arc<dyn Fn(usize) -> String + Send + Sync>,
 }
 
@@ -182,7 +194,7 @@ impl ShuffleDependencyBox {
 
 impl PartialOrd for ShuffleDependencyBox {
     fn partial_cmp(&self, other: &ShuffleDependencyBox) -> Option<Ordering> {
-        Some(self.shuffle_id.cmp(&other.shuffle_id))
+        Some(self.cmp(other))
     }
 }
 
@@ -337,15 +349,35 @@ where
     K: Data + Eq + Hash + Encode + Clone,
     V: Data + Clone,
     C: Data + Encode + Clone,
+    Vec<(K, V)>: WireEncode,
 {
     fn from(dep: Arc<ShuffleDependency<K, V, C>>) -> Self {
         let cloned = Arc::clone(&dep);
+
+        // Capture the typed RDD so partitions can be rkyv-encoded for workers.
+        let enc_rdd = dep.rdd.clone();
+        let encode_partitions: Arc<dyn Fn() -> Result<Vec<Vec<u8>>, String> + Send + Sync> =
+            Arc::new(move || {
+                enc_rdd
+                    .splits()
+                    .iter()
+                    .map(|split| {
+                        let items: Vec<(K, V)> = enc_rdd
+                            .compute(split.clone())
+                            .map_err(|e| format!("encode partition: {e}"))?
+                            .collect();
+                        items.encode_wire().map_err(|e| format!("encode wire: {e}"))
+                    })
+                    .collect()
+            });
 
         ShuffleDependencyBox {
             shuffle_id: dep.shuffle_id,
             rdd_base: dep.rdd.get_rdd_base(),
             is_cogroup: dep.is_cogroup_flag,
             num_output_partitions: dep.partitioner.get_num_of_partitions(),
+            type_id: std::any::type_name::<(K, V)>(),
+            encode_partitions,
             do_shuffle: Arc::new(move |partition| cloned.do_shuffle_task_typed(partition)),
         }
     }

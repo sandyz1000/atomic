@@ -53,9 +53,9 @@ where
     let final_value = &mut *this.final_value.lock();
     let failure = &mut *this.failure.lock();
     if final_value.is_some() {
-        Ok(final_value.take().ok_or_else(|| PartialJobError::None)?)
+        Ok(final_value.take().ok_or(PartialJobError::None)?)
     } else {
-        Err(failure.take().ok_or_else(|| PartialJobError::None)?)
+        Err(failure.take().ok_or(PartialJobError::None)?)
     }
 }
 

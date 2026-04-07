@@ -113,6 +113,6 @@ impl<T: Data + Clone, U: Data + Clone> Rdd for CartesianRdd<T, U> {
         let iter1 = self.rdd1.iterator(current_split.s1.clone())?;
         // required because iter2 must be clonable:
         let iter2: Vec<_> = self.rdd2.iterator(current_split.s2.clone())?.collect();
-        Ok(Box::new(iter1.cartesian_product(iter2.into_iter())))
+        Ok(Box::new(iter1.cartesian_product(iter2)))
     }
 }

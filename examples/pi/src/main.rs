@@ -17,11 +17,12 @@
 /// ```bash
 /// cargo build -p pi --release
 /// ./target/release/pi --worker --port 10001
+/// /// ./target/release/pi --worker --port 10002
 /// ```
 ///
 /// Terminal 2 — run the driver:
 /// ```bash
-/// ./target/release/pi --workers 127.0.0.1:10001
+/// ./target/release/pi --workers 127.0.0.1:10001,127.0.0.1:10002
 /// ```
 use atomic_compute::app::AtomicApp;
 use atomic_compute::task;

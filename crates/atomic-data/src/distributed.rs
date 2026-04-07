@@ -85,9 +85,7 @@ where
     T: for<'a> RkyvSerialize<RkyvWireSerializer<'a>>,
 {
     fn encode_wire(&self) -> BaseResult<Vec<u8>> {
-        rkyv::to_bytes::<Error>(self)
-            .map(|bytes| bytes.to_vec())
-            .map_err(|err| BaseError::Other(err.to_string()))
+        Ok(rkyv::to_bytes::<Error>(self)?.to_vec())
     }
 }
 
@@ -98,7 +96,7 @@ where
         + RkyvDeserialize<T, RkyvWireStrategy>,
 {
     fn decode_wire(bytes: &[u8]) -> BaseResult<Self> {
-        rkyv::from_bytes::<T, Error>(bytes).map_err(|err| BaseError::Other(err.to_string()))
+        Ok(rkyv::from_bytes::<T, Error>(bytes)?)
     }
 }
 
@@ -141,7 +139,10 @@ pub enum TaskAction {
     /// Collect all elements from partition (identity pass-through).
     Collect,
     /// Shuffle map phase: repartition elements by key into `num_output_partitions` buckets.
-    ShuffleMap { shuffle_id: usize, num_output_partitions: usize },
+    ShuffleMap {
+        shuffle_id: usize,
+        num_output_partitions: usize,
+    },
     /// Execute a Python UDF with the given operation.
     /// `payload` is a serde_json-encoded [`PythonUdfPayload`].
     /// Partition `data` is a JSON-encoded `Vec` of elements.
@@ -157,7 +158,16 @@ pub enum TaskAction {
 /// Embedded directly in [`TaskAction::PythonUdf`] and [`TaskAction::JavaScriptUdf`] so
 /// the UDF runtime does not need to store a separate action string in the payload.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Serialize,
+    Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum UdfAction {
@@ -387,7 +397,8 @@ mod tests {
 
     #[test]
     fn task_result_envelope_ok_round_trips() {
-        let result = TaskResultEnvelope::ok(1, 2, 3, 0, 0, "worker-1".to_string(), vec![4, 5, 6], None);
+        let result =
+            TaskResultEnvelope::ok(1, 2, 3, 0, 0, "worker-1".to_string(), vec![4, 5, 6], None);
         let bytes = result.encode_wire().expect("serialize result");
         let decoded = TaskResultEnvelope::decode_wire(&bytes).expect("deserialize result");
         assert_eq!(decoded.status, ResultStatus::Success);
@@ -402,8 +413,7 @@ mod tests {
             action: TaskAction::Fold,
             payload: 0_i32.to_le_bytes().to_vec(),
         }];
-        let envelope =
-            TaskEnvelope::new(1, 2, 3, 0, 4, "trace-2".to_string(), ops, vec![1, 2, 3]);
+        let envelope = TaskEnvelope::new(1, 2, 3, 0, 4, "trace-2".to_string(), ops, vec![1, 2, 3]);
         let bytes = envelope.encode_wire().expect("serialize");
         let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
         assert_eq!(decoded.ops[0].action, TaskAction::Fold);
@@ -414,7 +424,10 @@ mod tests {
     fn shuffle_map_action_carries_ids() {
         let ops = vec![PipelineOp {
             op_id: "sys.shuffle_map".to_string(),
-            action: TaskAction::ShuffleMap { shuffle_id: 7, num_output_partitions: 4 },
+            action: TaskAction::ShuffleMap {
+                shuffle_id: 7,
+                num_output_partitions: 4,
+            },
             payload: vec![],
         }];
         let envelope = TaskEnvelope::new(1, 2, 3, 0, 4, "trace-3".to_string(), ops, vec![]);
@@ -422,7 +435,10 @@ mod tests {
         let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
         assert!(matches!(
             decoded.ops[0].action,
-            TaskAction::ShuffleMap { shuffle_id: 7, num_output_partitions: 4 }
+            TaskAction::ShuffleMap {
+                shuffle_id: 7,
+                num_output_partitions: 4
+            }
         ));
     }
 

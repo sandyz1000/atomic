@@ -192,7 +192,7 @@ where
 
     fn compute(
         &self,
-        split: Box<dyn Split>,
+        _split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         todo!()
     }

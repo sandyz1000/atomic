@@ -33,8 +33,8 @@ use crate::{
     base::{Mutators, NativeScheduler},
     dag::{CompletionEvent, TastEndReason},
     error::{LibResult, SchedulerError},
-    job::{Job, JobTracker},
-    listener::{JobListener, LiveListenerBus},
+    job::Job,
+    listener::LiveListenerBus,
     stage::Stage,
 };
 

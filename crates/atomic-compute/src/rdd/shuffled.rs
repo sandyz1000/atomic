@@ -3,6 +3,7 @@ use crate::rdd::{Rdd, RddBase};
 use atomic_data::aggregator::Aggregator;
 use atomic_data::data::Data;
 use atomic_data::dependency::{Dependency, ShuffleDependency};
+use atomic_data::distributed::WireEncode;
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::shuffle::fetcher::ShuffleFetcher;
@@ -50,6 +51,7 @@ where
     K: Data + Eq + Hash + Clone + Encode + Decode<()>,
     V: Data + Clone,
     C: Data + Clone + Encode + Decode<()>,
+    Vec<(K, V)>: WireEncode,
 {
     pub fn new(
         id: usize,

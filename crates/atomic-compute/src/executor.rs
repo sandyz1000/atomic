@@ -1,10 +1,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::backend::NativeBackend;
 use crate::env;
-use num_cpus;
 use crate::error::{Error, LibResult};
 use atomic_data::distributed::{
     TRANSPORT_HEADER_LEN, TaskEnvelope, TransportFrameKind, WireDecode, WireEncode,
@@ -54,7 +53,7 @@ impl Executor {
     }
 
     /// Worker loop: binds TCP port, reads transport frames, dispatches via NativeBackend.
-    #[allow(clippy::drop_copy)]
+    #[allow(dropping_copy_types)]
     pub fn worker(self: Arc<Self>) -> LibResult<Signal> {
         env::Env::run_in_async_rt(move || -> LibResult<Signal> {
             futures::executor::block_on(async move {
@@ -69,7 +68,7 @@ impl Executor {
         })
     }
 
-    #[allow(clippy::drop_copy)]
+    #[allow(dropping_copy_types)]
     async fn process_stream(self: Arc<Self>, rcv_main: Receiver<Signal>) -> LibResult<Signal> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
         let listener = TcpListener::bind(addr)
