@@ -96,12 +96,12 @@ impl<T: Data> ParallelCollection<T> {
                 } else {
                     slice_count += 1;
                     end = ((slice_count + 1) * data_len) / num_slices;
-                    output.push(Arc::new(tmp.drain(..).collect::<Vec<_>>()));
+                    output.push(Arc::new(std::mem::take(&mut tmp)));
                     tmp.push(i);
                     iter_count += 1;
                 }
             }
-            output.push(Arc::new(tmp.drain(..).collect::<Vec<_>>()));
+            output.push(Arc::new(std::mem::take(&mut tmp)));
             output
         }
     }
@@ -131,7 +131,7 @@ impl<T: Data + Clone> RddBase for ParallelCollection<T> {
                 Box::new(ParallelCollectionSplit::new(
                     self.rdd_vals.vals.id as i64,
                     i,
-                    self.rdd_vals.splits_[i as usize].clone(),
+                    self.rdd_vals.splits_[{ i }].clone(),
                 )) as Box<dyn Split>
             })
             .collect::<Vec<Box<dyn Split>>>()

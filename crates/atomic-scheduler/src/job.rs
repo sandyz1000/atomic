@@ -133,7 +133,7 @@ where
             failed: Mutex::new(BTreeSet::new()),
             finished: Mutex::new(finished),
             pending_tasks: Mutex::new(pending_tasks),
-            listener: listener,
+            listener,
             _marker_t: PhantomData,
             _marker_u: PhantomData,
         })

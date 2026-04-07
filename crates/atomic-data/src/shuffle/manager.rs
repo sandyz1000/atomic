@@ -81,11 +81,10 @@ impl ShuffleManager {
     }
 
     pub fn clean_up_shuffle_data(&self) {
-        if self.config.log_cleanup {
-            if let Err(e) = fs::remove_dir_all(&self.shuffle_dir) {
+        if self.config.log_cleanup
+            && let Err(e) = fs::remove_dir_all(&self.shuffle_dir) {
                 log::error!("failed removing tmp work dir: {}", e);
             }
-        }
     }
 
     pub fn get_output_file(
@@ -245,10 +244,10 @@ impl ShuffleManager {
         Ok((send_main, rcv_main))
     }
 
-    fn get_shuffle_data_dir(local_dir_root: &PathBuf) -> LibResult<PathBuf> {
+    fn get_shuffle_data_dir(local_dir_root: &std::path::Path) -> LibResult<PathBuf> {
         for _ in 0..10 {
             let local_dir =
-                local_dir_root.join(format!("ns-shuffle-{}", Uuid::new_v4().to_string()));
+                local_dir_root.join(format!("ns-shuffle-{}", Uuid::new_v4()));
             if !local_dir.exists() {
                 log::debug!("creating directory at path: {:?}", &local_dir);
                 fs::create_dir_all(&local_dir)
@@ -314,7 +313,7 @@ impl ShuffleService {
 
     #[inline]
     fn parse_path_part(part: &str) -> LibResult<usize> {
-        Ok(u64::from_str_radix(part, 10).map_err(|_| ShuffleError::NotValidRequest)? as usize)
+        Ok(part.parse::<u64>().map_err(|_| ShuffleError::NotValidRequest)? as usize)
     }
 }
 

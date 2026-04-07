@@ -142,9 +142,7 @@ impl LiveListenerBus {
             let queued_events = self
                 .queued_events
                 .as_ref()
-                .ok_or_else(
-                    || /* Cannot be some if it was already started */ SchedulerError::Other,
-                )?
+                .ok_or(SchedulerError::Other)?
                 .lock();
             for queue in queues.iter_mut() {
                 queue.start();

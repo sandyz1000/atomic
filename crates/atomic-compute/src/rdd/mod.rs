@@ -13,7 +13,6 @@ pub mod typed;
 pub mod union_rdd;
 pub mod zip;
 
-use std::sync::Arc;
 
 pub use crate::context::Context;
 pub use atomic_data::task_context::TaskContext;

@@ -136,21 +136,13 @@ impl ShuffleFetcher {
         }
         log::debug!("total_results fetch results: {}", total_results);
         let task_results = future::join_all(tasks.into_iter()).await;
-        let results = task_results.into_iter().fold(
-            Ok(Vec::<(K, V)>::with_capacity(total_results)),
-            |curr, res| {
-                if let Ok(mut curr) = curr {
-                    if let Ok(Ok(res)) = res {
-                        curr.extend(res);
-                        Ok(curr)
-                    } else {
-                        Err(ShuffleError::FailedFetchOp)
-                    }
-                } else {
-                    Err(ShuffleError::FailedFetchOp)
-                }
-            },
-        )?;
+        let mut results = Vec::<(K, V)>::with_capacity(total_results);
+        for res in task_results {
+            match res {
+                Ok(Ok(items)) => results.extend(items),
+                _ => return Err(ShuffleError::FailedFetchOp),
+            }
+        }
         Ok(results.into_iter())
     }
 

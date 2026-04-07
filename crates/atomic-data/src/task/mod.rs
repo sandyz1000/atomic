@@ -102,7 +102,7 @@ impl Eq for TaskOption {}
 
 impl PartialOrd for TaskOption {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.get_task_id().cmp(&other.get_task_id()))
+        Some(self.cmp(other))
     }
 }
 

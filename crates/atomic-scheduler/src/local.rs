@@ -106,7 +106,7 @@ impl LocalScheduler {
             jt.listener
                 .get_result()
                 .await
-                .map_err(|s| SchedulerError::PartialJobError(s))
+                .map_err(SchedulerError::PartialJobError)
         })
     }
 
@@ -152,11 +152,10 @@ impl LocalScheduler {
     {
         // TODO: update cache
 
-        if allow_local {
-            if let Some(result) = LocalScheduler::local_execution(jt.clone())? {
+        if allow_local
+            && let Some(result) = LocalScheduler::local_execution(jt.clone())? {
                 return Ok(result);
             }
-        }
 
         self.mutators
             .event_queues

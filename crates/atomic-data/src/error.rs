@@ -1,12 +1,15 @@
 
-
 #[derive(thiserror::Error, Debug)]
 pub enum BaseError {
     #[error("{0}")]
     DowncastFailure(String),
-    
+
     #[error("{0}")]
-    Other(String)
+    Other(String),
+
+    /// Rkyv serialization/deserialization error (wire encoding).
+    #[error("wire encoding error: {0}")]
+    WireError(#[from] rkyv::rancor::Error),
 }
 
 pub type BaseResult<T> = Result<T, BaseError>;

@@ -1,9 +1,9 @@
 use atomic_data::distributed::{TaskAction, TaskEnvelope, TaskResultEnvelope};
 
-use crate::backend::udf::{JsUdfExecutor, PythonUdfExecutor, UdfExecutor};
 use crate::backend::Backend;
+use crate::backend::udf::{JsUdfExecutor, PythonUdfExecutor, UdfExecutor};
 use crate::error::{Error, LibResult};
-use crate::task_registry::TASK_REGISTRY;
+use crate::task_registry::{SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
 
 /// Native in-process task executor.
 ///
@@ -48,6 +48,30 @@ impl Backend for NativeBackend {
             let op_result: Result<Vec<u8>, String> = match &op.action {
                 TaskAction::PythonUdf(action) => py_exec.execute(*action, &op.payload, &data),
                 TaskAction::JavaScriptUdf(action) => js_exec.execute(*action, &op.payload, &data),
+                TaskAction::ShuffleMap {
+                    shuffle_id,
+                    num_output_partitions,
+                } => {
+                    // `op.payload` carries the type_id string (UTF-8) identifying which
+                    // SHUFFLE_MAP_REGISTRY handler to use for this (K, V) pair.
+                    (|| {
+                        let type_id = std::str::from_utf8(&op.payload)
+                            .map_err(|e| format!("ShuffleMap: payload not UTF-8: {e}"))?;
+                        match SHUFFLE_MAP_REGISTRY.get(type_id) {
+                            None => Err(format!(
+                                "no shuffle handler for type_id='{type_id}'; \
+                                 add `register_shuffle_map!(K, V)` to your binary"
+                            )),
+                            Some(handler) => handler(
+                                &data,
+                                *shuffle_id,
+                                task.partition_id,
+                                *num_output_partitions,
+                            )
+                            .map(|_| data.clone()), // side-effect only; pass data through
+                        }
+                    })()
+                }
                 _ => match TASK_REGISTRY.get(op.op_id.as_str()) {
                     None => Err(format!("unknown op: {}", op.op_id)),
                     Some(handler) => handler(&op.action, &op.payload, &data),

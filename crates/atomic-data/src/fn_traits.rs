@@ -14,7 +14,6 @@
 /// // After:
 /// impl<T, U, F: RddFn<T, U>> RddBase for MapperRdd<T, U, F> { }
 /// ```
-
 /// Function that transforms one value to another
 pub trait RddFn<T, U>: Fn(T) -> U + Send + Sync + 'static {}
 

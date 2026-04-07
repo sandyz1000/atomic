@@ -1,7 +1,6 @@
 use std::fs;
-use std::io::{BufReader, Read};
 use std::marker::PhantomData;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::SocketAddrV4;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,9 +9,8 @@ use crate::error::{Error, LibResult};
 use crate::io::*;
 use crate::rdd::{Rdd, RddBase, map_partitions::MapPartitionsRdd, mapper::MapperRdd};
 use atomic_data::data::Data;
-use atomic_data::dependency::Dependency;
 
-use atomic_data::split::{BytesReader, FileReader, Split};
+use atomic_data::split::{BytesReader, FileReader};
 
 use log::debug;
 use rand::prelude::*;
@@ -63,7 +61,7 @@ impl ReaderConfiguration<Vec<u8>> for LocalFsReaderConfig {
     {
         let reader = LocalFsReader::<BytesReader>::new(self, context.clone());
         let read_files = |_part: usize, readers: Box<dyn Iterator<Item = BytesReader>>| {
-            Box::new(readers.into_iter().map(|file| file.into_iter()).flatten())
+            Box::new(readers.into_iter().flat_map(|file| file.into_iter()))
                 as Box<dyn Iterator<Item = _>>
         };
         let id1 = context.new_rdd_id();
@@ -84,7 +82,7 @@ impl ReaderConfiguration<PathBuf> for LocalFsReaderConfig {
     {
         let reader = LocalFsReader::<FileReader>::new(self, context.clone());
         let read_files = |_part: usize, readers: Box<dyn Iterator<Item = FileReader>>| {
-            Box::new(readers.map(|reader| reader.into_iter()).flatten())
+            Box::new(readers.flat_map(|reader| reader.into_iter()))
                 as Box<dyn Iterator<Item = _>>
         };
 
@@ -193,7 +191,7 @@ impl<T> LocalFsReader<T> {
             return Err(Error::NoFilesFound);
         }
 
-        let file_size_mean = (total_size / total_files) as u64;
+        let file_size_mean = total_size / total_files;
         let std_dev = ((ex2 - ex.powf(2.0) / total_files as f32) / total_files as f32).sqrt();
 
         if total_files < num_partitions {
@@ -201,7 +199,7 @@ impl<T> LocalFsReader<T> {
             num_partitions = total_files;
         }
 
-        let avg_partition_size = (total_size / num_partitions) as u64;
+        let avg_partition_size = total_size / num_partitions;
 
         let partitions = self.assign_files_to_partitions(
             num_partitions,
@@ -226,7 +224,7 @@ impl<T> LocalFsReader<T> {
     ) -> Vec<Vec<PathBuf>> {
         // Accept ~ 0.25 std deviations top from the average partition size
         // when assigning a file to a partition.
-        let high_part_size_bound = (avg_partition_size + (std_dev * 0.25) as u64) as u64;
+        let high_part_size_bound = avg_partition_size + (std_dev * 0.25) as u64;
 
         debug!(
             "the average part size is {} with a high bound of {}",
@@ -255,7 +253,7 @@ impl<T> LocalFsReader<T> {
             {
                 partition.push(file);
                 curr_part_size = new_part_size;
-            } else if size > avg_partition_size as u64 {
+            } else if size > avg_partition_size {
                 if !partition.is_empty() {
                     partitions.push(partition);
                 }

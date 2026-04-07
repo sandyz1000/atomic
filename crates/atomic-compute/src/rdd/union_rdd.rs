@@ -9,7 +9,6 @@ use atomic_data::dependency::Dependency;
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::split::{PartitionerAwareUnionSplit, Split, UnionSplit};
-use itertools::{Itertools, MinMaxResult};
 
 pub struct UnionRdd<T: 'static>(UnionVariants<T>);
 
@@ -60,7 +59,7 @@ impl<T: Data> UnionVariants<T> {
         let mut vals = RddVals::new(id);
 
         let mut pos = 0;
-        let final_rdds: Vec<_> = rdds.iter().map(|rdd| rdd.clone().into()).collect();
+        let final_rdds: Vec<_> = rdds.iter().map(|rdd| rdd.clone()).collect();
 
         if !UnionVariants::has_unique_partitioner(rdds) {
             let deps = rdds
@@ -155,13 +154,13 @@ impl<T: Data + Clone> RddBase for UnionRdd<T> {
     fn preferred_locations(&self, split: Box<dyn Split>) -> Vec<Ipv4Addr> {
         match &self.0 {
             NonUniquePartitioner { .. } => Vec::new(),
-            PartitionerAware { rdds, .. } => {
+            PartitionerAware { rdds: _, .. } => {
                 log::debug!(
                     "finding preferred location for PartitionerAwareUnionRdd, partition {}",
                     split.get_index()
                 );
 
-                let Some(split) = split.as_any().downcast_ref::<PartitionerAwareUnionSplit>()
+                let Some(_split) = split.as_any().downcast_ref::<PartitionerAwareUnionSplit>()
                 else {
                     log::warn!("Failed to downcast split to PartitionerAwareUnionSplit");
                     return Vec::new();
@@ -253,7 +252,7 @@ impl<T: Data + Clone> Rdd for UnionRdd<T> {
                     .ok_or(Error::DowncastFailure("PartitionerAwareUnionSplit"))?;
                 let iter: Result<Vec<_>, BaseError> = rdds
                     .iter()
-                    .zip(split.parents(&rdds))
+                    .zip(split.parents(rdds))
                     .map(|(rdd, p)| rdd.iterator(p.clone()))
                     .collect();
                 Ok(Box::new(iter?.into_iter().flatten()))

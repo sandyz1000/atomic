@@ -31,6 +31,42 @@ pub static TASK_REGISTRY: Lazy<HashMap<&'static str, fn(&TaskAction, &[u8], &[u8
             .collect()
     });
 
+// ── Shuffle-map registry ──────────────────────────────────────────────────────
+
+/// A compile-time shuffle-write handler registered for a specific `(K, V)` type pair.
+///
+/// Place `register_shuffle_map!(K, V)` in your binary once per pair used with
+/// `reduce_by_key` or `group_by_key`. The worker binary collects all entries into
+/// [`SHUFFLE_MAP_REGISTRY`] at startup.
+///
+/// # Handler contract
+///
+/// `handler(data, shuffle_id, map_partition_id, num_reduce_partitions)`:
+/// - `data`: rkyv-encoded `Vec<(K, V)>` from the preceding pipeline ops
+/// - Partitions elements by `FxHash(K) % num_reduce_partitions`
+/// - Writes each bucket as bincode-encoded `Vec<(K, V)>` to `SHUFFLE_CACHE`
+/// - Returns `Ok(())` on success or an error message
+pub struct ShuffleMapEntry {
+    /// `std::any::type_name::<(K, V)>()` — stable key identifying the type pair.
+    pub type_id: &'static str,
+    /// The actual write handler.
+    pub handler: fn(&[u8], usize, usize, usize) -> Result<(), String>,
+}
+
+inventory::collect!(ShuffleMapEntry);
+
+/// Global compile-time shuffle-map registry — built once at startup from all
+/// `register_shuffle_map!(K, V)` calls linked into the binary.
+///
+/// Keyed by `type_id`. `NativeBackend` uses this when it sees `TaskAction::ShuffleMap`.
+pub static SHUFFLE_MAP_REGISTRY: Lazy<HashMap<&'static str, fn(&[u8], usize, usize, usize) -> Result<(), String>>> =
+    Lazy::new(|| {
+        inventory::iter::<ShuffleMapEntry>
+            .into_iter()
+            .map(|entry| (entry.type_id, entry.handler))
+            .collect()
+    });
+
 #[cfg(test)]
 mod tests {
     use super::*;

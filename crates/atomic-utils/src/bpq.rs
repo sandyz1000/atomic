@@ -9,9 +9,9 @@ pub struct BoundedPriorityQueue<T: Ord> {
     underlying: BinaryHeap<T>,
 }
 
-impl<T: Ord> Into<Vec<T>> for BoundedPriorityQueue<T> {
-    fn into(self) -> Vec<T> {
-        let mut col = self.underlying.into_sorted_vec();
+impl<T: Ord> From<BoundedPriorityQueue<T>> for Vec<T> {
+    fn from(val: BoundedPriorityQueue<T>) -> Self {
+        let mut col = val.underlying.into_sorted_vec();
         col.reverse();
         col
     }
@@ -20,7 +20,7 @@ impl<T: Ord> Into<Vec<T>> for BoundedPriorityQueue<T> {
 impl<T: Ord> BoundedPriorityQueue<T> {
     pub fn new(max_size: usize) -> BoundedPriorityQueue<T> {
         BoundedPriorityQueue {
-            max_size: max_size,
+            max_size,
             underlying: BinaryHeap::with_capacity(max_size),
         }
     }
@@ -44,11 +44,10 @@ impl<T: Ord> BoundedPriorityQueue<T> {
     }
 
     fn maybe_replace_lowest(&mut self, elem: T) {
-        if let Some(head) = self.underlying.peek() {
-            if elem.lt(head) {
+        if let Some(head) = self.underlying.peek()
+            && elem.lt(head) {
                 self.underlying.pop();
                 self.underlying.push(elem);
             }
-        }
     }
 }

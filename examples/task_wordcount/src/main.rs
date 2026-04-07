@@ -109,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut results: Vec<(String, u64)> = word_counts.into_iter().collect();
     results.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-    println!("{:<20} {}", "WORD", "COUNT");
+    println!("{:<20} COUNT", "WORD");
     println!("{}", "-".repeat(28));
     for (word, count) in &results {
         if !word.is_empty() {

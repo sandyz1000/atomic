@@ -363,11 +363,10 @@ impl DefaultPartitionCoalescer {
         let mut current_min: Option<Arc<PSyncGroup>> = None;
         if let Some(group) = self.group_hash.get(&key) {
             for g in group.as_slice() {
-                if let Some(ref cmin) = current_min {
-                    if *cmin.lock() > *g.lock() {
+                if let Some(ref cmin) = current_min
+                    && *cmin.lock() > *g.lock() {
                         current_min = Some((*g).clone());
                     }
-                }
             }
         }
         current_min
@@ -418,10 +417,10 @@ impl DefaultPartitionCoalescer {
             let (nxt_replica, nxt_part) = &partition_locs.parts_with_locs[tries as usize];
             tries += 1;
 
-            if !self.group_hash.contains_key(&nxt_replica) {
+            if !self.group_hash.contains_key(nxt_replica) {
                 let mut pgroup =
                     PartitionGroup::new(Some(*nxt_replica), part_cnt.fetch_add(1, SyncOrd::SeqCst));
-                self.add_part_to_pgroup(dyn_clone::clone_box(&**nxt_part).into(), &mut pgroup);
+                self.add_part_to_pgroup(dyn_clone::clone_box(&**nxt_part), &mut pgroup);
                 self.group_hash
                     .insert(*nxt_replica, vec![Arc::new(PSyncGroup(Mutex::new(pgroup)))]); // list in case we have multiple
                 num_created += 1;
@@ -439,12 +438,12 @@ impl DefaultPartitionCoalescer {
                 part_cnt.fetch_add(1, SyncOrd::SeqCst),
             ))));
             self.add_part_to_pgroup(
-                dyn_clone::clone_box(&**nxt_part).into(),
-                &mut *pgroup.lock(),
+                dyn_clone::clone_box(&**nxt_part),
+                &mut pgroup.lock(),
             );
             self.group_hash
                 .entry(*nxt_replica)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(pgroup.clone());
             self.group_arr.push(pgroup);
             num_created += 1;
@@ -533,7 +532,7 @@ impl DefaultPartitionCoalescer {
             if max_partitions > self.group_arr.len() {
                 // just return prev.partitions
                 for (i, p) in prev.splits().into_iter().enumerate() {
-                    self.group_arr[i].lock().partitions.push(p.into());
+                    self.group_arr[i].lock().partitions.push(p);
                 }
             } else {
                 // no locality available, then simply split partitions based on positions in array
@@ -545,7 +544,7 @@ impl DefaultPartitionCoalescer {
                     if i % chunk_size == 0 && chunk + 1 < max_partitions && i != 0 {
                         chunk += 1;
                     }
-                    self.group_arr[chunk].lock().partitions.push(e.into());
+                    self.group_arr[chunk].lock().partitions.push(e);
                 }
             }
         } else {
@@ -565,7 +564,7 @@ impl DefaultPartitionCoalescer {
                     let (_, nxt_part) = part_iter.next().unwrap();
                     if !self.initial_hash.contains(&nxt_part.get_index()) {
                         self.initial_hash.insert(nxt_part.get_index());
-                        pg.lock().partitions.push(nxt_part.into());
+                        pg.lock().partitions.push(nxt_part);
                     }
                 }
             }
@@ -582,7 +581,7 @@ impl DefaultPartitionCoalescer {
                     let nxt_part = part_no_loc_iter.next().unwrap();
                     if !self.initial_hash.contains(&nxt_part.get_index()) {
                         self.initial_hash.insert(nxt_part.get_index());
-                        pg.lock().partitions.push(nxt_part.into());
+                        pg.lock().partitions.push(nxt_part);
                     }
                 }
             }
@@ -594,7 +593,7 @@ impl DefaultPartitionCoalescer {
                     self.pick_bin(p.clone(), &*prev, balance_slack)
                         .lock()
                         .partitions
-                        .push(Box::from(p));
+                        .push(p);
                 }
             }
         }
@@ -605,7 +604,7 @@ impl DefaultPartitionCoalescer {
             .into_iter()
             .filter(|pg| pg.lock().num_partitions() > 0)
             .map(|pg: Arc<PSyncGroup>| {
-                let pg: PSyncGroup = Arc::try_unwrap(pg.into())
+                let pg: PSyncGroup = Arc::try_unwrap(pg)
                     .map_err(|_| "Not unique reference.")
                     .unwrap();
                 pg.0.into_inner()

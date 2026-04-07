@@ -22,9 +22,9 @@ dyn_clone::clone_trait_object!(Split);
 #[derive(Debug, Clone, Copy)]
 pub struct PrefLoc(u32);
 
-impl Into<Ipv4Addr> for PrefLoc {
-    fn into(self) -> Ipv4Addr {
-        Ipv4Addr::from(self.0)
+impl From<PrefLoc> for Ipv4Addr {
+    fn from(val: PrefLoc) -> Ipv4Addr {
+        Ipv4Addr::from(val.0)
     }
 }
 

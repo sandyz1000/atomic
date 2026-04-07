@@ -213,6 +213,20 @@ impl<T: Data + Clone> TypedRdd<T> {
                     .collect::<Result<Vec<_>, _>>()
                     .map(|vecs| vecs.into_iter().flatten().collect());
             }
+
+            // If the RDD has shuffle dependencies, run the shuffle map stage on
+            // workers first. ShuffledRdd::compute will then fetch via HTTP.
+            let rdd_base = self.rdd.get_rdd_base();
+            let has_shuffle = rdd_base
+                .get_dependencies()
+                .iter()
+                .any(|d| d.is_shuffle());
+            if has_shuffle {
+                self.context
+                    .run_pending_shuffle_stages(&rdd_base, vec![])
+                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                // Fall through to run_job — ShuffledRdd::compute calls ShuffleFetcher::fetch.
+            }
         }
         let cl = |iter: Box<dyn Iterator<Item = T>>| iter.collect::<Vec<T>>();
         let results = self.context.run_job(self.rdd.clone(), cl)?;
@@ -374,7 +388,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     {
         if self.context.is_distributed() {
             let elements = self.collect_distributed()?;
-            elements.iter().for_each(|x| f(x));
+            elements.iter().for_each(&f);
             return Ok(());
         }
         let for_each_partition = move |iter: Box<dyn Iterator<Item = T>>| {
@@ -667,7 +681,7 @@ impl<T: Data> TypedRdd<T> {
     /// ```ignore
     /// let difference = rdd1.subtract(rdd2);
     /// ```
-    pub fn subtract(self, other: TypedRdd<T>) -> TypedRdd<T>
+    pub fn subtract(self, _other: TypedRdd<T>) -> TypedRdd<T>
     where
         T: Eq + std::hash::Hash + Clone,
     {
@@ -699,7 +713,7 @@ impl<T: Data> TypedRdd<T> {
     /// ```ignore
     /// let common = rdd1.intersection(rdd2);
     /// ```
-    pub fn intersection(self, other: TypedRdd<T>) -> TypedRdd<T>
+    pub fn intersection(self, _other: TypedRdd<T>) -> TypedRdd<T>
     where
         T: Eq + std::hash::Hash + Clone,
     {
@@ -875,13 +889,14 @@ where
         F: Fn(V, V) -> V + Clone + Send + Sync + 'static,
         K: bincode::Encode + bincode::Decode<()>,
         V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
     {
         use crate::rdd::shuffled::ShuffledRdd;
         use atomic_data::aggregator::Aggregator;
         use atomic_data::shuffle::fetcher::ShuffleFetcher;
 
         let f2 = f.clone();
-        let f3 = f.clone();
+        let _f3 = f.clone();
         let aggregator = Arc::new(Aggregator::<K, V, V>::new(
             Arc::new(|v: V| v),
             Arc::new(move |c: &mut V, v: V| *c = f(c.clone(), v)),
@@ -924,6 +939,7 @@ where
     where
         K: bincode::Encode + bincode::Decode<()>,
         V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
     {
         use crate::rdd::shuffled::ShuffledRdd;
         use atomic_data::aggregator::Aggregator;
@@ -1081,6 +1097,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         K: Data + Eq + std::hash::Hash + Clone + bincode::Encode + bincode::Decode<()>,
         T: Clone + bincode::Encode + bincode::Decode<()>,
         F: Fn(&T) -> K + Clone + Send + Sync + 'static,
+        Vec<(K, T)>: WireEncode,
     {
         self.key_by(f).group_by_key()
     }
@@ -1229,7 +1246,7 @@ where
             let f_clone = F::call;
             let zero = init.clone();
             let reduce_partition =
-                move |iter: Box<dyn Iterator<Item = T>>| iter.fold(zero.clone(), |a, b| f_clone(a, b));
+                move |iter: Box<dyn Iterator<Item = T>>| iter.fold(zero.clone(), &f_clone);
             let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
             return Ok(results.into_iter().fold(init, F::call));
         }
@@ -1348,7 +1365,7 @@ where
                     driver_ops,
                     combined,
                 );
-                let result = crate::backend::NativeBackend::default()
+                let result = crate::backend::NativeBackend
                     .execute("local-driver", &task)
                     .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
                 match result.status {

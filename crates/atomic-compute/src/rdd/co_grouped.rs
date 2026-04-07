@@ -28,7 +28,7 @@ pub struct CoGroupedRdd<K: Data> {
 impl<K: Data + Eq + Hash + Encode + Clone> CoGroupedRdd<K> {
     pub fn new(
         id: usize,
-        shuffle_id: usize,
+        _shuffle_id: usize,
         rdds: Vec<Arc<dyn RddBase>>,
         part: Partitioner,
     ) -> Self {
@@ -45,15 +45,15 @@ impl<K: Data + Eq + Hash + Encode + Clone> CoGroupedRdd<K> {
             b1.extend(b2);
         })
             as Arc<dyn Fn(&mut Vec<Arc<dyn Data>>, Vec<Arc<dyn Data>>) + Send + Sync>;
-        let aggr = Arc::new(Aggregator::<K, Arc<dyn Data>, Vec<Arc<dyn Data>>>::new(
+        let _aggr = Arc::new(Aggregator::<K, Arc<dyn Data>, Vec<Arc<dyn Data>>>::new(
             create_combiner,
             merge_value,
             merge_combiners,
         ));
         let mut deps = Vec::new();
-        for (_index, rdd) in rdds.iter().enumerate() {
+        for rdd in rdds.iter() {
             let part = part.clone();
-            if rdd.partitioner().map_or(false, |p| p.equals(&part)) {
+            if rdd.partitioner().is_some_and(|p| p.equals(&part)) {
                 let rdd_base = rdd.clone();
                 deps.push(Dependency::OneToOne { rdd_base })
             } else {
@@ -101,7 +101,7 @@ impl<K: Eq + Hash + Data + Clone> RddBase for CoGroupedRdd<K> {
                             shuffle_id: s.get_shuffle_id(),
                         },
                         _ => CoGroupSplitDep::NarrowCoGroupSplitDep {
-                            rdd: r.clone().into(),
+                            rdd: r.clone(),
                             split: r.splits()[i].clone(),
                         },
                     })
@@ -177,7 +177,7 @@ where
                             continue;
                         }
                     }
-                    CoGroupSplitDep::ShuffleCoGroupSplitDep { shuffle_id } => {
+                    CoGroupSplitDep::ShuffleCoGroupSplitDep { shuffle_id: _ } => {
                         log::debug!("inside iterator CoGroupedRdd shuffle dep, agg: {:?}", agg);
                         let num_rdds = self.rdds.len();
                         // TODO: Fix ShuffleFetcher API - needs tracker instance

@@ -2,7 +2,6 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::error::Error;
 use log::LevelFilter;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
