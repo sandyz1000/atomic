@@ -1,0 +1,24 @@
+[package]
+name = "atomic-worker"
+version.workspace = true
+edition.workspace = true
+
+# NOTE: exclude atomic-worker from `cargo test --workspace` because the `udf`
+# feature activates pyo3 (which needs libpython) inside atomic-compute, causing
+# link failures in other test binaries that don't link against libpython.
+# Since atomic-worker has no unit tests, this exclusion loses nothing.
+#
+#   cargo test --workspace --exclude atomic-worker   ← correct workspace test command
+#   cargo build -p atomic-worker                     ← builds fine with Python installed
+
+[[bin]]
+name = "atomic-worker"
+path = "src/main.rs"
+
+[dependencies]
+# The `udf` feature enables both `python-udf` (PyO3) and `js-udf` (QuickJS) inside
+# atomic-compute. Dependencies are pulled in transitively.
+atomic-compute = { workspace = true, features = ["udf"] }
+tokio = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

@@ -1,0 +1,61 @@
+[package]
+name = "atomic-compute"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
+
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tonic-build = { workspace = true }
+hyper = { workspace = true }
+http-body-util = { workspace = true }
+http = { workspace = true }
+tempfile = { workspace = true }
+inventory = "0.3"
+once_cell.workspace = true
+dashmap.workspace = true
+rand.workspace = true
+parking_lot.workspace = true
+log.workspace = true
+env_logger = "0.11"
+anyhow.workspace = true
+uuid.workspace = true
+async-trait.workspace = true
+statrs.workspace = true
+itertools.workspace = true
+rand_distr.workspace = true
+rand_pcg.workspace = true
+dotenvy.workspace = true
+rustc-hash.workspace = true
+num_cpus.workspace = true
+bincode.workspace = true
+rkyv.workspace = true
+dyn-clone.workspace = true
+futures.workspace = true
+crossbeam.workspace = true
+hyper-util.workspace = true
+atomic-data.workspace = true
+atomic-utils.workspace = true
+atomic-scheduler.workspace = true
+atomic-runtime-macros.workspace = true
+tokio-util.workspace = true
+pyo3 = { workspace = true, features = ["auto-initialize"], optional = true }
+rquickjs = { workspace = true, optional = true }
+
+[features]
+# Enable Python UDF execution via embedded CPython interpreter (PyO3).
+# Only for worker binaries — NOT for extension modules (atomic-python cdylib).
+python-udf = ["pyo3"]
+# Enable JavaScript UDF execution via embedded QuickJS (rquickjs).
+# Workers use this to eval fn.toString() payloads sent by the atomic-js napi module.
+js-udf = ["rquickjs"]
+# Enable both UDF runtimes (for the atomic-worker binary).
+udf = ["python-udf", "js-udf"]
+
+[dev-dependencies]

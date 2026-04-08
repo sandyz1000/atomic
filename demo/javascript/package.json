@@ -1,0 +1,11 @@
+{
+  "name": "atomic-js-examples",
+  "version": "0.1.0",
+  "description": "Examples for the Atomic compute Node.js module",
+  "scripts": {
+    "build": "cargo build --release -p atomic-js --manifest-path ../../Cargo.toml",
+    "run:wordcount": "node local_word_count.js",
+    "run:mapreduce": "node map_reduce.js"
+  },
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,19 @@
+[package]
+name = "atomic-js"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "atomic_js"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", features = ["napi8", "serde-json"] }
+napi-derive = "2"
+atomic-data = { workspace = true }
+atomic-compute = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"

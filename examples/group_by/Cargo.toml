@@ -1,0 +1,12 @@
+[package]
+name = "group_by"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "group_by"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute.workspace = true
+tokio.workspace = true
