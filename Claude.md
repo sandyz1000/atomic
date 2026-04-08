@@ -14,6 +14,7 @@ Atomic is a stable-Rust rewrite and refactor of Vega.
 - `crates/atomic-data`: shared types — RDD traits, task envelopes, distributed structs, shuffle primitives, dependency DAG.
 - `crates/atomic-compute`: execution runtime — context, executor, `NativeBackend`, UDF dispatch, RDD implementations.
 - `crates/atomic-scheduler`: DAG building, stage planning, job tracking, `LocalScheduler`, `DistributedScheduler`.
+- `crates/atomic-sql`: structured data and SQL query layer — built on DataFusion (see below).
 - `crates/atomic-utils`: shared utilities.
 - `notes/`: architecture notes and design documents.
 
@@ -134,6 +135,56 @@ Distributed tasks use types from `atomic_data::distributed`.
 - Distributed shuffle end-to-end: each worker needs to run its own `ShuffleManager` and register its URI with the driver's `MapOutputTracker`.
 - `ShuffleFetcher` retry on transient network errors.
 - Failed shuffle-map stage recompute / fault recovery.
+
+## atomic-sql Architecture
+
+### Query Engine: DataFusion
+
+`atomic-sql` uses [Apache DataFusion](https://github.com/apache/datafusion) (`datafusion = "53"`)
+as its SQL query engine.  DataFusion provides:
+
+- SQL parsing (sqlparser-rs, bundled)
+- Logical plan + 30+ optimizer rules (predicate push-down, projection pruning, etc.)
+- Physical plan operators (hash join, sort-merge join, aggregation, exchange, etc.)
+- Apache Arrow `RecordBatch` columnar execution
+- Built-in Parquet, CSV, JSON readers
+
+`atomic-sql` adds a thin integration layer on top:
+
+| Type | File | Role |
+| --- | --- | --- |
+| `AtomicSqlContext` | `context.rs` | Primary entry point — wraps DataFusion `SessionContext` |
+| `DataFrame` | `dataframe.rs` | Lazy result — wraps DataFusion `DataFrame` |
+| `AtomicTableProvider` | `table.rs` | `TableProvider` impl backed by `Vec<Vec<RecordBatch>>` |
+| `AtomicScanExec` | `exec_plan.rs` | `ExecutionPlan` leaf node that streams pre-loaded batches |
+| `UdfRegistry` | `udf.rs` | Helper for registering `ScalarUDF` / `AggregateUDF` |
+
+### Row Format
+
+Arrow `RecordBatch` is the columnar format throughout `atomic-sql`.  When bridging
+from atomic compute, data flows as `TypedRdd<RecordBatch>` — call `rdd.collect()`
+to get `Vec<RecordBatch>`, then `ctx.register_batches(name, batches)`.
+
+### Entry Point
+
+```rust
+use atomic_sql::AtomicSqlContext;
+
+let ctx = AtomicSqlContext::new();
+ctx.register_parquet("orders", "data/orders.parquet", Default::default()).await?;
+let df = ctx.sql("SELECT customer_id, SUM(amount) FROM orders GROUP BY 1").await?;
+df.show().await?;
+```
+
+### What Is NOT in atomic-sql
+
+- Streaming SQL — deferred; use DataFusion's streaming APIs directly if needed.
+- Custom optimizer rules — DataFusion's built-in rules handle all rewrites.
+- Custom physical operators — DataFusion provides hash join, agg, sort, etc.
+- The old Catalyst-inspired code (analyzer, optimizer, joins, columnar, commands)
+  was entirely replaced by DataFusion.
+
+---
 
 ## Guardrails For Future Changes
 
