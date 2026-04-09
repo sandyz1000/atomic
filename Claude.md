@@ -14,6 +14,7 @@ Atomic is a stable-Rust rewrite and refactor of Vega.
 - `crates/atomic-data`: shared types — RDD traits, task envelopes, distributed structs, shuffle primitives, dependency DAG.
 - `crates/atomic-compute`: execution runtime — context, executor, `NativeBackend`, UDF dispatch, RDD implementations.
 - `crates/atomic-scheduler`: DAG building, stage planning, job tracking, `LocalScheduler`, `DistributedScheduler`.
+- `crates/atomic-sql`: structured data and SQL query layer — built on DataFusion (see below).
 - `crates/atomic-utils`: shared utilities.
 - `notes/`: architecture notes and design documents.
 
@@ -135,6 +136,56 @@ Distributed tasks use types from `atomic_data::distributed`.
 - `ShuffleFetcher` retry on transient network errors.
 - Failed shuffle-map stage recompute / fault recovery.
 
+## atomic-sql Architecture
+
+### Query Engine: DataFusion
+
+`atomic-sql` uses [Apache DataFusion](https://github.com/apache/datafusion) (`datafusion = "53"`)
+as its SQL query engine.  DataFusion provides:
+
+- SQL parsing (sqlparser-rs, bundled)
+- Logical plan + 30+ optimizer rules (predicate push-down, projection pruning, etc.)
+- Physical plan operators (hash join, sort-merge join, aggregation, exchange, etc.)
+- Apache Arrow `RecordBatch` columnar execution
+- Built-in Parquet, CSV, JSON readers
+
+`atomic-sql` adds a thin integration layer on top:
+
+| Type | File | Role |
+| --- | --- | --- |
+| `AtomicSqlContext` | `context.rs` | Primary entry point — wraps DataFusion `SessionContext` |
+| `DataFrame` | `dataframe.rs` | Lazy result — wraps DataFusion `DataFrame` |
+| `AtomicTableProvider` | `table.rs` | `TableProvider` impl backed by `Vec<Vec<RecordBatch>>` |
+| `AtomicScanExec` | `exec_plan.rs` | `ExecutionPlan` leaf node that streams pre-loaded batches |
+| `UdfRegistry` | `udf.rs` | Helper for registering `ScalarUDF` / `AggregateUDF` |
+
+### Row Format
+
+Arrow `RecordBatch` is the columnar format throughout `atomic-sql`.  When bridging
+from atomic compute, data flows as `TypedRdd<RecordBatch>` — call `rdd.collect()`
+to get `Vec<RecordBatch>`, then `ctx.register_batches(name, batches)`.
+
+### Entry Point
+
+```rust
+use atomic_sql::AtomicSqlContext;
+
+let ctx = AtomicSqlContext::new();
+ctx.register_parquet("orders", "data/orders.parquet", Default::default()).await?;
+let df = ctx.sql("SELECT customer_id, SUM(amount) FROM orders GROUP BY 1").await?;
+df.show().await?;
+```
+
+### What Is NOT in atomic-sql
+
+- Streaming SQL — deferred; use DataFusion's streaming APIs directly if needed.
+- Custom optimizer rules — DataFusion's built-in rules handle all rewrites.
+- Custom physical operators — DataFusion provides hash join, agg, sort, etc.
+- The old Catalyst-inspired code (analyzer, optimizer, joins, columnar, commands)
+  was entirely replaced by DataFusion.
+
+---
+
 ## Guardrails For Future Changes
 
 - Reuse Vega's DAG, stage, and shuffle ideas when they fit.
@@ -143,3 +194,79 @@ Distributed tasks use types from `atomic_data::distributed`.
 - Keep local and distributed execution paths conceptually aligned.
 - `#[task]` functions are the only way to register distributed work.
 - Prefer explicit backend routing and compile-time dispatch over dynamic runtime guessing.
+
+---
+
+## atomic-streaming Architecture
+
+`crates/atomic-streaming` implements Spark Streaming–style micro-batch streaming on top of `atomic-compute`.
+
+### Streaming Entry Point
+
+```rust
+let ctx = Context::local()?;
+let ssc = StreamingContext::new(ctx, Duration::from_secs(1));
+let queue = Arc::new(Mutex::new(VecDeque::new()));
+let stream = ssc.queue_stream(queue.clone(), true);
+ssc.foreach_rdd(stream, |rdd, time_ms| { /* process rdd */ });
+ssc.start()?;
+ssc.await_termination()?;
+```
+
+### Key Types
+
+| Type | File | Role |
+| --- | --- | --- |
+| `StreamingContext` | `context.rs` | Entry point — wraps `Arc<Context>` + `DStreamGraph` + batch loop |
+| `DStreamGraph` | `dstream/mod.rs` | DAG of input streams + output operations |
+| `DStreamBase` | `dstream/mod.rs` | Untyped, object-safe base for all DStreams |
+| `DStream<T>` | `dstream/mod.rs` | Typed DStream — `compute(time_ms) -> Option<Arc<dyn Rdd<Item=T>>>` |
+| `OutputOperation` | `dstream/mod.rs` | Trait for output ops — `generate_job(time_ms) -> Option<StreamingJob>` |
+| `StreamingJob` | `dstream/mod.rs` | A single runnable batch job (time + closure) |
+| `JobScheduler` | `scheduler/job.rs` | Drives the batch loop thread |
+| `ForEachDStream<T, F>` | `dstream/mapped.rs` | The primary output operation |
+| `QueueInputDStream<T>` | `dstream/input.rs` | In-memory queue of RDDs (used for testing) |
+| `SocketInputDStream` | `dstream/input.rs` | TCP socket reader (line-by-line) |
+| `FileInputDStream` | `dstream/input.rs` | Watches a local directory for new text files |
+| `Checkpoint` | `checkpoint.rs` | Serializable checkpoint state (bincode-encoded) |
+
+### Batch Loop
+
+A dedicated `std::thread` in `JobScheduler` fires every `batch_duration`:
+
+```text
+JobScheduler::run_batch_loop()
+  ├─ DStreamGraph::start(zero_time_ms)   — starts input streams
+  └─ loop every batch_ms:
+       ├─ DStreamGraph::generate_jobs(batch_time_ms)
+       │    └─ OutputOperation::generate_job(time_ms) for each output op
+       │         └─ DStream::get_or_compute(time_ms)   — lazy, cached per batch
+       │              └─ DStream::compute(time_ms)     — builds RDD DAG
+       └─ StreamingJob::run()            — executes via Arc<Context>::run_job()
+```
+
+### DStream Trait Contract
+
+`DStream<T>::compute(valid_time_ms)` is called at most once per batch time per DStream. Results are cached in a `Mutex<HashMap<u64, Arc<dyn Rdd<Item=T>>>>` stored on each DStream. The RDD returned is a fresh lazy DAG that gets executed by `Context::run_job()` when the output operation fires.
+
+### Input DStreams
+
+- **`QueueInputDStream<T>`** — pops RDDs from a `VecDeque`. No background threads. Primary tool for testing.
+- **`SocketInputDStream`** — `start()` spawns a thread that reads lines from TCP. `compute()` drains the buffer into a `ParallelCollection` RDD.
+- **`FileInputDStream`** — `compute()` uses `std::fs::read_dir()` to find files modified in the current batch window. Tracks seen files to avoid re-reading. Returns lines as `ParallelCollection<String>`.
+
+### Transformation DStreams (Phase 4 — TODO)
+
+`MappedDStream`, `FlatMappedDStream`, `FilteredDStream`, `WindowedDStream` are defined with correct type structure. Their `compute()` methods are `unimplemented!()` pending Phase 4 work, which will wrap parent RDDs with `MapperRdd`/`FlatMapperRdd` from `atomic_compute`.
+
+### Checkpointing
+
+`Checkpoint` is serialized with `bincode` v2 and written atomically (write to `.tmp`, then `rename()`). `Checkpoint::read_latest()` finds the most recent `checkpoint-<ms>` file. Checkpointing is wired to the batch loop in Phase 5 (TODO).
+
+### Streaming Features Not Yet Implemented
+
+- No Hadoop, no `blas`, no `hdrs`, no `atomic-sql` dependency.
+- No distributed receiver scheduling (`ReceiverTracker` is a local stub).
+- No dynamic executor allocation (`ExecutorAllocationManager` is a stub).
+- No windowed reduce-by-key, `updateStateByKey`, or `mapWithState` (all deferred to Phase 4).
+- No distributed streaming mode — local mode uses the same `Arc<Context>` as `atomic-compute`.

@@ -29,3 +29,6 @@ target
 
 .venv
 node_modules
+
+.agents
+skills-lock.json

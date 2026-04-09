@@ -256,7 +256,7 @@ mod tests {
     use crossbeam::channel::{Receiver, Sender, unbounded};
     use std::io::Write;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     type Port = u16;
     type ComputeResult = std::result::Result<(), Error>;
