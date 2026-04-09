@@ -22,6 +22,9 @@ pub enum AtomicSqlError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 pub type Result<T> = std::result::Result<T, AtomicSqlError>;
