@@ -569,6 +569,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-streaming"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "atomic-compute",
+ "atomic-data",
+ "bincode",
+ "bit-set",
+ "log",
+ "num_cpus",
+ "parking_lot",
+ "petgraph",
+ "rand 0.10.0",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "atomic-utils"
 version = "0.1.0"
 dependencies = [
@@ -680,6 +702,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
 dependencies = [
  "virtue",
+]
+
+[[package]]
+name = "bit-set"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
+dependencies = [
+ "bit-vec",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

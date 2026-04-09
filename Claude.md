@@ -194,3 +194,79 @@ df.show().await?;
 - Keep local and distributed execution paths conceptually aligned.
 - `#[task]` functions are the only way to register distributed work.
 - Prefer explicit backend routing and compile-time dispatch over dynamic runtime guessing.
+
+---
+
+## atomic-streaming Architecture
+
+`crates/atomic-streaming` implements Spark Streaming–style micro-batch streaming on top of `atomic-compute`.
+
+### Streaming Entry Point
+
+```rust
+let ctx = Context::local()?;
+let ssc = StreamingContext::new(ctx, Duration::from_secs(1));
+let queue = Arc::new(Mutex::new(VecDeque::new()));
+let stream = ssc.queue_stream(queue.clone(), true);
+ssc.foreach_rdd(stream, |rdd, time_ms| { /* process rdd */ });
+ssc.start()?;
+ssc.await_termination()?;
+```
+
+### Key Types
+
+| Type | File | Role |
+| --- | --- | --- |
+| `StreamingContext` | `context.rs` | Entry point — wraps `Arc<Context>` + `DStreamGraph` + batch loop |
+| `DStreamGraph` | `dstream/mod.rs` | DAG of input streams + output operations |
+| `DStreamBase` | `dstream/mod.rs` | Untyped, object-safe base for all DStreams |
+| `DStream<T>` | `dstream/mod.rs` | Typed DStream — `compute(time_ms) -> Option<Arc<dyn Rdd<Item=T>>>` |
+| `OutputOperation` | `dstream/mod.rs` | Trait for output ops — `generate_job(time_ms) -> Option<StreamingJob>` |
+| `StreamingJob` | `dstream/mod.rs` | A single runnable batch job (time + closure) |
+| `JobScheduler` | `scheduler/job.rs` | Drives the batch loop thread |
+| `ForEachDStream<T, F>` | `dstream/mapped.rs` | The primary output operation |
+| `QueueInputDStream<T>` | `dstream/input.rs` | In-memory queue of RDDs (used for testing) |
+| `SocketInputDStream` | `dstream/input.rs` | TCP socket reader (line-by-line) |
+| `FileInputDStream` | `dstream/input.rs` | Watches a local directory for new text files |
+| `Checkpoint` | `checkpoint.rs` | Serializable checkpoint state (bincode-encoded) |
+
+### Batch Loop
+
+A dedicated `std::thread` in `JobScheduler` fires every `batch_duration`:
+
+```text
+JobScheduler::run_batch_loop()
+  ├─ DStreamGraph::start(zero_time_ms)   — starts input streams
+  └─ loop every batch_ms:
+       ├─ DStreamGraph::generate_jobs(batch_time_ms)
+       │    └─ OutputOperation::generate_job(time_ms) for each output op
+       │         └─ DStream::get_or_compute(time_ms)   — lazy, cached per batch
+       │              └─ DStream::compute(time_ms)     — builds RDD DAG
+       └─ StreamingJob::run()            — executes via Arc<Context>::run_job()
+```
+
+### DStream Trait Contract
+
+`DStream<T>::compute(valid_time_ms)` is called at most once per batch time per DStream. Results are cached in a `Mutex<HashMap<u64, Arc<dyn Rdd<Item=T>>>>` stored on each DStream. The RDD returned is a fresh lazy DAG that gets executed by `Context::run_job()` when the output operation fires.
+
+### Input DStreams
+
+- **`QueueInputDStream<T>`** — pops RDDs from a `VecDeque`. No background threads. Primary tool for testing.
+- **`SocketInputDStream`** — `start()` spawns a thread that reads lines from TCP. `compute()` drains the buffer into a `ParallelCollection` RDD.
+- **`FileInputDStream`** — `compute()` uses `std::fs::read_dir()` to find files modified in the current batch window. Tracks seen files to avoid re-reading. Returns lines as `ParallelCollection<String>`.
+
+### Transformation DStreams (Phase 4 — TODO)
+
+`MappedDStream`, `FlatMappedDStream`, `FilteredDStream`, `WindowedDStream` are defined with correct type structure. Their `compute()` methods are `unimplemented!()` pending Phase 4 work, which will wrap parent RDDs with `MapperRdd`/`FlatMapperRdd` from `atomic_compute`.
+
+### Checkpointing
+
+`Checkpoint` is serialized with `bincode` v2 and written atomically (write to `.tmp`, then `rename()`). `Checkpoint::read_latest()` finds the most recent `checkpoint-<ms>` file. Checkpointing is wired to the batch loop in Phase 5 (TODO).
+
+### Streaming Features Not Yet Implemented
+
+- No Hadoop, no `blas`, no `hdrs`, no `atomic-sql` dependency.
+- No distributed receiver scheduling (`ReceiverTracker` is a local stub).
+- No dynamic executor allocation (`ExecutorAllocationManager` is a stub).
+- No windowed reduce-by-key, `updateStateByKey`, or `mapWithState` (all deferred to Phase 4).
+- No distributed streaming mode — local mode uses the same `Arc<Context>` as `atomic-compute`.
