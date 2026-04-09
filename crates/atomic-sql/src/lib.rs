@@ -37,6 +37,7 @@ pub mod dataframe;
 pub mod datasource;
 pub mod errors;
 pub mod exec_plan;
+pub mod rdd_table;
 pub mod schema;
 pub mod session;
 pub mod table;
@@ -46,6 +47,7 @@ pub mod udf;
 pub use context::AtomicSqlContext;
 pub use dataframe::DataFrame;
 pub use errors::{AtomicSqlError, Result};
+pub use rdd_table::RddTableProvider;
 pub use table::AtomicTableProvider;
 
 // Re-export DataFusion's expression helpers so users don't need a direct

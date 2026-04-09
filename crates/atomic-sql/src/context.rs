@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
+use atomic_compute::context::Context;
+use atomic_compute::rdd::TypedRdd;
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::execution::context::SessionContext;
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
 
 use crate::conf::AtomicSqlConfig;
 use crate::dataframe::DataFrame;
-use crate::errors::Result;
+use crate::errors::{AtomicSqlError, Result};
+use crate::rdd_table::RddTableProvider;
 use crate::table::AtomicTableProvider;
 
 /// The primary entry point for `atomic-sql`.
@@ -30,6 +34,8 @@ use crate::table::AtomicTableProvider;
 /// ```
 pub struct AtomicSqlContext {
     session: SessionContext,
+    /// Optional atomic-compute context for parallel RDD-backed execution.
+    sc: Option<Arc<Context>>,
 }
 
 impl AtomicSqlContext {
@@ -37,6 +43,7 @@ impl AtomicSqlContext {
     pub fn new() -> Self {
         Self {
             session: SessionContext::new(),
+            sc: None,
         }
     }
 
@@ -49,7 +56,83 @@ impl AtomicSqlContext {
             .with_prefer_existing_sort(false);
         Self {
             session: SessionContext::new_with_config(session_config),
+            sc: None,
         }
+    }
+
+    /// Create a context backed by an atomic-compute [`Context`] for parallel execution.
+    ///
+    /// Use this when your data lives in atomic RDDs. SQL queries will materialize
+    /// each RDD partition in parallel via atomic's scheduler (local threads or
+    /// remote workers) before DataFusion applies its operators.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::sync::Arc;
+    /// use atomic_compute::context::Context;
+    /// use atomic_sql::context::AtomicSqlContext;
+    ///
+    /// # async fn example() -> atomic_sql::errors::Result<()> {
+    /// // Assumes a Context built with Config::local() or similar.
+    /// let sc: Arc<Context> = // ...
+    /// #     unimplemented!();
+    /// let ctx = AtomicSqlContext::with_compute(sc);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_compute(sc: Arc<Context>) -> Self {
+        Self {
+            session: SessionContext::new(),
+            sc: Some(sc),
+        }
+    }
+
+    // ── RDD-backed table registration ─────────────────────────────────────────
+
+    /// Register a [`TypedRdd<RecordBatch>`] as a SQL table.
+    ///
+    /// Each RDD partition becomes one DataFusion partition. When a query runs,
+    /// atomic-compute materializes each partition in parallel (via the scheduler
+    /// passed to [`with_compute`]) before DataFusion applies SQL operators.
+    ///
+    /// Requires this context to have been created with [`with_compute`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use atomic_sql::context::AtomicSqlContext;
+    ///
+    /// # async fn example(ctx: AtomicSqlContext, rdd: atomic_compute::rdd::TypedRdd<datafusion::arrow::record_batch::RecordBatch>) -> atomic_sql::errors::Result<()> {
+    /// ctx.register_rdd("events", rdd)?;
+    /// let df = ctx.sql("SELECT user_id, COUNT(*) FROM events GROUP BY 1").await?;
+    /// df.show().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn register_rdd(&self, name: &str, rdd: TypedRdd<RecordBatch>) -> Result<()> {
+        let sc = self.sc.as_ref().ok_or_else(|| {
+            AtomicSqlError::Internal(
+                "register_rdd requires AtomicSqlContext::with_compute(sc)".into(),
+            )
+        })?;
+
+        // Infer schema by reading the first RecordBatch from partition 0.
+        let schema: SchemaRef = sc
+            .run_job_with_partitions(
+                rdd.inner().clone(),
+                |mut iter| iter.next().map(|b| b.schema()),
+                [0usize],
+            )
+            .map_err(|e| AtomicSqlError::Internal(e.to_string()))?
+            .into_iter()
+            .flatten()
+            .next()
+            .ok_or_else(|| AtomicSqlError::Schema("RDD is empty — cannot infer schema".into()))?;
+
+        let provider = Arc::new(RddTableProvider::new(schema, rdd.into_rdd(), sc.clone()));
+        self.session.register_table(name, provider)?;
+        Ok(())
     }
 
     // ── SQL execution ─────────────────────────────────────────────────────────
