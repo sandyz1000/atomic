@@ -1,3 +1,4 @@
+use crate::rdd::cached::CachedRdd;
 use crate::rdd::cartesian::CartesianRdd;
 use crate::rdd::coalesced::CoalescedRdd;
 use crate::rdd::flatmapper::FlatMapperRdd;
@@ -5,6 +6,7 @@ use crate::rdd::map_partitions::MapPartitionsRdd;
 use crate::rdd::mapper::MapperRdd;
 use crate::rdd::parallel_collection::ParallelCollection;
 use crate::task_traits::{BinaryTask, UnaryTask};
+use atomic_data::cache::StorageLevel;
 use atomic_data::dependency::Dependency;
 use atomic_data::distributed::{PipelineOp, TaskAction, TaskEnvelope, WireDecode, WireEncode};
 use atomic_data::error::BaseError;
@@ -95,6 +97,28 @@ impl<T> Clone for TypedRdd<T> {
             staged: None, // staged pipelines are one-shot; clone starts fresh
             _marker: PhantomData,
         }
+    }
+}
+
+// ── Persist / Cache ───────────────────────────────────────────────────────────
+
+impl<T: Data + Clone + 'static> TypedRdd<T> {
+    /// Persist this RDD's partitions in memory so they are not recomputed
+    /// across multiple actions.
+    ///
+    /// Equivalent to `persist(StorageLevel::MemoryOnly)`.
+    pub fn cache(self) -> Self {
+        self.persist(StorageLevel::MemoryOnly)
+    }
+
+    /// Persist this RDD's partitions using the given storage level.
+    ///
+    /// Currently all storage levels are treated as `MemoryOnly`.  Disk-spill
+    /// variants are reserved for future implementation.
+    pub fn persist(self, _level: StorageLevel) -> Self {
+        let ctx = self.get_context();
+        let cached = Arc::new(CachedRdd::new(self.into_rdd()));
+        TypedRdd::new(cached as RddRef<T>, ctx)
     }
 }
 
