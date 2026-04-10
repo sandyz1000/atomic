@@ -1,10 +1,18 @@
 use crate::dstream::{DStream, DStreamBase};
+use atomic_compute::rdd::union_rdd::UnionRdd;
 use atomic_data::data::Data;
 use atomic_data::rdd::Rdd;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+static NEXT_RDD_ID: AtomicUsize = AtomicUsize::new(0x6000_0000);
+
+fn next_rdd_id() -> usize {
+    NEXT_RDD_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WindowedDStream
@@ -63,10 +71,26 @@ impl<T: Data + Clone> DStreamBase for WindowedDStream<T> {
 
 impl<T: Data + Clone> DStream<T> for WindowedDStream<T> {
     fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = T>>> {
-        // TODO Phase 4: collect parent RDDs from the window and union them
-        let _window_ms = self.window_duration.as_millis() as u64;
-        let _parent_slide_ms = self.parent.slide_duration().as_millis() as u64;
-        unimplemented!("WindowedDStream::compute — implement in Phase 4")
+        let window_ms = self.window_duration.as_millis() as u64;
+        let parent_slide_ms = self.parent.slide_duration().as_millis() as u64;
+
+        // Collect parent RDDs covering [valid_time_ms - window_ms + parent_slide_ms,
+        // valid_time_ms], stepping backward by parent_slide_ms.
+        let num_steps = (window_ms / parent_slide_ms).max(1);
+        let rdds: Vec<Arc<dyn Rdd<Item = T>>> = (0..num_steps)
+            .filter_map(|i| {
+                let t = valid_time_ms.saturating_sub(i * parent_slide_ms);
+                self.parent.get_or_compute(t)
+            })
+            .collect();
+
+        match rdds.len() {
+            0 => None,
+            1 => Some(rdds.into_iter().next().unwrap()),
+            _ => UnionRdd::new(next_rdd_id(), &rdds)
+                .ok()
+                .map(|u| Arc::new(u) as Arc<dyn Rdd<Item = T>>),
+        }
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = T>>> {

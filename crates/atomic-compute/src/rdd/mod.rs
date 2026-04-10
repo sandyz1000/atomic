@@ -1,3 +1,4 @@
+pub mod cached;
 pub mod cartesian;
 pub mod co_grouped;
 pub mod coalesced;

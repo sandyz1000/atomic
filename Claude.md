@@ -25,7 +25,7 @@ Atomic is a stable-Rust rewrite and refactor of Vega.
 All narrow transforms and reductions have a `_task` variant. Always use these:
 
 | Method | Trait required | TaskAction |
-|---|---|---|
+| --- | --- | --- |
 | `rdd.map_task(F)` | `UnaryTask<T, U>` | `Map` |
 | `rdd.filter_task(F)` | `UnaryTask<T, bool>` | `Filter` |
 | `rdd.flat_map_task(F)` | `UnaryTask<T, Vec<U>>` | `FlatMap` |
@@ -53,7 +53,7 @@ rdd.map_task(task_fn!(|x: i32| -> i32 { x * 2 }))
 
 ### How the staged pipeline works
 
-```
+```text
 parallelize_typed(data, n)
   └─ flat_map_task(Tokenize)  → encodes partitions → StagedPipeline{source, ops:[FlatMap]}
        └─ map_task(PairOne)   → appends op          → StagedPipeline{source, ops:[FlatMap,Map]}
@@ -149,23 +149,23 @@ as its SQL query engine.  DataFusion provides:
 - Apache Arrow `RecordBatch` columnar execution
 - Built-in Parquet, CSV, JSON readers
 
-`atomic-sql` adds a thin integration layer on top:
+`atomic-sql` adds an integration layer on top:
 
 | Type | File | Role |
 | --- | --- | --- |
 | `AtomicSqlContext` | `context.rs` | Primary entry point — wraps DataFusion `SessionContext` |
 | `DataFrame` | `dataframe.rs` | Lazy result — wraps DataFusion `DataFrame` |
-| `AtomicTableProvider` | `table.rs` | `TableProvider` impl backed by `Vec<Vec<RecordBatch>>` |
-| `AtomicScanExec` | `exec_plan.rs` | `ExecutionPlan` leaf node that streams pre-loaded batches |
+| `AtomicTableProvider` | `table.rs` | `TableProvider` backed by pre-loaded `Vec<Vec<RecordBatch>>` |
+| `AtomicScanExec` | `exec_plan.rs` | `ExecutionPlan` leaf that streams pre-loaded batches |
+| `RddTableProvider` | `rdd_table.rs` | `TableProvider` backed by a live `Arc<dyn Rdd<Item=RecordBatch>>` |
+| `RddScanExec` | `rdd_table.rs` | `ExecutionPlan` leaf that runs one RDD partition via atomic-compute |
 | `UdfRegistry` | `udf.rs` | Helper for registering `ScalarUDF` / `AggregateUDF` |
 
 ### Row Format
 
-Arrow `RecordBatch` is the columnar format throughout `atomic-sql`.  When bridging
-from atomic compute, data flows as `TypedRdd<RecordBatch>` — call `rdd.collect()`
-to get `Vec<RecordBatch>`, then `ctx.register_batches(name, batches)`.
+Arrow `RecordBatch` is the columnar format throughout `atomic-sql`.
 
-### Entry Point
+### Entry Point — Standalone
 
 ```rust
 use atomic_sql::AtomicSqlContext;
@@ -174,6 +174,33 @@ let ctx = AtomicSqlContext::new();
 ctx.register_parquet("orders", "data/orders.parquet", Default::default()).await?;
 let df = ctx.sql("SELECT customer_id, SUM(amount) FROM orders GROUP BY 1").await?;
 df.show().await?;
+```
+
+### Entry Point — With atomic-compute (RDD-backed)
+
+Use `AtomicSqlContext::with_compute(sc)` to register a `TypedRdd<RecordBatch>` as
+a SQL table.  Each RDD partition is materialized in parallel by atomic's scheduler;
+DataFusion then applies filter/project/aggregate/join on the returned Arrow batches.
+
+```rust
+let sc = Arc::new(Context::new_with_config(Config::local())?);
+let rdd = sc.parallelize_typed(batches, num_partitions);
+
+let ctx = AtomicSqlContext::with_compute(Arc::clone(&sc));
+ctx.register_rdd("events", rdd)?;          // schema inferred from first batch
+let df = ctx.sql("SELECT user_id, COUNT(*) FROM events GROUP BY 1").await?;
+df.show().await?;
+```
+
+Data flow:
+
+```text
+TypedRdd<RecordBatch>  ──register_rdd()──►  RddTableProvider
+DataFusion PhysicalPlan (leaf = RddScanExec)
+  ├─ execute(partition=0) ── atomic-compute scheduler ──► thread/worker
+  ├─ execute(partition=1) ── atomic-compute scheduler ──► thread/worker
+  └─ ...
+DataFusion: Filter / Project / Aggregate / Join  →  DataFrame.collect()
 ```
 
 ### What Is NOT in atomic-sql
@@ -255,9 +282,18 @@ JobScheduler::run_batch_loop()
 - **`SocketInputDStream`** — `start()` spawns a thread that reads lines from TCP. `compute()` drains the buffer into a `ParallelCollection` RDD.
 - **`FileInputDStream`** — `compute()` uses `std::fs::read_dir()` to find files modified in the current batch window. Tracks seen files to avoid re-reading. Returns lines as `ParallelCollection<String>`.
 
-### Transformation DStreams (Phase 4 — TODO)
+### Transformation DStreams
 
-`MappedDStream`, `FlatMappedDStream`, `FilteredDStream`, `WindowedDStream` are defined with correct type structure. Their `compute()` methods are `unimplemented!()` pending Phase 4 work, which will wrap parent RDDs with `MapperRdd`/`FlatMapperRdd` from `atomic_compute`.
+`MappedDStream`, `FlatMappedDStream`, `FilteredDStream`, `WindowedDStream` are fully implemented.
+
+| DStream | `compute()` implementation |
+| --- | --- |
+| `MappedDStream<T,U,F>` | Wraps parent RDD with `MapperRdd::new(id, parent_rdd, f)` |
+| `FlatMappedDStream<T,U,F>` | Wraps parent RDD with `FlatMapperRdd::new(id, parent_rdd, f)` — adapts `Fn(T)->Vec<U>` to `Fn(T)->Box<dyn Iterator<Item=U>>` |
+| `FilteredDStream<T,F>` | Uses `FlatMapperRdd` as a filter: passing elements emit `once(x)`, others emit `empty()` |
+| `WindowedDStream<T>` | Calls `parent.get_or_compute(t)` for each `t` in the window, then unions via `UnionRdd::new` |
+
+RDD IDs for streaming-created RDDs use a module-level `static AtomicUsize` starting at `0x5000_0000` (mapped) and `0x6000_0000` (windowed) to avoid collisions with compute-layer RDD IDs.
 
 ### Checkpointing
 

@@ -5,22 +5,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Storage level hints for caching RDDs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StorageLevel {
-    None,
-    MemoryOnly,
-    MemoryOnlySer,
-    DiskOnly,
-    MemoryAndDisk,
-    OffHeap,
-}
-
-impl Default for StorageLevel {
-    fn default() -> Self {
-        StorageLevel::MemoryOnly
-    }
-}
+pub use atomic_data::cache::StorageLevel;
 
 /// A single segment written to a write-ahead log file.
 #[derive(Debug, Clone, Serialize, Deserialize)]

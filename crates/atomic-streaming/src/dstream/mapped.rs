@@ -1,11 +1,21 @@
 use crate::context::StreamingContext;
 use crate::dstream::{DStream, DStreamBase, OutputOperation, StreamingJob};
+use atomic_compute::rdd::flatmapper::FlatMapperRdd;
+use atomic_compute::rdd::mapper::MapperRdd;
 use atomic_data::data::Data;
 use atomic_data::rdd::Rdd;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Global counter for unique RDD IDs created by streaming transforms.
+static NEXT_RDD_ID: AtomicUsize = AtomicUsize::new(0x5000_0000);
+
+fn next_rdd_id() -> usize {
+    NEXT_RDD_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MappedDStream
@@ -65,8 +75,8 @@ where
     fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = U>>> {
         let parent_rdd = self.parent.get_or_compute(valid_time_ms)?;
         let f = self.map_func.clone();
-        // TODO Phase 4: use MapperRdd from atomic_compute once its constructor is stable
-        unimplemented!("MappedDStream::compute — implement in Phase 4")
+        let mapped = MapperRdd::new(next_rdd_id(), parent_rdd, move |x| f(x));
+        Some(Arc::new(mapped))
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = U>>> {
@@ -138,9 +148,15 @@ where
     F: Fn(T) -> Vec<U> + Send + Sync + 'static,
 {
     fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = U>>> {
-        let _parent_rdd = self.parent.get_or_compute(valid_time_ms)?;
-        // TODO Phase 4: wrap with FlatMapperRdd from atomic_compute
-        unimplemented!("FlatMappedDStream::compute — implement in Phase 4")
+        let parent_rdd = self.parent.get_or_compute(valid_time_ms)?;
+        let f = self.flat_map_func.clone();
+        // FlatMapperRdd requires Fn(T) -> Box<dyn Iterator<Item=U>>; adapt from Vec<U>.
+        let flat_mapped = FlatMapperRdd::new(
+            next_rdd_id(),
+            parent_rdd,
+            move |x| -> Box<dyn Iterator<Item = U>> { Box::new(f(x).into_iter()) },
+        );
+        Some(Arc::new(flat_mapped))
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = U>>> {
@@ -208,9 +224,22 @@ where
     F: Fn(&T) -> bool + Send + Sync + 'static,
 {
     fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = T>>> {
-        let _parent_rdd = self.parent.get_or_compute(valid_time_ms)?;
-        // TODO Phase 4: wrap with FilterRdd from atomic_compute
-        unimplemented!("FilteredDStream::compute — implement in Phase 4")
+        let parent_rdd = self.parent.get_or_compute(valid_time_ms)?;
+        let pred = self.filter_func.clone();
+        // No FilterRdd in atomic-compute; use FlatMapperRdd as a filter:
+        // elements that pass the predicate emit once, others emit nothing.
+        let filtered = FlatMapperRdd::new(
+            next_rdd_id(),
+            parent_rdd,
+            move |x| -> Box<dyn Iterator<Item = T>> {
+                if pred(&x) {
+                    Box::new(std::iter::once(x))
+                } else {
+                    Box::new(std::iter::empty())
+                }
+            },
+        );
+        Some(Arc::new(filtered))
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = T>>> {

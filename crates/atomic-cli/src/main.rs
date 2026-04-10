@@ -1,20 +1,32 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
+use russh::client::{self, Handle};
+use russh::keys::{PrivateKeyWithHashAlg, check_known_hosts_path, load_secret_key};
+use russh::ChannelMsg;
+use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt as _;
 
 const DEFAULT_BUILD_TARGET: &str = "x86_64-unknown-linux-musl";
 const CLUSTER_CONFIG_PATH: &str = ".atomic/cluster.toml";
+/// Default remote destination for the shipped binary.
+/// Change with --remote-path if /opt is not writable on your workers.
+const DEFAULT_REMOTE_PATH: &str = "/opt/atomic/worker";
+
+// ── CLI skeleton ──────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(name = "atomic")]
-#[command(about = "Atomic — distributed compute CLI (build, deploy, submit, stop)")]
+#[command(about = "Atomic — distributed compute CLI (build, ship, stop)")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -24,94 +36,80 @@ struct Cli {
 enum Commands {
     /// Cross-compile the project binary for worker deployment
     Build(BuildArgs),
-    /// Ship a compiled binary to remote workers and start them
-    Deploy(DeployArgs),
-    /// Build, deploy, and run the driver in one command
+    /// Ship a compiled binary to remote workers over SSH/SFTP
+    Ship(ShipArgs),
+    /// Build then ship in one step
     Submit(SubmitArgs),
     /// Send a graceful shutdown to all workers in .atomic/cluster.toml
     Stop(StopArgs),
 }
 
-// ── Build ────────────────────────────────────────────────────────────────────
+// ── Build ─────────────────────────────────────────────────────────────────────
 
 #[derive(Args)]
 struct BuildArgs {
     /// Target triple for cross-compilation
     #[arg(long, default_value = DEFAULT_BUILD_TARGET)]
     target: String,
-
-    /// Build in release mode (always true for worker targets)
+    /// Build in release mode
     #[arg(long, default_value_t = true)]
     release: bool,
-
-    /// Extra flags forwarded to `cargo build`
+    /// Extra flags forwarded to `cargo zigbuild`
     #[arg(last = true)]
     cargo_args: Vec<String>,
 }
 
-// ── Deploy ───────────────────────────────────────────────────────────────────
+// ── Ship (formerly Deploy) ────────────────────────────────────────────────────
 
 #[derive(Args)]
-struct DeployArgs {
+struct ShipArgs {
     /// Comma-separated list of worker host names or IPs
     #[arg(long, value_delimiter = ',', required = true)]
     workers: Vec<String>,
-
     /// Path to the compiled binary to ship
     #[arg(long, required = true)]
     binary: PathBuf,
-
-    /// Port each worker should listen on
+    /// Absolute path where the binary is written on each worker
+    #[arg(long, default_value = DEFAULT_REMOTE_PATH)]
+    remote_path: PathBuf,
+    /// Port recorded in the cluster config (for later use by the driver)
     #[arg(long, default_value_t = 10000)]
     port: u16,
-
-    /// SSH private key for authenticating to workers
+    /// SSH private key; omit to try ~/.ssh/id_ed25519, id_rsa, id_ecdsa
     #[arg(long)]
     key: Option<PathBuf>,
-
-    /// SSH user
+    /// SSH user on each worker
     #[arg(long, default_value = "ubuntu")]
     user: String,
-
-    /// Skip health-check after deploying
-    #[arg(long, default_value_t = false)]
-    no_healthcheck: bool,
 }
 
-// ── Submit ───────────────────────────────────────────────────────────────────
+// ── Submit ────────────────────────────────────────────────────────────────────
 
 #[derive(Args)]
 struct SubmitArgs {
-    /// Comma-separated list of worker host names or IPs
     #[arg(long, value_delimiter = ',')]
     workers: Vec<String>,
-
-    /// Target triple for cross-compilation (passed to `atomic build`)
     #[arg(long, default_value = DEFAULT_BUILD_TARGET)]
     target: String,
-
-    /// Port each worker should listen on
+    #[arg(long, default_value = DEFAULT_REMOTE_PATH)]
+    remote_path: PathBuf,
     #[arg(long, default_value_t = 10000)]
     port: u16,
-
-    /// SSH private key for authenticating to workers
     #[arg(long)]
     key: Option<PathBuf>,
-
-    /// SSH user
     #[arg(long, default_value = "ubuntu")]
     user: String,
-
     /// Driver arguments passed after `--`
     #[arg(last = true)]
     driver_args: Vec<String>,
 }
 
-// ── Stop ─────────────────────────────────────────────────────────────────────
+// ── Stop ──────────────────────────────────────────────────────────────────────
 
 #[derive(Args)]
 struct StopArgs {
-    /// Comma-separated list of worker addresses (host:port). If omitted, reads .atomic/cluster.toml
+    /// Comma-separated list of worker addresses (host:port).
+    /// If omitted, reads .atomic/cluster.toml.
     #[arg(long, value_delimiter = ',')]
     workers: Vec<String>,
 }
@@ -128,69 +126,26 @@ struct WorkerEntry {
     address: String,
 }
 
-fn main() -> Result<()> {
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Build(args) => cmd_build(args),
-        Commands::Deploy(args) => cmd_deploy(args),
-        Commands::Submit(args) => cmd_submit(args),
+        Commands::Ship(args) => cmd_ship(args).await,
+        Commands::Submit(args) => cmd_submit(args).await,
         Commands::Stop(args) => cmd_stop(args),
     }
 }
 
-// ── Build implementation ──────────────────────────────────────────────────────
-
-/// Which tool drives the cross-compilation build.
-#[derive(Debug, Clone, Copy)]
-enum BuildDriver {
-    /// `cargo zigbuild` — Zig as linker, no Docker, preferred.
-    ZigBuild,
-    /// `cross build` — Docker-based, wider target support.
-    Cross,
-    /// `cargo build` — plain Cargo, requires matching toolchain already installed.
-    Cargo,
-}
-
-impl BuildDriver {
-    /// Construct a `Command` pre-loaded with the right binary and subcommand.
-    fn command(self) -> Command {
-        match self {
-            // cargo-zigbuild is a cargo subcommand: `cargo zigbuild ...`
-            BuildDriver::ZigBuild => {
-                let mut cmd = Command::new("cargo");
-                cmd.arg("zigbuild");
-                cmd
-            }
-            // cross is a standalone binary: `cross build ...`
-            BuildDriver::Cross => {
-                let mut cmd = Command::new("cross");
-                cmd.arg("build");
-                cmd
-            }
-            // plain cargo: `cargo build ...`
-            BuildDriver::Cargo => {
-                let mut cmd = Command::new("cargo");
-                cmd.arg("build");
-                cmd
-            }
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            BuildDriver::ZigBuild => "cargo zigbuild",
-            BuildDriver::Cross => "cross",
-            BuildDriver::Cargo => "cargo",
-        }
-    }
-}
+// ── Build ─────────────────────────────────────────────────────────────────────
 
 fn cmd_build(args: BuildArgs) -> Result<()> {
-    println!("Building for target: {}", args.target);
+    ensure_zigbuild()?;
 
-    let driver = detect_build_driver()?;
-    let mut cmd = driver.command();
-
+    let mut cmd = Command::new("cargo");
+    cmd.arg("zigbuild");
     if args.release {
         cmd.arg("--release");
     }
@@ -199,188 +154,313 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
         cmd.arg(extra);
     }
 
-    println!("Running: {}", format_args_display(&cmd));
-
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to run `{}`", driver.name()))?;
-
+    println!("Running: {}", format_cmd(&cmd));
+    let status = cmd.status().context("failed to run `cargo zigbuild`")?;
     if !status.success() {
-        bail!("`{}` exited with status {}", driver.name(), status);
+        bail!("`cargo zigbuild` exited with status {}", status);
     }
 
     let profile = if args.release { "release" } else { "debug" };
-    let bin_dir = PathBuf::from("target").join(&args.target).join(profile);
-    println!("Build succeeded. Binaries in: {}", bin_dir.display());
+    println!(
+        "Build succeeded. Binaries in: {}",
+        PathBuf::from("target").join(&args.target).join(profile).display()
+    );
     Ok(())
 }
 
-/// Locate the best available cross-compilation driver:
-///
-/// 1. `cargo-zigbuild` — preferred: uses Zig as a linker, no Docker required.
-///    Install: `cargo install cargo-zigbuild` + Zig from <https://ziglang.org/download/>
-/// 2. `cross` — Docker-based, broader platform support (especially Windows targets).
-///    Install: `cargo install cross` + Docker
-/// 3. Plain `cargo build` — last resort; works only when the target toolchain is installed.
-///
-/// Missing tools are auto-installed via `cargo install` before falling through.
-fn detect_build_driver() -> Result<BuildDriver> {
-    // 1. cargo-zigbuild (no Docker, Zig as linker).
+/// Ensure `cargo-zigbuild` is installed, attempting `cargo install` if missing.
+fn ensure_zigbuild() -> Result<()> {
     if is_available("cargo-zigbuild") {
-        return Ok(BuildDriver::ZigBuild);
+        return Ok(());
     }
     eprintln!("`cargo-zigbuild` not found — installing…");
-    if try_cargo_install(&["install", "cargo-zigbuild"]) {
-        eprintln!("`cargo-zigbuild` installed successfully.");
-        return Ok(BuildDriver::ZigBuild);
+    let ok = Command::new("cargo")
+        .args(["install", "cargo-zigbuild"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok {
+        eprintln!("`cargo-zigbuild` installed.");
+        return Ok(());
     }
-
-    // 2. cross (Docker-based).
-    if is_available("cross") {
-        return Ok(BuildDriver::Cross);
-    }
-    eprintln!("`cross` not found — installing (requires Docker)…");
-    if try_cargo_install(&["install", "cross", "--git", "https://github.com/cross-rs/cross"]) {
-        eprintln!("`cross` installed successfully.");
-        return Ok(BuildDriver::Cross);
-    }
-
-    // 3. Plain cargo — warn and continue.
-    eprintln!(
-        "Warning: neither `cargo-zigbuild` nor `cross` could be installed.\n\
-        Falling back to `cargo build` — cross-compilation may fail without a matching toolchain.\n\
-        Install options:\n\
-          • cargo install cargo-zigbuild  (then install zig: https://ziglang.org/download/)\n\
-          • cargo install cross           (then install Docker)"
-    );
-    Ok(BuildDriver::Cargo)
+    bail!(
+        "`cargo-zigbuild` could not be installed automatically.\n\
+        Run:  cargo install cargo-zigbuild\n\
+        Then install Zig: https://ziglang.org/download/"
+    )
 }
 
-fn is_available(bin: &str) -> bool {
-    Command::new(bin).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
-}
+// ── Ship ──────────────────────────────────────────────────────────────────────
 
-fn try_cargo_install(args: &[&str]) -> bool {
-    Command::new("cargo").args(args).status().map(|s| s.success()).unwrap_or(false)
-}
-
-fn format_args_display(cmd: &Command) -> String {
-    let prog = cmd.get_program().to_string_lossy().to_string();
-    let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
-    format!("{} {}", prog, args.join(" "))
-}
-
-// ── Deploy implementation ─────────────────────────────────────────────────────
-
-fn cmd_deploy(args: DeployArgs) -> Result<()> {
+async fn cmd_ship(args: ShipArgs) -> Result<()> {
     if !args.binary.exists() {
         bail!("binary not found: {}", args.binary.display());
     }
 
+    // Compute SHA-256 locally once — verified on each remote after transfer.
+    let binary_data = fs::read(&args.binary)
+        .with_context(|| format!("cannot read {}", args.binary.display()))?;
+    let local_sha256 = sha256_hex(&binary_data);
+    println!("SHA-256: {}", local_sha256);
+    println!("Size:    {} bytes", binary_data.len());
+
+    let remote_path = args
+        .remote_path
+        .to_str()
+        .context("remote-path is not valid UTF-8")?
+        .to_owned();
+
     let mut deployed: Vec<WorkerEntry> = Vec::new();
 
     for host in &args.workers {
-        println!("Deploying to {}…", host);
-        deploy_to_worker(host, &args)?;
-
-        let address = format!("{}:{}", host, args.port);
-        if !args.no_healthcheck {
-            healthcheck(&address).with_context(|| format!("health-check failed for {}", address))?;
-            println!("  ✓ {} is healthy", address);
-        }
-
-        deployed.push(WorkerEntry { address });
+        println!("\nShipping to {}…", host);
+        ship_to_host(host, &args.user, args.key.as_deref(), &binary_data, &local_sha256, &remote_path)
+            .await
+            .with_context(|| format!("failed to ship to {}", host))?;
+        println!("  ✓ {} — binary at {}", host, remote_path);
+        deployed.push(WorkerEntry { address: format!("{}:{}", host, args.port) });
     }
 
     save_cluster_config(&deployed)?;
     println!(
-        "\nDeployed {} worker(s). Addresses written to {}",
+        "\nShipped to {} worker(s). Addresses written to {}",
         deployed.len(),
         CLUSTER_CONFIG_PATH
     );
-    for w in &deployed {
-        println!("  {}", w.address);
-    }
     Ok(())
 }
 
-fn deploy_to_worker(host: &str, args: &DeployArgs) -> Result<()> {
-    let remote_dir = "/tmp/atomic-worker";
-    let remote_path = format!("{}/worker", remote_dir);
-    let user_host = format!("{}@{}", args.user, host);
+/// SSH connect → authenticate → mkdir → SFTP upload → verify SHA-256 → atomic rename.
+async fn ship_to_host(
+    host: &str,
+    user: &str,
+    key_path: Option<&Path>,
+    binary_data: &[u8],
+    expected_sha256: &str,
+    remote_path: &str,
+) -> Result<()> {
+    // ── 1. Connect with host-key verification ─────────────────────────────────
+    //
+    // Refuses unknown hosts (no StrictHostKeyChecking=no).
+    // The caller must have already run `ssh-keyscan -H <host> >> ~/.ssh/known_hosts`.
+    let config = Arc::new(client::Config::default());
+    let checker = KnownHostsChecker { host: host.to_owned(), port: 22 };
+    let mut session = client::connect(config, (host, 22u16), checker)
+        .await
+        .with_context(|| format!("SSH connect to {} failed", host))?;
 
-    // 1. Create remote directory
-    ssh_run(host, &args.user, args.key.as_deref(), &format!("mkdir -p {}", remote_dir))?;
+    // ── 2. Authenticate ───────────────────────────────────────────────────────
+    authenticate(&mut session, user, key_path).await?;
 
-    // 2. SCP binary
-    let mut scp = Command::new("scp");
-    if let Some(key) = &args.key {
-        scp.arg("-i").arg(key);
+    // ── 3. Create remote directory (exec) ─────────────────────────────────────
+    let remote_dir = Path::new(remote_path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or("/opt/atomic");
+    exec_checked(&mut session, &format!("mkdir -p {}", shell_quote(remote_dir))).await?;
+
+    // ── 4. Upload to a temp path via SFTP ────────────────────────────────────
+    //
+    // Writing to `<path>.tmp` means the final destination always contains a
+    // complete binary — the rename in step 6 is atomic on POSIX systems.
+    let tmp_path = format!("{}.tmp", remote_path);
+    {
+        let channel = session.channel_open_session().await?;
+        channel.request_subsystem(true, "sftp").await?;
+        let sftp = SftpSession::new(channel.into_stream()).await?;
+
+        let mut remote_file = sftp
+            .create(&tmp_path)
+            .await
+            .with_context(|| format!("cannot create remote file {}", tmp_path))?;
+        remote_file.write_all(binary_data).await?;
+        remote_file.shutdown().await?;
+        // remote_file dropped — SFTP channel closes here.
     }
-    scp.args(["-o", "StrictHostKeyChecking=no"])
-        .arg(args.binary.as_os_str())
-        .arg(format!("{}:{}", user_host, remote_path));
 
-    let status = scp.status().context("failed to run scp")?;
-    if !status.success() {
-        bail!("scp failed for {}", host);
+    // ── 5. Verify SHA-256 on the remote ──────────────────────────────────────
+    //
+    // Catches bit-rot, truncated transfers, and any tampering between our
+    // SCP upload and the rename.
+    let (output, code) =
+        exec_output(&mut session, &format!("sha256sum {}", shell_quote(&tmp_path))).await?;
+    if code != 0 {
+        let _ = exec_output(&mut session, &format!("rm -f {}", shell_quote(&tmp_path))).await;
+        bail!("sha256sum failed on {} (exit {})", host, code);
+    }
+    let remote_sha256 = output.split_whitespace().next().unwrap_or("").trim().to_owned();
+    if remote_sha256 != expected_sha256 {
+        let _ = exec_output(&mut session, &format!("rm -f {}", shell_quote(&tmp_path))).await;
+        bail!(
+            "SHA-256 mismatch on {} — transfer corrupted or tampered:\n  expected: {}\n  got:      {}",
+            host, expected_sha256, remote_sha256
+        );
     }
 
-    // 3. chmod and launch worker in background
-    let launch_cmd = format!(
-        "chmod +x {path} && nohup {path} --worker --port {port} > /tmp/atomic-worker.log 2>&1 &",
-        path = remote_path,
-        port = args.port,
-    );
-    ssh_run(host, &args.user, args.key.as_deref(), &launch_cmd)?;
+    // ── 6. Atomic rename + set permissions ────────────────────────────────────
+    //
+    // chmod before mv: the binary is only visible at the final path once it is
+    // both complete and executable.
+    exec_checked(
+        &mut session,
+        &format!(
+            "chmod 755 {} && mv {} {}",
+            shell_quote(&tmp_path),
+            shell_quote(&tmp_path),
+            shell_quote(remote_path),
+        ),
+    )
+    .await?;
 
+    session.disconnect(russh::Disconnect::ByApplication, "", "English").await.ok();
     Ok(())
 }
 
-fn ssh_run(host: &str, user: &str, key: Option<&std::path::Path>, cmd: &str) -> Result<()> {
-    let mut ssh = Command::new("ssh");
-    if let Some(key) = key {
-        ssh.arg("-i").arg(key);
-    }
-    ssh.args(["-o", "StrictHostKeyChecking=no"])
-        .arg(format!("{}@{}", user, host))
-        .arg(cmd);
+// ── SSH host-key verification ─────────────────────────────────────────────────
 
-    let status = ssh.status().with_context(|| format!("failed to ssh into {}", host))?;
-    if !status.success() {
-        bail!("ssh command failed on {}: {}", host, cmd);
-    }
-    Ok(())
+struct KnownHostsChecker {
+    host: String,
+    port: u16,
 }
 
-/// TCP health-check: connect and read the WorkerCapabilities frame header (4 bytes).
-/// If the worker accepts the connection within 10 seconds it is considered healthy.
-fn healthcheck(address: &str) -> Result<()> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        match TcpStream::connect_timeout(
-            &address.parse().with_context(|| format!("invalid address: {}", address))?,
-            Duration::from_secs(1),
-        ) {
-            Ok(mut stream) => {
-                // Just connecting is enough — the worker accepts connections once ready.
-                // Drain any greeting bytes so the worker doesn't error on our disconnect.
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-                let mut buf = [0u8; 16];
-                let _ = stream.read(&mut buf);
-                return Ok(());
-            }
-            Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            Err(e) => bail!("could not connect to {}: {}", address, e),
+impl client::Handler for KnownHostsChecker {
+    type Error = anyhow::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &russh::keys::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        let known_hosts = ssh_dir()
+            .map(|d| d.join("known_hosts"))
+            .context("cannot locate ~/.ssh/known_hosts")?;
+
+        if !known_hosts.exists() {
+            bail!(
+                "~/.ssh/known_hosts does not exist.\n\
+                Add the host first:\n  ssh-keyscan -H {} >> ~/.ssh/known_hosts",
+                self.host
+            );
+        }
+
+        match check_known_hosts_path(&self.host, self.port, server_public_key, &known_hosts) {
+            // Key found and matches — safe to continue.
+            Ok(true) => Ok(true),
+
+            // Host not in known_hosts — refuse rather than auto-accept.
+            Ok(false) => bail!(
+                "Host '{}' is not in ~/.ssh/known_hosts.\n\
+                Add it with:\n  ssh-keyscan -H {} >> ~/.ssh/known_hosts",
+                self.host,
+                self.host
+            ),
+
+            // Key mismatch — warn loudly; this is a potential MITM.
+            Err(e) if e.to_string().to_lowercase().contains("changed") => bail!(
+                "HOST KEY MISMATCH for '{}'!\n\
+                This may indicate a man-in-the-middle attack, or the host was reinstalled.\n\
+                If the change is expected, remove the stale entry first:\n\
+                  ssh-keygen -R {}\n\
+                Then re-add:\n  ssh-keyscan -H {} >> ~/.ssh/known_hosts\n\
+                Underlying error: {}",
+                self.host,
+                self.host,
+                self.host,
+                e
+            ),
+
+            Err(e) => Err(e.into()),
         }
     }
 }
 
-// ── Submit implementation ─────────────────────────────────────────────────────
+// ── SSH authentication ────────────────────────────────────────────────────────
 
-fn cmd_submit(args: SubmitArgs) -> Result<()> {
+async fn authenticate(
+    session: &mut Handle<KnownHostsChecker>,
+    user: &str,
+    key_path: Option<&Path>,
+) -> Result<()> {
+    // Explicit key takes priority.
+    if let Some(path) = key_path {
+        let key = load_secret_key(path, None)
+            .with_context(|| format!("cannot load SSH key: {}", path.display()))?;
+        let auth_key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+        let result = session
+            .authenticate_publickey(user, auth_key)
+            .await
+            .context("SSH key auth request failed")?;
+        if !result.success() {
+            bail!("SSH key auth rejected for user '{}' (key: {})", user, path.display());
+        }
+        return Ok(());
+    }
+
+    // Fall back to default key files in preference order.
+    let ssh_dir = ssh_dir().context("cannot locate home directory")?;
+    for name in &["id_ed25519", "id_ecdsa", "id_rsa"] {
+        let path = ssh_dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let Ok(key) = load_secret_key(&path, None) else {
+            continue;
+        };
+        let auth_key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+        if session.authenticate_publickey(user, auth_key).await.map(|r| r.success()).unwrap_or(false) {
+            return Ok(());
+        }
+    }
+
+    bail!(
+        "SSH authentication failed for user '{}'.\n\
+        Use --key <path> to specify an SSH private key, or ensure one of\n\
+        ~/.ssh/id_ed25519, ~/.ssh/id_ecdsa, ~/.ssh/id_rsa works for this host.",
+        user
+    )
+}
+
+// ── Remote exec helpers ───────────────────────────────────────────────────────
+
+/// Run a remote command; bail if it exits non-zero.
+async fn exec_checked(session: &mut Handle<KnownHostsChecker>, cmd: &str) -> Result<()> {
+    let (output, code) = exec_output(session, cmd).await?;
+    if code != 0 {
+        bail!("remote command failed (exit {}):\n  cmd: {}\n  out: {}", code, cmd, output.trim());
+    }
+    Ok(())
+}
+
+/// Run a remote command and return (stdout, exit_code).
+async fn exec_output(
+    session: &mut Handle<KnownHostsChecker>,
+    cmd: &str,
+) -> Result<(String, i32)> {
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .context("failed to open SSH channel")?;
+    channel.exec(true, cmd).await?;
+
+    let mut stdout = Vec::new();
+    let mut exit_code = 0i32;
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
+            Some(ChannelMsg::ExitStatus { exit_status }) => {
+                exit_code = exit_status as i32;
+            }
+            // Ignore stderr (ExtendedData) and other control messages.
+            Some(ChannelMsg::Eof) | None => break,
+            _ => {}
+        }
+    }
+
+    Ok((String::from_utf8_lossy(&stdout).into_owned(), exit_code))
+}
+
+// ── Submit ────────────────────────────────────────────────────────────────────
+
+async fn cmd_submit(args: SubmitArgs) -> Result<()> {
     // 1. Build
     cmd_build(BuildArgs {
         target: args.target.clone(),
@@ -388,24 +468,25 @@ fn cmd_submit(args: SubmitArgs) -> Result<()> {
         cargo_args: vec![],
     })?;
 
-    // 2. Locate the built binary (first bin in release profile)
+    // 2. Locate built binary
     let bin_dir = PathBuf::from("target").join(&args.target).join("release");
     let binary = find_binary(&bin_dir)
         .with_context(|| format!("no binary found in {}", bin_dir.display()))?;
 
-    // 3. Deploy (if workers given)
+    // 3. Ship to workers
     if !args.workers.is_empty() {
-        cmd_deploy(DeployArgs {
+        cmd_ship(ShipArgs {
             workers: args.workers.clone(),
             binary,
+            remote_path: args.remote_path,
             port: args.port,
             key: args.key.clone(),
             user: args.user.clone(),
-            no_healthcheck: false,
-        })?;
+        })
+        .await?;
     }
 
-    // 4. Run driver
+    // 4. Run driver locally
     let worker_addrs: Vec<String> = if args.workers.is_empty() {
         load_cluster_config()?
             .workers
@@ -413,15 +494,12 @@ fn cmd_submit(args: SubmitArgs) -> Result<()> {
             .map(|w| w.address)
             .collect()
     } else {
-        args.workers
-            .iter()
-            .map(|h| format!("{}:{}", h, args.port))
-            .collect()
+        args.workers.iter().map(|h| format!("{}:{}", h, args.port)).collect()
     };
 
     let driver_binary = find_binary(&PathBuf::from("target/release"))
         .or_else(|_| find_binary(&PathBuf::from("target/debug")))
-        .context("no local driver binary found — run `cargo build` first")?;
+        .context("no local driver binary — run `cargo build` first")?;
 
     let mut driver_cmd = Command::new(&driver_binary);
     driver_cmd.arg("--driver");
@@ -440,47 +518,11 @@ fn cmd_submit(args: SubmitArgs) -> Result<()> {
     Ok(())
 }
 
-fn find_binary(dir: &std::path::Path) -> Result<PathBuf> {
-    if !dir.exists() {
-        bail!("directory does not exist: {}", dir.display());
-    }
-    let entries = fs::read_dir(dir)?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            // Skip known non-binary extensions
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if matches!(ext, "d" | "rlib" | "rmeta" | "pdb" | "so" | "dylib" | "dll") {
-                continue;
-            }
-            // On Unix, check executable bit
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if entry.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false) {
-                    return Ok(path);
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                if ext == "exe" || ext.is_empty() {
-                    return Ok(path);
-                }
-            }
-        }
-    }
-    bail!("no executable binary found in {}", dir.display());
-}
-
-// ── Stop implementation ───────────────────────────────────────────────────────
+// ── Stop ──────────────────────────────────────────────────────────────────────
 
 fn cmd_stop(args: StopArgs) -> Result<()> {
     let addresses: Vec<String> = if args.workers.is_empty() {
-        load_cluster_config()?
-            .workers
-            .into_iter()
-            .map(|w| w.address)
-            .collect()
+        load_cluster_config()?.workers.into_iter().map(|w| w.address).collect()
     } else {
         args.workers
     };
@@ -498,42 +540,86 @@ fn cmd_stop(args: StopArgs) -> Result<()> {
         }
     }
 
-    // Clear cluster config
     if PathBuf::from(CLUSTER_CONFIG_PATH).exists() {
         save_cluster_config(&[])?;
     }
-
     Ok(())
 }
 
 /// Send a graceful shutdown frame to a worker.
-///
-/// The wire protocol sends a 4-byte big-endian length followed by a single
-/// byte `0x01` (ShutdownRequest opcode as used by the executor's transport layer).
-/// If the worker has already stopped, the connection error is treated as success.
 fn stop_worker(address: &str) -> Result<()> {
-    let addr = address
-        .parse()
-        .with_context(|| format!("invalid address: {}", address))?;
+    let addr = address.parse().with_context(|| format!("invalid address: {}", address))?;
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
         .with_context(|| format!("could not connect to {}", address))?;
     stream.set_write_timeout(Some(Duration::from_secs(3))).ok();
-
     // Frame: 4-byte BE length (1) + 1-byte opcode (0x01 = shutdown)
-    let frame: [u8; 5] = [0, 0, 0, 1, 0x01];
-    let _ = stream.write_all(&frame);
+    let _ = stream.write_all(&[0, 0, 0, 1, 0x01]);
     Ok(())
 }
 
-// ── Cluster config helpers ────────────────────────────────────────────────────
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
+fn sha256_hex(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
+}
+
+/// Wrap a string in single quotes, escaping any embedded single quotes.
+/// Safe for use in remote shell commands that contain paths.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn ssh_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".ssh"))
+}
+
+fn is_available(bin: &str) -> bool {
+    Command::new(bin).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+fn format_cmd(cmd: &Command) -> String {
+    let prog = cmd.get_program().to_string_lossy().to_string();
+    let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+    format!("{} {}", prog, args.join(" "))
+}
+
+fn find_binary(dir: &Path) -> Result<PathBuf> {
+    if !dir.exists() {
+        bail!("directory does not exist: {}", dir.display());
+    }
+    for entry in fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if matches!(ext, "d" | "rlib" | "rmeta" | "pdb" | "so" | "dylib" | "dll") {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if entry.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false) {
+                return Ok(path);
+            }
+        }
+        #[cfg(not(unix))]
+        if ext == "exe" || ext.is_empty() {
+            return Ok(path);
+        }
+    }
+    bail!("no executable binary found in {}", dir.display())
+}
+
+// ── Cluster config ────────────────────────────────────────────────────────────
 
 fn save_cluster_config(workers: &[WorkerEntry]) -> Result<()> {
     let config_path = PathBuf::from(CLUSTER_CONFIG_PATH);
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent).context("failed to create .atomic directory")?;
     }
-    let config = ClusterConfig { workers: workers.to_vec() };
-    let toml = toml::to_string_pretty(&config).context("failed to serialize cluster config")?;
+    let toml = toml::to_string_pretty(&ClusterConfig { workers: workers.to_vec() })
+        .context("failed to serialize cluster config")?;
     fs::write(&config_path, toml)
         .with_context(|| format!("failed to write {}", config_path.display()))
 }

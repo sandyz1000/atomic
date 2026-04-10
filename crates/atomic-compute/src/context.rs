@@ -141,6 +141,7 @@ impl Context {
         fs::create_dir_all(&job_work_dir).unwrap();
 
         let _ = env_logger::try_init();
+        atomic_data::cache::init_partition_cache();
         let config = Arc::new(config);
         if let Err(e) = env::Env::run_in_async_rt(|| env::init_shuffle(&config)) {
             log::warn!("shuffle service could not start (wide transforms will be local-only): {e}");
@@ -167,6 +168,7 @@ impl Context {
 
         fs::create_dir_all(&job_work_dir).unwrap();
         let _ = env_logger::try_init();
+        atomic_data::cache::init_partition_cache();
 
         let config = Arc::new(config);
 
