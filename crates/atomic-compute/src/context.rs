@@ -698,6 +698,34 @@ pub fn start_worker(config: Config) -> ! {
         log::warn!("shuffle service could not start on worker: {e}");
     }
 
+    // Spawn the Python subprocess worker pool (one process per CPU, each with its own GIL).
+    #[cfg(feature = "python-udf")]
+    {
+        let pool_size = num_cpus::get().max(1);
+        crate::backend::python_pool::init_python_worker_pool(pool_size);
+        log::info!("Python worker pool started ({pool_size} subprocesses)");
+    }
+
+    // Eagerly warm up the JS V8 runtime on N blocking threads so the first UDF task
+    // does not pay the cold-start cost.  spawn_blocking is used because JsRuntime is
+    // !Send and must be initialized on the thread that will use it.
+    #[cfg(feature = "js-v8")]
+    {
+        let n = num_cpus::get().max(1);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let handles: Vec<_> = (0..n)
+                .map(|_| handle.spawn_blocking(crate::backend::js_runtime::warmup_js_runtime))
+                .collect();
+            for h in handles {
+                let _ = tokio::task::block_in_place(|| handle.block_on(h));
+            }
+            log::info!("JS V8 runtime warmed up on {n} blocking threads");
+        } else {
+            // Not inside a tokio runtime (e.g. integration tests) — skip pre-warming.
+            log::debug!("JS V8 warmup skipped: no tokio runtime available");
+        }
+    }
+
     let result = config
         .worker
         .as_ref()

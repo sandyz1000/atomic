@@ -11,10 +11,12 @@ Atomic is a stable-Rust rewrite and refactor of Vega.
 
 ## Repository Structure
 
-- `crates/atomic-data`: shared types — RDD traits, task envelopes, distributed structs, shuffle primitives, dependency DAG.
-- `crates/atomic-compute`: execution runtime — context, executor, `NativeBackend`, UDF dispatch, RDD implementations.
+- `crates/atomic-data`: shared types — RDD traits, task envelopes, distributed structs, shuffle primitives, dependency DAG, partition cache.
+- `crates/atomic-compute`: execution runtime — context, executor, `NativeBackend`, UDF dispatch, RDD implementations, persist/cache layer.
 - `crates/atomic-scheduler`: DAG building, stage planning, job tracking, `LocalScheduler`, `DistributedScheduler`.
 - `crates/atomic-sql`: structured data and SQL query layer — built on DataFusion (see below).
+- `crates/atomic-streaming`: Spark Streaming–style micro-batch streaming on top of `atomic-compute`.
+- `crates/atomic-cli`: cross-compilation and secure binary distribution to remote workers.
 - `crates/atomic-utils`: shared utilities.
 - `notes/`: architecture notes and design documents.
 
@@ -129,12 +131,19 @@ Distributed tasks use types from `atomic_data::distributed`.
 - `AtomicApp::build()` — unified entry point; reads `--worker`/`--workers`/`--local-ip` from CLI.
 - Explicit `Config` struct at entry point — replaces global `OnceCell<Configuration>` env-var reading.
 - Distributed integration test (driver + real worker over TCP, `cargo test -p atomic-tests test_distributed`).
+- **RDD persist/cache**: `TypedRdd::cache()` / `TypedRdd::persist(StorageLevel)` — partitions stored in global `PARTITION_CACHE` (`PartitionStore`) as typed `Arc<Vec<T>>`; no serialization required; subsequent actions hit the store instead of recomputing the DAG.
+- **`atomic-cli`**: cross-compilation with `cargo-zigbuild` (no Docker); secure SSH/SFTP binary distribution via `russh`; host-key verification against `~/.ssh/known_hosts`; SHA-256 integrity check on remote; atomic rename; no credentials in process list.
+- **`atomic-streaming` Phase 4**: `MappedDStream`, `FlatMappedDStream`, `FilteredDStream`, `WindowedDStream` all implement `compute()` using `MapperRdd`, `FlatMapperRdd`, and `UnionRdd`.
 
 ### Not Done Yet
 
 - Distributed shuffle end-to-end: each worker needs to run its own `ShuffleManager` and register its URI with the driver's `MapOutputTracker`.
 - `ShuffleFetcher` retry on transient network errors.
 - Failed shuffle-map stage recompute / fault recovery.
+- `CacheTracker` distributed protocol — locality-aware scheduling using cached partition locations (deferred; local cache works correctly without it).
+- LRU eviction for `PartitionStore` — currently unbounded in-memory growth.
+- `unpersist()` — explicit cache invalidation API.
+- Windowed reduce-by-key / `updateStateByKey` / `mapWithState` in streaming.
 
 ## atomic-sql Architecture
 
@@ -210,6 +219,70 @@ DataFusion: Filter / Project / Aggregate / Join  →  DataFrame.collect()
 - Custom physical operators — DataFusion provides hash join, agg, sort, etc.
 - The old Catalyst-inspired code (analyzer, optimizer, joins, columnar, commands)
   was entirely replaced by DataFusion.
+
+---
+
+## RDD Persist / Cache
+
+`TypedRdd::cache()` and `TypedRdd::persist(level)` wrap the target RDD in a `CachedRdd<T>`.
+
+### How it works
+
+```text
+rdd.map_task(Double).cache()
+       ↓
+TypedRdd<T> backed by CachedRdd { inner: MapperRdd { inner: ParallelCollection } }
+
+action1: rdd.collect()
+  CachedRdd::compute(p0) → miss → MapperRdd computes → stores Arc<Vec<T>> → returns
+  CachedRdd::compute(p1) → miss → MapperRdd computes → stores Arc<Vec<T>> → returns
+
+action2: rdd.count()
+  CachedRdd::compute(p0) → HIT  → returns from PartitionStore (no recompute)
+  CachedRdd::compute(p1) → HIT  → returns from PartitionStore (no recompute)
+```
+
+### Key types
+
+| Type | File | Role |
+| --- | --- | --- |
+| `CachedRdd<T>` | `rdd/cached.rs` | RDD wrapper that intercepts `compute()` to check/fill the cache |
+| `PartitionStore` | `cache/mod.rs` | `DashMap<(rdd_id, partition), Box<dyn Any+Send+Sync>>` — type-erased, no serialization |
+| `PARTITION_CACHE` | `cache/mod.rs` | Global `OnceLock<PartitionStore>` initialized at `Context` startup |
+| `StorageLevel` | `cache/mod.rs` | `MemoryOnly` (default), `MemoryAndDisk`, `MemoryOnlySer`, `DiskOnly` — only `MemoryOnly` implemented |
+
+### Constraints
+
+- `T` needs only `Data + Clone + 'static` — no serialization bounds.
+- `CachedRdd` IDs come from a module-level `NEXT_CACHED_ID: AtomicUsize` starting at `0x7000_0000` — globally unique across all `Context` instances.
+- `PARTITION_CACHE` is a process-wide singleton; multiple `Context` instances in one process share it (cache keys include RDD id, which is globally unique).
+
+---
+
+## atomic-cli Architecture
+
+`crates/atomic-cli` cross-compiles the project and ships the binary to remote workers over secure SSH/SFTP.
+
+### Commands
+
+| Command | Description |
+| --- | --- |
+| `atomic build` | Cross-compile with `cargo-zigbuild` (auto-installed if absent); default target `x86_64-unknown-linux-musl` |
+| `atomic ship` | SFTP-upload binary to workers; host-key verify → SHA-256 check → atomic rename |
+| `atomic submit` | `build` + `ship` + run driver locally |
+| `atomic stop` | Send graceful shutdown frame over TCP to each worker |
+
+### Security guarantees
+
+- Host keys verified against `~/.ssh/known_hosts`; unknown hosts refused (no `StrictHostKeyChecking=no`).
+- Host-key mismatch raises a hard error with MITM warning.
+- Binary uploaded to `<path>.tmp`; SHA-256 verified remotely; only then renamed to final path (atomic on POSIX).
+- SSH private key never appears in a shell command or process argument list.
+- Uses `russh 0.60` (pure Rust SSH) + `russh-sftp` — no `scp` subprocess, no shell injection surface.
+
+### Worker lifecycle
+
+`atomic-cli` is responsible for **distribution only** — it does not start or stop worker processes. Worker lifecycle (systemd, SSH, etc.) is managed separately.
 
 ---
 
@@ -306,3 +379,128 @@ RDD IDs for streaming-created RDDs use a module-level `static AtomicUsize` start
 - No dynamic executor allocation (`ExecutorAllocationManager` is a stub).
 - No windowed reduce-by-key, `updateStateByKey`, or `mapWithState` (all deferred to Phase 4).
 - No distributed streaming mode — local mode uses the same `Arc<Context>` as `atomic-compute`.
+
+---
+
+## Planned Features
+
+### atomic-nlq — Natural Language Query Layer (LLM-first analytics)
+
+The long-term direction is a general-purpose analytics platform where users express intent
+in natural language and the system compiles it to an execution plan — without routing through
+SQL as an intermediate representation.
+
+**DataFusion is the IR backbone.**  DataFusion's `LogicalPlan` with `Extension` nodes *is* the
+IR.  Relational operators (Scan, Filter, Aggregate, Join, …) use DataFusion's built-in plan
+nodes directly.  Novel LLM-specific operators (`LlmMap`, `LlmFilter`, `Embed`, `VectorSearch`)
+are DataFusion `Extension(UserDefinedLogicalNode)` nodes — the same pattern already used by
+`RddScanExec` in `atomic-sql`.  No custom AST enum is needed.
+
+#### Full pipeline
+
+```text
+User: "find customers who bought luxury items and estimate lifetime value"
+         │
+         ▼  LlmPlanner (Anthropic API: schema + UDF list + NL query)
+  Structured JSON plan (LLM output)
+         │
+         ▼  IrParser
+  DataFusion LogicalPlan tree
+    Aggregate {
+      input: Extension(LlmFilterNode { prompt: "is this a luxury item?", col: "category" })
+        input: TableScan("orders")
+    }
+         │
+         ▼  DataFusion analyzer  (schema resolution, type checking — built-in)
+         ▼  DataFusion optimizer (predicate push-down, projection pruning, … — built-in)
+         ▼  LlmBatchingRule      (custom: groups per-row LLM calls into batched API calls)
+         │
+         ▼  Physical planner
+  PhysicalPlan
+    ├── RddScanExec          (already built in atomic-sql)
+    └── LlmFilterExec        (new: per-partition Anthropic API calls → filtered RecordBatches)
+         │
+         ▼
+  atomic-compute RDD DAG → LocalScheduler / DistributedScheduler → workers
+```
+
+#### Why DataFusion instead of a custom IR enum
+
+| Concern | DataFusion approach |
+| --- | --- |
+| Relational nodes (Scan, Filter, Join, …) | Built-in `LogicalPlan` variants — zero code |
+| Novel nodes (LlmMap, Embed, VectorSearch) | `Extension(Arc<dyn UserDefinedLogicalNode>)` — one struct per operator |
+| Schema resolution + type checking | DataFusion analyzer passes — built-in |
+| 30+ optimizer rules (predicate push-down, etc.) | Built-in, run automatically |
+| Custom optimization (LLM call batching) | `OptimizerRule` trait — one impl per custom pass |
+| UDFs / scalar functions | `ScalarUDF` + DataFusion `FunctionRegistry` — already wired in `atomic-sql` |
+| Arrow columnar execution | `ExecutionPlan` + `RecordBatch` — already used by `RddScanExec` |
+
+#### Novel plan nodes (each requires two impls)
+
+```text
+LlmMap(prompt_template, model, col)   ← transform each row with LLM
+LlmFilter(prompt_template, model)     ← boolean predicate via LLM
+Embed(col, model)                     ← produce vector embedding column
+VectorSearch(query_col, index, k)     ← ANN / similarity join
+```
+
+Each node follows the pattern established by `RddScanExec`:
+
+```rust
+// 1. Logical node — used by LlmPlanner + optimizer
+struct LlmFilterNode { prompt: String, model: String, input: LogicalPlan }
+impl UserDefinedLogicalNode for LlmFilterNode { ... }
+
+// 2. Physical node — called by DataFusion executor per partition
+struct LlmFilterExec { ... }
+impl ExecutionPlan for LlmFilterExec {
+    fn execute(&self, partition, ctx) -> SendableRecordBatchStream {
+        // call Anthropic API on this partition's RecordBatch → return filtered batches
+    }
+}
+```
+
+#### UDF Integration
+
+UDFs are registered in DataFusion's `FunctionRegistry` (already used in `atomic-sql` via
+`UdfRegistry`) plus a companion `description` field the LLM planner exposes as available tools.
+
+```rust
+// planned API
+registry.register_scalar("is_luxury",    "Returns true if the category is a luxury item",
+    |category: &str| -> bool { ... });
+registry.register_scalar("estimate_ltv", "Estimates customer lifetime value from customer_id",
+    |customer_id: i64| -> f64 { /* ML model */ });
+```
+
+The LLM planner system prompt includes:
+
+- Schema (tables, columns, Arrow types)
+- UDF list (name + description + signature) — same mechanism as Anthropic tool definitions
+- Instruction to produce a JSON plan tree using DataFusion node names + extension node names
+
+The LLM embeds `Call("is_luxury", col("category"))` nodes; DataFusion resolves these as
+registered `ScalarUDF` calls, identical to how SQL `SELECT is_luxury(category)` would work —
+but without going through SQL.
+
+#### Planned crate: `crates/atomic-nlq`
+
+| Component | Role | DataFusion mapping |
+| --- | --- | --- |
+| `NlqContext` | Entry point — wraps `AtomicSqlContext` + Anthropic client + `NlqRegistry` | Orchestrator |
+| `LlmPlanner` | Calls Anthropic API with schema + UDF list + NL query → JSON plan | Produces input for `IrParser` |
+| `IrParser` | Deserializes JSON plan into `LogicalPlan` with extension nodes | Replaces custom `IrNode` enum |
+| `LlmFilterNode` / `LlmMapNode` / `EmbedNode` / `VectorSearchNode` | Custom logical nodes | `UserDefinedLogicalNode` impls |
+| `LlmFilterExec` / `LlmMapExec` / `EmbedExec` / `VectorSearchExec` | Per-partition physical execution | `ExecutionPlan` impls |
+| `LlmBatchingRule` | Groups per-row LLM calls into batched API requests | `OptimizerRule` impl |
+| `NlqRegistry` | UDF name → description + signature + DataFusion `ScalarUDF` | Extends DataFusion `FunctionRegistry` |
+
+#### Guardrails for this feature
+
+- Use DataFusion's `LogicalPlan` directly — do not define a parallel AST enum.
+- The LLM never produces SQL; it produces a structured JSON tree that `IrParser` converts to `LogicalPlan`.
+- Schema resolution and basic type checking are handled by DataFusion's analyzer (built-in) — only extension-node–specific validation is custom.
+- `LlmBatchingRule` must run before the physical planner to avoid one API call per row.
+- UDF implementations may be Rust closures, Python (PyO3), or JavaScript (QuickJS) — matching the existing UDF dispatch model in `atomic-compute`.
+- `NlqContext::query(nl)` is the only public entry point; internal plan construction is not exposed.
