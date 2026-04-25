@@ -19,6 +19,14 @@ impl DataFrame {
         Self { inner }
     }
 
+    /// Create a `DataFrame` from a DataFusion [`DFDataFrame`].
+    ///
+    /// Used by external crates (e.g. `atomic-nlq`) that need to wrap a
+    /// DataFusion `DataFrame` into this type.
+    pub fn from_df(inner: DFDataFrame) -> Self {
+        Self { inner }
+    }
+
     // ── Transformations (lazy) ────────────────────────────────────────────────
 
     /// Project columns by expression.

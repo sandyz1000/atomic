@@ -1,0 +1,20 @@
+[package]
+name = "atomic-graph"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+# randomness
+rand = { workspace = true }
+rand_distr = { workspace = true }
+rand_pcg = { workspace = true }
+log = { workspace = true }
+# serialization
+bincode = { workspace = true }
+serde = { workspace = true, features = ["rc", "derive"] }
+rayon = { workspace = true }
+petgraph = { version = "0.6" }
+lazy_static = { workspace = true }
+num_cpus = { workspace = true }
