@@ -37,7 +37,7 @@ pub mod __macro_support {
 /// ```
 #[macro_export]
 macro_rules! register_shuffle_map {
-    ($K:ty, $V:ty) => {{
+    ($K:ty, $V:ty) => {
         // Key is generated at the call site where K and V are concrete types.
         // stringify! captures the source token text, which is:
         //   - stable across compiler versions (unlike std::any::type_name)
@@ -56,7 +56,7 @@ macro_rules! register_shuffle_map {
                 key: __SHUFFLE_KEY,
             }
         );
-    }};
+    };
 }
 
 pub use atomic_runtime_macros::task;
