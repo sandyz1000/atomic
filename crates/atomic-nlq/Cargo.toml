@@ -1,0 +1,27 @@
+[package]
+name = "atomic-nlq"
+version.workspace = true
+edition.workspace = true
+
+[features]
+integration = []
+
+[dependencies]
+atomic-sql     = { workspace = true }
+atomic-compute = { workspace = true }
+datafusion     = "53"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde          = { workspace = true, features = ["derive"] }
+serde_json     = { workspace = true }
+tokio          = { workspace = true, features = ["full"] }
+async-trait    = { workspace = true }
+futures        = { workspace = true }
+thiserror      = { workspace = true }
+dashmap        = { workspace = true }
+log            = { workspace = true }
+async-stream   = "0.3"
+parking_lot    = "0.12"
+
+[dev-dependencies]
+tokio = { workspace = true }
+anyhow = { workspace = true }

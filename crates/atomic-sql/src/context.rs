@@ -60,6 +60,16 @@ impl AtomicSqlContext {
         }
     }
 
+    /// Create a context from a pre-built [`SessionContext`].
+    ///
+    /// Used by `atomic-nlq` to inject a custom `SessionState` with its own
+    /// optimizer rules and physical planner before handing the session to
+    /// `AtomicSqlContext`. Prefer the other constructors unless you need to
+    /// customize the `SessionState`.
+    pub fn from_session(session: SessionContext, sc: Option<Arc<Context>>) -> Self {
+        Self { session, sc }
+    }
+
     /// Create a context backed by an atomic-compute [`Context`] for parallel execution.
     ///
     /// Use this when your data lives in atomic RDDs. SQL queries will materialize

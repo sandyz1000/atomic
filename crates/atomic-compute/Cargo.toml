@@ -45,17 +45,18 @@ atomic-utils.workspace = true
 atomic-scheduler.workspace = true
 atomic-runtime-macros.workspace = true
 tokio-util.workspace = true
-pyo3 = { workspace = true, features = ["auto-initialize"], optional = true }
-rquickjs = { workspace = true, optional = true }
+deno_core = { workspace = true, optional = true }
+base64 = { version = "0.22", optional = true }
 
 [features]
-# Enable Python UDF execution via embedded CPython interpreter (PyO3).
-# Only for worker binaries — NOT for extension modules (atomic-python cdylib).
-python-udf = ["pyo3"]
-# Enable JavaScript UDF execution via embedded QuickJS (rquickjs).
-# Workers use this to eval fn.toString() payloads sent by the atomic-js napi module.
-js-udf = ["rquickjs"]
-# Enable both UDF runtimes (for the atomic-worker binary).
-udf = ["python-udf", "js-udf"]
+# Enable Python UDF execution via subprocess worker pool.
+# Spawns num_cpus Python processes at startup; each has its own GIL — true parallelism.
+python-udf = ["base64"]
+# Enable JavaScript UDF execution via embedded V8 (deno_core).
+# Thread-local JsRuntime per tokio blocking thread, warm from a V8 startup snapshot.
+# Supports context_json for closure-like capture of driver-side values.
+js-v8 = ["deno_core"]
+# Enable both UDF runtimes for the atomic-worker binary.
+udf = ["python-udf", "js-v8"]
 
 [dev-dependencies]

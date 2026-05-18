@@ -31,6 +31,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 
 [workspace.dependencies]
+atomic-nlq = { path = "crates/atomic-nlq" }
 atomic-sql = { path = "crates/atomic-sql" }
 atomic-compute = { path = "crates/atomic-compute" }
 atomic-scheduler = { path = "crates/atomic-scheduler" }
@@ -41,7 +42,8 @@ atomic-py = { path = "crates/atomic-py" }
 atomic-js = { path = "crates/atomic-js" }
 atomic-worker = { path = "crates/atomic-worker" }
 pyo3 = { version = "0.28.3" }
-rquickjs = { version = "0.11.0", features = ["full"] }
+deno_core = { version = "0.399" }
+base64 = { version = "0.22" }
 syn = { version = "2.0.117", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"

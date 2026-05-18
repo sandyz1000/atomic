@@ -104,7 +104,8 @@ impl JsRdd {
 
     /// Build a JS UDF PipelineOp and push it into the staged pipeline.
     fn stage_js_udf(&mut self, fn_source: String, action: UdfAction, zero_json: &str) -> Result<()> {
-        let payload_struct = JsUdfPayload { fn_source, zero_json: zero_json.to_string() };
+        // TODO: Pass the correct value to context_json
+        let payload_struct = JsUdfPayload { fn_source, zero_json: zero_json.to_string(), context_json: None };
         let payload = serde_json::to_vec(&payload_struct)
             .map_err(|e| Error::from_reason(format!("JsUdfPayload encode: {e}")))?;
         let op = PipelineOp {

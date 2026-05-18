@@ -1,7 +1,6 @@
 use atomic_data::distributed::{TaskAction, TaskEnvelope, TaskResultEnvelope};
 
 use crate::backend::Backend;
-use crate::backend::udf::{JsUdfExecutor, PythonUdfExecutor, UdfExecutor};
 use crate::error::{Error, LibResult};
 use crate::task_registry::{SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
 
@@ -11,8 +10,11 @@ use crate::task_registry::{SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
 /// compile-time [`TASK_REGISTRY`] and calls the registered dispatch handlers in
 /// sequence, threading data through each step.
 ///
-/// UDF ops (`PythonUdf`, `JavaScriptUdf`) are routed to their respective
-/// [`UdfExecutor`] implementations rather than the registry.
+/// Python UDF ops are dispatched to the process-wide [`python_pool::PythonWorkerPool`];
+/// each worker subprocess has its own GIL, so partitions execute in true parallel.
+///
+/// JavaScript UDF ops are dispatched to a thread-local [`js_runtime::JsRuntime`]
+/// (V8, initialised from a startup snapshot), one runtime per tokio blocking thread.
 ///
 /// This is only valid when the driver and worker run the same binary — the
 /// dispatch table is built at compile time from all `#[task]`-annotated functions
@@ -21,18 +23,10 @@ use crate::task_registry::{SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
 pub struct NativeBackend;
 
 impl Backend for NativeBackend {
-    /// Execute a task envelope by running its pipeline of ops in order.
-    ///
-    /// Each op's output becomes the next op's input. Returns a [`TaskResultEnvelope`]
-    /// in all cases — errors are wrapped as `FatalFailure` rather than propagated,
-    /// so the scheduler can handle them uniformly.
     fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> LibResult<TaskResultEnvelope> {
         if task.ops.is_empty() {
             return Err(Error::UnknownOperation("empty pipeline".to_string()));
         }
-
-        let py_exec = PythonUdfExecutor;
-        let js_exec = JsUdfExecutor;
 
         let mut data = task.data.clone();
 
@@ -46,14 +40,16 @@ impl Backend for NativeBackend {
             );
 
             let op_result: Result<Vec<u8>, String> = match &op.action {
-                TaskAction::PythonUdf(action) => py_exec.execute(*action, &op.payload, &data),
-                TaskAction::JavaScriptUdf(action) => js_exec.execute(*action, &op.payload, &data),
+                TaskAction::PythonUdf(action) => {
+                    dispatch_python_udf(*action, &op.payload, &data)
+                }
+                TaskAction::JavaScriptUdf(action) => {
+                    dispatch_js_udf(*action, &op.payload, &data)
+                }
                 TaskAction::ShuffleMap {
                     shuffle_id,
                     num_output_partitions,
                 } => {
-                    // `op.payload` carries the type_id string (UTF-8) identifying which
-                    // SHUFFLE_MAP_REGISTRY handler to use for this (K, V) pair.
                     (|| {
                         let type_id = std::str::from_utf8(&op.payload)
                             .map_err(|e| format!("ShuffleMap: payload not UTF-8: {e}"))?;
@@ -68,7 +64,7 @@ impl Backend for NativeBackend {
                                 task.partition_id,
                                 *num_output_partitions,
                             )
-                            .map(|_| data.clone()), // side-effect only; pass data through
+                            .map(|_| data.clone()),
                         }
                     })()
                 }
@@ -94,8 +90,6 @@ impl Backend for NativeBackend {
             }
         }
 
-        // If any op was a ShuffleMap, attach this worker's shuffle server URI so the
-        // driver can register it with MapOutputTracker without decoding `data`.
         let shuffle_server_uri = task
             .ops
             .iter()
@@ -123,10 +117,76 @@ impl NativeBackend {
     }
 }
 
+// ── Python UDF dispatch ───────────────────────────────────────────────────────
+
+#[cfg(feature = "python-udf")]
+fn dispatch_python_udf(
+    action: atomic_data::distributed::UdfAction,
+    payload: &[u8],
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    use atomic_data::distributed::PythonUdfPayload;
+    use crate::backend::python_pool::PYTHON_WORKER_POOL;
+
+    let spec: PythonUdfPayload = serde_json::from_slice(payload)
+        .map_err(|e| format!("python_udf payload decode: {e}"))?;
+    let pool = PYTHON_WORKER_POOL
+        .get()
+        .ok_or("PythonWorkerPool not initialized — call init_python_worker_pool() at startup")?;
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(pool.execute(action, &spec, data))
+    })
+}
+
+#[cfg(not(feature = "python-udf"))]
+fn dispatch_python_udf(
+    _action: atomic_data::distributed::UdfAction,
+    _payload: &[u8],
+    _data: &[u8],
+) -> Result<Vec<u8>, String> {
+    Err("python-udf feature not enabled; rebuild with the python-udf feature".to_string())
+}
+
+// ── JavaScript UDF dispatch ───────────────────────────────────────────────────
+
+#[cfg(feature = "js-v8")]
+fn dispatch_js_udf(
+    action: atomic_data::distributed::UdfAction,
+    payload: &[u8],
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    use atomic_data::distributed::JsUdfPayload;
+    use crate::backend::js_runtime;
+
+    let spec: JsUdfPayload = serde_json::from_slice(payload)
+        .map_err(|e| format!("js_udf payload decode: {e}"))?;
+    let data_str = std::str::from_utf8(data)
+        .map_err(|e| format!("data utf8: {e}"))?;
+    js_runtime::eval_partition(
+        action,
+        &spec.fn_source,
+        spec.context_json.as_deref(),
+        data_str,
+        &spec.zero_json,
+    )
+}
+
+#[cfg(not(feature = "js-v8"))]
+fn dispatch_js_udf(
+    _action: atomic_data::distributed::UdfAction,
+    _payload: &[u8],
+    _data: &[u8],
+) -> Result<Vec<u8>, String> {
+    Err("js-v8 feature not enabled; rebuild with the js-v8 feature".to_string())
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atomic_data::distributed::{PipelineOp, ResultStatus, TaskAction, UdfAction};
+    use atomic_data::distributed::{PipelineOp, ResultStatus, TaskAction};
 
     fn make_task(op_id: &str, action: TaskAction, data: Vec<u8>) -> TaskEnvelope {
         TaskEnvelope::new(
@@ -155,17 +215,22 @@ mod tests {
     }
 
     #[test]
-    fn returns_fatal_failure_for_unknown_python_udf_action() {
+    fn returns_fatal_failure_for_python_udf_without_feature() {
+        // Without python-udf feature, PythonUdf ops return FatalFailure with a clear message.
+        use atomic_data::distributed::UdfAction;
         let backend = NativeBackend;
-        // PythonUdf requires python-udf feature — without it returns FatalFailure
-        let task = make_task(
-            "atomic::udf::python",
-            TaskAction::PythonUdf(UdfAction::Map),
-            b"[]".to_vec(),
-        );
+        let task = make_task("", TaskAction::PythonUdf(UdfAction::Map), b"[]".to_vec());
         let result = backend.execute("test-worker", &task).unwrap();
-        // Either FatalFailure (feature not enabled) or Success (feature enabled)
-        // Just verify it doesn't panic
+        // Either FatalFailure (feature not enabled) or Success (feature enabled + cloudpickle)
+        let _ = result.status;
+    }
+
+    #[test]
+    fn returns_fatal_failure_for_js_udf_without_feature() {
+        use atomic_data::distributed::UdfAction;
+        let backend = NativeBackend;
+        let task = make_task("", TaskAction::JavaScriptUdf(UdfAction::Map), b"[]".to_vec());
+        let result = backend.execute("test-worker", &task).unwrap();
         let _ = result.status;
     }
 }

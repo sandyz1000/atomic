@@ -202,6 +202,11 @@ pub struct JsUdfPayload {
     pub fn_source: String,
     /// JSON-encoded zero value for fold (empty string for non-fold).
     pub zero_json: String,
+    /// Optional JSON-encoded object of driver-side values to expose as `globalThis.__ctx`.
+    /// Enables closure-like capture: `(x, ctx) => x > ctx.threshold` with `{"threshold": 42}`.
+    /// `None` means no context — all existing payloads without this field deserialize to `None`.
+    #[serde(default)]
+    pub context_json: Option<String>,
 }
 
 /// Result status codes for task execution.
