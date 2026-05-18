@@ -1,30 +1,44 @@
 /// Word count using `#[task]` functions on distributed workers.
 ///
-/// # Running locally (single process)
+/// This binary has two roles — driver (producer) and worker (consumer) — selected
+/// by CLI flags, exactly like rusty-celery's `Produce`/`Consume` subcommands.
 ///
+/// # Running as worker (consumer)
+///
+/// ```bash
+/// cargo build -p task_wordcount --release
+/// ./target/release/task_wordcount --worker --port 10001
+/// ./target/release/task_wordcount --worker --port 10002
+/// ```
+///
+/// # Running as driver (producer)
+///
+/// Local (single process):
 /// ```bash
 /// cargo run -p task_wordcount
 /// ```
 ///
-/// # Running distributed (two terminals)
-///
-/// Terminal 1 — start two workers:
+/// Distributed — point the driver at running workers:
 /// ```bash
-/// cargo build -p task_wordcount --release
-/// ./target/release/task_wordcount --worker --port 10001 &
-/// ./target/release/task_wordcount --worker --port 10002 &
+/// ./target/release/task_wordcount --workers 127.0.0.1:10001,127.0.0.1:10002
 /// ```
+/// (`--driver` is also accepted as an explicit alias for the driver role.)
 ///
-/// Terminal 2 — run the driver, pointing at those workers:
-/// ```bash
-/// ./target/release/task_wordcount \
-///   --driver \
-///   --workers 127.0.0.1:10001,127.0.0.1:10002
-/// ```
-use std::collections::HashMap;
-
-use atomic_compute::app::AtomicApp;
+/// # Notes on distributed shuffle
+///
+/// `reduce_by_key` partitions `(word, count)` pairs by key hash and reduces each
+/// output partition independently — no full data movement to the driver.
+/// In local mode the shuffle writes to an in-process `DashMapShuffleCache` and
+/// the result is fetched by the local `ShuffleManager` HTTP server.
+/// In distributed mode each worker must register its `ShuffleManager` URI with
+/// the driver's `MapOutputTracker` — see ROADMAP.md P0 for the remaining work.
+use atomic_compute::app::{AppRole, AtomicApp};
 use atomic_compute::task;
+
+// Register the shuffle-map handler for `(String, u32)`.
+// This links the type-specific partition-write function into the binary so that
+// workers can materialise shuffle buckets when `reduce_by_key` fires.
+atomic_compute::register_shuffle_map!(String, u32);
 
 // ── Task functions ─────────────────────────────────────────────────────────────
 //
@@ -72,12 +86,20 @@ fn corpus() -> Vec<String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // AtomicApp::build() reads CLI flags:
-    //   --worker [--port N] [--local-ip ADDR]  → starts worker loop, never returns
-    //   --workers addr:port,...                  → distributed driver
-    //   (no flags)                               → local driver
+    // build() parses CLI flags and returns — role is stored in app.role.
+    // Match on it to branch explicitly, mirroring celery's Consume/Produce pattern.
+    //
+    //   --worker [--port N] [--local-ip ADDR]   → AppRole::Worker  → run_worker()
+    //   --driver / --workers addr:port,...       → AppRole::Driver  → driver_context()
+    //   (no flags)                               → AppRole::Driver  → local driver
     let app = AtomicApp::build().await?;
-    let ctx = app.driver_context()?;
+
+    let ctx = match app.role {
+        AppRole::Worker { .. } => {
+            app.run_worker(); // executor: dispatch TaskEnvelopes via TASK_REGISTRY — never returns
+        }
+        AppRole::Driver => app.driver_context()?,
+    };
 
     let lines = corpus();
     let num_partitions = 4;
@@ -88,37 +110,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   1. parallelize       — split lines into `num_partitions` partitions
     //   2. flat_map_task     — workers tokenize each partition: lines → words
     //   3. map_task          — workers pair each word: word → (word, 1)
-    //   4. collect           — driver receives all (word, 1) pairs
+    //   4. reduce_by_key     — shuffle by key hash; each partition reduces its key range
+    //   5. collect           — driver receives the fully-reduced (word, count) pairs
     //
-    // In distributed mode, steps 2 and 3 are pipelined into a single
-    // TaskEnvelope per partition, so each worker receives lines, runs both
-    // tasks, and returns (word, 1) pairs — one round-trip per partition.
-    let pairs: Vec<(String, u32)> = ctx
+    // In distributed mode, steps 2–3 are pipelined into a single TaskEnvelope per
+    // partition. The reduce_by_key shuffle then moves only reduced data — not all raw
+    // pairs — back to the driver.
+    let mut word_counts: Vec<(String, u32)> = ctx
         .parallelize_typed(lines, num_partitions)
         .flat_map_task(Tokenize)
         .map_task(PairOne)
+        .reduce_by_key(|a, b| a + b)
         .collect()?;
 
-    // Aggregate word counts on the driver.
-    let mut word_counts: HashMap<String, u64> = HashMap::new();
-    for (word, n) in pairs {
-        *word_counts.entry(word).or_insert(0) += n as u64;
-    }
-
     // Sort by count descending, then word alphabetically.
-    let mut results: Vec<(String, u64)> = word_counts.into_iter().collect();
-    results.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    word_counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
     println!("{:<20} COUNT", "WORD");
     println!("{}", "-".repeat(28));
-    for (word, count) in &results {
+    for (word, count) in &word_counts {
         if !word.is_empty() {
             println!("{:<20} {}", word, count);
         }
     }
 
-    let unique = results.iter().filter(|(w, _)| !w.is_empty()).count();
-    let total: u64 = results.iter().map(|(_, c)| c).sum();
+    let unique = word_counts.iter().filter(|(w, _)| !w.is_empty()).count();
+    let total: u64 = word_counts.iter().map(|(_, c)| *c as u64).sum();
     println!("\nUnique words: {}  |  Total tokens: {}", unique, total);
 
     Ok(())

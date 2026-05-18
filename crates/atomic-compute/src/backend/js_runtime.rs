@@ -26,7 +26,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 #[cfg(feature = "js-v8")]
-use atomic_data::distributed::UdfAction;
+
 
 // ── Thread-local state ────────────────────────────────────────────────────────
 
@@ -108,11 +108,9 @@ fn ensure_fn_compiled(
 /// Returns JSON-encoded result bytes.
 #[cfg(feature = "js-v8")]
 pub fn eval_partition(
-    action: UdfAction,
     fn_source: &str,
     context_json: Option<&str>,
     data_str: &str,
-    zero_json: &str,
 ) -> Result<Vec<u8>, String> {
     with_js_runtime(|rt| {
         // 1. Inject driver context (or clear to avoid stale values from prior tasks).
@@ -123,17 +121,11 @@ pub fn eval_partition(
         rt.execute_script("<ctx>", ctx_js)
             .map_err(|e| format!("ctx inject: {e}"))?;
 
-        // 2. For fold: inject the zero value.
-        if matches!(action, UdfAction::Fold) && !zero_json.is_empty() {
-            rt.execute_script("<zero>", format!("globalThis.__zero = {zero_json};"))
-                .map_err(|e| format!("zero inject: {e}"))?;
-        }
-
-        // 3. Ensure the UDF function is compiled and cached; get its JS identifier.
+        // 2. Ensure the UDF function is compiled and cached; get its JS identifier.
         let fn_var = ensure_fn_compiled(rt, fn_source)?;
 
-        // 4. Build and run the action script using the cached function reference.
-        let script = build_script(action, &fn_var, data_str);
+        // 3. Build and run the partition-level function (fn_source is already partition-level).
+        let script = format!("JSON.stringify(({})({}));", fn_var, data_str);
         let result = rt
             .execute_script("<udf>", script)
             .map_err(|e| format!("JS eval: {e}"))?;
@@ -169,35 +161,6 @@ pub fn eval_partition(
 /// than the array index that JS array methods pass as their second argument.
 /// For binary operations (Reduce, Fold) the standard `(acc, x)` callback
 /// convention applies and no ctx wrapper is needed.
-#[cfg(feature = "js-v8")]
-fn build_script(action: UdfAction, fn_var: &str, data_str: &str) -> String {
-    match action {
-        UdfAction::Map => format!(
-            "JSON.stringify(({data_str}).map((x)=>globalThis.{fn_var}(x,globalThis.__ctx)))"
-        ),
-        UdfAction::Filter => format!(
-            "JSON.stringify(({data_str}).filter((x)=>globalThis.{fn_var}(x,globalThis.__ctx)))"
-        ),
-        UdfAction::FlatMap => format!(
-            "JSON.stringify(({data_str}).flatMap((x)=>globalThis.{fn_var}(x,globalThis.__ctx)))"
-        ),
-        UdfAction::MapValues => format!(
-            "JSON.stringify(({data_str}).map((p)=>[p[0],globalThis.{fn_var}(p[1],globalThis.__ctx)]))"
-        ),
-        UdfAction::FlatMapValues => format!(
-            "JSON.stringify(({data_str}).flatMap((p)=>globalThis.{fn_var}(p[1],globalThis.__ctx).map((v)=>[p[0],v])))"
-        ),
-        UdfAction::KeyBy => format!(
-            "JSON.stringify(({data_str}).map((x)=>[globalThis.{fn_var}(x,globalThis.__ctx),x]))"
-        ),
-        UdfAction::Reduce => format!(
-            "(function(){{var a=({data_str});return a.length===0?'[]':JSON.stringify([a.reduce(globalThis.{fn_var})]);}})()"
-        ),
-        UdfAction::Fold => format!(
-            "JSON.stringify([({data_str}).reduce(globalThis.{fn_var},globalThis.__zero)])"
-        ),
-    }
-}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -207,7 +170,7 @@ mod tests {
 
     #[test]
     fn map_doubles_integers() {
-        let result = eval_partition(UdfAction::Map, "x => x * 2", None, "[1,2,3]", "")
+        let result = eval_partition("(partition) => partition.map(x => x * 2)", None, "[1,2,3]")
             .expect("eval ok");
         let parsed: Vec<i64> = serde_json::from_slice(&result).unwrap();
         assert_eq!(parsed, vec![2, 4, 6]);
@@ -216,11 +179,9 @@ mod tests {
     #[test]
     fn filter_with_context_json() {
         let result = eval_partition(
-            UdfAction::Filter,
-            "(x, ctx) => x > ctx.threshold",
+            "(partition, ctx) => partition.filter(x => x > ctx.threshold)",
             Some(r#"{"threshold": 2}"#),
             "[1,2,3,4,5]",
-            "",
         )
         .expect("eval ok");
         let parsed: Vec<i64> = serde_json::from_slice(&result).unwrap();
@@ -231,8 +192,8 @@ mod tests {
     fn thread_local_runtime_reused() {
         // Two evals on the same thread reuse the same JsRuntime — verified by
         // setting a globalThis variable in the first eval and reading it in the second.
-        eval_partition(UdfAction::Map, "x => { globalThis.__marker = 99; return x; }", None, "[1]", "").unwrap();
-        let r2 = eval_partition(UdfAction::Map, "x => globalThis.__marker", None, "[0]", "").unwrap();
+        eval_partition("(partition) => partition.map(x => { globalThis.__marker = 99; return x; })", None, "[1]").unwrap();
+        let r2 = eval_partition("(partition) => partition.map(x => globalThis.__marker)", None, "[0]").unwrap();
         let v2: Vec<i64> = serde_json::from_slice(&r2).unwrap();
         assert_eq!(v2, vec![99]);
     }
@@ -242,8 +203,8 @@ mod tests {
         // Same fn_source evaluated across multiple partition calls — FN_CACHE should
         // have exactly one entry for "x => x + 1" after both calls.
         let fn_source = "x => x + 1";
-        eval_partition(UdfAction::Map, fn_source, None, "[10]", "").unwrap();
-        eval_partition(UdfAction::Map, fn_source, None, "[20]", "").unwrap();
+        eval_partition(fn_source, None, "[10]").unwrap();
+        eval_partition(fn_source, None, "[20]").unwrap();
 
         // Verify the function is in the cache (compiled exactly once).
         use std::hash::{Hash, Hasher};
@@ -254,7 +215,7 @@ mod tests {
         assert!(cached, "fn_source should be in FN_CACHE after first call");
 
         // Results must still be correct on the second call (reused compiled fn).
-        let r = eval_partition(UdfAction::Map, fn_source, None, "[99]", "").unwrap();
+        let r = eval_partition(fn_source, None, "[99]").unwrap();
         let v: Vec<i64> = serde_json::from_slice(&r).unwrap();
         assert_eq!(v, vec![100]);
     }

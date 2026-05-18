@@ -1,8 +1,12 @@
 // Load the native Node.js module built by napi-rs.
-// After `npm run build`, the .node file lands next to this file.
-// After `cargo build --release -p atomic-js`, it lands in ../../target/release/.
+// The .node binary is produced by one of:
+//   npm run build                             → atomic_js.node (next to this file)
+//   cargo build --release -p atomic-js       → ../../target/release/atomic_js.node
+//   cargo build -p atomic-js                 → ../../target/debug/atomic_js.node
 
-const { join } = require('path');
+"use strict";
+
+const { join } = require("path");
 
 let nativeBinding;
 
@@ -15,21 +19,46 @@ function tryLoad(p) {
   }
 }
 
-// 1. Release build (npm run build / cargo build --release)
-const releasePath = join(__dirname, '..', '..', 'target', 'release', 'atomic_js.node');
-// 2. Debug build
-const debugPath = join(__dirname, '..', '..', 'target', 'debug', 'atomic_js.node');
-// 3. napi-rs CLI build (co-located .node)
-const localPath = join(__dirname, 'atomic_js.node');
+// Priority: napi CLI co-located build → release cargo build → debug cargo build
+const localPath = join(__dirname, "atomic_js.node");
+const releasePath = join(
+  __dirname,
+  "..",
+  "..",
+  "target",
+  "release",
+  "atomic_js.node",
+);
+const debugPath = join(
+  __dirname,
+  "..",
+  "..",
+  "target",
+  "debug",
+  "atomic_js.node",
+);
 
 if (!tryLoad(localPath) && !tryLoad(releasePath) && !tryLoad(debugPath)) {
   throw new Error(
-    'Failed to load atomic_js native module.\n' +
-    'Build it first:\n' +
-    '  cargo build --release -p atomic-js\n' +
-    'or:\n' +
-    '  cd crates/atomic-js && npm run build'
+    "Failed to load @atomic-compute/js native module (atomic_js.node).\n\n" +
+      "Build it first with one of:\n" +
+      "  cd crates/atomic-js && npm run build     # recommended (napi CLI)\n" +
+      "  cargo build --release -p atomic-js       # release build via cargo\n" +
+      "  cargo build -p atomic-js                 # debug build via cargo\n\n" +
+      "Tried:\n" +
+      "  " +
+      localPath +
+      "\n" +
+      "  " +
+      releasePath +
+      "\n" +
+      "  " +
+      debugPath,
   );
 }
 
-module.exports = nativeBinding;
+// Re-export with user-facing names matching the TypeScript declarations.
+module.exports = {
+  Context: nativeBinding.JsContext,
+  RDD: nativeBinding.JsRdd,
+};

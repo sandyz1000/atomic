@@ -15,6 +15,6 @@ doctest = false
 [dependencies]
 pyo3 = { workspace = true, features = ["extension-module", "abi3-py311"] }
 atomic-compute = { workspace = true }
-atomic-data = { workspace = true }
+atomic-data = { workspace = true, features = ["python"] }
 serde_json = { workspace = true }
 rayon = { workspace = true }

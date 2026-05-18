@@ -2,7 +2,7 @@
  * Distributed word count demo using the atomic JavaScript API.
  *
  * JS closures are serialized as source strings (via Function.prototype.toString)
- * and executed on workers via their embedded QuickJS runtime — no binary
+ * and executed on workers via their embedded V8 runtime (deno_core) — no binary
  * deployment of your code is required. The `atomic-worker` pre-built binary
  * handles all JS UDF execution.
  *

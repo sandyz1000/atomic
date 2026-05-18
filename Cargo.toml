@@ -6,6 +6,7 @@ authors = ["Sandip Dey <sandip.dey1988@yahoo.com>"]
 [workspace]
 resolver = "2"
 members = ["crates/*", "examples/*"]
+exclude = ["examples/py-demo", "examples/ts-demo"]
 
 # ── Root package ──────────────────────────────────────────────────────────────
 # The workspace root is also the "atomic" package that owns:

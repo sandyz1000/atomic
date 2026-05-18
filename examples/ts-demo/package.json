@@ -1,0 +1,25 @@
+{
+  "name": "atomic-ts-demo",
+  "version": "0.1.0",
+  "description": "Spark-like TypeScript/JavaScript demos using the Atomic compute engine (napi-rs)",
+  "private": true,
+  "scripts": {
+    "build:native": "cargo build --release -p atomic-js --manifest-path ../../Cargo.toml && node -e \"const{platform}=require('os'),{copyFileSync}=require('fs'),{resolve}=require('path');const ext=platform()==='win32'?'.dll':platform()==='darwin'?'.dylib':'.so';const d=resolve(__dirname,'../../target/release');copyFileSync(d+'/libatomic_js'+ext,d+'/atomic_js.node');console.log('atomic_js.node ready')\"",
+    "wordcount": "tsx src/local_word_count.ts",
+    "mapreduce": "tsx src/map_reduce.ts",
+    "distributed": "tsx src/distributed_word_count.ts",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@atomic-compute/js": "file:../../crates/atomic-js"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.0",
+    "tsx": "^4.22.2",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Apache-2.0"
+}

@@ -4,7 +4,7 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicI16, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -29,6 +29,14 @@ use tokio::{
     net::TcpStream,
 };
 
+/// RAII guard that decrements an inflight counter when dropped.
+struct InflightGuard(Arc<AtomicI16>);
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 use crate::{
     base::{Mutators, NativeScheduler},
     dag::{CompletionEvent, TastEndReason},
@@ -46,6 +54,12 @@ pub struct DistributedScheduler {
 
     /// Per-worker capability declarations — keyed by endpoint.
     worker_capabilities: Arc<DashMap<SocketAddrV4, WorkerCapabilities>>,
+    /// Number of tasks currently in-flight to each worker.
+    inflight: Arc<DashMap<SocketAddrV4, Arc<AtomicI16>>>,
+    /// Consecutive TCP-level failure count per worker — reset on success, triggers removal at MAX_WORKER_FAILURES.
+    worker_failures: Arc<DashMap<SocketAddrV4, u32>>,
+    /// Per-task timeout. `None` means no timeout (useful in tests / local mode).
+    task_timeout: Option<Duration>,
 
     master: bool,
     active_jobs: Arc<DashMap<usize, Job>>,
@@ -70,6 +84,9 @@ impl DistributedScheduler {
             max_failures,
             attempt_id: Arc::new(AtomicUsize::new(0)),
             worker_capabilities: Arc::new(DashMap::new()),
+            inflight: Arc::new(DashMap::new()),
+            worker_failures: Arc::new(DashMap::new()),
+            task_timeout: Some(Duration::from_secs(300)), // 5-minute default
             master,
             active_jobs: Arc::new(DashMap::new()),
             active_job_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -100,8 +117,7 @@ impl DistributedScheduler {
         Ok(endpoint)
     }
 
-    /// Capacity-aware worker selection: skip workers with `max_tasks == 0`,
-    /// prefer those with higher declared capacity.
+    /// Capacity-aware worker selection: pick a worker where in-flight count < max_tasks.
     pub fn next_executor_with_capacity(&self) -> LibResult<SocketAddrV4> {
         let mut servers = self.server_uris.lock();
         let len = servers.len();
@@ -121,36 +137,124 @@ impl DistributedScheduler {
                 .as_deref()
                 .map(|c| c.max_tasks)
                 .unwrap_or(1);
-            if max_tasks > 0 {
+            let inflight = self
+                .inflight
+                .get(&endpoint)
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(0);
+            if max_tasks > 0 && (inflight as u16) < max_tasks {
                 return Ok(endpoint);
             }
         }
         Err(SchedulerError::NoCompatibleWorker(
-            "all workers are at capacity (max_tasks == 0)".to_string(),
+            "all workers are at capacity".to_string(),
         ))
     }
 
+    /// Returns `true` if `endpoint` supports `op_id`, or if the worker advertised no ops
+    /// (empty `registered_ops` means "unknown / accept all" — backwards-compatible with old workers).
+    pub fn worker_supports_op(&self, endpoint: &SocketAddrV4, op_id: &str) -> bool {
+        self.worker_capabilities
+            .get(endpoint)
+            .map(|c| c.registered_ops.is_empty() || c.registered_ops.iter().any(|o| o == op_id))
+            .unwrap_or(false)
+    }
+
     /// Submit a single `TaskEnvelope` to a worker, retrying up to `max_failures` times.
+    ///
+    /// Features:
+    /// - Tracks in-flight count per worker via `InflightGuard` (decrements on drop).
+    /// - Per-task timeout via `task_timeout` (default 5 min).
+    /// - Exponential backoff between retries: 100ms * min(2^attempt, 32).
+    /// - Dead-worker removal after `MAX_WORKER_FAILURES` consecutive TCP errors.
     pub async fn submit_native_task(
         &self,
         task: &TaskEnvelope,
     ) -> LibResult<(TaskResultEnvelope, SocketAddrV4)> {
+        const MAX_WORKER_FAILURES: u32 = 3;
         let mut last_err = None;
-        for attempt in 0..=self.max_failures {
+        'retry: for attempt in 0..=self.max_failures {
             let target = self.next_executor_with_capacity()?;
-            match self.submit_task_to_worker(task, target).await {
-                Ok(result) => return Ok((result, target)),
+
+            // Pre-flight op_id validation — skip incompatible workers without using an inflight slot.
+            for op in &task.ops {
+                if !self.worker_supports_op(&target, &op.op_id) {
+                    log::warn!(
+                        "worker {} does not support op '{}' — skipping to next worker",
+                        target,
+                        op.op_id
+                    );
+                    last_err = Some(SchedulerError::NoCompatibleWorker(format!(
+                        "worker {} does not support op '{}'",
+                        target, op.op_id
+                    )));
+                    continue 'retry;
+                }
+            }
+
+            // Track inflight count; guard decrements on drop regardless of outcome.
+            let counter = Arc::clone(
+                &*self
+                    .inflight
+                    .entry(target)
+                    .or_insert_with(|| Arc::new(AtomicI16::new(0))),
+            );
+            counter.fetch_add(1, Ordering::Relaxed);
+            let _guard = InflightGuard(counter);
+
+            let send_result = match self.task_timeout {
+                Some(timeout) => {
+                    tokio::time::timeout(timeout, self.submit_task_to_worker(task, target))
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(SchedulerError::Transport(format!(
+                                "task timed out after {:?}",
+                                timeout
+                            )))
+                        })
+                }
+                None => self.submit_task_to_worker(task, target).await,
+            };
+
+            match send_result {
+                Ok(result) => {
+                    self.worker_failures.remove(&target);
+                    return Ok((result, target));
+                }
                 Err(e) => {
                     log::warn!(
-                        "task {}/{} attempt {}/{} failed: {}",
+                        "task {}/{} attempt {}/{} failed on {}: {}",
                         task.run_id,
                         task.task_id,
                         attempt + 1,
                         self.max_failures + 1,
+                        target,
                         e
                     );
+                    let fails = {
+                        let mut entry = self.worker_failures.entry(target).or_insert(0);
+                        *entry += 1;
+                        *entry
+                    };
+                    if fails >= MAX_WORKER_FAILURES {
+                        log::warn!(
+                            "removing dead worker {} from pool after {} consecutive failures",
+                            target,
+                            fails
+                        );
+                        self.worker_capabilities.remove(&target);
+                        self.server_uris.lock().retain(|&ep| ep != target);
+                        self.inflight.remove(&target);
+                        self.worker_failures.remove(&target);
+                    }
                     last_err = Some(e);
                 }
+            }
+
+            // Exponential backoff before next attempt: 100ms, 200ms, 400ms … 3.2s
+            if attempt < self.max_failures {
+                let delay = Duration::from_millis(100 * (1u64 << attempt).min(32));
+                tokio::time::sleep(delay).await;
             }
         }
         Err(last_err.unwrap())
@@ -206,28 +310,37 @@ impl DistributedScheduler {
                     .insert(task_key.clone());
 
                 async move {
-                    let (result, worker_addr) = self.submit_native_task(&task).await?;
-                    self.taskid_to_slaveid
-                        .insert(task_key, worker_addr.to_string());
-                    // Surface application-level failures rather than silently dropping them.
-                    match result.status {
-                        atomic_data::distributed::ResultStatus::FatalFailure => {
-                            return Err(SchedulerError::TaskFailed(
-                                result.error.unwrap_or_else(|| "fatal failure".to_string()),
-                            ));
+                    let mut retry_count = 0usize;
+                    loop {
+                        let (result, worker_addr) = self.submit_native_task(&task).await?;
+                        self.taskid_to_slaveid
+                            .insert(task_key.clone(), worker_addr.to_string());
+                        match result.status {
+                            atomic_data::distributed::ResultStatus::FatalFailure => {
+                                return Err(SchedulerError::TaskFailed(
+                                    result.error.unwrap_or_else(|| "fatal failure".to_string()),
+                                ));
+                            }
+                            atomic_data::distributed::ResultStatus::RetryableFailure => {
+                                if retry_count < self.max_failures {
+                                    retry_count += 1;
+                                    let delay = Duration::from_millis(
+                                        200 * (1u64 << retry_count).min(16),
+                                    );
+                                    tokio::time::sleep(delay).await;
+                                    continue;
+                                }
+                                return Err(SchedulerError::TaskFailed(
+                                    result.error.unwrap_or_else(|| {
+                                        "retryable failure exhausted".to_string()
+                                    }),
+                                ));
+                            }
+                            atomic_data::distributed::ResultStatus::Success => {
+                                return Ok::<_, SchedulerError>(result);
+                            }
                         }
-                        atomic_data::distributed::ResultStatus::RetryableFailure => {
-                            // submit_native_task already retried at the TCP layer;
-                            // promote to a job-level failure.
-                            return Err(SchedulerError::TaskFailed(
-                                result
-                                    .error
-                                    .unwrap_or_else(|| "retryable failure exhausted".to_string()),
-                            ));
-                        }
-                        atomic_data::distributed::ResultStatus::Success => {}
                     }
-                    Ok::<_, SchedulerError>(result)
                 }
             });
 
@@ -287,23 +400,34 @@ impl DistributedScheduler {
                 data,
             );
             async move {
-                let (result, _worker) = self.submit_native_task(&task).await?;
-                match result.status {
-                    atomic_data::distributed::ResultStatus::FatalFailure => {
-                        return Err(SchedulerError::TaskFailed(
-                            result
-                                .error
-                                .unwrap_or_else(|| "shuffle map fatal failure".to_string()),
-                        ));
+                let mut retry_count = 0usize;
+                loop {
+                    let (result, _worker) = self.submit_native_task(&task).await?;
+                    match result.status {
+                        atomic_data::distributed::ResultStatus::FatalFailure => {
+                            return Err(SchedulerError::TaskFailed(
+                                result
+                                    .error
+                                    .unwrap_or_else(|| "shuffle map fatal failure".to_string()),
+                            ));
+                        }
+                        atomic_data::distributed::ResultStatus::RetryableFailure => {
+                            if retry_count < self.max_failures {
+                                retry_count += 1;
+                                let delay =
+                                    Duration::from_millis(200 * (1u64 << retry_count).min(16));
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                            return Err(SchedulerError::TaskFailed(result.error.unwrap_or_else(
+                                || "shuffle map retryable failure exhausted".to_string(),
+                            )));
+                        }
+                        atomic_data::distributed::ResultStatus::Success => {
+                            return Ok::<_, SchedulerError>((part_id, result.shuffle_server_uri));
+                        }
                     }
-                    atomic_data::distributed::ResultStatus::RetryableFailure => {
-                        return Err(SchedulerError::TaskFailed(result.error.unwrap_or_else(
-                            || "shuffle map retryable failure exhausted".to_string(),
-                        )));
-                    }
-                    atomic_data::distributed::ResultStatus::Success => {}
                 }
-                Ok::<_, SchedulerError>((part_id, result.shuffle_server_uri))
             }
         });
 
@@ -503,8 +627,8 @@ impl Drop for DistributedScheduler {
 mod tests {
     use super::*;
     use atomic_data::distributed::{
-        ResultStatus, TRANSPORT_HEADER_LEN, TaskAction, TaskResultEnvelope, WireDecode, WireEncode,
-        encode_transport_frame, parse_transport_header,
+        ResultStatus, TRANSPORT_HEADER_LEN, TaskAction, TaskResultEnvelope, TaskRuntime,
+        WireDecode, WireEncode, encode_transport_frame, parse_transport_header,
     };
 
     #[test]
@@ -513,11 +637,7 @@ mod tests {
         let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31001);
         scheduler.register_worker(
             addr,
-            WorkerCapabilities {
-                version: 1,
-                worker_id: "native-1".to_string(),
-                max_tasks: 2,
-            },
+            WorkerCapabilities::new("native-1".to_string(), 2, vec![]),
         );
         let selected = scheduler.next_executor().expect("should select worker");
         assert_eq!(selected, addr);
@@ -528,22 +648,8 @@ mod tests {
         let scheduler = DistributedScheduler::new(4, true);
         let addr1 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31011);
         let addr2 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31012);
-        scheduler.register_worker(
-            addr1,
-            WorkerCapabilities {
-                version: 1,
-                worker_id: "w1".to_string(),
-                max_tasks: 1,
-            },
-        );
-        scheduler.register_worker(
-            addr2,
-            WorkerCapabilities {
-                version: 1,
-                worker_id: "w2".to_string(),
-                max_tasks: 1,
-            },
-        );
+        scheduler.register_worker(addr1, WorkerCapabilities::new("w1".to_string(), 1, vec![]));
+        scheduler.register_worker(addr2, WorkerCapabilities::new("w2".to_string(), 1, vec![]));
         let first = scheduler.next_executor().unwrap();
         let second = scheduler.next_executor().unwrap();
         assert_ne!(first, second);
@@ -559,11 +665,7 @@ mod tests {
         let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, endpoint.port());
         scheduler.register_worker(
             endpoint,
-            WorkerCapabilities {
-                version: 1,
-                worker_id: "w1".to_string(),
-                max_tasks: 1,
-            },
+            WorkerCapabilities::new("w1".to_string(), 1, vec![]),
         );
 
         let server = tokio::spawn(async move {
@@ -601,6 +703,7 @@ mod tests {
             vec![PipelineOp {
                 op_id: "mycrate::double".to_string(),
                 action: TaskAction::Map,
+                runtime: TaskRuntime::Native,
                 payload: vec![],
             }],
             vec![1, 2, 3],

@@ -47,8 +47,10 @@ pub static TASK_REGISTRY: Lazy<HashMap<&'static str, fn(&TaskAction, &[u8], &[u8
 /// - Writes each bucket as bincode-encoded `Vec<(K, V)>` to `SHUFFLE_CACHE`
 /// - Returns `Ok(())` on success or an error message
 pub struct ShuffleMapEntry {
-    /// `std::any::type_name::<(K, V)>()` — stable key identifying the type pair.
-    pub type_id: &'static str,
+    /// Function pointer that returns `std::any::type_name::<(K, V)>()`.
+    /// Stored as a fn pointer (const-compatible) rather than calling type_name()
+    /// directly in the static initializer, since type_name is not a stable const fn.
+    pub type_id: fn() -> &'static str,
     /// The actual write handler.
     pub handler: fn(&[u8], usize, usize, usize) -> Result<(), String>,
 }
@@ -58,12 +60,13 @@ inventory::collect!(ShuffleMapEntry);
 /// Global compile-time shuffle-map registry — built once at startup from all
 /// `register_shuffle_map!(K, V)` calls linked into the binary.
 ///
-/// Keyed by `type_id`. `NativeBackend` uses this when it sees `TaskAction::ShuffleMap`.
+/// Keyed by the result of each entry's `type_id()` call (`std::any::type_name::<(K,V)>()`).
+/// `NativeBackend` uses this when it sees `TaskAction::ShuffleMap`.
 pub static SHUFFLE_MAP_REGISTRY: Lazy<HashMap<&'static str, fn(&[u8], usize, usize, usize) -> Result<(), String>>> =
     Lazy::new(|| {
         inventory::iter::<ShuffleMapEntry>
             .into_iter()
-            .map(|entry| (entry.type_id, entry.handler))
+            .map(|entry| ((entry.type_id)(), entry.handler))
             .collect()
     });
 

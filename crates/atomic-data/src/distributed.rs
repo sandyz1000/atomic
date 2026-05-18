@@ -100,6 +100,34 @@ where
     }
 }
 
+/// Which execution runtime handles a [`PipelineOp`] on the worker.
+///
+/// `Native` (the default) looks up `op_id` in the compile-time `TASK_REGISTRY`.
+/// `Python` and `JavaScript` dispatch the serialized partition-level function to
+/// the respective runtime; the worker calls `fn(partition)` without inspecting
+/// `action`.
+///
+/// Runtime variants are feature-gated so pure-Rust deployments compile without
+/// pulling in Python or V8 symbols:
+/// - feature `python`     → enables [`TaskRuntime::Python`]
+/// - feature `javascript` → enables [`TaskRuntime::JavaScript`]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize,
+    Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRuntime {
+    /// Compile-time `TASK_REGISTRY` lookup via `op_id` (default for `#[task]` functions).
+    #[default]
+    Native,
+    /// Pickled partition-level Python callable executed in the subprocess worker pool.
+    #[cfg(feature = "python")]
+    Python,
+    /// Partition-level JavaScript function evaluated in the embedded V8 (deno_core) runtime.
+    #[cfg(feature = "javascript")]
+    JavaScript,
+}
+
 /// One step in a multi-op pipeline sent to a worker.
 ///
 /// A [`TaskEnvelope`] carries a sequence of these; the worker threads partition
@@ -107,11 +135,15 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct PipelineOp {
     /// Registered op_id, e.g. `"task_double::double"`. Looked up in the worker's
-    /// compile-time dispatch table.
+    /// compile-time dispatch table. Empty string for Python/JS UDF ops.
     pub op_id: String,
-    /// Which action to perform with this function.
+    /// Which operation this step performs. Authoritative for Native runtime;
+    /// informational (for observability) for Python and JavaScript runtimes.
     pub action: TaskAction,
-    /// rkyv-encoded config: fold zero value for Fold/Aggregate, empty for Map/Filter.
+    /// Which runtime executes this op. Defaults to [`TaskRuntime::Native`].
+    pub runtime: TaskRuntime,
+    /// rkyv-encoded config: fold zero value for Fold/Aggregate; serde_json-encoded
+    /// [`PythonUdfPayload`] / [`JsUdfPayload`] for Python/JS ops; empty for Map/Filter.
     pub payload: Vec<u8>,
 }
 
@@ -143,67 +175,36 @@ pub enum TaskAction {
         shuffle_id: usize,
         num_output_partitions: usize,
     },
-    /// Execute a Python UDF with the given operation.
-    /// `payload` is a serde_json-encoded [`PythonUdfPayload`].
-    /// Partition `data` is a JSON-encoded `Vec` of elements.
-    PythonUdf(UdfAction),
-    /// Execute a JavaScript UDF with the given operation.
-    /// `payload` is a serde_json-encoded [`JsUdfPayload`].
-    /// Partition `data` is a JSON-encoded `Vec` of elements.
-    JavaScriptUdf(UdfAction),
 }
 
-/// Which operation a UDF pipeline step should perform.
-///
-/// Embedded directly in [`TaskAction::PythonUdf`] and [`TaskAction::JavaScriptUdf`] so
-/// the UDF runtime does not need to store a separate action string in the payload.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    Serialize,
-    Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum UdfAction {
-    Map,
-    Filter,
-    FlatMap,
-    MapValues,
-    FlatMapValues,
-    KeyBy,
-    Reduce,
-    Fold,
-}
 
 /// Metadata carried in `PipelineOp.payload` for a Python UDF step.
 ///
 /// Serialized as JSON so both Python (via `json` stdlib) and Rust (`serde_json`) can
 /// produce and consume it without a shared binary format.
-/// The operation to perform is carried in [`TaskAction::PythonUdf`], not here.
+/// The function is now a partition-level function that will be pickled and called directly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PythonUdfPayload {
-    /// `cloudpickle`/`pickle`-serialized Python callable.
+    /// `cloudpickle`/`pickle`-serialized partition-level Python callable.
+    /// Format: `lambda partition: [result_list]` — receives a list of partition elements,
+    /// returns a list of result elements.
     pub fn_bytes: Vec<u8>,
-    /// `pickle`-serialized fold zero value (empty for non-fold operations).
+    /// Reserved for future use (currently unused). Empty for all operations.
     pub zero_bytes: Vec<u8>,
 }
 
 /// Metadata carried in `PipelineOp.payload` for a JavaScript UDF step.
-/// The operation to perform is carried in [`TaskAction::JavaScriptUdf`], not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsUdfPayload {
-    /// JavaScript function source obtained via `fn.toString()`.
+    /// JavaScript partition-level function source.
+    /// Format: `(partition) => [result_array]` — receives an array of partition elements,
+    /// returns an array of result elements.
     pub fn_source: String,
-    /// JSON-encoded zero value for fold (empty string for non-fold).
+    /// Reserved for future use (currently unused). Empty for all operations.
     pub zero_json: String,
     /// Optional JSON-encoded object of driver-side values to expose as `globalThis.__ctx`.
-    /// Enables closure-like capture: `(x, ctx) => x > ctx.threshold` with `{"threshold": 42}`.
+    /// Enables closure-like capture: `(partition, ctx) => partition.filter(x => x > ctx.threshold)`
+    /// with `{"threshold": 42}`.
     /// `None` means no context — all existing payloads without this field deserialize to `None`.
     #[serde(default)]
     pub context_json: Option<String>,
@@ -368,14 +369,18 @@ pub struct WorkerCapabilities {
     pub version: u16,
     pub worker_id: String,
     pub max_tasks: u16,
+    /// Op IDs registered in this worker's `TASK_REGISTRY`.
+    /// Empty means "unknown / accept all" — used for backwards compatibility with old workers.
+    pub registered_ops: Vec<String>,
 }
 
 impl WorkerCapabilities {
-    pub fn new(worker_id: String, max_tasks: u16) -> Self {
+    pub fn new(worker_id: String, max_tasks: u16, registered_ops: Vec<String>) -> Self {
         Self {
             version: WIRE_SCHEMA_V1,
             worker_id,
             max_tasks,
+            registered_ops,
         }
     }
 }
@@ -389,6 +394,7 @@ mod tests {
         let ops = vec![PipelineOp {
             op_id: "mycrate::double".to_string(),
             action: TaskAction::Map,
+            runtime: TaskRuntime::Native,
             payload: vec![],
         }];
         let envelope = TaskEnvelope::new(1, 2, 3, 0, 4, "trace-1".to_string(), ops, vec![1, 2, 3]);
@@ -416,6 +422,7 @@ mod tests {
         let ops = vec![PipelineOp {
             op_id: "mycrate::sum".to_string(),
             action: TaskAction::Fold,
+            runtime: TaskRuntime::Native,
             payload: 0_i32.to_le_bytes().to_vec(),
         }];
         let envelope = TaskEnvelope::new(1, 2, 3, 0, 4, "trace-2".to_string(), ops, vec![1, 2, 3]);
@@ -433,6 +440,7 @@ mod tests {
                 shuffle_id: 7,
                 num_output_partitions: 4,
             },
+            runtime: TaskRuntime::Native,
             payload: vec![],
         }];
         let envelope = TaskEnvelope::new(1, 2, 3, 0, 4, "trace-3".to_string(), ops, vec![]);
@@ -453,16 +461,19 @@ mod tests {
             PipelineOp {
                 op_id: "myapp::double".to_string(),
                 action: TaskAction::Map,
+                runtime: TaskRuntime::Native,
                 payload: vec![],
             },
             PipelineOp {
                 op_id: "myapp::is_positive".to_string(),
                 action: TaskAction::Filter,
+                runtime: TaskRuntime::Native,
                 payload: vec![],
             },
             PipelineOp {
                 op_id: "myapp::add".to_string(),
                 action: TaskAction::Fold,
+                runtime: TaskRuntime::Native,
                 payload: 0_i32.to_le_bytes().to_vec(),
             },
         ];
@@ -476,12 +487,55 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_op_default_runtime_is_native() {
+        let op = PipelineOp {
+            op_id: "x".to_string(),
+            action: TaskAction::Map,
+            runtime: TaskRuntime::default(),
+            payload: vec![],
+        };
+        assert_eq!(op.runtime, TaskRuntime::Native);
+    }
+
+    #[test]
+    fn pipeline_op_with_native_runtime_roundtrips_rkyv() {
+        let ops = vec![PipelineOp {
+            op_id: "x".to_string(),
+            action: TaskAction::Map,
+            runtime: TaskRuntime::Native,
+            payload: vec![],
+        }];
+        let envelope = TaskEnvelope::new(1, 2, 3, 0, 0, "t".to_string(), ops, vec![]);
+        let bytes = envelope.encode_wire().unwrap();
+        let decoded = TaskEnvelope::decode_wire(&bytes).unwrap();
+        assert_eq!(decoded.ops[0].runtime, TaskRuntime::Native);
+    }
+
+    #[test]
+    fn task_action_exhaustive_without_python_js_variants() {
+        // Compile-time check: TaskAction no longer has PythonUdf / JavaScriptUdf.
+        let action = TaskAction::Map;
+        let _ = match action {
+            TaskAction::Map
+            | TaskAction::Filter
+            | TaskAction::FlatMap
+            | TaskAction::Fold
+            | TaskAction::Reduce
+            | TaskAction::Aggregate
+            | TaskAction::Collect
+            | TaskAction::ShuffleMap { .. } => true,
+        };
+    }
+
+    #[test]
     fn worker_capabilities_round_trips() {
-        let caps = WorkerCapabilities::new("worker-42".to_string(), 8);
+        let ops = vec!["myapp::double".to_string(), "myapp::sum".to_string()];
+        let caps = WorkerCapabilities::new("worker-42".to_string(), 8, ops.clone());
         let bytes = caps.encode_wire().expect("serialize caps");
         let decoded = WorkerCapabilities::decode_wire(&bytes).expect("deserialize caps");
         assert_eq!(decoded.worker_id, "worker-42");
         assert_eq!(decoded.max_tasks, 8);
+        assert_eq!(decoded.registered_ops, ops);
     }
 
     #[test]

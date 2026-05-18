@@ -34,13 +34,22 @@ pub mod __macro_support {
 #[macro_export]
 macro_rules! register_shuffle_map {
     ($K:ty, $V:ty) => {
+        // Store a monomorphized function pointer rather than calling type_name()
+        // directly in the static initializer. Function pointers are const-compatible,
+        // but type_name() is not a stable const fn.
         $crate::__macro_support::inventory::submit!(
             $crate::__macro_support::ShuffleMapEntry {
-                type_id: ::std::any::type_name::<($K, $V)>(),
+                type_id: $crate::__shuffle_map_type_name::<$K, $V>,
                 handler: $crate::builtin_tasks::shuffle_map_handler::<$K, $V>,
             }
         );
     };
+}
+
+/// Helper called by `register_shuffle_map!` — not public API.
+#[doc(hidden)]
+pub fn __shuffle_map_type_name<K: 'static, V: 'static>() -> &'static str {
+    std::any::type_name::<(K, V)>()
 }
 
 pub use atomic_runtime_macros::task;

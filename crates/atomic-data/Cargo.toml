@@ -3,6 +3,12 @@ name = "atomic-data"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default    = []
+python     = []   # enables TaskRuntime::Python
+javascript = []   # enables TaskRuntime::JavaScript
+udf        = ["python", "javascript"]
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 rustc-hash ={ workspace = true }

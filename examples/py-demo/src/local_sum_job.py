@@ -8,7 +8,7 @@ Prerequisites:
   cd crates/atomic-py && maturin develop --release && cd ../..
 
 Run:
-  python demo/python/local_sum_job.py
+  python3 src/local_sum_job.py
 """
 
 import atomic

@@ -125,7 +125,7 @@ Distributed tasks use types from `atomic_data::distributed`.
 - `DashMapShuffleCache` + `ShuffleManager` HTTP server.
 - `ShuffleFetcher` + `MapOutputTracker`.
 - `partition_id` in `TaskResultEnvelope` for correct result ordering after retries.
-- Python UDF support (PyO3 / pickle) and JavaScript UDF support (QuickJS).
+- Python UDF support (PyO3 / pickle) and JavaScript UDF support (V8 / deno_core / fn.toString).
 - Unified `_task` API: `map_task`, `filter_task`, `flat_map_task`, `fold_task`, `reduce_task` — work identically in local and distributed mode.
 - All action methods (`collect`, `count`, `take`, `first`, `reduce`, `fold`, `aggregate`, `for_each`, `for_each_partition`, `count_by_value`, `is_empty`, `top`, `take_ordered`, `max`, `min`) dispatch staged pipelines to workers in distributed mode.
 - `AtomicApp::build()` — unified entry point; reads `--worker`/`--workers`/`--local-ip` from CLI.
@@ -286,6 +286,90 @@ action2: rdd.count()
 
 ---
 
+## Framework Design Vision: PoC → Production Workflow
+
+Atomic is designed around a progressive adoption model: start fast in TypeScript or Python, then rewrite hot paths in Rust for production. The same binary serves as both driver and worker.
+
+### 1. Start fast, scale later
+
+Users build quick prototypes using the same Spark-like API in TypeScript (`atomic-js`) or Python (`atomic-py`). When a job is confirmed correct and needs production throughput, CPU-hot paths are
+rewritten as Rust `#[task]` functions in `atomic-compute`.
+
+**TypeScript (PoC):**
+
+```typescript
+const ctx = new Context();
+const result = ctx.parallelize(data, 4)
+  .map(x => x * 2)
+  .filter(x => x > threshold)
+  .collect();
+```
+
+**Rust (production rewrite of the hot path):**
+
+```rust
+#[task]
+fn double_and_filter(x: i32) -> Option<i32> {
+    let v = x * 2;
+    if v > THRESHOLD { Some(v) } else { None }
+}
+ctx.parallelize_typed(data, 4).flat_map_task(DoubleAndFilter).collect()?;
+```
+
+The driver-side TypeScript/Python script does not change — only the registered `#[task]` functions
+in the Rust binary change.
+
+### 2. Same binary = driver + worker
+
+`AtomicApp::build()` reads `--worker`/`--workers`/`--local-ip` from CLI flags at startup.
+
+- Run normally: the binary acts as the **driver** and coordinates the job.
+- Run with `--worker --port N`: the **same binary** acts as a worker and waits for task envelopes.
+
+No separate worker binary or daemon is needed. Driver and workers run identical code; the dispatch
+table (`TASK_REGISTRY`) is the same in both modes because it is built at compile time.
+
+### 3. Extending the worker with new `#[task]` functions
+
+When Rust `#[task]` functions are added or changed:
+
+1. Recompile: `cargo build --release`
+2. Redeploy: `atomic ship --workers user@host1,user@host2`
+
+The `atomic-cli` `ship` command uploads the new binary via SFTP with host-key verification and
+SHA-256 integrity check. Worker nodes are restarted with the new binary by the operator
+(systemd reload, SSH, etc.) — `atomic-cli` handles distribution only.
+
+The driver-side script (TS or Python) does not need to change — it references the same op IDs.
+
+### 4. `atomic-cli` ships the binary
+
+```bash
+atomic build --target x86_64-unknown-linux-musl   # cross-compile via cargo-zigbuild
+atomic ship --workers user@host1,user@host2        # SFTP upload + SHA-256 verify
+```
+
+Each remote worker node receives the same binary. The binary embeds both the Rust task registry
+and the PyO3/V8 runtimes for Python and JS UDFs — no separate runtime installation needed.
+
+### 5. UDFs are the dynamic escape hatch
+
+Python and JavaScript UDFs bypass binary redeployment:
+
+- Python lambdas are `pickle.dumps()`-serialized on the driver and shipped inside `TaskEnvelope`.
+- JavaScript functions are shipped as source strings and evaluated by the embedded V8 runtime.
+
+Use `#[task]` for static-typed Rust hot paths; use UDFs for rapidly-iterating or exploratory logic.
+
+| Change type | Requires binary redeployment? |
+| --- | --- |
+| Modify a Python UDF lambda | **No** — pickled and sent in TaskEnvelope |
+| Modify a JavaScript UDF function | **No** — source string sent in TaskEnvelope |
+| Modify a Rust `#[task]` function | **Yes** — compiled into the binary |
+| Add new scheduler/shuffle infrastructure | **Yes** — compiled into the binary |
+
+---
+
 ## Guardrails For Future Changes
 
 - Reuse Vega's DAG, stage, and shuffle ideas when they fit.
@@ -294,6 +378,8 @@ action2: rdd.count()
 - Keep local and distributed execution paths conceptually aligned.
 - `#[task]` functions are the only way to register distributed work.
 - Prefer explicit backend routing and compile-time dispatch over dynamic runtime guessing.
+- The JS (`atomic-js`) and Python (`atomic-py`) APIs must mirror Rust `TypedRdd` — keep them in
+  parity when adding new RDD operations. The three APIs serve the PoC→Production workflow.
 
 ---
 
@@ -502,5 +588,5 @@ but without going through SQL.
 - The LLM never produces SQL; it produces a structured JSON tree that `IrParser` converts to `LogicalPlan`.
 - Schema resolution and basic type checking are handled by DataFusion's analyzer (built-in) — only extension-node–specific validation is custom.
 - `LlmBatchingRule` must run before the physical planner to avoid one API call per row.
-- UDF implementations may be Rust closures, Python (PyO3), or JavaScript (QuickJS) — matching the existing UDF dispatch model in `atomic-compute`.
+- UDF implementations may be Rust closures, Python (PyO3), or JavaScript (V8/deno_core) — matching the existing UDF dispatch model in `atomic-compute`.
 - `NlqContext::query(nl)` is the only public entry point; internal plan construction is not exposed.

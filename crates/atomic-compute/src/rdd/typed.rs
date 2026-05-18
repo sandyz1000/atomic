@@ -5,10 +5,11 @@ use crate::rdd::flatmapper::FlatMapperRdd;
 use crate::rdd::map_partitions::MapPartitionsRdd;
 use crate::rdd::mapper::MapperRdd;
 use crate::rdd::parallel_collection::ParallelCollection;
+use crate::rdd::partitionwise_sampled::PartitionwiseSampledRdd;
 use crate::task_traits::{BinaryTask, UnaryTask};
 use atomic_data::cache::StorageLevel;
 use atomic_data::dependency::Dependency;
-use atomic_data::distributed::{PipelineOp, TaskAction, TaskEnvelope, WireDecode, WireEncode};
+use atomic_data::distributed::{PipelineOp, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode};
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
 
@@ -705,27 +706,27 @@ impl<T: Data> TypedRdd<T> {
     /// ```ignore
     /// let difference = rdd1.subtract(rdd2);
     /// ```
-    pub fn subtract(self, _other: TypedRdd<T>) -> TypedRdd<T>
+    pub fn subtract(self, other: TypedRdd<T>) -> TypedRdd<T>
     where
         T: Eq + std::hash::Hash + Clone,
     {
         use std::collections::HashSet;
-
-        // Collect other RDD elements into a set
-        let other_set: Arc<std::sync::Mutex<HashSet<T>>> = Arc::new(std::sync::Mutex::new(HashSet::new()));
-
-        // Map this to filter based on other_set
-        let other_set_clone = other_set.clone();
+        let other_elems = self
+            .context
+            .run_job(other.rdd, |iter| iter.collect::<Vec<T>>())
+            .unwrap_or_default();
+        let other_set: Arc<HashSet<T>> =
+            Arc::new(other_elems.into_iter().flatten().collect());
+        let other_set_clone = Arc::clone(&other_set);
         let filter_fn =
             move |_idx: usize, iter: Box<dyn Iterator<Item = T>>| -> Box<dyn Iterator<Item = T>> {
-                let set = other_set_clone.lock().unwrap();
+                let set = Arc::clone(&other_set_clone);
                 Box::new(
                     iter.filter(move |x| !set.contains(x))
                         .collect::<Vec<_>>()
                         .into_iter(),
                 )
             };
-
         let id = self.context.new_rdd_id();
         let subtract_rdd = MapPartitionsRdd::new(id, self.rdd, filter_fn);
         TypedRdd::new(Arc::new(subtract_rdd), self.context)
@@ -737,27 +738,27 @@ impl<T: Data> TypedRdd<T> {
     /// ```ignore
     /// let common = rdd1.intersection(rdd2);
     /// ```
-    pub fn intersection(self, _other: TypedRdd<T>) -> TypedRdd<T>
+    pub fn intersection(self, other: TypedRdd<T>) -> TypedRdd<T>
     where
         T: Eq + std::hash::Hash + Clone,
     {
         use std::collections::HashSet;
-
-        // Collect other RDD elements into a set
-        let other_set: Arc<std::sync::Mutex<HashSet<T>>> = Arc::new(std::sync::Mutex::new(HashSet::new()));
-
-        // Map this to filter based on other_set
-        let other_set_clone = other_set.clone();
+        let other_elems = self
+            .context
+            .run_job(other.rdd, |iter| iter.collect::<Vec<T>>())
+            .unwrap_or_default();
+        let other_set: Arc<HashSet<T>> =
+            Arc::new(other_elems.into_iter().flatten().collect());
+        let other_set_clone = Arc::clone(&other_set);
         let filter_fn =
             move |_idx: usize, iter: Box<dyn Iterator<Item = T>>| -> Box<dyn Iterator<Item = T>> {
-                let set = other_set_clone.lock().unwrap();
+                let set = Arc::clone(&other_set_clone);
                 Box::new(
                     iter.filter(move |x| set.contains(x))
                         .collect::<Vec<_>>()
                         .into_iter(),
                 )
             };
-
         let id = self.context.new_rdd_id();
         let intersect_rdd = MapPartitionsRdd::new(id, self.rdd, filter_fn);
         TypedRdd::new(Arc::new(intersect_rdd), self.context)
@@ -1042,6 +1043,94 @@ where
         let partition_values = self.context.run_job(self.rdd.clone(), lookup_partition)?;
         Ok(partition_values.into_iter().flatten().collect())
     }
+
+    /// Inner join with another pair RDD on matching keys.
+    ///
+    /// Collects both sides to the driver and performs a hash join. For every (K, V) on the
+    /// left and (K, U) on the right with the same key, emits `(K, (V, U))`.
+    ///
+    /// For production distributed workloads, use a shuffle-based join (see ROADMAP P1).
+    pub fn join<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, (V, U))>
+    where
+        U: Data + Clone,
+        K: std::hash::Hash + Eq,
+        Vec<(K, V)>: Data + Clone,
+        Vec<(K, U)>: Data + Clone,
+    {
+        use std::collections::HashMap;
+        let ctx = self.context.clone();
+        let num_partitions = self.rdd.number_of_splits();
+
+        let left_parts = ctx
+            .run_job(self.rdd, |iter| iter.collect::<Vec<(K, V)>>())
+            .unwrap_or_default();
+        let mut left_map: HashMap<K, Vec<V>> = HashMap::new();
+        for partition in left_parts {
+            for (k, v) in partition {
+                left_map.entry(k).or_default().push(v);
+            }
+        }
+
+        let right_parts = other
+            .context
+            .run_job(other.rdd, |iter| iter.collect::<Vec<(K, U)>>())
+            .unwrap_or_default();
+        let mut result: Vec<(K, (V, U))> = Vec::new();
+        for partition in right_parts {
+            for (k, u) in partition {
+                if let Some(vs) = left_map.get(&k) {
+                    for v in vs {
+                        result.push((k.clone(), (v.clone(), u.clone())));
+                    }
+                }
+            }
+        }
+        ctx.parallelize_typed(result, num_partitions)
+    }
+
+    /// Left outer join with another pair RDD.
+    ///
+    /// Every key on the left side is preserved; unmatched right keys produce `None`.
+    pub fn left_outer_join<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, (V, Option<U>))>
+    where
+        U: Data + Clone,
+        K: std::hash::Hash + Eq,
+        Vec<(K, V)>: Data + Clone,
+        Vec<(K, U)>: Data + Clone,
+    {
+        use std::collections::HashMap;
+        let ctx = self.context.clone();
+        let num_partitions = self.rdd.number_of_splits();
+
+        let right_parts = other
+            .context
+            .run_job(other.rdd, |iter| iter.collect::<Vec<(K, U)>>())
+            .unwrap_or_default();
+        let mut right_map: HashMap<K, Vec<U>> = HashMap::new();
+        for partition in right_parts {
+            for (k, u) in partition {
+                right_map.entry(k).or_default().push(u);
+            }
+        }
+
+        let left_parts = ctx
+            .run_job(self.rdd, |iter| iter.collect::<Vec<(K, V)>>())
+            .unwrap_or_default();
+        let mut result: Vec<(K, (V, Option<U>))> = Vec::new();
+        for partition in left_parts {
+            for (k, v) in partition {
+                match right_map.get(&k) {
+                    Some(us) => {
+                        for u in us {
+                            result.push((k.clone(), (v.clone(), Some(u.clone()))));
+                        }
+                    }
+                    None => result.push((k.clone(), (v.clone(), None))),
+                }
+            }
+        }
+        ctx.parallelize_typed(result, num_partitions)
+    }
 }
 
 // ============================================================================
@@ -1087,6 +1176,81 @@ impl<T: Data> TypedRdd<T> {
         // TODO: Implement actual file saving
         // For now, just return Ok
         Ok(())
+    }
+}
+
+// ============================================================================
+// SAMPLE / SORT
+// ============================================================================
+
+impl<T: Data + Clone + 'static> TypedRdd<T> {
+    /// Return a sampled subset of this RDD.
+    ///
+    /// - `with_replacement = true`  → Poisson sampling (each element may appear multiple times)
+    /// - `with_replacement = false` → Bernoulli sampling (each element included at most once)
+    ///
+    /// Works in both local and distributed mode — sampling runs per-partition.
+    pub fn sample(self, with_replacement: bool, fraction: f64) -> TypedRdd<T> {
+        use atomic_utils::random::BernoulliSampler;
+        use atomic_utils::random::PoissonSampler;
+        let id = self.context.new_rdd_id();
+        let sampler: Arc<dyn atomic_utils::random::RandomSampler<T>> = if with_replacement {
+            Arc::new(PoissonSampler::new(fraction, true))
+        } else {
+            Arc::new(BernoulliSampler::new(fraction))
+        };
+        let rdd = PartitionwiseSampledRdd::new(id, self.rdd, sampler, false);
+        TypedRdd::new(Arc::new(rdd), self.context)
+    }
+
+    /// Sort elements using a key function, returning a new RDD.
+    ///
+    /// Collects all data to the driver, sorts, and re-parallelizes into the same number
+    /// of partitions. For distributed mode this is a driver-side global sort; a proper
+    /// range-shuffle sort is tracked in ROADMAP P2.
+    pub fn sort_by<K, F>(self, key_fn: F, ascending: bool) -> Self
+    where
+        K: Ord,
+        F: Fn(&T) -> K,
+        Vec<T>: WireDecode,
+        T: WireEncode,
+    {
+        let num_partitions = self.rdd.number_of_splits();
+        let ctx = self.context.clone();
+        let mut data = self.collect().unwrap_or_default();
+        if ascending {
+            data.sort_by(|a, b| key_fn(a).cmp(&key_fn(b)));
+        } else {
+            data.sort_by(|a, b| key_fn(b).cmp(&key_fn(a)));
+        }
+        ctx.parallelize_typed(data, num_partitions)
+    }
+}
+
+impl<K, V> TypedRdd<(K, V)>
+where
+    K: Data + Ord + Clone,
+    V: Data + Clone,
+{
+    /// Sort pair RDD elements by key (ascending or descending).
+    ///
+    /// Collects all data to the driver, sorts by key, and re-parallelizes.
+    /// Equivalent to Spark's `sortByKey()`.
+    pub fn sort_by_key(self, ascending: bool) -> Self
+    where
+        Vec<(K, V)>: WireDecode,
+        K: WireEncode,
+        V: WireEncode,
+    {
+        let num_partitions = self.rdd.number_of_splits();
+        let ctx = self.context.clone();
+        let mut data = self.collect().unwrap_or_default();
+        if ascending {
+            data.sort_by(|(a, _), (b, _)| a.cmp(b));
+        } else {
+            data.sort_by(|(a, _), (b, _)| b.cmp(a));
+        }
+        ctx.parallelize_typed(data, num_partitions)
     }
 }
 
@@ -1166,7 +1330,7 @@ where
             return TypedRdd::new(Arc::new(MapperRdd::new(id, self.rdd, F::call)), context);
         }
 
-        let op = PipelineOp { op_id: F::NAME.to_string(), action: TaskAction::Map, payload: vec![] };
+        let op = PipelineOp { op_id: F::NAME.to_string(), action: TaskAction::Map, runtime: TaskRuntime::Native, payload: vec![] };
         let staged = Self::stage_op(self.staged, &self.rdd, op)
             .expect("map_task: failed to encode source partitions");
         // The rdd field is unused once we have a staged pipeline; use a placeholder.
@@ -1203,7 +1367,7 @@ where
             );
         }
 
-        let op = PipelineOp { op_id: F::NAME.to_string(), action: TaskAction::Filter, payload: vec![] };
+        let op = PipelineOp { op_id: F::NAME.to_string(), action: TaskAction::Filter, runtime: TaskRuntime::Native, payload: vec![] };
         let staged = Self::stage_op(self.staged, &self.rdd, op)
             .expect("filter_task: failed to encode source partitions");
         let id = context.new_rdd_id();
@@ -1238,7 +1402,7 @@ where
             );
         }
 
-        let op = PipelineOp { op_id: F::NAME.to_string(), action: TaskAction::FlatMap, payload: vec![] };
+        let op = PipelineOp { op_id: F::NAME.to_string(), action: TaskAction::FlatMap, runtime: TaskRuntime::Native, payload: vec![] };
         let staged = Self::stage_op(self.staged, &self.rdd, op)
             .expect("flat_map_task: failed to encode source partitions");
         let id = context.new_rdd_id();
@@ -1282,6 +1446,7 @@ where
         let fold_op = PipelineOp {
             op_id: F::NAME.to_string(),
             action: TaskAction::Fold,
+            runtime: TaskRuntime::Native,
             payload: fold_payload,
         };
 
@@ -1348,6 +1513,7 @@ where
         let reduce_op = PipelineOp {
             op_id: F::NAME.to_string(),
             action: TaskAction::Reduce,
+            runtime: TaskRuntime::Native,
             payload: vec![],
         };
 
@@ -1381,6 +1547,7 @@ where
                 let driver_ops = vec![PipelineOp {
                     op_id: F::NAME.to_string(),
                     action: TaskAction::Reduce,
+                    runtime: TaskRuntime::Native,
                     payload: vec![],
                 }];
                 let task = TaskEnvelope::new(
