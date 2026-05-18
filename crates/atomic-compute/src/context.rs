@@ -8,8 +8,9 @@ use crate::rdd::{ParallelCollection, UnionRdd};
 use crate::{env, hosts};
 use atomic_data::data::Data;
 use atomic_data::distributed::{
-    TRANSPORT_HEADER_LEN, PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TransportFrameKind,
-    WireDecode, WireEncode, WorkerCapabilities, encode_transport_frame, parse_transport_header,
+    TRANSPORT_HEADER_LEN, PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime,
+    TransportFrameKind, WireDecode, WireEncode, WorkerCapabilities, encode_transport_frame,
+    parse_transport_header,
 };
 use atomic_data::partial::ApproximateEvaluator;
 use atomic_data::partial::result::PartialResult;
@@ -484,7 +485,7 @@ impl Context {
         U: Data + Clone + WireDecode,
         Vec<U>: WireDecode,
     {
-        let ops = vec![PipelineOp { op_id: op_id.to_string(), action, payload }];
+        let ops = vec![PipelineOp { op_id: op_id.to_string(), action, runtime: TaskRuntime::Native, payload }];
         let encoded = Self::encode_rdd_partitions(rdd)?;
         let result_bytes = self.dispatch_pipeline(encoded, ops)?;
         result_bytes
@@ -508,7 +509,7 @@ impl Context {
         Vec<T>: WireEncode + WireDecode,
     {
         let payload = zero.encode_wire()?;
-        let ops = vec![PipelineOp { op_id: op_id.to_string(), action: TaskAction::Fold, payload }];
+        let ops = vec![PipelineOp { op_id: op_id.to_string(), action: TaskAction::Fold, runtime: TaskRuntime::Native, payload }];
         let encoded = Self::encode_rdd_partitions(rdd)?;
         let partition_results_raw = self.dispatch_pipeline(encoded, ops.clone())?;
 
@@ -529,6 +530,7 @@ impl Context {
         let reduce_ops = vec![PipelineOp {
             op_id: op_id.to_string(),
             action: TaskAction::Reduce,
+            runtime: TaskRuntime::Native,
             payload: vec![],
         }];
         let task = TaskEnvelope::new(
@@ -643,6 +645,7 @@ impl Context {
                         shuffle_id: shuffle_dep.shuffle_id,
                         num_output_partitions: shuffle_dep.num_output_partitions,
                     },
+                    runtime: TaskRuntime::Native,
                     payload: shuffle_dep.type_id.as_bytes().to_vec(),
                 };
 

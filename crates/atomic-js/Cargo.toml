@@ -9,9 +9,9 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "2", features = ["napi8", "serde-json"] }
-napi-derive = "2"
-atomic-data = { workspace = true }
+napi = { version = "3.9.0", features = ["napi8", "serde-json"] }
+napi-derive = "3.5.6"
+atomic-data = { workspace = true, features = ["javascript"] }
 atomic-compute = { workspace = true }
 serde_json = { workspace = true }
 

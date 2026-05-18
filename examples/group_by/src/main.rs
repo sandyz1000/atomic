@@ -2,21 +2,27 @@
 ///
 /// Shows: reduce_by_key, group_by_key, map_values, count_by_key.
 ///
-/// **Local-only example**: `reduce_by_key` and `group_by_key` use closure-based
-/// aggregation functions that always run on the driver's local scheduler. They
-/// cannot dispatch work to remote workers. Use `Context::local()` here.
+/// **Local-only operations**: all aggregations use closure-based functions that run
+/// on the driver's local scheduler and cannot be dispatched to remote workers.
+/// For distributed grouping, use `flat_map_task` / `map_task` to prepare key-value
+/// pairs on workers, then collect and aggregate on the driver.
 ///
-/// For distributed grouping, use task-based pipelines with explicit key extraction
-/// and `flat_map_task` / `map_task` to prepare key-value pairs on workers, then
-/// aggregate on the driver.
+/// The binary still respects `--worker` / `--driver` flags for structural consistency
+/// with other Atomic examples (the same driver/worker pattern as task_wordcount).
 ///
 /// Run locally:
 ///   cargo run -p group_by
-use atomic_compute::context::Context;
+use atomic_compute::app::{AppRole, AtomicApp};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = Context::local()?;
+    let app = AtomicApp::build().await?;
+    let ctx = match app.role {
+        AppRole::Worker { .. } => {
+            app.run_worker();
+        }
+        AppRole::Driver => app.driver_context()?,
+    };
 
     // --- Example 1: word count via reduce_by_key (1 partition → global result) ---
     let words: Vec<(String, i32)> = vec![

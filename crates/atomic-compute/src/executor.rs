@@ -14,8 +14,8 @@ use atomic_data::shuffle::error::NetworkError;
 use crossbeam::channel::{Receiver, Sender, bounded};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    task::{spawn, spawn_blocking},
+    net::{TcpListener, TcpStream},
+    task::{JoinSet, spawn, spawn_blocking},
 };
 
 pub struct Executor {
@@ -45,11 +45,25 @@ impl Executor {
     }
 
     pub fn worker_capabilities(&self) -> WorkerCapabilities {
-        WorkerCapabilities {
-            version: atomic_data::distributed::WIRE_SCHEMA_V1,
-            worker_id: self.worker_id.to_string(),
-            max_tasks: self.max_concurrent_tasks,
-        }
+        let mut registered_ops: Vec<String> = crate::task_registry::TASK_REGISTRY
+            .keys()
+            .map(|k| k.to_string())
+            .collect();
+        // Shuffle map types use a "shuffle:<key>" prefix to avoid colliding with
+        // regular op_ids. After Fix 2, SHUFFLE_MAP_REGISTRY is keyed by the stable
+        // stringify!-based string (e.g. "String::u32") instead of type_name.
+        registered_ops.extend(
+            crate::task_registry::SHUFFLE_MAP_REGISTRY
+                .keys()
+                .map(|k| format!("shuffle:{k}")),
+        );
+        log::debug!(
+            "worker {} advertising {} registered ops ({} shuffle types)",
+            self.worker_id,
+            registered_ops.len(),
+            crate::task_registry::SHUFFLE_MAP_REGISTRY.len(),
+        );
+        WorkerCapabilities::new(self.worker_id.to_string(), self.max_concurrent_tasks, registered_ops)
     }
 
     /// Worker loop: binds TCP port, reads transport frames, dispatches via NativeBackend.
@@ -68,59 +82,71 @@ impl Executor {
         })
     }
 
-    #[allow(dropping_copy_types)]
     async fn process_stream(self: Arc<Self>, rcv_main: Receiver<Signal>) -> LibResult<Signal> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
         let listener = TcpListener::bind(addr)
             .await
             .map_err(NetworkError::TcpListener)?;
         log::info!("[{}] worker listening on {}", self.worker_id, addr);
+
+        let mut tasks: JoinSet<LibResult<Signal>> = JoinSet::new();
+
         loop {
-            let (mut stream, _peer) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => break,
-            };
-            let rcv_main = rcv_main.clone();
-            let executor = Arc::clone(&self);
-            let res: LibResult<Signal> = spawn(async move {
-                match rcv_main.try_recv() {
-                    Ok(Signal::ShutDownError) => {
-                        log::info!("shutting down executor @{} due to error", executor.port);
-                        return Err(Error::ExecutorShutdown);
-                    }
-                    Ok(Signal::ShutDownGracefully) => {
-                        log::info!("shutting down executor @{} gracefully", executor.port);
-                        return Ok(Signal::ShutDownGracefully);
-                    }
-                    _ => {}
+            // Check for a shutdown signal before accepting the next connection.
+            match rcv_main.try_recv() {
+                Ok(Signal::ShutDownGracefully) => {
+                    log::info!("shutting down executor @{} gracefully", self.port);
+                    tasks.shutdown().await;
+                    return Ok(Signal::ShutDownGracefully);
                 }
-                log::debug!("received new task @{} executor", executor.port);
-                let (frame_kind, payload) = executor.read_transport_frame(&mut stream).await?;
-                let exec_clone = Arc::clone(&executor);
-                let (result_kind, result_payload) =
-                    spawn_blocking(move || exec_clone.handle_transport_frame(frame_kind, payload))
-                        .await??;
-
-                executor.write_transport_frame(&mut stream, result_kind, &result_payload)
-                    .await?;
-
-                log::debug!("sent result data to driver");
-                Ok(Signal::Continue)
-            })
-            .await?;
-            match res {
-                Ok(Signal::Continue) => continue,
-                Ok(s) => return Ok(s),
-                // Peer disconnected mid-frame (e.g. a health-check probe that immediately
-                // drops the connection). Log and keep the listener running.
-                Err(Error::InputRead(_)) | Err(Error::OutputWrite(_)) => {
-                    log::debug!("[{}] peer disconnected, resuming listen", self.port);
-                    continue;
+                Ok(Signal::ShutDownError) => {
+                    log::info!("shutting down executor @{} due to error", self.port);
+                    tasks.abort_all();
+                    return Err(Error::ExecutorShutdown);
                 }
-                Err(s) => return Err(s),
+                _ => {}
+            }
+
+            // When at full capacity, drain one completed task before accepting more.
+            if tasks.len() >= self.max_concurrent_tasks as usize {
+                if let Some(result) = tasks.join_next().await {
+                    propagate_task_result(result, self.port)?;
+                }
+                continue;
+            }
+
+            // Below capacity: race a new connection against a completed task.
+            tokio::select! {
+                accepted = listener.accept() => {
+                    match accepted {
+                        Ok((stream, _peer)) => {
+                            let exec = Arc::clone(&self);
+                            tasks.spawn(async move { exec.handle_connection(stream).await });
+                        }
+                        Err(_) => break,
+                    }
+                }
+                Some(result) = tasks.join_next() => {
+                    propagate_task_result(result, self.port)?;
+                }
             }
         }
         Err(Error::ExecutorShutdown)
+    }
+
+    /// Handle a single accepted TCP connection: read one transport frame, execute it,
+    /// write the response. This runs concurrently for up to `max_concurrent_tasks` connections.
+    async fn handle_connection(self: Arc<Self>, mut stream: TcpStream) -> LibResult<Signal> {
+        log::debug!("received new task @{} executor", self.port);
+        let (frame_kind, payload) = self.read_transport_frame(&mut stream).await?;
+        let exec_clone = Arc::clone(&self);
+        let (result_kind, result_payload) =
+            spawn_blocking(move || exec_clone.handle_transport_frame(frame_kind, payload))
+                .await??;
+        self.write_transport_frame(&mut stream, result_kind, &result_payload)
+            .await?;
+        log::debug!("sent result data to driver");
+        Ok(Signal::Continue)
     }
 
     fn handle_transport_frame(
@@ -235,6 +261,23 @@ impl Executor {
     }
 }
 
+
+/// Inspect one completed `JoinSet` result.
+/// Disconnections are logged and swallowed; other errors propagate.
+fn propagate_task_result(
+    result: Result<LibResult<Signal>, tokio::task::JoinError>,
+    port: u16,
+) -> LibResult<()> {
+    match result {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(Error::InputRead(_))) | Ok(Err(Error::OutputWrite(_))) => {
+            log::debug!("[worker-{}] peer disconnected, resuming listen", port);
+            Ok(())
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_join_err) => Ok(()),
+    }
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum Signal {

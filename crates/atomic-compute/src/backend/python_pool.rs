@@ -30,16 +30,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, mpsc};
 
-use atomic_data::distributed::{PythonUdfPayload, UdfAction};
+use atomic_data::distributed::PythonUdfPayload;
 
 // ── Embedded Python worker script ─────────────────────────────────────────────
 
 const WORKER_SCRIPT: &str = r#"
-import sys, json, base64, struct, itertools, functools
+import sys, json, base64, struct
 
 # Prefer cloudpickle (ships closures + lambdas) but fall back to stdlib pickle.
-# The driver is expected to use cloudpickle.dumps(); cloudpickle.loads() handles
-# both cloudpickle and stdlib pickle payloads.
 try:
     import cloudpickle as _pkl
 except ImportError:
@@ -64,30 +62,15 @@ def write_frame(obj):
     sys.stdout.buffer.write(payload)
     sys.stdout.buffer.flush()
 
-def apply_fold(fn, items, zero_b64):
-    zero = _pkl.loads(base64.b64decode(zero_b64))
-    return [functools.reduce(fn, items, zero)]
-
-ACTION_MAP = {
-    "map":             lambda fn, items, z: list(map(fn, items)),
-    "filter":          lambda fn, items, z: list(filter(fn, items)),
-    "flat_map":        lambda fn, items, z: list(itertools.chain.from_iterable(map(fn, items))),
-    "map_values":      lambda fn, items, z: [[k, fn(v)] for k, v in items],
-    "flat_map_values": lambda fn, items, z: [[k, w] for k, v in items for w in fn(v)],
-    "key_by":          lambda fn, items, z: [[fn(x), x] for x in items],
-    "reduce":          lambda fn, items, z: [functools.reduce(fn, items)] if items else [],
-    "fold":            lambda fn, items, z: apply_fold(fn, items, z),
-}
-
 while True:
     task = read_frame()
     if task is None:
         break
     try:
-        fn_obj = _pkl.loads(base64.b64decode(task["fn_b64"]))
-        items  = json.loads(task["data_json"])
-        zero   = task.get("zero_b64")
-        result = ACTION_MAP[task["action"]](fn_obj, items, zero)
+        # fn_bytes is a pickled partition-level function: lambda partition: [...]
+        partition_fn = _pkl.loads(base64.b64decode(task["fn_b64"]))
+        partition    = json.loads(task["data_json"])
+        result       = partition_fn(partition)
         write_frame({"ok": True, "data_json": json.dumps(result), "error": None})
     except Exception as e:
         write_frame({"ok": False, "data_json": None, "error": str(e)})
@@ -97,10 +80,8 @@ while True:
 
 #[derive(Serialize)]
 struct TaskFrame<'a> {
-    action:   &'a str,
     fn_b64:   String,
     data_json: &'a str,
-    zero_b64: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -225,25 +206,16 @@ impl PythonWorkerPool {
     /// once. A second failure returns an error.
     pub async fn execute(
         &self,
-        action: UdfAction,
         spec: &PythonUdfPayload,
         data: &[u8],
     ) -> Result<Vec<u8>, String> {
-        let action_str = udf_action_str(action);
-        let fn_b64     = B64.encode(&spec.fn_bytes);
-        let zero_b64   = if spec.zero_bytes.is_empty() {
-            None
-        } else {
-            Some(B64.encode(&spec.zero_bytes))
-        };
+        let fn_b64   = B64.encode(&spec.fn_bytes);
         let data_str = std::str::from_utf8(data)
             .map_err(|e| format!("data utf8: {e}"))?;
 
         let frame = TaskFrame {
-            action: action_str,
             fn_b64,
             data_json: data_str,
-            zero_b64,
         };
 
         let mut handle = self.take_idle().await?;
@@ -288,19 +260,6 @@ impl PythonWorkerPool {
         // Best-effort: if the channel is full (shouldn't happen with correct pool_size)
         // just drop the handle (subprocess exits when stdin closes).
         let _ = self.idle_tx.try_send(handle);
-    }
-}
-
-fn udf_action_str(action: UdfAction) -> &'static str {
-    match action {
-        UdfAction::Map          => "map",
-        UdfAction::Filter       => "filter",
-        UdfAction::FlatMap      => "flat_map",
-        UdfAction::MapValues    => "map_values",
-        UdfAction::FlatMapValues => "flat_map_values",
-        UdfAction::KeyBy        => "key_by",
-        UdfAction::Reduce       => "reduce",
-        UdfAction::Fold         => "fold",
     }
 }
 
@@ -358,7 +317,7 @@ mod tests {
         let data = b"[1, 2, 3]";
 
         let result = pool
-            .execute(UdfAction::Map, &spec, data)
+            .execute(&spec, data)
             .await
             .expect("map succeeded");
 

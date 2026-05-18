@@ -16,8 +16,8 @@ Setup:
        RUST_LOG=info ./target/release/atomic-worker --worker --port 10001
 
   4. Run this driver:
-       VEGA_DEPLOYMENT_MODE=distributed VEGA_LOCAL_IP=127.0.0.1 \\
-         python demo/python/distributed_word_count.py
+       ATOMIC_DEPLOYMENT_MODE=distributed ATOMIC_LOCAL_IP=127.0.0.1 \\
+         python3 src/distributed_word_count.py
 """
 
 import atomic

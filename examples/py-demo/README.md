@@ -3,31 +3,56 @@
 Spark-like jobs written in Python using the `atomic` extension module
 (built from `crates/atomic-py` via PyO3).
 
+## Prerequisites
+
+- Python ≥ 3.11
+- Rust toolchain (stable)
+- `maturin` (`pip install maturin`)
+
 ## Setup
 
 ```bash
-# Install maturin if needed
-pip install maturin
+cd examples/py-demo
 
-# Build and install the atomic Python module in dev mode
-cd crates/atomic-py
-maturin develop --release
-cd ../..
+# Build and install the atomic Python module into the active venv/interpreter
+pip install maturin
+cd ../../crates/atomic-py && maturin develop --release && cd ../../examples/py-demo
+```
+
+## Running examples
+
+```bash
+# All local examples (word count + sum)
+python3 main.py
+
+# Word count only
+python3 src/local_word_count.py
+
+# Range sum only
+python3 src/local_sum_job.py
+
+# Distributed word count (see distributed section below)
+python3 src/distributed_word_count.py
+```
+
+Or via Make:
+
+```bash
+make run            # word count + sum
+make run-wordcount  # word count only
+make run-sum        # range sum only
+make run-distributed
 ```
 
 ## Examples
 
-### `local_word_count.py` — Pure local job
+### `src/local_word_count.py` — Word count (local)
 
-Classic word count using `PyRdd` transformations. Everything runs in-process.
+Classic word count using `Rdd` transformations. Everything runs in-process.
 
-```bash
-cd demo/python
-python local_word_count.py
-```
-
+```text
 Expected output:
-```
+
 word                 count
 ----------------------------
 and                  1
@@ -44,18 +69,31 @@ tools                1
 world                2
 ```
 
-### `local_sum_job.py` — Range sum demo
+### `src/local_sum_job.py` — Range sum demo
 
-Partitions a numeric range and sums all values using `fold`.
+Partitions the range [1, 101) across 4 partitions and folds into a single sum.
+
+```text
+Expected output:
+
+Sum of 1..100 = 5050
+```
+
+### `src/distributed_word_count.py` — Distributed word count
+
+Python lambdas are serialized via `pickle` and executed on workers by their embedded
+PyO3 runtime. The `atomic-worker` binary handles all Python UDF execution — no binary
+deployment of your code is required.
 
 ```bash
-cd demo/python
-python local_sum_job.py
-```
+# Build the worker binary
+cargo build --release -p atomic-worker --manifest-path ../../Cargo.toml
 
-Expected output:
-```
-Sum of 1..100 = 5050
+# Start a worker in a separate terminal
+RUST_LOG=info ../../target/release/atomic-worker --worker --port 10001
+
+# Run the driver
+python3 src/distributed_word_count.py
 ```
 
 ## API overview
@@ -92,3 +130,11 @@ rdd.take(n)                    # first n elements
 rdd.reduce(f)                  # fold with f(acc, elem)
 rdd.fold(zero, f)              # fold with initial value
 ```
+
+## Notes
+
+- All element types must be picklable (numbers, strings, lists, dicts, tuples).
+- Lambda functions are pickled via `pickle.dumps()` for distributed dispatch.
+- Workers execute pickled lambdas via their embedded PyO3 runtime.
+- For distributed jobs: only the `atomic-worker` binary needs to be on the workers;
+  your Python script stays on the driver.
