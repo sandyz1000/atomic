@@ -47,11 +47,14 @@ Closure-based variants (`map`, `filter`, `flat_map`, `reduce`, `fold`) are **dep
 fn double(x: i32) -> i32 { x * 2 }
 rdd.map_task(Double)         // #[task] generates PascalCase struct
 
-// Inline — preferred for one-off lambdas
+// Inline — for one-off lambdas (op_id is a content hash of the closure tokens)
 rdd.map_task(task_fn!(|x: i32| -> i32 { x * 2 }))
 ```
 
-`task_fn!` generates a zero-sized struct with a stable `file!:line!:col!` op_id registered via `inventory::submit!` — identical to `#[task]` at the dispatch level.
+`task_fn!` generates a zero-sized struct with a **content-hash op_id** (`task_fn::<fnv1a-hex>`)
+registered via `inventory::submit!` — identical to `#[task]` at the dispatch level. The hash is
+derived from the closure's normalized token text, so it is stable across line-number shifts and
+reformatting. It changes only when the closure body changes, which is the correct behavior.
 
 ### How the staged pipeline works
 

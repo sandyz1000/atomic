@@ -1,14 +1,16 @@
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
+use crate::task_registry::SHUFFLE_KEY_REGISTRY;
 use atomic_data::aggregator::Aggregator;
 use atomic_data::data::Data;
-use atomic_data::dependency::{Dependency, ShuffleDependency};
+use atomic_data::dependency::{Dependency, ShuffleDependency, ShuffleDependencyBox};
 use atomic_data::distributed::WireEncode;
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::shuffle::fetcher::ShuffleFetcher;
 use atomic_data::split::{ShuffledRddSplit, Split};
 use bincode::{Decode, Encode};
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -63,15 +65,27 @@ where
     ) -> Self {
         let mut vals = RddVals::new(id);
 
+        let shuffle_dep = ShuffleDependency::new(
+            shuffle_id,
+            false,
+            parent.clone(),
+            aggregator.clone(),
+            part.clone(),
+        );
+        let shuffle_key = SHUFFLE_KEY_REGISTRY
+            .get(&TypeId::of::<(K, V)>())
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "register_shuffle_map! not called for ({}, {}); \
+                     add `atomic_compute::register_shuffle_map!(K, V)` to your binary before \
+                     calling reduce_by_key or group_by_key",
+                    std::any::type_name::<K>(),
+                    std::any::type_name::<V>(),
+                )
+            });
         vals.dependencies.push(Dependency::Shuffle(Arc::new(
-            ShuffleDependency::new(
-                shuffle_id,
-                false,
-                parent.clone(),
-                aggregator.clone(),
-                part.clone(),
-            )
-            .into(),
+            ShuffleDependencyBox::from_typed_with_key(shuffle_dep, shuffle_key),
         )));
         let vals = Arc::new(vals);
         ShuffledRdd {

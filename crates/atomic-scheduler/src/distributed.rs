@@ -151,13 +151,31 @@ impl DistributedScheduler {
         ))
     }
 
-    /// Returns `true` if `endpoint` supports `op_id`, or if the worker advertised no ops
-    /// (empty `registered_ops` means "unknown / accept all" — backwards-compatible with old workers).
-    pub fn worker_supports_op(&self, endpoint: &SocketAddrV4, op_id: &str) -> bool {
+    /// Unified capability check. For regular ops, `cap` is the `op_id`.
+    /// For shuffle ops, `cap` is `"shuffle:<shuffle_key>"`.
+    ///
+    /// An empty `registered_ops` list means "accept all" for backwards compatibility
+    /// with workers that predate capability advertising.
+    fn worker_has_capability(&self, endpoint: &SocketAddrV4, cap: &str) -> bool {
         self.worker_capabilities
             .get(endpoint)
-            .map(|c| c.registered_ops.is_empty() || c.registered_ops.iter().any(|o| o == op_id))
+            .map(|c| c.registered_ops.is_empty() || c.registered_ops.iter().any(|o| o == cap))
             .unwrap_or(false)
+    }
+
+    /// Resolve the required capability string for a pipeline op.
+    ///
+    /// Regular ops use their `op_id`. `ShuffleMap` ops use `"shuffle:<key>"` where
+    /// `<key>` is the stringify-based type key embedded in the op payload.
+    fn required_capability(op: &PipelineOp) -> String {
+        use atomic_data::distributed::TaskAction;
+        match &op.action {
+            TaskAction::ShuffleMap { .. } => {
+                let key = std::str::from_utf8(&op.payload).unwrap_or("<invalid-utf8>");
+                format!("shuffle:{key}")
+            }
+            _ => op.op_id.clone(),
+        }
     }
 
     /// Submit a single `TaskEnvelope` to a worker, retrying up to `max_failures` times.
@@ -176,17 +194,19 @@ impl DistributedScheduler {
         'retry: for attempt in 0..=self.max_failures {
             let target = self.next_executor_with_capacity()?;
 
-            // Pre-flight op_id validation — skip incompatible workers without using an inflight slot.
+            // Pre-flight capability validation — skip incompatible workers without using an inflight slot.
+            // Regular ops are checked by op_id; ShuffleMap ops are checked by "shuffle:<key>".
             for op in &task.ops {
-                if !self.worker_supports_op(&target, &op.op_id) {
+                let cap = Self::required_capability(op);
+                if !self.worker_has_capability(&target, &cap) {
                     log::warn!(
-                        "worker {} does not support op '{}' — skipping to next worker",
+                        "worker {} does not support capability '{}' — skipping to next worker",
                         target,
-                        op.op_id
+                        cap,
                     );
                     last_err = Some(SchedulerError::NoCompatibleWorker(format!(
-                        "worker {} does not support op '{}'",
-                        target, op.op_id
+                        "worker {} does not support capability '{}'",
+                        target, cap,
                     )));
                     continue 'retry;
                 }

@@ -4,6 +4,22 @@ use proc_macro2::Span;
 use quote::quote;
 use syn::{ExprClosure, ItemFn, LitStr, ReturnType, Type, parse_macro_input};
 
+/// Compute a stable FNV-1a 64-bit hash of the closure's normalized token text.
+///
+/// Used to generate a content-stable `op_id` for `task_fn!` closures.
+/// The result is stable across line-number changes and reformatting because
+/// it hashes the logical token stream, not the source position.
+fn fnv1a_hash(s: &str) -> u64 {
+    const OFFSET: u64 = 14695981039346656037;
+    const PRIME: u64 = 1099511628211;
+    let mut h = OFFSET;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(PRIME);
+    }
+    h
+}
+
 /// Attribute macro for defining a distributed Atomic task function.
 ///
 /// Annotating a function with `#[task]` does three things at compile time:
@@ -388,11 +404,15 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
 
     let body = &closure.body;
 
-    // Stable unique struct ident — proc_macro2 gives us only call_site span,
-    // but the inventory key is the op_id string which uses concat!(file!, line!, col!).
+    // Generate a content-stable op_id by hashing the closure's normalized token text.
+    // This is stable across line-number shifts and reformatting; it changes only when
+    // the closure logic itself changes (which is correct: new logic = new dispatch entry).
     let struct_ident = syn::Ident::new("__TaskFnStruct", Span::call_site());
     let dispatch_fn_ident = syn::Ident::new("__task_fn_dispatch", Span::call_site());
-    let op_id_expr = quote! { concat!(file!(), ":", line!(), ":", column!()) };
+    let closure_token_str = quote! { #closure }.to_string();
+    let hash = fnv1a_hash(&closure_token_str);
+    let op_id_str = format!("task_fn::{hash:016x}");
+    let op_id_expr = quote! { #op_id_str };
 
     if num_inputs == 2 {
         // Binary fn(T, T) -> T → BinaryTask<T>

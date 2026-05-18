@@ -343,7 +343,11 @@ where
     }
 }
 
-/// Convert typed ShuffleDependency to type-erased ShuffleDependencyBox
+/// Convert typed ShuffleDependency to type-erased ShuffleDependencyBox.
+///
+/// Sets `type_id` to `std::any::type_name::<(K, V)>()`. This is a fallback path;
+/// prefer [`ShuffleDependencyBox::from_typed_with_key`] when a stable key is
+/// available from the compile-time `SHUFFLE_KEY_REGISTRY`.
 impl<K, V, C> From<Arc<ShuffleDependency<K, V, C>>> for ShuffleDependencyBox
 where
     K: Data + Eq + Hash + Encode + Clone,
@@ -352,9 +356,33 @@ where
     Vec<(K, V)>: WireEncode,
 {
     fn from(dep: Arc<ShuffleDependency<K, V, C>>) -> Self {
+        ShuffleDependencyBox::from_typed_with_key(dep, std::any::type_name::<(K, V)>())
+    }
+}
+
+impl ShuffleDependencyBox {
+    /// Build a type-erased [`ShuffleDependencyBox`] from a typed [`ShuffleDependency`],
+    /// using an explicit, stable `shuffle_key` string as the dispatch key.
+    ///
+    /// The `shuffle_key` is embedded in the `ShuffleMap` pipeline-op payload sent to
+    /// workers, which look it up in their `SHUFFLE_MAP_REGISTRY`. Using a
+    /// `stringify!`-based key (from `register_shuffle_map!`) instead of `type_name`
+    /// avoids instability across Rust toolchain versions.
+    ///
+    /// Call sites in `atomic-compute` obtain the key from `SHUFFLE_KEY_REGISTRY`
+    /// (keyed by `TypeId::of::<(K, V)>()`) before calling this constructor.
+    pub fn from_typed_with_key<K, V, C>(
+        dep: Arc<ShuffleDependency<K, V, C>>,
+        shuffle_key: &'static str,
+    ) -> Self
+    where
+        K: Data + Eq + Hash + Encode + Clone,
+        V: Data + Clone,
+        C: Data + Encode + Clone,
+        Vec<(K, V)>: WireEncode,
+    {
         let cloned = Arc::clone(&dep);
 
-        // Capture the typed RDD so partitions can be rkyv-encoded for workers.
         let enc_rdd = dep.rdd.clone();
         let encode_partitions: Arc<dyn Fn() -> Result<Vec<Vec<u8>>, String> + Send + Sync> =
             Arc::new(move || {
@@ -376,7 +404,7 @@ where
             rdd_base: dep.rdd.get_rdd_base(),
             is_cogroup: dep.is_cogroup_flag,
             num_output_partitions: dep.partitioner.get_num_of_partitions(),
-            type_id: std::any::type_name::<(K, V)>(),
+            type_id: shuffle_key,
             encode_partitions,
             do_shuffle: Arc::new(move |partition| cloned.do_shuffle_task_typed(partition)),
         }

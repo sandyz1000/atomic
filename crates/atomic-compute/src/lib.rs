@@ -13,7 +13,7 @@ pub mod task_registry;
 pub mod task_traits;
 
 pub mod __macro_support {
-    pub use crate::task_registry::{ShuffleMapEntry, TaskEntry};
+    pub use crate::task_registry::{ShuffleKeyEntry, ShuffleMapEntry, TaskEntry};
     pub use crate::task_traits::{BinaryTask, UnaryTask};
     pub use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
     pub use inventory;
@@ -25,6 +25,10 @@ pub mod __macro_support {
 /// on a `TypedRdd<(K, V)>`. Both the driver and worker binary must contain the
 /// same call (they are the same binary in Atomic's model, so one call suffices).
 ///
+/// The dispatch key is generated at compile time from the source-level token text
+/// of `K` and `V` using `stringify!` (e.g. `"String::u32"`). This is stable across
+/// compiler versions, unlike `std::any::type_name`.
+///
 /// # Example
 ///
 /// ```rust,ignore
@@ -33,23 +37,26 @@ pub mod __macro_support {
 /// ```
 #[macro_export]
 macro_rules! register_shuffle_map {
-    ($K:ty, $V:ty) => {
-        // Store a monomorphized function pointer rather than calling type_name()
-        // directly in the static initializer. Function pointers are const-compatible,
-        // but type_name() is not a stable const fn.
+    ($K:ty, $V:ty) => {{
+        // Key is generated at the call site where K and V are concrete types.
+        // stringify! captures the source token text, which is:
+        //   - stable across compiler versions (unlike std::any::type_name)
+        //   - consistent between driver and worker (same binary, same call site)
+        const __SHUFFLE_KEY: &str = concat!(stringify!($K), "::", stringify!($V));
+
         $crate::__macro_support::inventory::submit!(
             $crate::__macro_support::ShuffleMapEntry {
-                type_id: $crate::__shuffle_map_type_name::<$K, $V>,
+                type_id: || __SHUFFLE_KEY,
                 handler: $crate::builtin_tasks::shuffle_map_handler::<$K, $V>,
             }
         );
-    };
-}
-
-/// Helper called by `register_shuffle_map!` — not public API.
-#[doc(hidden)]
-pub fn __shuffle_map_type_name<K: 'static, V: 'static>() -> &'static str {
-    std::any::type_name::<(K, V)>()
+        $crate::__macro_support::inventory::submit!(
+            $crate::__macro_support::ShuffleKeyEntry {
+                type_id: || std::any::TypeId::of::<($K, $V)>(),
+                key: __SHUFFLE_KEY,
+            }
+        );
+    }};
 }
 
 pub use atomic_runtime_macros::task;

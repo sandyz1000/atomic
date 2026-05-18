@@ -45,14 +45,23 @@ impl Executor {
     }
 
     pub fn worker_capabilities(&self) -> WorkerCapabilities {
-        let registered_ops: Vec<String> = crate::task_registry::TASK_REGISTRY
+        let mut registered_ops: Vec<String> = crate::task_registry::TASK_REGISTRY
             .keys()
             .map(|k| k.to_string())
             .collect();
+        // Shuffle map types use a "shuffle:<key>" prefix to avoid colliding with
+        // regular op_ids. After Fix 2, SHUFFLE_MAP_REGISTRY is keyed by the stable
+        // stringify!-based string (e.g. "String::u32") instead of type_name.
+        registered_ops.extend(
+            crate::task_registry::SHUFFLE_MAP_REGISTRY
+                .keys()
+                .map(|k| format!("shuffle:{k}")),
+        );
         log::debug!(
-            "worker {} advertising {} registered ops",
+            "worker {} advertising {} registered ops ({} shuffle types)",
             self.worker_id,
-            registered_ops.len()
+            registered_ops.len(),
+            crate::task_registry::SHUFFLE_MAP_REGISTRY.len(),
         );
         WorkerCapabilities::new(self.worker_id.to_string(), self.max_concurrent_tasks, registered_ops)
     }
