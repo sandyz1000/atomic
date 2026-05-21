@@ -292,14 +292,32 @@ impl MapOutputTracker {
         log::debug!("server_uris after register_shuffle {:?}", self.server_uris);
     }
 
-    pub fn register_map_output(&self, shuffle_id: usize, map_id: usize, server_uri: String) {
+    pub fn register_map_output(
+        &self,
+        shuffle_id: usize,
+        map_id: usize,
+        server_uri: String,
+    ) -> Result<()> {
         log::debug!(
             "registering map output from shuffle task #{} with map id #{} at server: {}",
             shuffle_id,
             map_id,
             server_uri
         );
-        self.server_uris.get_mut(&shuffle_id).unwrap()[map_id] = Some(server_uri);
+        let mut entry = self
+            .server_uris
+            .get_mut(&shuffle_id)
+            .ok_or(MapOutputError::ShuffleIdNotFound(shuffle_id))?;
+        let num_maps = entry.len();
+        let slot = entry
+            .get_mut(map_id)
+            .ok_or(MapOutputError::MapIdOutOfBounds {
+                shuffle_id,
+                map_id,
+                num_maps,
+            })?;
+        *slot = Some(server_uri);
+        Ok(())
     }
 
     pub fn register_map_outputs(&self, shuffle_id: usize, locs: Vec<Option<String>>) {
@@ -312,17 +330,20 @@ impl MapOutputTracker {
     }
 
     pub fn unregister_map_output(&self, shuffle_id: usize, map_id: usize, server_uri: String) {
-        let array = self.server_uris.get(&shuffle_id);
-        if let Some(arr) = array {
-            if arr.get(map_id).unwrap() == &Some(server_uri) {
-                self.server_uris
-                    .get_mut(&shuffle_id)
-                    .unwrap()
-                    .insert(map_id, None)
+        if let Some(arr) = self.server_uris.get(&shuffle_id) {
+            // Bounds-safe: out-of-range map_id is treated as a no-op.
+            let should_clear = arr
+                .get(map_id)
+                .map_or(false, |slot| *slot == Some(server_uri));
+            drop(arr); // release read guard before acquiring write guard
+            if should_clear {
+                if let Some(mut entry) = self.server_uris.get_mut(&shuffle_id) {
+                    if let Some(slot) = entry.get_mut(map_id) {
+                        *slot = None;
+                    }
+                }
             }
             self.increment_generation();
-        } else {
-            // TODO: error logging
         }
     }
 
@@ -397,6 +418,13 @@ impl MapOutputTracker {
 pub enum MapOutputError {
     #[error("Shuffle id output #{0} not found in the map")]
     ShuffleIdNotFound(usize),
+
+    #[error("map_id {map_id} out of bounds for shuffle_id {shuffle_id} (num_maps={num_maps})")]
+    MapIdOutOfBounds {
+        shuffle_id: usize,
+        map_id: usize,
+        num_maps: usize,
+    },
 
     #[error(transparent)]
     NetworkError(#[from] NetworkError),

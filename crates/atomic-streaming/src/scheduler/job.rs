@@ -1,3 +1,4 @@
+use crate::checkpoint::Checkpoint;
 use crate::context::StreamingContext;
 use crate::errors::{StreamingError, StreamingResult};
 use crate::utils::timer::{next_tick_ms, now_ms};
@@ -128,8 +129,17 @@ impl JobScheduler {
 
             log::debug!("Completed {} jobs for batch time {}ms", num_jobs, batch_time_ms);
 
-            // Optional checkpoint (if checkpoint_dir is set)
-            // TODO Phase 5: write checkpoint here when checkpoint_duration aligns
+            // Write checkpoint if a directory was configured.
+            if let Some(dir) = ssc.checkpoint_dir.lock().clone() {
+                let cp = Checkpoint::new(
+                    batch_time_ms,
+                    ssc.batch_duration.as_millis() as u64,
+                    dir.to_string_lossy().as_ref(),
+                );
+                if let Err(e) = cp.write(&dir) {
+                    log::warn!("checkpoint write failed for batch {}ms: {}", batch_time_ms, e);
+                }
+            }
         }
 
         log::info!("Streaming batch loop stopped");

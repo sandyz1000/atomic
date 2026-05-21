@@ -1,4 +1,5 @@
 use atomic_compute::context::Context;
+use atomic_compute::task;
 use std::sync::Arc;
 
 fn ctx() -> Arc<Context> {
@@ -6,8 +7,8 @@ fn ctx() -> Arc<Context> {
 }
 
 // reduce_by_key and group_by_key use the shuffle infrastructure which has process-wide
-// global state (MAP_OUTPUT_TRACKER, SHUFFLE_SERVER_URI). Serialize those tests to prevent
-// parallel tests from interfering with each other's shuffle data.
+// global state (MAP_OUTPUT_TRACKER, SHUFFLE_SERVER_URI). Serialize shuffle tests with
+// shuffle_guard() to prevent parallel tests from interfering with each other's shuffle data.
 static SHUFFLE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 
 fn shuffle_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -28,13 +29,6 @@ fn word_pairs(ctx: &Arc<Context>) -> atomic_compute::rdd::typed::TypedRdd<(Strin
 }
 
 // ── reduce_by_key() ───────────────────────────────────────────────────────────
-// reduce_by_key / group_by_key use the ShuffledRdd which fetches data over HTTP from
-// a ShuffleManager. The ShuffleManager URI is stored in a process-wide OnceLock:
-// once the first Context drops its manager the URI is stale for all subsequent tests
-// in the same binary run. These tests pass individually:
-//   cargo test test_reduce_by_key_sum  (or group_by_key)
-// but are ignored in the full suite to keep `cargo test` green.
-#[ignore = "requires isolated shuffle infrastructure; run with: cargo test test_reduce_by_key_sum -- --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_reduce_by_key_sum() {
     let _g = shuffle_guard();
@@ -54,7 +48,6 @@ async fn test_reduce_by_key_sum() {
     );
 }
 
-#[ignore = "requires isolated shuffle infrastructure; run with: cargo test test_reduce_by_key_empty -- --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_reduce_by_key_empty() {
     let _g = shuffle_guard();
@@ -69,7 +62,6 @@ async fn test_reduce_by_key_empty() {
 
 // ── group_by_key() ────────────────────────────────────────────────────────────
 
-#[ignore = "requires isolated shuffle infrastructure; run with: cargo test test_group_by_key -- --ignored"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_group_by_key() {
     let _g = shuffle_guard();
@@ -264,4 +256,142 @@ async fn test_key_by() {
     assert!(result.contains(&(0, 2)));
     assert!(result.contains(&(1, 1)));
     assert!(result.contains(&(1, 3)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2A: Local shuffle E2E tests
+//
+// These tests exercise the full shuffle pipeline in local mode:
+// map → shuffle-map stage → HTTP fetch → reduce stage.
+// All require isolated shuffle state and use shuffle_guard() + #[ignore].
+//
+// register_shuffle_map!(String, i32) must be present in this binary.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Register the shuffle handler for (String, i32) at binary scope.
+atomic_compute::register_shuffle_map!(String, i32);
+
+// Tasks used by Phase 2A shuffle tests.
+#[task]
+fn tokenize_line(line: String) -> Vec<(String, i32)> {
+    line.split_whitespace().map(|w| (w.to_lowercase(), 1i32)).collect()
+}
+
+#[task]
+fn bucket_by_parity(x: i32) -> (String, i32) {
+    (if x % 2 == 0 { "even".to_string() } else { "odd".to_string() }, x)
+}
+
+/// Classic word-count pipeline: tokenize → pair → reduce_by_key.
+/// This is the canonical correctness benchmark for the local shuffle path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_word_count_pipeline_local() {
+    let _g = shuffle_guard();
+    let ctx = ctx();
+
+    let lines = vec![
+        "hello world".to_string(),
+        "hello rust".to_string(),
+        "world of rust".to_string(),
+    ];
+
+    let mut result = ctx
+        .parallelize_typed(lines, 2)
+        .flat_map_task(TokenizeLine)
+        .reduce_by_key(|a, b| a + b)
+        .collect()
+        .unwrap();
+
+    result.sort_by_key(|(k, _): &(String, i32)| k.clone());
+    assert_eq!(
+        result,
+        vec![
+            ("hello".to_string(), 2),
+            ("of".to_string(), 1),
+            ("rust".to_string(), 2),
+            ("world".to_string(), 2),
+        ]
+    );
+}
+
+/// `reduce_by_key` after a `map` transformation (chained pipeline → shuffle).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_reduce_by_key_with_chained_map() {
+    let _g = shuffle_guard();
+    let ctx = ctx();
+
+    // Map: each i32 → ("bucket", value) based on even/odd
+    let mut result = ctx
+        .parallelize_typed(vec![1i32, 2, 3, 4, 5, 6], 2)
+        .map_task(BucketByParity)
+        .reduce_by_key(|a, b| a + b)
+        .collect()
+        .unwrap();
+
+    result.sort_by_key(|(k, _): &(String, i32)| k.clone());
+    assert_eq!(
+        result,
+        vec![("even".to_string(), 12), ("odd".to_string(), 9)]
+    );
+}
+
+/// `group_by_key` across 4 partitions — all partitions must contribute.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_group_by_key_multiple_partitions() {
+    let _g = shuffle_guard();
+    let ctx = ctx();
+
+    let pairs = vec![
+        ("x".to_string(), 1i32),
+        ("y".to_string(), 2i32),
+        ("x".to_string(), 3i32),
+        ("z".to_string(), 4i32),
+        ("y".to_string(), 5i32),
+        ("x".to_string(), 6i32),
+        ("z".to_string(), 7i32),
+        ("y".to_string(), 8i32),
+    ];
+    let mut result = ctx
+        .parallelize_typed(pairs, 4) // spread across 4 partitions
+        .group_by_key()
+        .collect()
+        .unwrap();
+
+    result.sort_by_key(|(k, _)| k.clone());
+
+    // Sort the inner Vec so assertions are deterministic.
+    let mut result: Vec<(String, Vec<i32>)> = result
+        .into_iter()
+        .map(|(k, mut v)| { v.sort(); (k, v) })
+        .collect();
+    result.sort_by_key(|(k, _)| k.clone());
+
+    assert_eq!(result[0], ("x".to_string(), vec![1, 3, 6]));
+    assert_eq!(result[1], ("y".to_string(), vec![2, 5, 8]));
+    assert_eq!(result[2], ("z".to_string(), vec![4, 7]));
+}
+
+/// Partitions that contribute no keys for a given bucket must not produce output.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_reduce_by_key_empty_partitions() {
+    let _g = shuffle_guard();
+    let ctx = ctx();
+
+    // Only 2 unique keys but 6 partitions → 4 partitions are empty.
+    let pairs = vec![
+        ("alpha".to_string(), 1i32),
+        ("beta".to_string(), 10i32),
+        ("alpha".to_string(), 2i32),
+    ];
+    let mut result = ctx
+        .parallelize_typed(pairs, 6)
+        .reduce_by_key(|a, b| a + b)
+        .collect()
+        .unwrap();
+
+    result.sort_by_key(|(k, _)| k.clone());
+    assert_eq!(
+        result,
+        vec![("alpha".to_string(), 3), ("beta".to_string(), 10)]
+    );
 }

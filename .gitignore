@@ -34,3 +34,5 @@ node_modules
 skills-lock.json
 
 .memsearch
+
+.claude

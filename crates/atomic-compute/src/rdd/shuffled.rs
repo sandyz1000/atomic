@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::runtime::Handle;
 
 pub struct ShuffledRdd<K, V, C>
 where
@@ -63,6 +64,22 @@ where
         part: Partitioner,
         fetcher: Arc<ShuffleFetcher>,
     ) -> Self {
+        Self::new_with_staged(id, shuffle_id, parent, aggregator, part, fetcher, None)
+    }
+
+    /// Variant used when a staged pipeline (from `_task` ops) precedes the shuffle.
+    /// `staged` carries `(source_partitions, preceding_ops)` so workers run the ops
+    /// before writing shuffle buckets.
+    pub fn new_with_staged(
+        id: usize,
+        shuffle_id: usize,
+        parent: Arc<dyn Rdd<Item = (K, V)>>,
+        aggregator: Arc<Aggregator<K, V, C>>,
+        part: Partitioner,
+        fetcher: Arc<ShuffleFetcher>,
+        staged: Option<(Vec<Vec<u8>>, Vec<atomic_data::distributed::PipelineOp>)>,
+    ) -> Self {
+        use atomic_data::distributed::PipelineOp;
         let mut vals = RddVals::new(id);
 
         let shuffle_dep = ShuffleDependency::new(
@@ -84,9 +101,13 @@ where
                     std::any::type_name::<V>(),
                 )
             });
-        vals.dependencies.push(Dependency::Shuffle(Arc::new(
-            ShuffleDependencyBox::from_typed_with_key(shuffle_dep, shuffle_key),
-        )));
+        let dep_box = ShuffleDependencyBox::from_typed_with_key(shuffle_dep, shuffle_key);
+        let dep_box = if let Some((src_parts, ops)) = staged {
+            dep_box.with_staged_pipeline(src_parts, ops)
+        } else {
+            dep_box
+        };
+        vals.dependencies.push(Dependency::Shuffle(Arc::new(dep_box)));
         let vals = Arc::new(vals);
         ShuffledRdd {
             parent,
@@ -177,7 +198,9 @@ where
             .fetcher
             .fetch::<K, C>(self.shuffle_id, split.get_index());
         let mut combiners: HashMap<K, C> = HashMap::new();
-        let result = futures::executor::block_on(fut)
+        // Use the Tokio runtime handle so hyper HTTP connections get a reactor.
+        let result = Handle::current()
+            .block_on(fut)
             .map_err(|e| BaseError::Other(format!("Shuffle fetch error: {}", e)))?;
         for (k, c) in result.into_iter() {
             combiners

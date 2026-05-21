@@ -933,19 +933,27 @@ where
         let shuffle_id = self.context.new_shuffle_id();
         let rdd_id = self.context.new_rdd_id();
 
-        let tracker = atomic_data::env::MAP_OUTPUT_TRACKER
-            .get()
-            .cloned()
+        let tracker = atomic_data::env::get_map_output_tracker()
             .unwrap_or_else(|| Arc::new(atomic_data::shuffle::MapOutputTracker::default()));
         let fetcher = Arc::new(ShuffleFetcher::new(tracker));
 
-        let shuffled = ShuffledRdd::<K, V, V>::new(
+        // In distributed mode, if a staged pipeline precedes the shuffle, carry its
+        // source partitions + ops into the ShuffleDependencyBox so the workers receive
+        // real data and the correct preceding ops (instead of the placeholder RDD).
+        let staged_info = if self.context.is_distributed() {
+            self.staged.as_ref().map(|s| (s.source_partitions.clone(), s.ops.clone()))
+        } else {
+            None
+        };
+
+        let shuffled = ShuffledRdd::<K, V, V>::new_with_staged(
             rdd_id,
             shuffle_id,
             self.rdd,
             aggregator,
             partitioner,
             fetcher,
+            staged_info,
         );
         TypedRdd::new(Arc::new(shuffled), self.context)
     }
@@ -977,19 +985,24 @@ where
         let shuffle_id = self.context.new_shuffle_id();
         let rdd_id = self.context.new_rdd_id();
 
-        let tracker = atomic_data::env::MAP_OUTPUT_TRACKER
-            .get()
-            .cloned()
+        let tracker = atomic_data::env::get_map_output_tracker()
             .unwrap_or_else(|| Arc::new(atomic_data::shuffle::MapOutputTracker::default()));
         let fetcher = Arc::new(ShuffleFetcher::new(tracker));
 
-        let shuffled = ShuffledRdd::<K, V, Vec<V>>::new(
+        let staged_info = if self.context.is_distributed() {
+            self.staged.as_ref().map(|s| (s.source_partitions.clone(), s.ops.clone()))
+        } else {
+            None
+        };
+
+        let shuffled = ShuffledRdd::<K, V, Vec<V>>::new_with_staged(
             rdd_id,
             shuffle_id,
             self.rdd,
             aggregator,
             partitioner,
             fetcher,
+            staged_info,
         );
         TypedRdd::new(Arc::new(shuffled), self.context)
     }

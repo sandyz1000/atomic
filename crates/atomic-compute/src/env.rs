@@ -289,16 +289,16 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
     use atomic_data::shuffle::config::ShuffleConfig;
     use atomic_data::shuffle::manager::ShuffleManager;
 
-    if atomic_data::env::SHUFFLE_CACHE.get().is_some() {
+    if atomic_data::env::get_shuffle_server_uri().is_some() {
         return Ok(());
     }
 
     let cache: Arc<dyn atomic_data::shuffle::cache::ShuffleCache> =
         Arc::new(DashMapShuffleCache::default());
-    let _ = atomic_data::env::SHUFFLE_CACHE.set(cache.clone());
+    atomic_data::env::set_shuffle_cache(cache.clone());
 
     let tracker = Arc::new(atomic_data::shuffle::MapOutputTracker::default());
-    let _ = atomic_data::env::MAP_OUTPUT_TRACKER.set(tracker);
+    atomic_data::env::set_map_output_tracker(tracker);
 
     let shuffle_config = ShuffleConfig::new(
         config.local_ip,
@@ -310,8 +310,8 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
     let mgr = ShuffleManager::new(shuffle_config, cache)
         .map_err(|e| format!("failed to start ShuffleManager: {e}"))?;
 
-    let _ = atomic_data::env::SHUFFLE_SERVER_URI.set(mgr.get_server_uri());
-
-    log::info!("shuffle service started at {}", mgr.get_server_uri());
+    let uri = mgr.get_server_uri();
+    atomic_data::env::set_shuffle_server_uri(uri.clone());
+    log::info!("shuffle service started at {uri}");
     Ok(())
 }

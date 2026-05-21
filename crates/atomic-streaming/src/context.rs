@@ -49,8 +49,8 @@ pub struct StreamingContext {
     pub batch_duration: Duration,
     /// The DAG of DStreams.
     pub graph: Mutex<DStreamGraph>,
-    /// Optional checkpoint directory.
-    pub checkpoint_dir: Option<PathBuf>,
+    /// Optional checkpoint directory (interior-mutable so it can be set before start()).
+    pub checkpoint_dir: Mutex<Option<PathBuf>>,
     /// How often to write checkpoints (must be a multiple of batch_duration).
     pub checkpoint_duration: Option<Duration>,
     /// Lifecycle state.
@@ -70,7 +70,7 @@ impl StreamingContext {
             sc,
             batch_duration,
             graph: Mutex::new(graph),
-            checkpoint_dir: None,
+            checkpoint_dir: Mutex::new(None),
             checkpoint_duration: None,
             state: Mutex::new(StreamingContextState::Initialized),
             scheduler: Mutex::new(None),
@@ -219,18 +219,14 @@ impl StreamingContext {
     /// Enable checkpointing. `dir` is created if it does not exist.
     pub fn checkpoint(self: &Arc<Self>, dir: impl Into<PathBuf>) {
         let path = dir.into();
-        // We can't mutate self.checkpoint_dir after Arc construction, so we do it via
-        // an unsafe pointer if needed — but for simplicity, users should call this
-        // before start(). The path is recorded in the graph's start sequence.
-        //
-        // TODO: make checkpoint_dir interior-mutable (Mutex<Option<PathBuf>>)
-        // For now, log a warning if called after start.
         let state = self.state.lock();
         if *state != StreamingContextState::Initialized {
             log::warn!("checkpoint() called after start() — has no effect");
+            return;
         }
         drop(state);
         let _ = std::fs::create_dir_all(&path);
+        *self.checkpoint_dir.lock() = Some(path.clone());
         log::info!("Checkpointing enabled at {:?}", path);
     }
 
@@ -253,9 +249,11 @@ impl StreamingContext {
 
     /// Stop the streaming computation.
     ///
-    /// `stop_sc`: also shut down the underlying compute Context (not yet implemented).
-    /// `gracefully`: wait for in-progress batches to finish (not yet implemented).
-    pub fn stop(self: &Arc<Self>, _stop_sc: bool, _gracefully: bool) {
+    /// If `stop_sc` is `true`, also shuts down the underlying compute `Context`.
+    /// If `gracefully` is `true`, waits for the current in-progress batch to
+    /// complete before stopping (the batch loop already joins on stop, so this
+    /// parameter is effectively always honored).
+    pub fn stop(self: &Arc<Self>, stop_sc: bool, _gracefully: bool) {
         let mut state = self.state.lock();
         if *state == StreamingContextState::Stopped {
             return;
@@ -264,9 +262,14 @@ impl StreamingContext {
         drop(state);
 
         if let Some(sched) = self.scheduler.lock().take() {
-            sched.stop();
+            sched.stop(); // sets stop flag + joins batch-loop thread (graceful by default)
         }
         self.graph.lock().stop();
+
+        if stop_sc {
+            self.sc.shutdown();
+        }
+
         log::info!("StreamingContext stopped");
     }
 

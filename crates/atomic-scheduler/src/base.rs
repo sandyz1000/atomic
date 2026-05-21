@@ -574,7 +574,7 @@ impl Mutators {
     pub fn new() -> Self {
         Self {
             stage_cache: Arc::new(DashMap::new()),
-            map_output_tracker: atomic_data::env::MAP_OUTPUT_TRACKER.get().cloned(),
+            map_output_tracker: atomic_data::env::get_map_output_tracker(),
             shuffle_to_map_stage: Arc::new(DashMap::new()),
             event_queues: Arc::new(DashMap::new()),
             cache_locs: Arc::new(DashMap::new()),
@@ -660,5 +660,31 @@ impl Mutators {
     #[inline]
     pub fn get_next_task_id(&self) -> usize {
         self.next_task_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Returns true if the distributed scheduler already completed a shuffle
+    /// for `shuffle_id` — i.e., every map-partition slot in the tracker has a URI.
+    pub fn is_shuffle_complete(&self, shuffle_id: usize) -> bool {
+        if let Some(tracker) = &self.map_output_tracker {
+            tracker
+                .server_uris
+                .get(&shuffle_id)
+                .map_or(false, |arr| !arr.is_empty() && arr.iter().all(|s| s.is_some()))
+        } else {
+            false
+        }
+    }
+
+    /// Returns the per-partition URIs for a completed shuffle (in partition order).
+    pub fn get_shuffle_server_uris(&self, shuffle_id: usize) -> Vec<String> {
+        if let Some(tracker) = &self.map_output_tracker {
+            tracker
+                .server_uris
+                .get(&shuffle_id)
+                .map(|arr| arr.iter().filter_map(|s| s.clone()).collect())
+                .unwrap_or_default()
+        } else {
+            vec![]
+        }
     }
 }

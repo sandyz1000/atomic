@@ -409,13 +409,14 @@ impl DistributedScheduler {
         let submits = partitions.into_iter().enumerate().map(|(part_id, data)| {
             let task_id = m.get_next_task_id();
             let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
+            let trace_id = format!("shuffle-map-{shuffle_id}-{part_id}");
             let task = TaskEnvelope::new(
                 0,
                 stage_id,
                 task_id,
                 attempt_id,
                 part_id,
-                format!("shuffle-map-{}-{}", shuffle_id, part_id),
+                trace_id,
                 ops.clone(),
                 data,
             );
@@ -456,13 +457,10 @@ impl DistributedScheduler {
         let mut locs: Vec<Option<String>> = vec![None; num_partitions];
         for (part_id, uri_opt) in responses {
             if let Some(uri) = uri_opt {
-                m.add_output_loc_to_stage(stage_id, part_id, uri.clone());
                 locs[part_id] = Some(uri);
             } else {
                 log::warn!(
-                    "shuffle-map stage {}: partition {} worker returned no shuffle URI",
-                    stage_id,
-                    part_id
+                    "shuffle-map stage {stage_id}: partition {part_id} returned no shuffle URI"
                 );
             }
         }
