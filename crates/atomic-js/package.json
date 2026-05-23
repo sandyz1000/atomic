@@ -8,6 +8,7 @@
     "build": "napi build --platform --release --manifest-path ../../Cargo.toml",
     "build:debug": "napi build --platform --manifest-path ../../Cargo.toml",
     "type-check": "tsc --noEmit",
+    "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
   "exports": {
@@ -20,7 +21,8 @@
     "@napi-rs/cli": "^3.6.2",
     "@types/node": "^25.8.0",
     "tsx": "^4.19.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^2.0.0"
   },
   "keywords": [
     "compute",

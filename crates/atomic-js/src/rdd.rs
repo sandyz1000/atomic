@@ -128,7 +128,7 @@ impl JsRdd {
             serde_json::Value::Number(n) => Ok(n.to_string()),
             serde_json::Value::Bool(b) => Ok(b.to_string()),
             other => Err(Error::from_reason(format!(
-                "key must be a string, number, or boolean; got: {other}"
+                "Unsupported key type: {other}"
             ))),
         }
     }
@@ -283,13 +283,52 @@ impl JsRdd {
         &mut self,
         f: Function<serde_json::Value, serde_json::Value>,
     ) -> Result<JsRdd> {
-        let keyed = self.key_by(f)?;
+        let mut keyed = self.key_by(f)?;
         keyed.group_by_key()
     }
 
     /// Group `[key, value]` pairs by key → `[key, [values]]` pairs.
     #[napi]
-    pub fn group_by_key(&self) -> Result<JsRdd> {
+    pub fn group_by_key(&mut self) -> Result<JsRdd> {
+        if self.context.is_distributed() {
+            // Per-partition partial grouping dispatched to workers; driver merges.
+            let wrapper = "(partition) => { const g = new Map(), o = []; \
+                for (const p of partition) { const k = JSON.stringify(p[0]); \
+                if (!g.has(k)) { g.set(k, [p[0], []]); o.push(k); } \
+                g.get(k)[1].push(p[1]); } \
+                return o.map(k => g.get(k)); }".to_string();
+            self.stage_js_udf(wrapper, TaskAction::Map)?;
+            let partials = self.dispatch_and_collect()?;
+
+            let mut groups: HashMap<String, (serde_json::Value, Vec<serde_json::Value>)> =
+                HashMap::new();
+            let mut order: Vec<String> = Vec::new();
+            for pair in &partials {
+                let arr = pair.as_array()
+                    .ok_or_else(|| Error::from_reason("group_by_key partial: not an array"))?;
+                if arr.len() != 2 {
+                    return Err(Error::from_reason("group_by_key partial: expected [key, vals]"));
+                }
+                let key = arr[0].clone();
+                let vals = arr[1].as_array()
+                    .ok_or_else(|| Error::from_reason("group_by_key partial: vals not an array"))?;
+                let key_str = Self::key_to_string(&key)?;
+                let entry = groups.entry(key_str.clone()).or_insert_with(|| {
+                    order.push(key_str.clone());
+                    (key, Vec::new())
+                });
+                entry.1.extend(vals.iter().cloned());
+            }
+
+            let elements = order.iter()
+                .map(|k| {
+                    let (key, vals) = &groups[k];
+                    Ok(serde_json::json!([key, vals]))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)));
+        }
+
         let mut groups: HashMap<String, (serde_json::Value, Vec<serde_json::Value>)> =
             HashMap::new();
         let mut order: Vec<String> = Vec::new();
@@ -322,9 +361,54 @@ impl JsRdd {
     /// Aggregate values with the same key using `f(acc, value) => acc`.
     #[napi]
     pub fn reduce_by_key(
-        &self,
+        &mut self,
         f: Function<FnArgs<(serde_json::Value, serde_json::Value)>, serde_json::Value>,
     ) -> Result<JsRdd> {
+        if self.context.is_distributed() {
+            let fn_src = Self::fn_to_source(&f)?;
+            // Per-partition partial reduce dispatched to workers; driver merges.
+            let wrapper = format!(
+                "(partition) => {{ const g = new Map(), o = []; \
+                 for (const p of partition) {{ const k = JSON.stringify(p[0]); \
+                 if (g.has(k)) {{ g.set(k, [p[0], ({fn_src})(g.get(k)[1], p[1])]); }} \
+                 else {{ g.set(k, [p[0], p[1]]); o.push(k); }} }} \
+                 return o.map(k => g.get(k)); }}"
+            );
+            self.stage_js_udf(wrapper, TaskAction::Map)?;
+            let partials = self.dispatch_and_collect()?;
+
+            let mut accum: HashMap<String, (serde_json::Value, serde_json::Value)> =
+                HashMap::new();
+            let mut order: Vec<String> = Vec::new();
+            for pair in &partials {
+                let arr = pair.as_array()
+                    .ok_or_else(|| Error::from_reason("reduce_by_key partial: not an array"))?;
+                if arr.len() != 2 {
+                    return Err(Error::from_reason("reduce_by_key partial: expected [key, val]"));
+                }
+                let key = arr[0].clone();
+                let val = arr[1].clone();
+                let key_str = Self::key_to_string(&key)?;
+                match accum.get_mut(&key_str) {
+                    Some((_, acc)) => {
+                        *acc = f.call(FnArgs::from((acc.clone(), val)))?;
+                    }
+                    None => {
+                        order.push(key_str.clone());
+                        accum.insert(key_str, (key, val));
+                    }
+                }
+            }
+
+            let elements = order.iter()
+                .map(|k| {
+                    let (key, val) = &accum[k];
+                    Ok(serde_json::json!([key, val]))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)));
+        }
+
         let mut accum: HashMap<String, (serde_json::Value, serde_json::Value)> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
 

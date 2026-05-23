@@ -92,10 +92,25 @@ impl JsContext {
         if step == 0 {
             return Err(Error::from_reason("step cannot be zero"));
         }
-        let elements: Vec<serde_json::Value> = (start..end)
-            .step_by(step.unsigned_abs() as usize)
-            .map(serde_json::Value::from)
-            .collect();
+        // A Rust range `a..b` is empty when a >= b, so negative steps need explicit generation.
+        let abs_step = step.unsigned_abs() as usize;
+        let elements: Vec<serde_json::Value> = if step > 0 {
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur < end {
+                v.push(serde_json::Value::from(cur));
+                cur += step;
+            }
+            v
+        } else {
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur > end {
+                v.push(serde_json::Value::from(cur));
+                cur -= abs_step as i64;
+            }
+            v
+        };
         let partitions = num_partitions
             .map(|n| n as usize)
             .unwrap_or(self.default_parallelism)

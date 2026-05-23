@@ -43,7 +43,10 @@ impl PyContext {
         let inner = atomic_compute::context::Context::new()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let parallelism = default_parallelism.unwrap_or_else(num_cpus);
-        Ok(Self { inner, default_parallelism: parallelism })
+        Ok(Self {
+            inner,
+            default_parallelism: parallelism,
+        })
     }
 
     /// Distribute a Python list as an RDD across `num_partitions` partitions.
@@ -61,7 +64,12 @@ impl PyContext {
     ) -> PyResult<PyRdd> {
         let elements: Vec<Py<PyAny>> = data.iter().map(|item| item.unbind()).collect();
         let partitions = num_partitions.unwrap_or(self.default_parallelism).max(1);
-        Ok(PyRdd::from_data(py, elements, partitions, Arc::clone(&self.inner)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            partitions,
+            Arc::clone(&self.inner),
+        ))
     }
 
     /// Create an RDD from lines of a text file.
@@ -70,10 +78,21 @@ impl PyContext {
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
         let elements: Vec<Py<PyAny>> = content
             .lines()
-            .map(|line| line.to_string().into_pyobject(py).unwrap().into_any().unbind())
+            .map(|line| {
+                line.to_string()
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind()
+            })
             .collect();
         let partitions = self.default_parallelism.max(1);
-        Ok(PyRdd::from_data(py, elements, partitions, Arc::clone(&self.inner)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            partitions,
+            Arc::clone(&self.inner),
+        ))
     }
 
     /// Create an RDD of integers in `[start, end)` with optional `step`.
@@ -88,15 +107,36 @@ impl PyContext {
     ) -> PyResult<PyRdd> {
         let step = step.unwrap_or(1);
         if step == 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err("step cannot be zero"));
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "step cannot be zero",
+            ));
         }
-        let elements: Vec<Py<PyAny>> = (start..end)
-            .step_by(step.unsigned_abs() as usize)
-            .filter(|&x| if step > 0 { x < end } else { x > end })
+        // `(start..end)` is empty when start >= end, so descending ranges need explicit generation.
+        let abs_step = step.unsigned_abs() as usize;
+        let mut cur = start;
+        let mut raw: Vec<i64> = Vec::new();
+        if step > 0 {
+            while cur < end {
+                raw.push(cur);
+                cur += step;
+            }
+        } else {
+            while cur > end {
+                raw.push(cur);
+                cur -= abs_step as i64;
+            }
+        }
+        let elements: Vec<Py<PyAny>> = raw
+            .into_iter()
             .map(|i| i.into_pyobject(py).unwrap().into_any().unbind())
             .collect();
         let partitions = num_partitions.unwrap_or(self.default_parallelism).max(1);
-        Ok(PyRdd::from_data(py, elements, partitions, Arc::clone(&self.inner)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            partitions,
+            Arc::clone(&self.inner),
+        ))
     }
 
     pub fn default_parallelism(&self) -> usize {
