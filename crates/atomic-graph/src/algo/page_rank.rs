@@ -206,4 +206,43 @@ mod tests {
         // In a cycle all vertices share equal rank; sum ≈ 1.0.
         assert!((total - 1.0).abs() < 0.1, "rank sum {total} far from 1.0");
     }
+
+    #[test]
+    fn two_node_cycle_equal_ranks() {
+        let g: Graph<(), ()> = Graph::from_edges(
+            vec![
+                Edge { src: 0, dst: 1, attr: () },
+                Edge { src: 1, dst: 0, attr: () },
+            ],
+            (),
+        );
+        let ranks = run(&g, 20, 0.15);
+        let r0 = ranks[&0];
+        let r1 = ranks[&1];
+        assert!(
+            (r0 - r1).abs() < 0.01,
+            "symmetric cycle: both nodes should have equal rank, got {r0} vs {r1}"
+        );
+    }
+
+    #[test]
+    fn sink_node_has_lower_rank_than_hub() {
+        // Hub (0) is pointed to by spokes (1,2,3) but points nowhere → dangling node.
+        // Hub collects all rank but redistributes via teleportation only.
+        // In a star-to-hub the hub should still rank highest.
+        let ranks = run(&star_graph(), 20, 0.15);
+        let hub = ranks[&0];
+        for (&vid, &r) in &ranks {
+            if vid != 0 {
+                assert!(hub > r, "hub {hub} should exceed spoke {r} for vid={vid}");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_graph_returns_empty_ranks() {
+        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![], vec![]);
+        let ranks = run(&g, 10, 0.15);
+        assert!(ranks.is_empty());
+    }
 }

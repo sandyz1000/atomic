@@ -97,4 +97,23 @@ mod tests {
         assert_eq!(labels[&4], 3);
         assert_eq!(labels[&5], 3);
     }
+
+    #[test]
+    fn single_vertex_is_its_own_component() {
+        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![(7, ())], vec![]);
+        let labels = run(&g, 10);
+        assert_eq!(labels[&7], 7);
+    }
+
+    #[test]
+    fn isolated_vertices_each_in_own_component() {
+        let g: Graph<(), ()> = Graph::from_vertices_edges(
+            vec![(10, ()), (20, ()), (30, ())],
+            vec![],
+        );
+        let labels = run(&g, 10);
+        assert_eq!(labels[&10], 10);
+        assert_eq!(labels[&20], 20);
+        assert_eq!(labels[&30], 30);
+    }
 }

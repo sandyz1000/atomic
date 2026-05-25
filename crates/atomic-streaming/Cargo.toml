@@ -25,6 +25,9 @@ uuid = { version = "1.6.1" }
 num_cpus = { workspace = true }
 
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lib]
 name = "atomic_streaming"
 path = "src/lib.rs"

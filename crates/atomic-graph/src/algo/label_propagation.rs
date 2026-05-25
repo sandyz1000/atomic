@@ -111,18 +111,47 @@ mod tests {
 
     #[test]
     fn isolated_vertex_keeps_own_label() {
-        let g: Graph<(), ()> = Graph::from_edges(
-            vec![
-                Edge { src: 0, dst: 1, attr: () },
-                // vertex 99 is isolated (added via from_vertices_edges)
-            ],
-            (),
-        );
         let g = Graph::from_vertices_edges(
             vec![(0, ()), (1, ()), (99, ())],
             vec![Edge { src: 0, dst: 1, attr: () }],
         );
         let labels = run(&g, 5);
         assert_eq!(labels[&99], 99, "isolated vertex keeps its own label");
+    }
+
+    #[test]
+    fn all_vertices_receive_a_label() {
+        let g = two_cliques_bridge();
+        let labels = run(&g, 20);
+        assert_eq!(labels.len(), g.num_vertices(), "every vertex must have a label");
+    }
+
+    #[test]
+    fn single_vertex_gets_own_label() {
+        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![(42, ())], vec![]);
+        let labels = run(&g, 5);
+        assert_eq!(labels[&42], 42);
+    }
+
+    #[test]
+    fn all_labels_are_valid_vertex_ids() {
+        // Labels can only ever be original vertex IDs — verify that invariant.
+        let g: Graph<(), ()> = Graph::from_edges(
+            vec![
+                Edge { src: 0, dst: 1, attr: () },
+                Edge { src: 1, dst: 2, attr: () },
+                Edge { src: 2, dst: 0, attr: () },
+            ],
+            (),
+        );
+        let valid_ids: std::collections::HashSet<VertexId> =
+            g.vertices().map(|(v, _)| v).collect();
+        let labels = run(&g, 10);
+        for (_, &label) in &labels {
+            assert!(
+                valid_ids.contains(&label),
+                "label {label} is not an original vertex ID"
+            );
+        }
     }
 }

@@ -108,4 +108,21 @@ mod tests {
         // The two SCCs should have different labels.
         assert_ne!(labels[&0], labels[&3]);
     }
+
+    #[test]
+    fn single_vertex_is_own_scc() {
+        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![(5, ())], vec![]);
+        let labels = run(&g, 10);
+        assert_eq!(labels.len(), 1);
+    }
+
+    #[test]
+    fn self_loop_vertex_is_own_scc() {
+        let g: Graph<(), ()> = Graph::from_vertices_edges(
+            vec![(0, ())],
+            vec![Edge { src: 0, dst: 0, attr: () }],
+        );
+        let labels = run(&g, 5);
+        assert!(labels.contains_key(&0));
+    }
 }

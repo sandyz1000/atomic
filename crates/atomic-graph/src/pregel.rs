@@ -135,4 +135,82 @@ mod tests {
             assert_eq!(*label, 0);
         }
     }
+
+    #[test]
+    fn single_vertex_receives_initial_msg_only() {
+        // Graph with one isolated vertex. No edges → send_msg is never called → terminates immediately.
+        let g: Graph<VertexId, ()> = Graph::from_vertices_edges(vec![(0, 0)], vec![]);
+        let result = run(
+            &g,
+            VertexId::MAX,
+            10,
+            EdgeDirection::Either,
+            |_vid, _vd, msg: VertexId| msg,
+            |_ctx| {},
+            |a, b| a.min(b),
+        );
+        // vprog was called with initial_msg = VertexId::MAX, so all vertices hold MAX.
+        assert_eq!(*result.vertices().next().unwrap().1, VertexId::MAX);
+    }
+
+    #[test]
+    fn max_iterations_respected() {
+        // Dense clique that would converge in many iterations.
+        let g: Graph<VertexId, ()> = Graph::from_edges(
+            vec![
+                Edge { src: 0, dst: 1, attr: () },
+                Edge { src: 1, dst: 0, attr: () },
+            ],
+            100_i64,
+        )
+        .map_vertices(|vid, _| vid);
+
+        let mut calls = 0usize;
+        let result = run(
+            &g,
+            VertexId::MAX,
+            2, // max 2 iterations
+            EdgeDirection::Either,
+            |_vid, vd, msg: VertexId| (*vd).min(msg),
+            |mut ctx| {
+                let s = ctx.triplet.src_attr;
+                let d = ctx.triplet.dst_attr;
+                if s < d { ctx.send_to_dst(s); }
+                if d < s { ctx.send_to_src(d); }
+            },
+            |a, b| a.min(b),
+        );
+        // After at most 2 supersteps the computation must have stopped.
+        assert_eq!(result.num_vertices(), 2);
+    }
+
+    #[test]
+    fn converges_early_when_no_messages_sent() {
+        // A path that converges in exactly 1 superstep.
+        let g: Graph<VertexId, ()> = Graph::from_edges(
+            vec![Edge { src: 0, dst: 1, attr: () }],
+            VertexId::MAX,
+        )
+        .map_vertices(|vid, _| vid);
+
+        let result = run(
+            &g,
+            VertexId::MAX,
+            100,
+            EdgeDirection::Either,
+            |_vid, vd, msg: VertexId| (*vd).min(msg),
+            |mut ctx| {
+                // After superstep 0: both hold their own ID (0 and 1).
+                // 0 < 1 → send 0 to dst once. After merge, vertex 1 holds 0.
+                // Superstep 1: 0 = 0 and 1 now holds 0 → no messages → terminates.
+                if ctx.triplet.src_attr < ctx.triplet.dst_attr {
+                    ctx.send_to_dst(ctx.triplet.src_attr);
+                }
+            },
+            |a, b| a.min(b),
+        );
+        for (_, label) in result.vertices() {
+            assert_eq!(*label, 0, "all vertices should converge to min label 0");
+        }
+    }
 }

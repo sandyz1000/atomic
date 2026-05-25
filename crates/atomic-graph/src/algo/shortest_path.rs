@@ -125,4 +125,46 @@ mod tests {
         // vertex 1 should have distances to both landmarks
         assert!(result[&1].contains_key(&0) || result[&1].contains_key(&2));
     }
+
+    #[test]
+    fn single_node_graph_distance_to_self_is_zero() {
+        let g: Graph<(), f64> = Graph::from_vertices_edges(vec![(5, ())], vec![]);
+        let result = run(&g, &[5]);
+        assert_eq!(result[&5][&5], 0.0);
+    }
+
+    #[test]
+    fn unreachable_vertex_has_no_landmark_entry() {
+        // 0 → 1 and isolated vertex 99. Landmark = 0.
+        // Vertex 99 cannot reach 0, so it should have no entry for landmark 0.
+        let g = Graph::from_vertices_edges(
+            vec![(0, ()), (1, ()), (99, ())],
+            vec![Edge { src: 0, dst: 1, attr: 1.0 }],
+        );
+        let result = run(&g, &[0]);
+        // Vertex 99 is isolated and can't reach landmark 0.
+        assert!(!result[&99].contains_key(&0),
+            "unreachable vertex should have no entry for landmark 0");
+    }
+
+    #[test]
+    fn parallel_paths_shortest_wins() {
+        // Two paths from 0 to 3:
+        //   0 →(1.0)→ 1 →(1.0)→ 3  (total 2.0)
+        //   0 →(5.0)→ 3             (total 5.0)
+        let g = Graph::from_vertices_edges(
+            vec![(0, ()), (1, ()), (3, ())],
+            vec![
+                Edge { src: 0, dst: 1, attr: 1.0 },
+                Edge { src: 1, dst: 3, attr: 1.0 },
+                Edge { src: 0, dst: 3, attr: 5.0 },
+            ],
+        );
+        let result = run(&g, &[3]);
+        assert!(
+            (result[&0][&3] - 2.0).abs() < 1e-9,
+            "shortest path should be 2.0, got {}",
+            result[&0][&3]
+        );
+    }
 }
