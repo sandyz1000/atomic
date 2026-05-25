@@ -122,4 +122,27 @@ mod tests {
         );
         assert_eq!(total(&g), 0);
     }
+
+    #[test]
+    fn empty_graph_has_zero_triangles() {
+        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![], vec![]);
+        assert_eq!(total(&g), 0);
+    }
+
+    #[test]
+    fn single_vertex_has_zero_triangles() {
+        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![(0, ())], vec![]);
+        assert_eq!(total(&g), 0);
+        let counts = run(&g);
+        assert_eq!(counts[&0], 0);
+    }
+
+    #[test]
+    fn two_vertices_no_triangle() {
+        let g: Graph<(), ()> = Graph::from_edges(
+            vec![Edge { src: 0, dst: 1, attr: () }],
+            (),
+        );
+        assert_eq!(total(&g), 0);
+    }
 }

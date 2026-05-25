@@ -495,4 +495,100 @@ mod tests {
             assert_eq!(v, 1.0);
         }
     }
+
+    #[test]
+    fn empty_graph_has_zero_counts() {
+        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![], vec![]);
+        assert_eq!(g.num_vertices(), 0);
+        assert_eq!(g.num_edges(), 0);
+    }
+
+    #[test]
+    fn from_vertices_edges_isolated_vertex_is_present() {
+        let g: Graph<i32, ()> = Graph::from_vertices_edges(
+            vec![(0, 10), (1, 20), (99, 99)],
+            vec![Edge { src: 0, dst: 1, attr: () }],
+        );
+        assert_eq!(g.num_vertices(), 3);
+        assert_eq!(g.num_edges(), 1);
+        // isolated vertex 99 should be in the graph
+        let ids: Vec<_> = g.vertices().map(|(id, _)| id).collect();
+        assert!(ids.contains(&99));
+    }
+
+    #[test]
+    fn from_vertices_edges_edge_referencing_unknown_vertex_dropped() {
+        let g: Graph<(), ()> = Graph::from_vertices_edges(
+            vec![(0, ()), (1, ())],
+            vec![
+                Edge { src: 0, dst: 1, attr: () },
+                Edge { src: 0, dst: 99, attr: () }, // 99 not in vertex list
+            ],
+        );
+        assert_eq!(g.num_edges(), 1, "edge to unknown vertex should be dropped");
+    }
+
+    #[test]
+    fn in_degrees() {
+        let g = triangle_graph();
+        let id = g.in_degrees();
+        // Triangle: every vertex has in-degree 1.
+        assert_eq!(id[&0], 1);
+        assert_eq!(id[&1], 1);
+        assert_eq!(id[&2], 1);
+    }
+
+    #[test]
+    fn map_edges_changes_attributes() {
+        let g = triangle_graph();
+        let doubled = g.map_edges(|e| e.attr * 2.0);
+        let attrs: Vec<f64> = doubled.edges().map(|e| e.attr).collect();
+        for a in attrs {
+            assert!(a == 2.0 || a == 4.0 || a == 6.0);
+        }
+    }
+
+    #[test]
+    fn subgraph_filter_by_vertex() {
+        let g = triangle_graph();
+        // Keep only vertices 0 and 1.
+        let sub = g.subgraph(|vid, _| vid <= 1, |_| true);
+        assert_eq!(sub.num_vertices(), 2);
+        // Only edge 0→1 should survive (2 is removed, so 1→2 and 2→0 are gone).
+        assert_eq!(sub.num_edges(), 1);
+    }
+
+    #[test]
+    fn subgraph_filter_by_edge() {
+        let g = triangle_graph();
+        // Keep only edges with attr < 2.0.
+        let sub = g.subgraph(|_, _| true, |e| e.attr < 2.0);
+        assert_eq!(sub.num_edges(), 1);
+    }
+
+    #[test]
+    fn group_edges_merges_parallel_edges() {
+        let g: Graph<(), f64> = Graph::from_vertices_edges(
+            vec![(0, ()), (1, ())],
+            vec![
+                Edge { src: 0, dst: 1, attr: 1.0 },
+                Edge { src: 0, dst: 1, attr: 3.0 },
+            ],
+        );
+        let merged = g.group_edges(|a, b| a + b);
+        assert_eq!(merged.num_edges(), 1);
+        let total: f64 = merged.edges().map(|e| e.attr).sum();
+        assert!((total - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn outer_join_vertices_updates_matching() {
+        let g = triangle_graph();
+        let extra: std::collections::HashMap<i64, f64> = vec![(0_i64, 100.0), (2, 200.0)].into_iter().collect();
+        let joined = g.outer_join_vertices(&extra, |_vid, _old, v| v.cloned().unwrap_or(0.0));
+        let vmap: std::collections::HashMap<_, _> = joined.vertices().map(|(id, v)| (id, *v)).collect();
+        assert!((vmap[&0] - 100.0).abs() < 1e-9);
+        assert!((vmap[&1] - 0.0).abs() < 1e-9);  // no entry → default 0
+        assert!((vmap[&2] - 200.0).abs() < 1e-9);
+    }
 }

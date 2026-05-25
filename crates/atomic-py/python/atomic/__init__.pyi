@@ -112,6 +112,84 @@ class Rdd(Generic[T]):
         """Aggregate with an initial ``zero`` value using ``f(acc, element) -> acc``."""
         ...
 
+    def distinct(self) -> "Rdd[T]":
+        """Remove duplicate elements."""
+        ...
+
+    def subtract(self, other: "Rdd[T]") -> "Rdd[T]":
+        """Return elements in ``self`` that are not in ``other``."""
+        ...
+
+    def intersection(self, other: "Rdd[T]") -> "Rdd[T]":
+        """Return elements present in both ``self`` and ``other`` (no duplicates)."""
+        ...
+
+    def map_partitions(self, f: Callable[[List[T]], Iterable[U]]) -> "Rdd[U]":
+        """Apply ``f`` to each logical partition (Python list), returning a flattened RDD."""
+        ...
+
+    def keys(self) -> "Rdd[K]":
+        """Extract the key from each ``(key, value)`` tuple."""
+        ...
+
+    def values(self) -> "Rdd[V]":
+        """Extract the value from each ``(key, value)`` tuple."""
+        ...
+
+    def lookup(self, key: K) -> List[V]:
+        """Return all values associated with ``key`` in a pair RDD."""
+        ...
+
+    def for_each(self, f: Callable[[T], None]) -> None:
+        """Apply ``f`` to each element for side effects."""
+        ...
+
+    def for_each_partition(self, f: Callable[[List[T]], None]) -> None:
+        """Apply ``f`` to each logical partition for side effects."""
+        ...
+
+    def count_by_value(self) -> "dict[T, int]":
+        """Count occurrences of each distinct element. Returns a dict keyed by items."""
+        ...
+
+    def count_by_key(self) -> "dict[K, int]":
+        """Count elements per key in a pair RDD. Returns a dict keyed by key objects."""
+        ...
+
+    def is_empty(self) -> bool:
+        """Return ``True`` if the RDD has no elements."""
+        ...
+
+    def max(self, key: Optional[Callable[[T], Any]] = None) -> T:
+        """Return the maximum element. Optional ``key`` function for comparison."""
+        ...
+
+    def min(self, key: Optional[Callable[[T], Any]] = None) -> T:
+        """Return the minimum element. Optional ``key`` function for comparison."""
+        ...
+
+    def top(self, n: int, key: Optional[Callable[[T], Any]] = None) -> List[T]:
+        """Return the top ``n`` elements (largest first). Optional ``key`` function."""
+        ...
+
+    def take_ordered(self, n: int, key: Optional[Callable[[T], Any]] = None) -> List[T]:
+        """Return the ``n`` smallest elements. Optional ``key`` function."""
+        ...
+
+    def save_as_text_file(self, path: str) -> None:
+        """Write each element as a line to ``path``."""
+        ...
+
+    def aggregate(
+        self,
+        zero: U,
+        seq_fn: Callable[[U, T], U],
+        comb_fn: Callable[[U, U], U],
+    ) -> U:
+        """Two-phase aggregation: ``seq_fn(acc, elem)`` within partitions,
+        ``comb_fn(acc, acc)`` across partition results."""
+        ...
+
     # ── Properties ───────────────────────────────────────────────────────────
 
     def num_partitions(self) -> int:

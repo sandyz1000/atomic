@@ -37,26 +37,20 @@ pub mod __macro_support {
 /// ```
 #[macro_export]
 macro_rules! register_shuffle_map {
-    ($K:ty, $V:ty) => {{
-        // Key is generated at the call site where K and V are concrete types.
-        // stringify! captures the source token text, which is:
-        //   - stable across compiler versions (unlike std::any::type_name)
-        //   - consistent between driver and worker (same binary, same call site)
-        const __SHUFFLE_KEY: &str = concat!(stringify!($K), "::", stringify!($V));
-
+    ($K:ty, $V:ty) => {
         $crate::__macro_support::inventory::submit!(
             $crate::__macro_support::ShuffleMapEntry {
-                type_id: || __SHUFFLE_KEY,
+                type_id: || concat!(stringify!($K), "::", stringify!($V)),
                 handler: $crate::builtin_tasks::shuffle_map_handler::<$K, $V>,
             }
         );
         $crate::__macro_support::inventory::submit!(
             $crate::__macro_support::ShuffleKeyEntry {
                 type_id: || std::any::TypeId::of::<($K, $V)>(),
-                key: __SHUFFLE_KEY,
+                key: concat!(stringify!($K), "::", stringify!($V)),
             }
         );
-    }};
+    };
 }
 
 pub use atomic_runtime_macros::task;

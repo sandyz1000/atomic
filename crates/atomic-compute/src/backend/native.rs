@@ -95,7 +95,7 @@ impl Backend for NativeBackend {
             .ops
             .iter()
             .any(|op| matches!(op.action, TaskAction::ShuffleMap { .. }))
-            .then(|| atomic_data::env::SHUFFLE_SERVER_URI.get().cloned())
+            .then(|| atomic_data::env::get_shuffle_server_uri())
             .flatten();
 
         Ok(TaskResultEnvelope::ok(

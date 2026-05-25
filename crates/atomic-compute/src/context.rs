@@ -56,6 +56,7 @@ impl Drop for Context {
             }
         }
         Context::driver_clean_up_directives(&self.work_dir, &self.address_map);
+        atomic_data::env::clear_shuffle_infrastructure();
     }
 }
 
@@ -183,14 +184,26 @@ impl Context {
 
         for &endpoint in &config.workers {
             log::info!("connecting to worker at {}", endpoint);
-            let capabilities = Context::request_worker_capabilities(endpoint)?;
-            log::info!(
-                "worker {} ready (max_tasks={})",
-                capabilities.worker_id,
-                capabilities.max_tasks,
-            );
-            scheduler.register_worker(endpoint, capabilities);
-            address_map.push(endpoint);
+            match Context::request_worker_capabilities(endpoint) {
+                Ok(capabilities) => {
+                    log::info!(
+                        "worker {} ready (max_tasks={})",
+                        capabilities.worker_id,
+                        capabilities.max_tasks,
+                    );
+                    scheduler.register_worker(endpoint, capabilities);
+                    address_map.push(endpoint);
+                }
+                Err(e) => {
+                    log::warn!("worker {} unreachable during handshake, skipping: {}", endpoint, e);
+                }
+            }
+        }
+
+        if address_map.is_empty() {
+            return Err(Error::WorkerHandshake(
+                "no reachable workers found".to_string(),
+            ));
         }
 
         let scheduler = Schedulers::Distributed(scheduler);
@@ -220,6 +233,14 @@ impl Context {
                 std::process::exit(0);
             }
         }
+    }
+
+    /// Shut down the compute context, releasing shuffle infrastructure.
+    ///
+    /// Called by `StreamingContext::stop(stop_sc=true)` to also tear down the
+    /// underlying compute layer.
+    pub fn shutdown(&self) {
+        atomic_data::env::clear_shuffle_infrastructure();
     }
 
     fn driver_clean_up_directives(work_dir: &std::path::Path, _executors: &[SocketAddrV4]) {
@@ -256,6 +277,13 @@ impl Context {
                         .map_err(|err| Error::WorkerHandshake(err.to_string()));
                 }
                 Err(err) => {
+                    if err.kind() == std::io::ErrorKind::ConnectionRefused {
+                        // Worker is actively refusing — it is not starting up; it is dead.
+                        return Err(Error::WorkerHandshake(format!(
+                            "worker {} refused connection ({})",
+                            endpoint, err
+                        )));
+                    }
                     last_err = Some(err.to_string());
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -394,16 +422,15 @@ impl Context {
     {
         // Closures cannot be sent to remote workers; always execute on the driver
         // using the dedicated local scheduler, regardless of deployment mode.
+        // `run_in_async_rt` ensures spawn_blocking (used by LocalScheduler) has a
+        // Tokio handle, and that shuffle fetches (hyper HTTP) work correctly.
         let cl = move |(_task_context, iter)| (func)(iter);
-        self.driver_scheduler
-            .clone()
-            .run_job(
-                Arc::new(cl),
-                rdd.clone(),
-                (0..rdd.number_of_splits()).collect(),
-                false,
-            )
-            .map_err(Error::from)
+        let sched = self.driver_scheduler.clone();
+        let partitions = (0..rdd.number_of_splits()).collect();
+        env::Env::run_in_async_rt(|| {
+            sched.run_job(Arc::new(cl), rdd, partitions, false)
+        })
+        .map_err(Error::from)
     }
 
     pub fn run_job_with_partitions<T: Data, U: Data + Clone, F, P>(
@@ -417,10 +444,12 @@ impl Context {
         P: IntoIterator<Item = usize>,
     {
         let cl = move |(_task_context, iter)| (func)(iter);
-        self.driver_scheduler
-            .clone()
-            .run_job(Arc::new(cl), rdd, partitions.into_iter().collect(), false)
-            .map_err(Error::from)
+        let sched = self.driver_scheduler.clone();
+        let partitions: Vec<usize> = partitions.into_iter().collect();
+        env::Env::run_in_async_rt(|| {
+            sched.run_job(Arc::new(cl), rdd, partitions, false)
+        })
+        .map_err(Error::from)
     }
 
     pub fn run_job_with_context<T: Data, U: Data + Clone, F>(
@@ -433,15 +462,12 @@ impl Context {
     {
         log::debug!("inside run job in context");
         let func = Arc::new(func);
-        self.driver_scheduler
-            .clone()
-            .run_job(
-                func,
-                rdd.clone(),
-                (0..rdd.number_of_splits()).collect(),
-                false,
-            )
-            .map_err(Error::from)
+        let sched = self.driver_scheduler.clone();
+        let partitions = (0..rdd.number_of_splits()).collect();
+        env::Env::run_in_async_rt(|| {
+            sched.run_job(func, rdd, partitions, false)
+        })
+        .map_err(Error::from)
     }
 
     pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
@@ -649,7 +675,11 @@ impl Context {
                     payload: shuffle_dep.type_id.as_bytes().to_vec(),
                 };
 
-                let mut ops = preceding_ops.clone();
+                // Prefer ops stored on the dep (set when a staged pipeline precedes the shuffle).
+                // Fall back to the caller-supplied preceding_ops.
+                let dep_preceding = shuffle_dep.preceding_ops.clone();
+                let base_ops = if !dep_preceding.is_empty() { dep_preceding } else { preceding_ops.clone() };
+                let mut ops = base_ops;
                 ops.push(shuffle_op);
 
                 env::Env::run_in_async_rt(|| {

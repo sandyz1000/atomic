@@ -21,6 +21,18 @@ edition = "2024"
 name = "integration"
 path = "integration/main.rs"
 
+[[bin]]
+name = "integration_shuffle_wordcount"
+path = "integration/shuffle_wordcount.rs"
+
+[[bin]]
+name = "integration_multi_stage"
+path = "integration/multi_stage.rs"
+
+[[bin]]
+name = "integration_fault_tolerance"
+path = "integration/fault_tolerance.rs"
+
 [dependencies]
 atomic-compute = { workspace = true }
 serde_json = { workspace = true }
@@ -28,14 +40,20 @@ env_logger = { workspace = true }
 
 [dev-dependencies]
 atomic-compute = { workspace = true }
+atomic-data = { workspace = true }
+atomic-scheduler = { workspace = true }
+atomic-streaming = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tempfile = { workspace = true }
+parking_lot = { workspace = true }
 
 [workspace.dependencies]
 atomic-nlq = { path = "crates/atomic-nlq" }
 atomic-sql = { path = "crates/atomic-sql" }
 atomic-compute = { path = "crates/atomic-compute" }
 atomic-scheduler = { path = "crates/atomic-scheduler" }
+atomic-streaming = { path = "crates/atomic-streaming" }
 atomic-data = { path = "crates/atomic-data" }
 atomic-utils = { path = "crates/atomic-utils" }
 atomic-runtime-macros = { path = "crates/atomic-runtime-macros" }
@@ -92,3 +110,4 @@ regex = "*"
 toml = "0.9.8"
 env_logger = "0.11"
 lazy_static = "1.5.0"
+lru = "0.12"

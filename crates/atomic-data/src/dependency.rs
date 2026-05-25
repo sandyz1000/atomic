@@ -2,7 +2,7 @@ use bincode::Encode;
 
 use crate::aggregator::Aggregator;
 use crate::data::Data;
-use crate::distributed::WireEncode;
+use crate::distributed::{PipelineOp, WireEncode};
 // use crate::env;
 use crate::partitioner::Partitioner;
 use crate::rdd::RddBase;
@@ -160,6 +160,12 @@ pub struct ShuffleDependencyBox {
     /// Used by the driver in distributed mode to build the shuffle-map `TaskEnvelope`
     /// sent to workers. Captures the typed parent RDD so encoding is exact.
     pub encode_partitions: Arc<dyn Fn() -> Result<Vec<Vec<u8>>, String> + Send + Sync>,
+    /// Pipeline ops that must run on workers *before* the ShuffleMap op.
+    ///
+    /// Non-empty when a staged pipeline (from `map_task`/`flat_map_task`) precedes
+    /// the shuffle stage. `encode_partitions` then returns the staged source partitions
+    /// whose element type matches the first op's input type.
+    pub preceding_ops: Vec<PipelineOp>,
     // Type-erased executor: stores a closure that runs the actual shuffle task (local mode)
     do_shuffle: Arc<dyn Fn(usize) -> String + Send + Sync>,
 }
@@ -316,7 +322,7 @@ where
                         partition,
                         set.first()
                     );
-                    if let Some(cache) = crate::env::SHUFFLE_CACHE.get() {
+                    if let Some(cache) = crate::env::get_shuffle_cache() {
                         cache.insert((self.shuffle_id, partition, i), ser_bytes);
                     } else {
                         log::warn!(
@@ -336,10 +342,7 @@ where
             self.shuffle_id
         );
 
-        crate::env::SHUFFLE_SERVER_URI
-            .get()
-            .cloned()
-            .unwrap_or_default()
+        crate::env::get_shuffle_server_uri().unwrap_or_default()
     }
 }
 
@@ -406,7 +409,23 @@ impl ShuffleDependencyBox {
             num_output_partitions: dep.partitioner.get_num_of_partitions(),
             type_id: shuffle_key,
             encode_partitions,
+            preceding_ops: vec![],
             do_shuffle: Arc::new(move |partition| cloned.do_shuffle_task_typed(partition)),
         }
+    }
+
+    /// Override `encode_partitions` and set `preceding_ops` for staged-pipeline shuffles.
+    ///
+    /// Used when a `_task`-based pipeline precedes a shuffle: the staged source partitions
+    /// (already rkyv-encoded) become the worker input, and the staged ops run on workers
+    /// before the ShuffleMap op.
+    pub fn with_staged_pipeline(
+        mut self,
+        source_partitions: Vec<Vec<u8>>,
+        preceding_ops: Vec<PipelineOp>,
+    ) -> Self {
+        self.encode_partitions = Arc::new(move || Ok(source_partitions.clone()));
+        self.preceding_ops = preceding_ops;
+        self
     }
 }

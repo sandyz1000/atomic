@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use atomic_compute::context::Context;
@@ -45,16 +44,59 @@ impl PyRdd {
         num_partitions: usize,
         context: Arc<Context>,
     ) -> Self {
-        Self { elements, num_partitions, context, staged: None }
+        Self {
+            elements,
+            num_partitions,
+            context,
+            staged: None,
+        }
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
 
-    /// Pickle a Python callable and return the bytes.
+    /// Pickle a callable using cloudpickle (if available) or stdlib pickle.
+    ///
+    /// cloudpickle is required for lambdas and closures; the worker subprocess
+    /// already prefers it.  Stdlib pickle only works for top-level named functions.
     fn pickle_fn(py: Python, f: &Py<PyAny>) -> PyResult<Vec<u8>> {
-        let pickle = PyModule::import(py, "pickle")?;
+        let pickle =
+            PyModule::import(py, "cloudpickle").or_else(|_| PyModule::import(py, "pickle"))?;
         let bytes_obj: Bound<'_, PyAny> = pickle.call_method1("dumps", (f.bind(py),))?;
         Ok(bytes_obj.extract::<Vec<u8>>()?)
+    }
+
+    /// Wrap an element-level function `f` into a partition-level function using
+    /// `eval(expr, scope)` where `scope = {"_f": f}` (and optionally `"_z": zero`).
+    ///
+    /// The worker calls `partition_fn(partition: list) -> list`, so every function
+    /// we send must be partition-level.  Using default-argument capture (`_f=_f`)
+    /// makes the lambda self-contained and picklable by cloudpickle.
+    ///
+    /// Python's `eval` automatically inserts `__builtins__` into `scope` when it
+    /// is absent, so list comprehensions and built-ins work inside the lambda body.
+    fn make_partition_wrapper<'py>(
+        py: Python<'py>,
+        expr: &str,
+        f: &Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let scope = pyo3::types::PyDict::new(py);
+        scope.set_item("_f", f.bind(py))?;
+        let builtins = PyModule::import(py, "builtins")?;
+        builtins.getattr("eval")?.call1((expr, &scope))
+    }
+
+    /// Like `make_partition_wrapper` but also captures a `zero` value as `_z`.
+    fn make_partition_wrapper_with_zero<'py>(
+        py: Python<'py>,
+        expr: &str,
+        f: &Py<PyAny>,
+        zero: &Py<PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let scope = pyo3::types::PyDict::new(py);
+        scope.set_item("_f", f.bind(py))?;
+        scope.set_item("_z", zero.bind(py))?;
+        let builtins = PyModule::import(py, "builtins")?;
+        builtins.getattr("eval")?.call1((expr, &scope))
     }
 
     /// JSON-encode the elements split into `num_partitions` chunks.
@@ -93,8 +135,16 @@ impl PyRdd {
     }
 
     /// Build a Python UDF op and push it into the staged pipeline.
-    fn stage_python_udf(&mut self, py: Python, partition_fn_bytes: Vec<u8>, action: TaskAction) -> PyResult<()> {
-        let payload_struct = PythonUdfPayload { fn_bytes: partition_fn_bytes, zero_bytes: vec![] };
+    fn stage_python_udf(
+        &mut self,
+        py: Python,
+        partition_fn_bytes: Vec<u8>,
+        action: TaskAction,
+    ) -> PyResult<()> {
+        let payload_struct = PythonUdfPayload {
+            fn_bytes: partition_fn_bytes,
+            zero_bytes: vec![],
+        };
         let payload = serde_json::to_vec(&payload_struct)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let op = PipelineOp {
@@ -129,9 +179,13 @@ impl PyRdd {
     /// Apply `f` to each element, returning a new RDD.
     pub fn map(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            let fn_bytes = Self::pickle_fn(py, &f)?;
+            let wrapper = Self::make_partition_wrapper(
+                py,
+                "lambda partition, _f=_f: [_f(x) for x in partition]",
+                &f,
+            )?;
+            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
             self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
-            // Return self with updated staged pipeline (move semantics emulated via clone of non-data fields)
             return Ok(self.take_as_new(py));
         }
         // Local eager
@@ -140,13 +194,23 @@ impl PyRdd {
             .iter()
             .map(|item| f.call1(py, (item,)))
             .collect::<PyResult<Vec<_>>>()?;
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Keep only elements for which `f` returns truthy.
     pub fn filter(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            let fn_bytes = Self::pickle_fn(py, &f)?;
+            let wrapper = Self::make_partition_wrapper(
+                py,
+                "lambda partition, _f=_f: [x for x in partition if _f(x)]",
+                &f,
+            )?;
+            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
             self.stage_python_udf(py, fn_bytes, TaskAction::Filter)?;
             return Ok(self.take_as_new(py));
         }
@@ -163,13 +227,23 @@ impl PyRdd {
                 }
             })
             .collect::<PyResult<Vec<_>>>()?;
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Apply `f` to each element and flatten the results (f must return an iterable).
     pub fn flat_map(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            let fn_bytes = Self::pickle_fn(py, &f)?;
+            let wrapper = Self::make_partition_wrapper(
+                py,
+                "lambda partition, _f=_f: [y for x in partition for y in _f(x)]",
+                &f,
+            )?;
+            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
             self.stage_python_udf(py, fn_bytes, TaskAction::FlatMap)?;
             return Ok(self.take_as_new(py));
         }
@@ -182,13 +256,24 @@ impl PyRdd {
                 elements.push(val?.unbind());
             }
         }
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Apply `f` only to the value in each `(key, value)` pair.
     pub fn map_values(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            let fn_bytes = Self::pickle_fn(py, &f)?;
+            // Partition-level wrapper: preserves the key, applies f to the value only.
+            let wrapper = Self::make_partition_wrapper(
+                py,
+                "lambda partition, _f=_f: [(p[0], _f(p[1])) for p in partition]",
+                &f,
+            )?;
+            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
             self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
             return Ok(self.take_as_new(py));
         }
@@ -207,13 +292,23 @@ impl PyRdd {
                 Ok(PyTuple::new(py, [key, new_val])?.unbind().into_any())
             })
             .collect::<PyResult<Vec<_>>>()?;
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Apply `f` to each value in `(key, value)` pairs and flatten.
     pub fn flat_map_values(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            let fn_bytes = Self::pickle_fn(py, &f)?;
+            let wrapper = Self::make_partition_wrapper(
+                py,
+                "lambda partition, _f=_f: [(p[0], v) for p in partition for v in _f(p[1])]",
+                &f,
+            )?;
+            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
             self.stage_python_udf(py, fn_bytes, TaskAction::FlatMap)?;
             return Ok(self.take_as_new(py));
         }
@@ -229,17 +324,29 @@ impl PyRdd {
             let iter_result = f.call1(py, (pair.get_item(1)?,))?;
             let iter_obj = PyIterator::from_object(iter_result.bind(py))?;
             for val in iter_obj {
-                let new_pair = PyTuple::new(py, [key.clone_ref(py), val?.unbind()])?.unbind().into_any();
+                let new_pair = PyTuple::new(py, [key.clone_ref(py), val?.unbind()])?
+                    .unbind()
+                    .into_any();
                 elements.push(new_pair);
             }
         }
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Produce `(f(element), element)` pairs.
     pub fn key_by(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
-            let fn_bytes = Self::pickle_fn(py, &f)?;
+            let wrapper = Self::make_partition_wrapper(
+                py,
+                "lambda partition, _f=_f: [(_f(x), x) for x in partition]",
+                &f,
+            )?;
+            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
             self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
             return Ok(self.take_as_new(py));
         }
@@ -248,10 +355,17 @@ impl PyRdd {
             .iter()
             .map(|item| {
                 let key = f.call1(py, (item,))?;
-                Ok(PyTuple::new(py, [key, item.clone_ref(py)])?.unbind().into_any())
+                Ok(PyTuple::new(py, [key, item.clone_ref(py)])?
+                    .unbind()
+                    .into_any())
             })
             .collect::<PyResult<Vec<_>>>()?;
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Group elements by `f(element)`.
@@ -261,8 +375,9 @@ impl PyRdd {
 
     /// Group `(key, value)` pairs by key.
     pub fn group_by_key(&self, py: Python) -> PyResult<PyRdd> {
-        let mut groups: HashMap<String, (Py<PyAny>, Vec<Py<PyAny>>)> = HashMap::new();
-        let mut order: Vec<String> = Vec::new();
+        // Use Python equality (==) rather than repr strings to group keys correctly.
+        // This is O(n²) but correct for all hashable Python objects.
+        let mut groups: Vec<(Py<PyAny>, Vec<Py<PyAny>>)> = Vec::new();
 
         for item in &self.elements {
             let pair = item.bind(py).cast::<PyTuple>()?;
@@ -273,30 +388,44 @@ impl PyRdd {
             }
             let key_obj = pair.get_item(0)?.unbind();
             let val_obj = pair.get_item(1)?.unbind();
-            let key_str = key_obj.bind(py).repr()?.to_string();
-            let entry = groups.entry(key_str.clone()).or_insert_with(|| {
-                order.push(key_str);
-                (key_obj.clone_ref(py), Vec::new())
-            });
-            entry.1.push(val_obj);
+
+            let mut found = false;
+            for (existing_key, vals) in &mut groups {
+                if existing_key.bind(py).eq(key_obj.bind(py))? {
+                    vals.push(val_obj.clone_ref(py));
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                groups.push((key_obj, vec![val_obj]));
+            }
         }
 
-        let elements = order
+        let elements = groups
             .iter()
-            .map(|k| {
-                let (key, vals) = &groups[k];
-                let py_list = PyList::new(py, vals.iter().map(|v| v.bind(py)))?.into_any().unbind();
-                Ok(PyTuple::new(py, [key.bind(py), py_list.bind(py)])?.unbind().into_any())
+            .map(|(key, vals)| {
+                let py_list = PyList::new(py, vals.iter().map(|v| v.bind(py)))?
+                    .into_any()
+                    .unbind();
+                Ok(PyTuple::new(py, [key.bind(py), py_list.bind(py)])?
+                    .unbind()
+                    .into_any())
             })
             .collect::<PyResult<Vec<_>>>()?;
 
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Aggregate values with the same key using `f(acc, value) -> acc`.
     pub fn reduce_by_key(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
-        let mut accum: HashMap<String, (Py<PyAny>, Py<PyAny>)> = HashMap::new();
-        let mut order: Vec<String> = Vec::new();
+        // Use Python equality (==) for key comparison, not repr strings.
+        let mut groups: Vec<(Py<PyAny>, Py<PyAny>)> = Vec::new(); // (key, accumulated_val)
 
         for item in &self.elements {
             let pair = item.bind(py).cast::<PyTuple>()?;
@@ -307,29 +436,38 @@ impl PyRdd {
             }
             let key_obj = pair.get_item(0)?.unbind();
             let val_obj = pair.get_item(1)?.unbind();
-            let key_str = key_obj.bind(py).repr()?.to_string();
 
-            match accum.get_mut(&key_str) {
-                Some((_, acc)) => {
-                    let new_acc = f.call1(py, (acc.clone_ref(py), val_obj))?;
+            let mut found = false;
+            for (existing_key, acc) in &mut groups {
+                if existing_key.bind(py).eq(key_obj.bind(py))? {
+                    let new_acc = f.call1(py, (acc.clone_ref(py), val_obj.clone_ref(py)))?;
                     *acc = new_acc;
+                    found = true;
+                    break;
                 }
-                None => {
-                    order.push(key_str.clone());
-                    accum.insert(key_str, (key_obj, val_obj));
-                }
+            }
+            if !found {
+                groups.push((key_obj, val_obj));
             }
         }
 
-        let elements = order
+        let elements = groups
             .iter()
-            .map(|k| {
-                let (key, val) = &accum[k];
-                Ok(PyTuple::new(py, [key.bind(py).clone(), val.bind(py).clone()])?.unbind().into_any())
+            .map(|(key, val)| {
+                Ok(
+                    PyTuple::new(py, [key.bind(py).clone(), val.bind(py).clone()])?
+                        .unbind()
+                        .into_any(),
+                )
             })
             .collect::<PyResult<Vec<_>>>()?;
 
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Merge two RDDs with the same element type into one.
@@ -354,10 +492,17 @@ impl PyRdd {
             .iter()
             .zip(other.elements.iter())
             .map(|(a, b)| {
-                Ok(PyTuple::new(py, [a.bind(py).clone(), b.bind(py).clone()])?.unbind().into_any())
+                Ok(PyTuple::new(py, [a.bind(py).clone(), b.bind(py).clone()])?
+                    .unbind()
+                    .into_any())
             })
             .collect::<PyResult<Vec<_>>>()?;
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Compute the Cartesian product of two RDDs.
@@ -366,12 +511,19 @@ impl PyRdd {
         for a in &self.elements {
             for b in &other.elements {
                 elements.push(
-                    PyTuple::new(py, [a.bind(py).clone(), b.bind(py).clone()])?.unbind().into_any(),
+                    PyTuple::new(py, [a.bind(py).clone(), b.bind(py).clone()])?
+                        .unbind()
+                        .into_any(),
                 );
             }
         }
         let partitions = self.num_partitions * other.num_partitions.max(1);
-        Ok(PyRdd::from_data(py, elements, partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Coalesce into `num_partitions` logical partitions.
@@ -398,17 +550,20 @@ impl PyRdd {
     pub fn collect(&mut self, py: Python) -> PyResult<Py<PyAny>> {
         if self.context.is_distributed() {
             if let Some(ref staged) = self.staged {
-                let result_bytes = self.context
+                let result_bytes = self
+                    .context
                     .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
                 return Self::collect_distributed(py, result_bytes);
             }
         }
         // Local eager: return elements as a list
-        Ok(PyList::new(py, self.elements.iter().map(|e| e.bind(py).clone()))
-            .unwrap()
-            .into_any()
-            .unbind())
+        Ok(
+            PyList::new(py, self.elements.iter().map(|e| e.bind(py).clone()))
+                .unwrap()
+                .into_any()
+                .unbind(),
+        )
     }
 
     /// Return the number of elements.
@@ -427,20 +582,15 @@ impl PyRdd {
         self.elements
             .first()
             .map(|e| Ok(e.clone_ref(py)))
-            .unwrap_or_else(|| {
-                Err(pyo3::exceptions::PyStopIteration::new_err("RDD is empty"))
-            })
+            .unwrap_or_else(|| Err(pyo3::exceptions::PyStopIteration::new_err("RDD is empty")))
     }
 
     /// Return the first `n` elements as a Python list.
     pub fn take(&self, py: Python, n: usize) -> Py<PyAny> {
-        PyList::new(
-            py,
-            self.elements.iter().take(n).map(|e| e.bind(py).clone()),
-        )
-        .unwrap()
-        .into_any()
-        .unbind()
+        PyList::new(py, self.elements.iter().take(n).map(|e| e.bind(py).clone()))
+            .unwrap()
+            .into_any()
+            .unbind()
     }
 
     /// Aggregate all elements using `f(acc, element) -> acc`.
@@ -449,8 +599,17 @@ impl PyRdd {
     /// per-partition scalar), then combines those scalars on the driver.
     pub fn reduce(&mut self, py: Python, f: Py<PyAny>) -> PyResult<Py<PyAny>> {
         if self.context.is_distributed() {
-            let fn_bytes = Self::pickle_fn(py, &f)?;
-            let payload_struct = PythonUdfPayload { fn_bytes, zero_bytes: vec![] };
+            // Partition-level reduce: each partition returns [] (empty) or [scalar].
+            let wrapper = Self::make_partition_wrapper(
+                py,
+                "lambda partition, _f=_f: [] if not partition else [__import__('functools').reduce(_f, partition)]",
+                &f,
+            )?;
+            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
+            let payload_struct = PythonUdfPayload {
+                fn_bytes,
+                zero_bytes: vec![],
+            };
             let payload = serde_json::to_vec(&payload_struct)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let op = PipelineOp {
@@ -462,7 +621,8 @@ impl PyRdd {
             self.push_op(py, op)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let result_bytes = self.context
+            let result_bytes = self
+                .context
                 .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
@@ -484,15 +644,17 @@ impl PyRdd {
                     Some(a) => f.call1(py, (a, scalar))?.bind(py).clone(),
                 });
             }
-            return acc
-                .map(|a| Ok(a.unbind()))
-                .unwrap_or_else(|| Err(pyo3::exceptions::PyValueError::new_err("reduce on empty RDD")));
+            return acc.map(|a| Ok(a.unbind())).unwrap_or_else(|| {
+                Err(pyo3::exceptions::PyValueError::new_err(
+                    "reduce on empty RDD",
+                ))
+            });
         }
         // Local eager
         let mut iter = self.elements.iter();
-        let first = iter.next().ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err("reduce on empty RDD")
-        })?;
+        let first = iter
+            .next()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("reduce on empty RDD"))?;
         let mut acc = first.clone_ref(py);
         for item in iter {
             acc = f.call1(py, (acc, item.clone_ref(py)))?;
@@ -505,14 +667,22 @@ impl PyRdd {
     /// In distributed mode this dispatches the fold to workers.
     pub fn fold(&mut self, py: Python, zero: Py<PyAny>, f: Py<PyAny>) -> PyResult<Py<PyAny>> {
         if self.context.is_distributed() {
-            // Pickle zero and fn, push a fold op, dispatch, combine results on driver.
-            let fn_bytes = Self::pickle_fn(py, &f)?;
-            let zero_bytes = {
-                let pickle = PyModule::import(py, "pickle")?;
-                let b: Bound<'_, PyAny> = pickle.call_method1("dumps", (zero.bind(py),))?;
-                b.extract::<Vec<u8>>()?
+            // Partition-level fold: embed both _f and _z into the wrapper via default args.
+            // Each partition returns [accumulated_scalar]; driver combines using f starting
+            // from zero.  zero_bytes is kept for the driver-side combination step.
+            let wrapper = Self::make_partition_wrapper_with_zero(
+                py,
+                "lambda partition, _f=_f, _z=_z: [__import__('functools').reduce(_f, partition, _z)]",
+                &f,
+                &zero,
+            )?;
+            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
+            // zero_bytes is only used by the driver combiner below — store it separately.
+            let zero_bytes = Self::pickle_fn(py, &zero)?;
+            let payload_struct = PythonUdfPayload {
+                fn_bytes,
+                zero_bytes: vec![], // zero embedded in wrapper; zero_bytes unused by worker
             };
-            let payload_struct = PythonUdfPayload { fn_bytes, zero_bytes: zero_bytes.clone() };
             let payload = serde_json::to_vec(&payload_struct)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let op = PipelineOp {
@@ -524,13 +694,15 @@ impl PyRdd {
             self.push_op(py, op)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let result_bytes = self.context
+            let result_bytes = self
+                .context
                 .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-            // Each partition returned [scalar]. Combine scalars using f on driver.
+            // Each partition returned [scalar]. Combine scalars using f on driver from zero.
             let json_mod = PyModule::import(py, "json")?;
-            let pickle = PyModule::import(py, "pickle")?;
+            let pickle =
+                PyModule::import(py, "cloudpickle").or_else(|_| PyModule::import(py, "pickle"))?;
             let zero_again = pickle.call_method1("loads", (PyBytes::new(py, &zero_bytes),))?;
             let mut acc: Bound<'_, PyAny> = zero_again;
             for bytes in result_bytes {
@@ -554,45 +726,70 @@ impl PyRdd {
     /// Remove duplicate elements.
     pub fn distinct(&self, py: Python) -> PyResult<PyRdd> {
         let mut seen = std::collections::HashSet::new();
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .filter(|e| {
                 let key = e.bind(py).repr().map(|r| r.to_string()).unwrap_or_default();
                 seen.insert(key)
             })
             .map(|e| e.clone_ref(py))
             .collect();
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Return elements in `self` that are not in `other`.
     pub fn subtract(&self, py: Python, other: &PyRdd) -> PyResult<PyRdd> {
-        let other_set: std::collections::HashSet<String> = other.elements.iter()
+        let other_set: std::collections::HashSet<String> = other
+            .elements
+            .iter()
             .map(|e| e.bind(py).repr().map(|r| r.to_string()).unwrap_or_default())
             .collect();
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .filter(|e| {
                 let key = e.bind(py).repr().map(|r| r.to_string()).unwrap_or_default();
                 !other_set.contains(&key)
             })
             .map(|e| e.clone_ref(py))
             .collect();
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Return elements present in both `self` and `other` (no duplicates).
     pub fn intersection(&self, py: Python, other: &PyRdd) -> PyResult<PyRdd> {
-        let other_set: std::collections::HashSet<String> = other.elements.iter()
+        let other_set: std::collections::HashSet<String> = other
+            .elements
+            .iter()
             .map(|e| e.bind(py).repr().map(|r| r.to_string()).unwrap_or_default())
             .collect();
         let mut seen = std::collections::HashSet::new();
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .filter(|e| {
                 let key = e.bind(py).repr().map(|r| r.to_string()).unwrap_or_default();
                 other_set.contains(&key) && seen.insert(key)
             })
             .map(|e| e.clone_ref(py))
             .collect();
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Apply `f` to each logical partition (Python list of elements), returning a flattened RDD.
@@ -609,12 +806,19 @@ impl PyRdd {
                 elements.push(val?.unbind());
             }
         }
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Extract the key from each `(key, value)` tuple.
     pub fn keys(&self, py: Python) -> PyResult<PyRdd> {
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .map(|item| {
                 let pair = item.bind(py).cast::<PyTuple>()?;
                 if pair.len() < 1 {
@@ -625,12 +829,19 @@ impl PyRdd {
                 Ok(pair.get_item(0)?.unbind())
             })
             .collect::<PyResult<Vec<_>>>()?;
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Extract the value from each `(key, value)` tuple.
     pub fn values(&self, py: Python) -> PyResult<PyRdd> {
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .map(|item| {
                 let pair = item.bind(py).cast::<PyTuple>()?;
                 if pair.len() < 2 {
@@ -641,18 +852,23 @@ impl PyRdd {
                 Ok(pair.get_item(1)?.unbind())
             })
             .collect::<PyResult<Vec<_>>>()?;
-        Ok(PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Return all values associated with `key` in a pair RDD.
     pub fn lookup(&self, py: Python, key: Py<PyAny>) -> PyResult<Py<PyAny>> {
-        let key_repr = key.bind(py).repr()?.to_string();
         let vals = PyList::empty(py);
         for item in &self.elements {
             let pair = item.bind(py).cast::<PyTuple>()?;
-            if pair.len() != 2 { continue; }
-            let k_repr = pair.get_item(0)?.repr()?.to_string();
-            if k_repr == key_repr {
+            if pair.len() != 2 {
+                continue;
+            }
+            if pair.get_item(0)?.eq(key.bind(py))? {
                 vals.append(pair.get_item(1)?)?;
             }
         }
@@ -679,18 +895,21 @@ impl PyRdd {
         Ok(())
     }
 
-    /// Count occurrences of each distinct element. Returns a Python dict.
+    /// Count occurrences of each distinct element. Returns a Python dict keyed by items.
     pub fn count_by_value(&self, py: Python) -> PyResult<Py<PyAny>> {
         let dict = pyo3::types::PyDict::new(py);
         for item in &self.elements {
-            let key = item.bind(py).repr()?.to_string();
-            let current: i64 = dict.get_item(&key)?.map(|v| v.extract::<i64>().unwrap_or(0)).unwrap_or(0);
-            dict.set_item(&key, current + 1)?;
+            let key = item.bind(py);
+            let current: i64 = dict
+                .get_item(key.clone())?
+                .map(|v| v.extract::<i64>().unwrap_or(0))
+                .unwrap_or(0);
+            dict.set_item(key, current + 1)?;
         }
         Ok(dict.into_any().unbind())
     }
 
-    /// Count elements per key in a pair RDD. Returns a Python dict.
+    /// Count elements per key in a pair RDD. Returns a Python dict keyed by key objects.
     pub fn count_by_key(&self, py: Python) -> PyResult<Py<PyAny>> {
         let dict = pyo3::types::PyDict::new(py);
         for item in &self.elements {
@@ -700,9 +919,12 @@ impl PyRdd {
                     "count_by_key requires elements to be non-empty tuples",
                 ));
             }
-            let key = pair.get_item(0)?.repr()?.to_string();
-            let current: i64 = dict.get_item(&key)?.map(|v| v.extract::<i64>().unwrap_or(0)).unwrap_or(0);
-            dict.set_item(&key, current + 1)?;
+            let key = pair.get_item(0)?;
+            let current: i64 = dict
+                .get_item(key.clone())?
+                .map(|v| v.extract::<i64>().unwrap_or(0))
+                .unwrap_or(0);
+            dict.set_item(key, current + 1)?;
         }
         Ok(dict.into_any().unbind())
     }
@@ -768,7 +990,9 @@ impl PyRdd {
 
     /// Return the top `n` elements (largest first). Optional `key` function.
     pub fn top(&self, py: Python, n: usize, key: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        let mut indexed: Vec<(Py<PyAny>, Py<PyAny>)> = self.elements.iter()
+        let mut indexed: Vec<(Py<PyAny>, Py<PyAny>)> = self
+            .elements
+            .iter()
             .map(|item| {
                 let k = match &key {
                     Some(f) => f.call1(py, (item.clone_ref(py),))?,
@@ -780,25 +1004,46 @@ impl PyRdd {
         // Sort descending by key
         let mut sort_error: Option<pyo3::PyErr> = None;
         indexed.sort_by(|(_, ka), (_, kb)| {
-            if sort_error.is_some() { return std::cmp::Ordering::Equal; }
+            if sort_error.is_some() {
+                return std::cmp::Ordering::Equal;
+            }
             match kb.bind(py).lt(ka.bind(py)) {
                 Ok(true) => std::cmp::Ordering::Less,
                 Ok(false) => match ka.bind(py).lt(kb.bind(py)) {
                     Ok(true) => std::cmp::Ordering::Greater,
                     Ok(false) => std::cmp::Ordering::Equal,
-                    Err(e) => { sort_error = Some(e); std::cmp::Ordering::Equal }
+                    Err(e) => {
+                        sort_error = Some(e);
+                        std::cmp::Ordering::Equal
+                    }
                 },
-                Err(e) => { sort_error = Some(e); std::cmp::Ordering::Equal }
+                Err(e) => {
+                    sort_error = Some(e);
+                    std::cmp::Ordering::Equal
+                }
             }
         });
-        if let Some(e) = sort_error { return Err(e); }
-        let result: Vec<_> = indexed.into_iter().take(n).map(|(item, _)| item.bind(py).clone()).collect();
+        if let Some(e) = sort_error {
+            return Err(e);
+        }
+        let result: Vec<_> = indexed
+            .into_iter()
+            .take(n)
+            .map(|(item, _)| item.bind(py).clone())
+            .collect();
         Ok(PyList::new(py, result)?.into_any().unbind())
     }
 
     /// Return the `n` smallest elements. Optional `key` function.
-    pub fn take_ordered(&self, py: Python, n: usize, key: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        let mut indexed: Vec<(Py<PyAny>, Py<PyAny>)> = self.elements.iter()
+    pub fn take_ordered(
+        &self,
+        py: Python,
+        n: usize,
+        key: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let mut indexed: Vec<(Py<PyAny>, Py<PyAny>)> = self
+            .elements
+            .iter()
             .map(|item| {
                 let k = match &key {
                     Some(f) => f.call1(py, (item.clone_ref(py),))?,
@@ -810,19 +1055,33 @@ impl PyRdd {
         // Sort ascending by key
         let mut sort_error: Option<pyo3::PyErr> = None;
         indexed.sort_by(|(_, ka), (_, kb)| {
-            if sort_error.is_some() { return std::cmp::Ordering::Equal; }
+            if sort_error.is_some() {
+                return std::cmp::Ordering::Equal;
+            }
             match ka.bind(py).lt(kb.bind(py)) {
                 Ok(true) => std::cmp::Ordering::Less,
                 Ok(false) => match kb.bind(py).lt(ka.bind(py)) {
                     Ok(true) => std::cmp::Ordering::Greater,
                     Ok(false) => std::cmp::Ordering::Equal,
-                    Err(e) => { sort_error = Some(e); std::cmp::Ordering::Equal }
+                    Err(e) => {
+                        sort_error = Some(e);
+                        std::cmp::Ordering::Equal
+                    }
                 },
-                Err(e) => { sort_error = Some(e); std::cmp::Ordering::Equal }
+                Err(e) => {
+                    sort_error = Some(e);
+                    std::cmp::Ordering::Equal
+                }
             }
         });
-        if let Some(e) = sort_error { return Err(e); }
-        let result: Vec<_> = indexed.into_iter().take(n).map(|(item, _)| item.bind(py).clone()).collect();
+        if let Some(e) = sort_error {
+            return Err(e);
+        }
+        let result: Vec<_> = indexed
+            .into_iter()
+            .take(n)
+            .map(|(item, _)| item.bind(py).clone())
+            .collect();
         Ok(PyList::new(py, result)?.into_any().unbind())
     }
 
@@ -874,6 +1133,13 @@ impl PyRdd {
 
     pub fn __len__(&self) -> usize {
         self.elements.len()
+    }
+
+    /// Iterate over elements: `for x in rdd`.
+    pub fn __iter__(&self, py: Python) -> PyResult<Py<PyAny>> {
+        let list = PyList::new(py, self.elements.iter().map(|e| e.bind(py).clone()))?;
+        let iter = PyIterator::from_object(list.as_any())?;
+        Ok(iter.into_any().unbind())
     }
 
     pub fn __repr__(&self) -> String {

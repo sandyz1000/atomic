@@ -57,8 +57,7 @@ where
     }
 
     // 3. Write each bucket as bincode bytes to SHUFFLE_CACHE.
-    let cache = atomic_data::env::SHUFFLE_CACHE
-        .get()
+    let cache = atomic_data::env::get_shuffle_cache()
         .ok_or_else(|| "shuffle_map_handler: SHUFFLE_CACHE not initialized".to_string())?;
 
     for (reduce_id, bucket) in buckets.into_iter().enumerate() {

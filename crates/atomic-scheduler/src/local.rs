@@ -410,11 +410,31 @@ impl NativeScheduler for LocalScheduler {
                 let stage = self
                     .new_stage(shuf.get_rdd_base(), Some(shuf.clone()))
                     .await?;
+                let shuffle_id = shuf.get_shuffle_id();
+                // If the distributed scheduler already completed this shuffle, mark the
+                // stage available so the local scheduler doesn't re-run it and overwrite
+                // the worker URIs in MapOutputTracker.
+                if self.mutators.is_shuffle_complete(shuffle_id) {
+                    let uris = self.mutators.get_shuffle_server_uris(shuffle_id);
+                    log::debug!(
+                        "shuffle #{} already complete from distributed run; \
+                         pre-populating stage #{} output_locs ({} partitions, {} uris)",
+                        shuffle_id, stage.id, stage.num_partitions, uris.len()
+                    );
+                    // Stage uses the placeholder RDD's partition count, which may be
+                    // smaller than the number of distributed map outputs (2 vs 1 for
+                    // staged pipelines). Only populate as many slots as the stage has.
+                    for (partition, uri) in uris.into_iter().enumerate().take(stage.num_partitions) {
+                        self.mutators.add_output_loc_to_stage(stage.id, partition, uri);
+                    }
+                }
+                // Re-fetch from stage_cache so output_locs mutations are reflected.
+                let updated = self.mutators.stage_cache.get(&stage.id).unwrap().clone();
                 self.mutators
                     .shuffle_to_map_stage
-                    .insert(shuf.get_shuffle_id(), stage.clone());
+                    .insert(shuffle_id, updated.clone());
                 log::debug!("finished inserting newly created shuffle stage");
-                Ok(stage)
+                Ok(updated)
             }
         }
     }

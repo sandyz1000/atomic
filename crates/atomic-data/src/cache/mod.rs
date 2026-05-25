@@ -4,10 +4,12 @@ pub mod tracker;
 pub use error::{CacheError, Result};
 
 use std::any::Any;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use dashmap::DashMap;
+use lru::LruCache;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // StorageLevel
@@ -33,48 +35,79 @@ pub enum StorageLevel {
 // PartitionStore — typed in-memory cache for CachedRdd
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A lock-free, type-erased store for cached RDD partitions.
+/// Default maximum number of partitions the global `PARTITION_CACHE` will hold
+/// before evicting least-recently-used entries.
+pub const DEFAULT_PARTITION_CACHE_CAP: usize = 1024;
+
+/// A type-erased, LRU-bounded store for cached RDD partitions.
 ///
 /// Keys are `(rdd_id, partition_index)`.  Values are `Arc<Vec<T>>` boxed as
 /// `dyn Any + Send + Sync` so that any `T: 'static + Send + Sync` can be
-/// stored without serialization.
+/// stored without serialization.  When `cap` is reached the LRU entry is
+/// evicted automatically.
 pub struct PartitionStore {
-    map: DashMap<(usize, usize), Box<dyn Any + Send + Sync>>,
+    map: Mutex<LruCache<(usize, usize), Box<dyn Any + Send + Sync>>>,
 }
 
 impl PartitionStore {
+    /// Create a store with the default LRU cap.
     pub fn new() -> Self {
+        Self::with_cap(DEFAULT_PARTITION_CACHE_CAP)
+    }
+
+    /// Create a store with a custom LRU cap.
+    pub fn with_cap(cap: usize) -> Self {
+        let cap = NonZeroUsize::new(cap).unwrap_or(NonZeroUsize::new(1).unwrap());
         PartitionStore {
-            map: DashMap::new(),
+            map: Mutex::new(LruCache::new(cap)),
         }
     }
 
-    /// Retrieve a cached partition, returning `None` on a miss or a type mismatch.
+    /// Retrieve a cached partition, returning `None` on a miss.
+    /// Logs a warning when the key exists but the stored type doesn't match `T`.
     pub fn get<T: Any + Send + Sync>(
         &self,
         rdd_id: usize,
         partition: usize,
     ) -> Option<Arc<Vec<T>>> {
-        self.map
-            .get(&(rdd_id, partition))
-            .and_then(|entry| entry.downcast_ref::<Arc<Vec<T>>>().cloned())
+        let mut map = self.map.lock().unwrap();
+        let entry = map.get(&(rdd_id, partition))?;
+        let result = entry.downcast_ref::<Arc<Vec<T>>>().cloned();
+        if result.is_none() {
+            log::warn!(
+                "PartitionStore type mismatch: rdd_id={} partition={} — \
+                 stored type does not match requested type, treating as cache miss",
+                rdd_id,
+                partition
+            );
+        }
+        result
     }
 
-    /// Insert a computed partition into the store.
+    /// Insert a computed partition, evicting the LRU entry if at capacity.
     pub fn put<T: Any + Send + Sync + 'static>(
         &self,
         rdd_id: usize,
         partition: usize,
         data: Arc<Vec<T>>,
     ) {
-        self.map.insert((rdd_id, partition), Box::new(data));
+        self.map
+            .lock()
+            .unwrap()
+            .put((rdd_id, partition), Box::new(data));
     }
 
     /// Remove all cached partitions for an RDD (unpersist).
     pub fn remove_rdd(&self, rdd_id: usize, num_partitions: usize) {
+        let mut map = self.map.lock().unwrap();
         for p in 0..num_partitions {
-            self.map.remove(&(rdd_id, p));
+            map.pop(&(rdd_id, p));
         }
+    }
+
+    /// Current number of cached partitions.
+    pub fn len(&self) -> usize {
+        self.map.lock().unwrap().len()
     }
 }
 
