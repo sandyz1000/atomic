@@ -143,6 +143,51 @@ impl PyContext {
         self.default_parallelism
     }
 
+    /// Broadcast a read-only value to all tasks.
+    ///
+    /// The value is serialized with cloudpickle (falling back to stdlib
+    /// `pickle`) on the driver and deserialized on demand when `value()` is
+    /// called on the `BroadcastVar`.
+    ///
+    /// # Example
+    /// ```python
+    /// bv = ctx.broadcast({"threshold": 10})
+    /// rdd.filter(lambda x: x > bv.value()["threshold"]).collect()
+    /// ```
+    pub fn broadcast(
+        &self,
+        py: Python<'_>,
+        value: PyObject,
+    ) -> PyResult<crate::shared::PyBroadcastVar> {
+        // Try cloudpickle first (supports lambdas); fall back to stdlib pickle.
+        let pickle = py
+            .import("cloudpickle")
+            .or_else(|_| py.import("pickle"))?;
+        let bytes: Vec<u8> = pickle.call_method1("dumps", (value,))?.extract()?;
+        Ok(crate::shared::PyBroadcastVar::new(bytes))
+    }
+
+    /// Create a mutable accumulator with an initial (zero) value.
+    ///
+    /// Supports `int`, `float`, `str`, `bool`, and `list` as the initial
+    /// value.  `add()` increments the accumulator; `reset()` restores the
+    /// initial value.
+    ///
+    /// # Example
+    /// ```python
+    /// acc = ctx.accumulator(0)
+    /// ctx.parallelize([1, 2, 3]).for_each(lambda x: acc.add(x))
+    /// assert acc.value() == 6
+    /// ```
+    pub fn accumulator(
+        &self,
+        py: Python<'_>,
+        zero: PyObject,
+    ) -> PyResult<crate::shared::PyAccumulator> {
+        let initial = crate::shared::pythonobj_to_json(py, &zero)?;
+        Ok(crate::shared::PyAccumulator::new(initial))
+    }
+
     /// Stop the context and release resources.
     ///
     /// In distributed mode, sends a graceful-shutdown signal to every worker.

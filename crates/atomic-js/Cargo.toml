@@ -13,8 +13,10 @@ napi = { version = "3.9.0", features = ["napi8", "serde-json"] }
 napi-derive = "3.5.6"
 atomic-data = { workspace = true, features = ["javascript"] }
 atomic-compute = { workspace = true }
+atomic-graph = { path = "../atomic-graph" }
 atomic-sql = { workspace = true }
 datafusion = "53"
+parking_lot = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 

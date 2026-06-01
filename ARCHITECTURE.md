@@ -285,17 +285,22 @@ action2: count()
 
 ---
 
-## What Atomic Does NOT Do (currently)
+## Known Gaps (as of v1.0)
 
-- **No LRU eviction.** `PartitionStore` is unbounded — long-running jobs risk OOM.
-- **No disk spill for shuffle.** `DashMapShuffleCache` is memory-only.
-- **No broadcast variables.** Each task payload carries its own copy of any driver-side constants.
-- **No accumulators.** No distributed counter/aggregator protocol.
-- **No adaptive query execution.** Partition count and parallelism are fixed at submission.
-- **No speculative execution.** Slow tasks are not re-run on a second worker.
-- **No object store connectors.** S3 / GCS / HDFS integration is not implemented.
-- **No auth/TLS.** Worker communication is plain TCP.
-- **No web dashboard.** Job/stage timing is in structured logs only.
-- **Streaming in local mode only.** No distributed receiver scheduling.
+All P0–P3 roadmap items are complete. The remaining known limitations are:
 
-See [ROADMAP.md](ROADMAP.md) for the prioritized plan to address these gaps.
+| Gap | Description |
+| --- | --- |
+| `MemoryAndDisk` lazy eviction | `persist_with_disk()` writes all partitions eagerly at persist time; true write-on-LRU-eviction requires an eviction hook in `PartitionStore` |
+| Shuffle HTTP TLS | Worker TCP task port is TLS-wrapped (`tls` feature); `ShuffleManager` HTTP server is still plain HTTP |
+| `ShuffleFetcher` transient retry | Network-level retry on temporary fetch failures not implemented — only stage-level retry on full map-stage failure |
+| Sort-based shuffle | Only hash partitioning; range-shuffle for globally sorted output not implemented |
+| Streaming distributed receivers | `ReceiverTracker` is a local stub; Kafka / Kinesis sources not implemented |
+| `atomic-nlq` physical wiring | `LlmFilterExec` / `LlmMapExec` / `EmbedExec` scaffolded; full DataFusion physical planner wiring in progress |
+| Python `text_file` S3 | Python binding reads local files only (`std::fs`); `s3://` requires the Rust driver |
+| Python/JS streaming `start()` background thread | `start()` spawns a Rust background thread using `Python::attach` for the GIL; `JsStreamingContext::start()` is a no-op stub (JS is single-threaded NAPI) — use `run_one_batch()` in tests |
+| Pregel custom vertex programs | Python/JS expose only the 6 built-in graph algorithms; the generic `pregel::run` with custom vertex/message functions is Rust-only |
+| Accumulator custom merge functions | `Accumulator` supports int/float add, list append, string concat; user-defined merge closures are deferred to Phase 5 |
+| No web dashboard | Job/stage timing is in structured logs + Prometheus metrics only |
+
+See [ROADMAP.md](ROADMAP.md) for the full history of completed and planned items.

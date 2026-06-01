@@ -181,15 +181,16 @@ Metrics are served at `http://driver:9090/metrics`. Scrape with Prometheus and v
 ## 8. Graceful shutdown
 
 ```python
-# From the driver script
+# From the Python driver script
 ctx.stop()
 ```
 
 This sends a graceful-shutdown signal to every registered worker and clears the driver's shuffle infrastructure. Workers finish their current task before exiting.
 
-To cancel a specific running job:
+In Rust, per-job cancellation is also available via the `Context` API:
 
-```python
-job_id = 42  # obtained from job submission
-ctx.cancel_job(job_id)
+```rust
+// Rust only — not available in Python or TypeScript bindings
+let job_id = ctx.submit_job(...)?;
+ctx.cancel_job(job_id)?;
 ```

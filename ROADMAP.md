@@ -26,7 +26,7 @@ Outstanding gaps are documented in the "Known Remaining Gaps" section below.
 | Observability | ✅ Prometheus `/metrics` endpoint (`Config::metrics_port`) |
 | Security | ✅ Mutual TLS via `rustls` (`tls` feature); plain TCP fallback when unconfigured |
 | Distribution | ✅ `atomic-cli` cross-compile + SSH/SFTP ship; dynamic worker heartbeat + registration |
-| Language bindings | ✅ `atomic-py` (PyO3), `atomic-js` (NAPI); full RDD API in both |
+| Language bindings | ✅ `atomic-py` + `atomic-js`: RDD, SQL, Graph, Streaming, Broadcast, Accumulator |
 | Object store | ✅ S3 via `aws-sdk-s3` (`s3` feature); `text_file("s3://…")`, `save_as_text_file` |
 | Shared variables | ✅ Broadcast variables, accumulators |
 | CI / Release | ✅ GitHub Actions: local tests, distributed tests, lint, PyPI wheels, npm bindings |
@@ -305,7 +305,13 @@ These are within-scope items where the implementation is partial or has a known 
 | `ShuffleFetcher` transient retry | Network-level retry on temporary fetch failures not implemented (only stage-level retry on full failure) |
 | Sort-based shuffle | Only hash partitioning; range-shuffle for globally sorted output not implemented |
 | Streaming distributed receivers | `ReceiverTracker` is a local stub; Kafka / Kinesis sources not implemented |
-| `task_fn!` in production | The intelligent `task_fn!` op_id scheme (`module::task_fn::Action<T>::hash`) is stable but `task_fn!` closures are best-effort for distributed use; `#[task(name = "…")]` is recommended for long-lived production tasks |
+| Python/JS `StreamingContext::start()` threading | Python uses `Python::attach` for GIL in background thread; JS `start()` is a no-op stub — background batch loop for JS deferred to Phase 5 |
+| Python/JS accumulator custom merge | `Accumulator` supports int/float add, list append, string concat; user-defined merge closures deferred to Phase 5 |
+| Python/JS Pregel custom programs | Only the 6 built-in graph algorithms are exposed; generic `pregel::run` with custom vertex programs is Rust-only |
+| Python `text_file` S3 | Python binding reads local files only; S3 support for Python/JS deferred to Phase 5 |
+| Python/JS streaming windowing | Windowed DStream operations (sliding/tumbling windows) deferred to Phase 5 |
+| Python/JS streaming checkpoint | Streaming checkpoint/restore deferred to Phase 5 |
+| `task_fn!` in production | The intelligent `task_fn!` op_id scheme is stable but `task_fn!` closures are best-effort for distributed use; `#[task(name = "…")]` is recommended for long-lived production tasks |
 | `atomic-nlq` physical wiring | `LlmFilterExec` / `LlmMapExec` / `EmbedExec` scaffolded; full DataFusion physical planner wiring in progress |
 | `/register` HTTP endpoint | `dynamically_add_worker()` is callable in-process; a full `POST /register` HTTP route on the driver has not been added yet |
 | Distributed CI test isolation | Distributed tests run sequentially via `Mutex` and bind fixed ports — flaky if ports are already in use in CI |

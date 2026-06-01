@@ -61,4 +61,7 @@ if (!tryLoad(localPath) && !tryLoad(releasePath) && !tryLoad(debugPath)) {
 module.exports = {
   Context: nativeBinding.JsContext,
   RDD: nativeBinding.JsRdd,
+  BroadcastVar: nativeBinding.BroadcastVar,
+  Accumulator: nativeBinding.Accumulator,
+  Graph: nativeBinding.JsGraph,
 };

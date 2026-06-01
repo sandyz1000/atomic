@@ -1127,6 +1127,297 @@ impl PyRdd {
         Ok(result)
     }
 
+    /// Inner join two pair RDDs on their keys.
+    ///
+    /// Both RDDs must contain `(key, value)` 2-tuples.
+    /// Emits `(key, (left_val, right_val))` for every matching key pair.
+    #[pyo3(signature = (other))]
+    pub fn join(&self, py: Python, other: &PyRdd) -> PyResult<PyRdd> {
+        // Collect (key, val) pairs from both sides
+        let mut left_pairs: Vec<(Py<PyAny>, Py<PyAny>)> = Vec::new();
+        for item in &self.elements {
+            let pair = item.bind(py).cast::<PyTuple>()?;
+            if pair.len() != 2 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "join requires elements to be 2-tuples",
+                ));
+            }
+            left_pairs.push((pair.get_item(0)?.unbind(), pair.get_item(1)?.unbind()));
+        }
+        let mut right_pairs: Vec<(Py<PyAny>, Py<PyAny>)> = Vec::new();
+        for item in &other.elements {
+            let pair = item.bind(py).cast::<PyTuple>()?;
+            if pair.len() != 2 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "join requires elements to be 2-tuples",
+                ));
+            }
+            right_pairs.push((pair.get_item(0)?.unbind(), pair.get_item(1)?.unbind()));
+        }
+
+        let mut elements: Vec<Py<PyAny>> = Vec::new();
+        for (lk, lv) in &left_pairs {
+            for (rk, rv) in &right_pairs {
+                if lk.bind(py).eq(rk.bind(py))? {
+                    let inner = PyTuple::new(py, [lv.bind(py).clone(), rv.bind(py).clone()])?
+                        .unbind()
+                        .into_any();
+                    let outer = PyTuple::new(py, [lk.bind(py).clone(), inner.bind(py).clone()])?
+                        .unbind()
+                        .into_any();
+                    elements.push(outer);
+                }
+            }
+        }
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Left outer join two pair RDDs on their keys.
+    ///
+    /// Unmatched left keys emit `(key, (left_val, None))`.
+    #[pyo3(signature = (other))]
+    pub fn left_outer_join(&self, py: Python, other: &PyRdd) -> PyResult<PyRdd> {
+        let mut left_pairs: Vec<(Py<PyAny>, Py<PyAny>)> = Vec::new();
+        for item in &self.elements {
+            let pair = item.bind(py).cast::<PyTuple>()?;
+            if pair.len() != 2 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "left_outer_join requires elements to be 2-tuples",
+                ));
+            }
+            left_pairs.push((pair.get_item(0)?.unbind(), pair.get_item(1)?.unbind()));
+        }
+        let mut right_pairs: Vec<(Py<PyAny>, Py<PyAny>)> = Vec::new();
+        for item in &other.elements {
+            let pair = item.bind(py).cast::<PyTuple>()?;
+            if pair.len() != 2 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "left_outer_join requires elements to be 2-tuples",
+                ));
+            }
+            right_pairs.push((pair.get_item(0)?.unbind(), pair.get_item(1)?.unbind()));
+        }
+
+        let mut elements: Vec<Py<PyAny>> = Vec::new();
+        for (lk, lv) in &left_pairs {
+            let mut matched = false;
+            for (rk, rv) in &right_pairs {
+                if lk.bind(py).eq(rk.bind(py))? {
+                    let inner = PyTuple::new(py, [lv.bind(py).clone(), rv.bind(py).clone()])?
+                        .unbind()
+                        .into_any();
+                    let outer = PyTuple::new(py, [lk.bind(py).clone(), inner.bind(py).clone()])?
+                        .unbind()
+                        .into_any();
+                    elements.push(outer);
+                    matched = true;
+                }
+            }
+            if !matched {
+                let none_val: Py<PyAny> = py.None();
+                let inner = PyTuple::new(py, [lv.bind(py).clone(), none_val.bind(py).clone()])?
+                    .unbind()
+                    .into_any();
+                let outer = PyTuple::new(py, [lk.bind(py).clone(), inner.bind(py).clone()])?
+                    .unbind()
+                    .into_any();
+                elements.push(outer);
+            }
+        }
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Sort elements. Optional `key_fn` extracts a comparison key; `ascending` defaults to `true`.
+    #[pyo3(signature = (key_fn=None, ascending=None))]
+    pub fn sort_by(
+        &self,
+        py: Python,
+        key_fn: Option<Py<PyAny>>,
+        ascending: Option<bool>,
+    ) -> PyResult<PyRdd> {
+        let asc = ascending.unwrap_or(true);
+
+        // Build (element, key) pairs
+        let mut indexed: Vec<(Py<PyAny>, Py<PyAny>)> = self
+            .elements
+            .iter()
+            .map(|item| {
+                let k = match &key_fn {
+                    Some(f) => f.call1(py, (item.clone_ref(py),))?,
+                    None => item.clone_ref(py),
+                };
+                Ok((item.clone_ref(py), k))
+            })
+            .collect::<PyResult<_>>()?;
+
+        let mut sort_error: Option<pyo3::PyErr> = None;
+        indexed.sort_by(|(_, ka), (_, kb)| {
+            if sort_error.is_some() {
+                return std::cmp::Ordering::Equal;
+            }
+            // For ascending: ka < kb  ⟹  Less
+            // For descending: kb < ka ⟹  Less
+            let (a, b) = if asc {
+                (ka.bind(py), kb.bind(py))
+            } else {
+                (kb.bind(py), ka.bind(py))
+            };
+            match a.lt(b.clone()) {
+                Ok(true) => std::cmp::Ordering::Less,
+                Ok(false) => match b.lt(a) {
+                    Ok(true) => std::cmp::Ordering::Greater,
+                    Ok(false) => std::cmp::Ordering::Equal,
+                    Err(e) => {
+                        sort_error = Some(e);
+                        std::cmp::Ordering::Equal
+                    }
+                },
+                Err(e) => {
+                    sort_error = Some(e);
+                    std::cmp::Ordering::Equal
+                }
+            }
+        });
+        if let Some(e) = sort_error {
+            return Err(e);
+        }
+
+        let elements = indexed
+            .into_iter()
+            .map(|(item, _)| item)
+            .collect::<Vec<_>>();
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Sort a pair RDD by key. `ascending` defaults to `true`.
+    ///
+    /// Each element must be a `(key, value)` 2-tuple; sorting is performed on the key.
+    #[pyo3(signature = (ascending=None))]
+    pub fn sort_by_key(&self, py: Python, ascending: Option<bool>) -> PyResult<PyRdd> {
+        // Validate all elements are 2-tuples first
+        for item in &self.elements {
+            let pair = item.bind(py).cast::<PyTuple>()?;
+            if pair.len() != 2 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "sort_by_key requires elements to be 2-tuples",
+                ));
+            }
+        }
+        // Build a Python lambda `lambda p: p[0]` as the key extractor
+        let builtins = PyModule::import(py, "builtins")?;
+        let key_fn = builtins
+            .getattr("eval")?
+            .call1(("lambda p: p[0]",))?
+            .unbind();
+        self.sort_by(py, Some(key_fn), ascending)
+    }
+
+    /// Return a Python list of sublists — one sublist per logical partition.
+    ///
+    /// `[[partition_0_elements], [partition_1_elements], ...]`
+    pub fn glom(&self, py: Python) -> PyResult<Py<PyAny>> {
+        let np = self.num_partitions.max(1);
+        let total = self.elements.len();
+
+        let outer = PyList::empty(py);
+
+        if total == 0 {
+            // All partitions are empty
+            for _ in 0..np {
+                outer.append(PyList::empty(py))?;
+            }
+            return Ok(outer.into_any().unbind());
+        }
+
+        let chunk_size = (total + np - 1) / np; // ceiling division
+        let mut emitted = 0usize;
+        for chunk in self.elements.chunks(chunk_size.max(1)) {
+            let inner = PyList::new(py, chunk.iter().map(|e| e.bind(py).clone()))?;
+            outer.append(inner)?;
+            emitted += 1;
+        }
+        // Pad with empty sublists for any remaining logical partitions
+        while emitted < np {
+            outer.append(PyList::empty(py))?;
+            emitted += 1;
+        }
+        Ok(outer.into_any().unbind())
+    }
+
+    /// No-op in local mode: return a clone of this RDD (same elements, same partitions).
+    pub fn cache(&self, py: Python) -> PyRdd {
+        PyRdd {
+            elements: self.elements.iter().map(|e| e.clone_ref(py)).collect(),
+            num_partitions: self.num_partitions,
+            context: Arc::clone(&self.context),
+            staged: None,
+        }
+    }
+
+    /// No-op in local mode: return a clone of this RDD (same elements, same partitions).
+    pub fn persist(&self, py: Python) -> PyRdd {
+        self.cache(py)
+    }
+
+    /// No-op in local mode: return a clone of this RDD (same elements, same partitions).
+    pub fn unpersist(&self, py: Python) -> PyRdd {
+        self.cache(py)
+    }
+
+    /// Materialize elements to `{path}/checkpoint.pkl` using Python pickle, then return
+    /// a new RDD with the same elements (lineage is conceptually truncated).
+    ///
+    /// Write is atomic: data goes to `{path}/checkpoint.pkl.tmp` first, then renamed.
+    #[pyo3(signature = (path))]
+    pub fn checkpoint(&self, py: Python, path: &str) -> PyResult<PyRdd> {
+        use std::io::Write;
+
+        // Create directory
+        std::fs::create_dir_all(path)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+
+        // Serialize elements list with pickle
+        let pickle =
+            PyModule::import(py, "cloudpickle").or_else(|_| PyModule::import(py, "pickle"))?;
+        let py_list = PyList::new(py, self.elements.iter().map(|e| e.bind(py).clone()))?;
+        let bytes_obj = pickle.call_method1("dumps", (py_list,))?;
+        let bytes: Vec<u8> = bytes_obj.extract()?;
+
+        // Atomic write: tmp → rename
+        let tmp_path = format!("{}/checkpoint.pkl.tmp", path);
+        let final_path = format!("{}/checkpoint.pkl", path);
+        let mut f = std::fs::File::create(&tmp_path)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        f.write_all(&bytes)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        drop(f);
+        std::fs::rename(&tmp_path, &final_path)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+
+        // Return new RDD with same elements (lineage truncated conceptually)
+        Ok(PyRdd {
+            elements: self.elements.iter().map(|e| e.clone_ref(py)).collect(),
+            num_partitions: self.num_partitions,
+            context: Arc::clone(&self.context),
+            staged: None,
+        })
+    }
+
     pub fn num_partitions(&self) -> usize {
         self.num_partitions
     }

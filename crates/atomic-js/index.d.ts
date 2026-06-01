@@ -414,5 +414,128 @@ declare namespace AtomicJs {
      * Return the default number of partitions (CPU count or constructor value).
      */
     defaultParallelism(): number;
+
+    /**
+     * Broadcast a JSON-serializable value to all tasks.
+     *
+     * The returned `BroadcastVar` can be passed into `map`, `forEach`, etc.
+     * and its `.value()` method returns the deserialized copy.
+     *
+     * @param value - Any JSON-serializable value.
+     */
+    broadcast(value: unknown): BroadcastVar;
+
+    /**
+     * Create an accumulator initialized to `zero`.
+     *
+     * The accumulator supports numeric addition (`number`), array append (`array`),
+     * and string concatenation (`string`) via `.add(delta)`.
+     *
+     * @param zero - Initial value (number, array, or string).
+     */
+    accumulator(zero: unknown): Accumulator;
+  }
+
+  /**
+   * A value broadcast to all tasks.  Read the value via `.value()`.
+   */
+  class BroadcastVar {
+    /**
+     * Deserialize and return the broadcast value.
+     */
+    value(): unknown;
+  }
+
+  /**
+   * A mutable accumulator that can be updated from within RDD operations.
+   *
+   * Supports numeric addition, array append, and string concatenation.
+   */
+  class Accumulator {
+    /**
+     * Add `delta` to the accumulator.
+     *
+     * - `number + number` → numeric addition.
+     * - `array + array` → concatenation.
+     * - `array + single` → append.
+     * - `string + string` → concatenation.
+     */
+    add(delta: unknown): void;
+
+    /** Return the current accumulated value. */
+    value(): unknown;
+
+    /** Reset the accumulator to its initial value. */
+    reset(): void;
+  }
+
+  /**
+   * A directed graph with `f64` vertex and edge attributes.
+   *
+   * Vertex IDs are integers; returned record keys are their string representations.
+   */
+  class Graph {
+    /**
+     * Create a graph from vertex and edge lists.
+     *
+     * @param vertices - Array of `[vertexId, weight]` pairs.
+     * @param edges    - Array of `[srcId, dstId, weight]` triples.
+     */
+    constructor(
+      vertices: [number, number][],
+      edges: [number, number, number][]
+    );
+
+    /** Number of vertices. */
+    numVertices(): number;
+
+    /** Number of edges. */
+    numEdges(): number;
+
+    /**
+     * Run fixed-iteration PageRank.
+     *
+     * @param numIter   - Number of iterations.
+     * @param resetProb - Teleportation probability (typically 0.15).
+     * @returns Map from vertex ID (as string) to PageRank score.
+     */
+    pageRank(numIter: number, resetProb: number): Record<string, number>;
+
+    /**
+     * Compute weakly connected components.
+     *
+     * @returns Map from vertex ID (as string) to component representative ID.
+     */
+    connectedComponents(): Record<string, number>;
+
+    /**
+     * Compute strongly connected components (Tarjan's algorithm).
+     *
+     * @returns Map from vertex ID (as string) to SCC representative ID.
+     */
+    stronglyConnectedComponents(): Record<string, number>;
+
+    /**
+     * Label propagation community detection.
+     *
+     * @param maxIter - Maximum number of supersteps.
+     * @returns Map from vertex ID (as string) to community label.
+     */
+    labelPropagation(maxIter: number): Record<string, number>;
+
+    /**
+     * Count triangles per vertex.
+     *
+     * @returns Map from vertex ID (as string) to triangle count.
+     */
+    triangleCount(): Record<string, number>;
+
+    /**
+     * Compute shortest-path distances from landmark vertices.
+     *
+     * @param landmarks - Array of source vertex IDs.
+     * @returns Map from vertex ID (as string) to map of landmark ID → distance.
+     */
+    shortestPath(landmarks: number[]): Record<string, Record<string, number>>;
   }
 }

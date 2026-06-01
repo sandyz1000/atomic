@@ -163,8 +163,85 @@ let ctx = Context::new_with_config(config)?;
 
 ---
 
-## 7. Next steps
+---
+
+## 7. Graph analytics (Python + JavaScript)
+
+```python
+import atomic_compute
+
+# vertices: [(id, weight)], edges: [(src, dst, weight)]
+g = atomic_compute.Graph(
+    vertices=[(1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0)],
+    edges=[(1, 2, 1.0), (2, 3, 1.0), (3, 4, 1.0), (4, 1, 1.0)],
+)
+
+print(g.page_rank())              # {1: 0.25, 2: 0.25, 3: 0.25, 4: 0.25}
+print(g.connected_components())   # {1: 1, 2: 1, 3: 1, 4: 1}
+print(g.shortest_path([1]))       # {1: {1: 0, 2: 1.0, 3: 2.0, 4: 3.0}}
+```
+
+The same API is available in TypeScript as `new Graph(vertices, edges)` with camelCase methods (`pageRank`, `connectedComponents`, `shortestPath`).
+
+---
+
+## 8. Micro-batch streaming (Python + JavaScript)
+
+```python
+import atomic_compute
+
+ssc = atomic_compute.StreamingContext(batch_secs=1.0)
+
+# For tests, use a queue-backed stream
+stream, queue = ssc.test_pair_queue_stream()
+
+word_counts = {}
+def update_counts(new_vals, old_state):
+    return (old_state or 0) + sum(new_vals)
+
+stateful = stream.update_state_by_key(update_counts)
+ssc.foreach_rdd(stateful, lambda batch: word_counts.update(dict(batch)))
+
+# Push a batch and process it
+queue.push([("hello", 1), ("world", 1), ("hello", 1)])
+ssc.run_one_batch()
+print(word_counts)  # {'hello': 2, 'world': 1}
+
+# For real-time use, start the background loop instead:
+# ssc.start()
+# ssc.await_termination_or_timeout(60.0)
+```
+
+---
+
+## 9. Broadcast variables and accumulators (Python + JavaScript)
+
+```python
+import atomic_compute
+
+ctx = atomic_compute.Context()
+
+# Broadcast: share a large read-only value with all tasks
+threshold = ctx.broadcast({"min": 3, "max": 10})
+result = (
+    ctx.parallelize([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    .filter(lambda x, _t=threshold: _t.value()["min"] <= x <= _t.value()["max"])
+    .collect()
+)
+print(result)  # [3, 4, 5, 6, 7, 8, 9, 10]
+
+# Accumulator: distributed counter
+acc = ctx.accumulator(0)
+ctx.parallelize([1, 2, 3, 4, 5]).for_each(lambda x: acc.add(x))
+print(acc.value())  # 15
+```
+
+---
+
+## 10. Next steps
 
 - [Configuration Reference](configuration.md) — all `ATOMIC_*` env vars and `Config` fields
 - [Deployment Guide](deployment.md) — building, shipping binaries, mTLS, S3
+- [atomic-py README](../crates/atomic-py/README.md) — full Python API reference
+- [atomic-js README](../crates/atomic-js/README.md) — full TypeScript/JS API reference
 - [API Reference](https://docs.rs/atomic-compute) — full Rust API docs

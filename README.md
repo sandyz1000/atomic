@@ -96,7 +96,7 @@ console.log(result);  // [1, 9, 25]
 
 ## The PoC → Production Workflow
 
-Atomic is designed around a progressive adoption model. Start with Python or TypeScript to get the job right, then rewrite hot partitions in Rust for production throughput — without changing the driver script.
+Atomic is designed around a progressive adoption model. Start with Python or TypeScript to prove correctness quickly, then rewrite the job in Rust for production throughput.
 
 ### Step 1 — Prototype in Python
 
@@ -105,7 +105,7 @@ import atomic_compute
 
 ctx = atomic_compute.Context()
 result = (
-    ctx.text_file("s3://my-bucket/events/")
+    ctx.text_file("data/events.txt")       # Python reads local or remote paths
        .flat_map(lambda line: line.split())
        .map(lambda w: (w.lower(), 1))
        .reduce_by_key(lambda a, b: a + b)
@@ -113,30 +113,52 @@ result = (
 )
 ```
 
-### Step 2 — Promote the hot path to Rust
+Python lambdas are pickled with `cloudpickle` and executed by the embedded PyO3 runtime on workers. This works immediately — no compilation step.
+
+### Step 2 — Rewrite in Rust when correctness is confirmed
+
+Once the Python job produces correct results, rewrite it in Rust using the `#[task]` API. This is a new program, not a patch to the Python driver:
 
 ```rust
+use atomic_compute::{context::Context, env::Config, task};
+
 #[task]
 fn tokenize(line: String) -> Vec<(String, u64)> {
     line.split_whitespace()
         .map(|w| (w.to_lowercase(), 1u64))
         .collect()
 }
-```
 
-### Step 3 — Driver script does not change
-
-```python
-# Same Python driver — workers now execute the compiled Rust #[task]
-result = (
-    ctx.text_file("s3://my-bucket/events/")
-       .flat_map_task("tokenize")
-       .reduce_by_key(lambda a, b: a + b)
+fn main() -> anyhow::Result<()> {
+    let ctx = Context::new_with_config(Config::distributed(workers)?)?;
+    ctx.text_file("s3://my-bucket/events/")?
+       .flat_map_task(Tokenize)
+       .reduce_by_key(Add)
        .collect()
-)
+}
 ```
 
-Python UDFs (`lambda`) are pickled and sent in the task envelope. Rust `#[task]` functions are dispatched by ID against the compiled worker binary. Both use the same wire protocol. Switching is a one-line change per transform.
+### Step 3 — Redeploy the same binary
+
+```bash
+atomic build && atomic ship --workers user@host1,user@host2
+```
+
+Workers now execute the compiled Rust `#[task]` function instead of deserializing a Python lambda. The Python prototype still runs unchanged — it uses the PyO3 runtime path and produces the same results. Both versions are independently deployable from the same cluster.
+
+**Language capability summary:**
+
+| Feature | Rust | Python | TypeScript |
+| --- | --- | --- | --- |
+| `#[task]` compile-time dispatch | ✅ | ❌ | ❌ |
+| Closure / lambda UDFs | ✅ (local) | ✅ (pickled) | ✅ (V8 source string) |
+| SQL (`SqlContext`) | ✅ | ✅ | ✅ |
+| Streaming (`StreamingContext`) | ✅ | ✅ | ✅ |
+| Graph (`Graph`, 6 algorithms) | ✅ | ✅ | ✅ |
+| Broadcast variables / accumulators | ✅ | ✅ | ✅ |
+| `join`, `sort_by`, `glom`, `cache`, `checkpoint` on RDD | ✅ | ✅ | ✅ |
+| S3 `text_file` / `save_as_text_file` | ✅ | ❌ (local only) | ❌ (local only) |
+| Pregel custom vertex programs | ✅ | ❌ | ❌ |
 
 ---
 
@@ -144,11 +166,13 @@ Python UDFs (`lambda`) are pickled and sent in the task envelope. Rust `#[task]`
 
 `atomic-sql` wraps [Apache DataFusion](https://github.com/apache/datafusion) — a full query optimizer with 30+ rewrite rules, Arrow columnar execution, and Parquet/CSV/JSON readers.
 
+**Python:**
+
 ```python
 from atomic_compute import SqlContext
 
 ctx = SqlContext()
-ctx.register_parquet("orders", "s3://my-bucket/orders/")
+ctx.register_parquet("orders", "data/orders.parquet")   # local path
 
 df = ctx.sql("""
     SELECT customer_id,
@@ -164,17 +188,39 @@ df = ctx.sql("""
 df.show()
 df.write_parquet("/tmp/top_customers/")
 
-# Export to pandas
+# Python-only: export to PyArrow Table → Pandas
 table = df.to_arrow()
 pandas_df = table.to_pandas()
 ```
 
-Register an RDD directly as a SQL table:
+**Python — register an RDD as a SQL table** (Python only; schema required):
 
 ```python
-rdd = ctx.parallelize([{"id": 1, "val": 2.5}, {"id": 2, "val": 3.0}], 4)
+from atomic_compute import Context, SqlContext
+
+rdd_ctx = Context()
+sql_ctx = SqlContext()
+
+rdd = rdd_ctx.parallelize([{"id": 1, "val": 2.5}, {"id": 2, "val": 3.0}])
 sql_ctx.register_rdd("data", rdd, {"id": "int64", "val": "float64"})
 df = sql_ctx.sql("SELECT * FROM data WHERE val > 2.0")
+```
+
+**TypeScript:**
+
+```typescript
+import { SqlContext } from "@atomic-compute/js";
+
+const ctx = new SqlContext();
+ctx.registerParquet("orders", "data/orders.parquet");
+
+const df = ctx.sql(`
+    SELECT customer_id, COUNT(*) AS order_count
+    FROM orders
+    GROUP BY customer_id
+`);
+df.show();
+df.writeParquet("/tmp/output/");
 ```
 
 ---
@@ -255,22 +301,24 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 | | RDD-backed table provider | ✅ |
 | | DataFrame write (Parquet, CSV) | ✅ |
 | | SQL UDF registration (Python callable) | ✅ |
-| **Streaming** | Micro-batch DStream (`StreamingContext`) | ✅ |
-| | `reduce_by_key`, `join`, `updateStateByKey` | ✅ |
+| **Streaming** | Micro-batch DStream (`StreamingContext`) — Rust + Python + JS | ✅ |
+| | `map`, `filter`, `flat_map`, `reduce_by_key`, `join`, `update_state_by_key` | ✅ |
 | | Checkpoint (bincode, atomic write) | ✅ |
 | | Kafka source | ❌ planned |
 | | Event-time watermarking | ❌ planned |
-| **Graph** | Pregel engine | ✅ |
+| **Graph** | `Graph<VD,ED>` + Pregel engine — Rust | ✅ |
+| | `Graph(vertices, edges)` + 6 algorithms — Python + JS | ✅ |
 | | PageRank, SSSP, SCC, LabelPropagation, TriangleCount, CC | ✅ |
-| **Language Bindings** | Python (`atomic-compute` on PyPI) | ✅ |
-| | TypeScript/JavaScript (`@atomic-compute/js` on npm) | ✅ |
+| **Language Bindings** | Python (`atomic-compute` on PyPI) — RDD + SQL + Graph + Streaming | ✅ |
+| | TypeScript/JavaScript (`@atomic-compute/js` on npm) — RDD + SQL + Graph + Streaming | ✅ |
+| | `BroadcastVar`, `Accumulator` — Python + JS | ✅ |
+| | `join`, `sort_by`, `glom`, `cache`, `checkpoint` on RDD — Python + JS | ✅ |
 | | Python → Arrow (`df.to_arrow()`) | ✅ |
-| | Python RDD → SQL bridge | ✅ |
-| **Infrastructure** | S3 object store (`s3` feature) | ✅ |
+| | Python RDD → SQL bridge (`register_rdd`) | ✅ |
+| **Infrastructure** | S3 object store — Rust only (`s3` feature) | ✅ |
 | | Mutual TLS (`tls` feature, rustls) | ✅ |
 | | Prometheus `/metrics` endpoint | ✅ |
 | | Dynamic worker heartbeat + removal | ✅ |
-| | Broadcast variables, accumulators | ✅ |
 | | `atomic build` (musl static binary) | ✅ |
 | | `atomic ship` (SSH/SFTP, host-key verified) | ✅ |
 | **NLQ** | LLM-native DataFusion plan nodes | 🔬 scaffolded |

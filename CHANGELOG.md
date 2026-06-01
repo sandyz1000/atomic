@@ -64,9 +64,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pregel bulk-synchronous message-passing engine
 - Built-in algorithms: PageRank, ShortestPath (Dijkstra), SCC (Kosaraju), LabelPropagation, TriangleCount, ConnectedComponents
 
-#### Language Bindings
+#### Language Bindings (v1.0)
+
 - `atomic-py` (PyPI: `atomic-compute`): full RDD and SQL API via PyO3/maturin; Python `.pyi` type stubs
 - `atomic-js` (npm: `@atomic-compute/js`): full RDD and SQL API via napi-rs
+
+#### Language Bindings — Phase 4 additions
+
+**`atomic-py` and `atomic-js` now expose:**
+
+- **RDD API gaps**: `join`, `left_outer_join`, `sort_by`, `sort_by_key`, `glom`, `cache`, `persist`, `unpersist`, `checkpoint`
+- **Broadcast variables**: `ctx.broadcast(value)` → `BroadcastVar` — pickled/JSON-serialized, `.value()` for read-back
+- **Accumulators**: `ctx.accumulator(zero)` → `Accumulator` — supports int/float add, list append, string concat; `.add(delta)`, `.value()`, `.reset()`
+- **Graph bindings** (`Graph` class): construct from vertex/edge lists; `pageRank`, `connectedComponents`, `stronglyConnectedComponents`, `labelPropagation`, `triangleCount`, `shortestPath`
+- **Streaming bindings** (`StreamingContext`, `DStream`): full pair-stream API — `map`, `filter`, `flatMap`, `reduceByKey`, `groupByKey`, `join`, `leftOuterJoin`, `updateStateByKey`, `mapValues`; deterministic `runOneBatch()` for tests
 
 #### Infrastructure
 - `atomic-cli`: cross-compilation via `cargo-zigbuild`; SSH/SFTP binary distribution; host-key verification; SHA-256 integrity check

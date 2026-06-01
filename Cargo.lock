@@ -661,11 +661,13 @@ version = "0.1.0"
 dependencies = [
  "atomic-compute",
  "atomic-data",
+ "atomic-graph",
  "atomic-sql",
  "datafusion",
  "napi",
  "napi-build",
  "napi-derive",
+ "parking_lot",
  "serde_json",
  "tokio",
 ]
@@ -697,8 +699,10 @@ version = "0.1.0"
 dependencies = [
  "atomic-compute",
  "atomic-data",
+ "atomic-graph",
  "atomic-sql",
  "datafusion",
+ "parking_lot",
  "pyo3",
  "pyo3-arrow",
  "rayon",

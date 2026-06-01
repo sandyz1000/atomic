@@ -26,8 +26,11 @@ cargo build --release
 # Unit and integration tests (excludes atomic-py and atomic-worker)
 cargo test --workspace --exclude atomic-py --exclude atomic-worker -- --test-threads=4
 
-# Run a single test by name
-cargo test -p atomic-compute -- test_reduce_by_key_basic
+# Run a single test by name (most tests live in the root atomic-engine package)
+cargo test -p atomic-engine -- test_reduce_by_key_sum
+
+# Run a crate-specific test
+cargo test -p atomic-sql -- test_joins
 
 # Distributed integration tests (spawns a real worker process — Linux/macOS only)
 cargo build --release -p atomic-engine

@@ -1,12 +1,18 @@
 mod context;
+mod graph;
 mod rdd;
+mod shared;
 mod sql;
+mod streaming;
 
 use pyo3::prelude::*;
 
 use context::PyContext;
+use graph::PyGraph;
 use rdd::PyRdd;
+use shared::{PyAccumulator, PyBroadcastVar};
 use sql::{PyDataFrame, PySqlContext};
+use streaming::{PyBatchQueue, PyDStream, PyStreamingContext};
 
 /// Atomic Python client — Spark-like distributed computing and SQL for Python.
 ///
@@ -28,11 +34,31 @@ use sql::{PyDataFrame, PySqlContext};
 /// df = ctx.sql("SELECT id, SUM(amount) FROM orders GROUP BY id")
 /// rows = df.collect()   # → list[dict]
 /// ```
+///
+/// # Broadcast + Accumulator
+/// ```python
+/// bv = ctx.broadcast({"threshold": 10})
+/// acc = ctx.accumulator(0)
+/// ctx.parallelize([1, 2, 3]).for_each(lambda x: acc.add(x))
+/// print(acc.value())  # 6
+/// ```
+///
+/// # Graph
+/// ```python
+/// g = atomic_compute.Graph([(1, 1.0), (2, 1.0)], [(1, 2, 1.0)])
+/// ranks = g.page_rank()
+/// ```
 #[pymodule]
 fn atomic(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyContext>()?;
     m.add_class::<PyRdd>()?;
     m.add_class::<PySqlContext>()?;
     m.add_class::<PyDataFrame>()?;
+    m.add_class::<PyBroadcastVar>()?;
+    m.add_class::<PyAccumulator>()?;
+    m.add_class::<PyGraph>()?;
+    m.add_class::<PyStreamingContext>()?;
+    m.add_class::<PyDStream>()?;
+    m.add_class::<PyBatchQueue>()?;
     Ok(())
 }

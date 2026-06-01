@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use napi::bindgen_prelude::*;
 use napi::JsValue as _;
+use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use atomic_compute::context::Context;
@@ -46,7 +46,12 @@ impl JsRdd {
         num_partitions: usize,
         context: Arc<Context>,
     ) -> Self {
-        Self { elements, num_partitions, context, staged: None }
+        Self {
+            elements,
+            num_partitions,
+            context,
+            staged: None,
+        }
     }
 
     /// Capture the source string of a JS function via `Function.prototype.toString()`.
@@ -91,7 +96,10 @@ impl JsRdd {
             staged.ops.push(op);
         } else {
             let source_partitions = self.encode_source_partitions()?;
-            self.staged = Some(StagedJsPipeline { source_partitions, ops: vec![op] });
+            self.staged = Some(StagedJsPipeline {
+                source_partitions,
+                ops: vec![op],
+            });
         }
         Ok(())
     }
@@ -108,9 +116,12 @@ impl JsRdd {
 
     /// Dispatch staged pipeline and decode result bytes.
     fn dispatch_and_collect(&self) -> Result<Vec<serde_json::Value>> {
-        let staged = self.staged.as_ref()
+        let staged = self
+            .staged
+            .as_ref()
             .ok_or_else(|| Error::from_reason("no staged pipeline to dispatch"))?;
-        let result_bytes = self.context
+        let result_bytes = self
+            .context
             .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
             .map_err(|e| Error::from_reason(format!("dispatch_pipeline: {e}")))?;
         let mut all = Vec::new();
@@ -127,20 +138,18 @@ impl JsRdd {
             serde_json::Value::String(s) => Ok(s.clone()),
             serde_json::Value::Number(n) => Ok(n.to_string()),
             serde_json::Value::Bool(b) => Ok(b.to_string()),
-            other => Err(Error::from_reason(format!(
-                "Unsupported key type: {other}"
-            ))),
+            other => Err(Error::from_reason(format!("Unsupported key type: {other}"))),
         }
     }
 
     /// Default JSON value comparison for ordering operations.
     fn json_compare(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ordering {
         match (a, b) {
-            (serde_json::Value::Number(an), serde_json::Value::Number(bn)) => {
-                an.as_f64().unwrap_or(0.0)
-                    .partial_cmp(&bn.as_f64().unwrap_or(0.0))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }
+            (serde_json::Value::Number(an), serde_json::Value::Number(bn)) => an
+                .as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&bn.as_f64().unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal),
             (serde_json::Value::String(as_), serde_json::Value::String(bs)) => as_.cmp(bs),
             _ => a.to_string().cmp(&b.to_string()),
         }
@@ -155,28 +164,40 @@ impl JsRdd {
 
     /// Apply `f` to each element, returning a new RDD.
     #[napi]
-    pub fn map(
-        &mut self,
-        f: Function<serde_json::Value, serde_json::Value>,
-    ) -> Result<JsRdd> {
+    pub fn map(&mut self, f: Function<serde_json::Value, serde_json::Value>) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(format!("(partition) => partition.map((x) => ({})(x))", Self::fn_to_source(&f)?), TaskAction::Map)?;
+            self.stage_js_udf(
+                format!(
+                    "(partition) => partition.map((x) => ({})(x))",
+                    Self::fn_to_source(&f)?
+                ),
+                TaskAction::Map,
+            )?;
             return Ok(self.take_as_new());
         }
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .map(|elem| f.call(elem.clone()))
             .collect::<Result<Vec<_>>>()?;
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Keep only elements for which `f` returns truthy.
     #[napi]
-    pub fn filter(
-        &mut self,
-        f: Function<serde_json::Value, bool>,
-    ) -> Result<JsRdd> {
+    pub fn filter(&mut self, f: Function<serde_json::Value, bool>) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(format!("(partition) => partition.filter((x) => ({})(x))", Self::fn_to_source(&f)?), TaskAction::Filter)?;
+            self.stage_js_udf(
+                format!(
+                    "(partition) => partition.filter((x) => ({})(x))",
+                    Self::fn_to_source(&f)?
+                ),
+                TaskAction::Filter,
+            )?;
             return Ok(self.take_as_new());
         }
         let mut elements = Vec::new();
@@ -185,7 +206,11 @@ impl JsRdd {
                 elements.push(elem.clone());
             }
         }
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Apply `f` to each element and flatten (f must return an Array).
@@ -195,16 +220,27 @@ impl JsRdd {
         f: Function<serde_json::Value, Vec<serde_json::Value>>,
     ) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(format!("(partition) => partition.flatMap((x) => ({})(x))", Self::fn_to_source(&f)?), TaskAction::FlatMap)?;
+            self.stage_js_udf(
+                format!(
+                    "(partition) => partition.flatMap((x) => ({})(x))",
+                    Self::fn_to_source(&f)?
+                ),
+                TaskAction::FlatMap,
+            )?;
             return Ok(self.take_as_new());
         }
         let mut elements = Vec::new();
         for elem in &self.elements {
-            let result = f.call(elem.clone())
-                .map_err(|e| Error::from_reason(format!("flat_map: f must return an Array: {e}")))?;
+            let result = f.call(elem.clone()).map_err(|e| {
+                Error::from_reason(format!("flat_map: f must return an Array: {e}"))
+            })?;
             elements.extend(result);
         }
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Apply `f` only to the value in each `[key, value]` pair.
@@ -214,12 +250,21 @@ impl JsRdd {
         f: Function<serde_json::Value, serde_json::Value>,
     ) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(format!("(partition) => partition.map((p) => [p[0], ({})(p[1])])", Self::fn_to_source(&f)?), TaskAction::Map)?;
+            self.stage_js_udf(
+                format!(
+                    "(partition) => partition.map((p) => [p[0], ({})(p[1])])",
+                    Self::fn_to_source(&f)?
+                ),
+                TaskAction::Map,
+            )?;
             return Ok(self.take_as_new());
         }
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .map(|elem| {
-                let pair = elem.as_array()
+                let pair = elem
+                    .as_array()
                     .ok_or_else(|| Error::from_reason("map_values requires [key, value] arrays"))?;
                 if pair.len() != 2 {
                     return Err(Error::from_reason("map_values requires 2-element arrays"));
@@ -229,7 +274,11 @@ impl JsRdd {
                 Ok(serde_json::json!([key, new_val]))
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Apply `f` to each value in `[key, value]` pairs and flatten.
@@ -239,15 +288,24 @@ impl JsRdd {
         f: Function<serde_json::Value, Vec<serde_json::Value>>,
     ) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(format!("(partition) => partition.flatMap((p) => ({})(p[1]).map((v) => [p[0], v]))", Self::fn_to_source(&f)?), TaskAction::FlatMap)?;
+            self.stage_js_udf(
+                format!(
+                    "(partition) => partition.flatMap((p) => ({})(p[1]).map((v) => [p[0], v]))",
+                    Self::fn_to_source(&f)?
+                ),
+                TaskAction::FlatMap,
+            )?;
             return Ok(self.take_as_new());
         }
         let mut elements = Vec::new();
         for elem in &self.elements {
-            let pair = elem.as_array()
-                .ok_or_else(|| Error::from_reason("flat_map_values requires [key, value] arrays"))?;
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("flat_map_values requires [key, value] arrays")
+            })?;
             if pair.len() != 2 {
-                return Err(Error::from_reason("flat_map_values requires 2-element arrays"));
+                return Err(Error::from_reason(
+                    "flat_map_values requires 2-element arrays",
+                ));
             }
             let key = pair[0].clone();
             let vals = f.call(pair[1].clone())?;
@@ -255,34 +313,44 @@ impl JsRdd {
                 elements.push(serde_json::json!([key, val]));
             }
         }
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Produce `[f(element), element]` pairs.
     #[napi]
-    pub fn key_by(
-        &mut self,
-        f: Function<serde_json::Value, serde_json::Value>,
-    ) -> Result<JsRdd> {
+    pub fn key_by(&mut self, f: Function<serde_json::Value, serde_json::Value>) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(format!("(partition) => partition.map((x) => [({})(x), x])", Self::fn_to_source(&f)?), TaskAction::Map)?;
+            self.stage_js_udf(
+                format!(
+                    "(partition) => partition.map((x) => [({})(x), x])",
+                    Self::fn_to_source(&f)?
+                ),
+                TaskAction::Map,
+            )?;
             return Ok(self.take_as_new());
         }
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .map(|elem| {
                 let key = f.call(elem.clone())?;
                 Ok(serde_json::json!([key, elem]))
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Group elements by `f(element)` → `[key, [elements]]` pairs.
     #[napi]
-    pub fn group_by(
-        &mut self,
-        f: Function<serde_json::Value, serde_json::Value>,
-    ) -> Result<JsRdd> {
+    pub fn group_by(&mut self, f: Function<serde_json::Value, serde_json::Value>) -> Result<JsRdd> {
         let mut keyed = self.key_by(f)?;
         keyed.group_by_key()
     }
@@ -296,7 +364,8 @@ impl JsRdd {
                 for (const p of partition) { const k = JSON.stringify(p[0]); \
                 if (!g.has(k)) { g.set(k, [p[0], []]); o.push(k); } \
                 g.get(k)[1].push(p[1]); } \
-                return o.map(k => g.get(k)); }".to_string();
+                return o.map(k => g.get(k)); }"
+                .to_string();
             self.stage_js_udf(wrapper, TaskAction::Map)?;
             let partials = self.dispatch_and_collect()?;
 
@@ -304,13 +373,17 @@ impl JsRdd {
                 HashMap::new();
             let mut order: Vec<String> = Vec::new();
             for pair in &partials {
-                let arr = pair.as_array()
+                let arr = pair
+                    .as_array()
                     .ok_or_else(|| Error::from_reason("group_by_key partial: not an array"))?;
                 if arr.len() != 2 {
-                    return Err(Error::from_reason("group_by_key partial: expected [key, vals]"));
+                    return Err(Error::from_reason(
+                        "group_by_key partial: expected [key, vals]",
+                    ));
                 }
                 let key = arr[0].clone();
-                let vals = arr[1].as_array()
+                let vals = arr[1]
+                    .as_array()
                     .ok_or_else(|| Error::from_reason("group_by_key partial: vals not an array"))?;
                 let key_str = Self::key_to_string(&key)?;
                 let entry = groups.entry(key_str.clone()).or_insert_with(|| {
@@ -320,13 +393,18 @@ impl JsRdd {
                 entry.1.extend(vals.iter().cloned());
             }
 
-            let elements = order.iter()
+            let elements = order
+                .iter()
                 .map(|k| {
                     let (key, vals) = &groups[k];
                     Ok(serde_json::json!([key, vals]))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            return Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)));
+            return Ok(JsRdd::from_data(
+                elements,
+                self.num_partitions,
+                Arc::clone(&self.context),
+            ));
         }
 
         let mut groups: HashMap<String, (serde_json::Value, Vec<serde_json::Value>)> =
@@ -334,7 +412,8 @@ impl JsRdd {
         let mut order: Vec<String> = Vec::new();
 
         for elem in &self.elements {
-            let pair = elem.as_array()
+            let pair = elem
+                .as_array()
                 .ok_or_else(|| Error::from_reason("group_by_key requires [key, value] arrays"))?;
             if pair.len() != 2 {
                 return Err(Error::from_reason("group_by_key requires 2-element arrays"));
@@ -349,13 +428,18 @@ impl JsRdd {
             entry.1.push(val);
         }
 
-        let elements = order.iter()
+        let elements = order
+            .iter()
             .map(|k| {
                 let (key, vals) = &groups[k];
                 Ok(serde_json::json!([key, vals]))
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Aggregate values with the same key using `f(acc, value) => acc`.
@@ -377,14 +461,16 @@ impl JsRdd {
             self.stage_js_udf(wrapper, TaskAction::Map)?;
             let partials = self.dispatch_and_collect()?;
 
-            let mut accum: HashMap<String, (serde_json::Value, serde_json::Value)> =
-                HashMap::new();
+            let mut accum: HashMap<String, (serde_json::Value, serde_json::Value)> = HashMap::new();
             let mut order: Vec<String> = Vec::new();
             for pair in &partials {
-                let arr = pair.as_array()
+                let arr = pair
+                    .as_array()
                     .ok_or_else(|| Error::from_reason("reduce_by_key partial: not an array"))?;
                 if arr.len() != 2 {
-                    return Err(Error::from_reason("reduce_by_key partial: expected [key, val]"));
+                    return Err(Error::from_reason(
+                        "reduce_by_key partial: expected [key, val]",
+                    ));
                 }
                 let key = arr[0].clone();
                 let val = arr[1].clone();
@@ -400,23 +486,31 @@ impl JsRdd {
                 }
             }
 
-            let elements = order.iter()
+            let elements = order
+                .iter()
                 .map(|k| {
                     let (key, val) = &accum[k];
                     Ok(serde_json::json!([key, val]))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            return Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)));
+            return Ok(JsRdd::from_data(
+                elements,
+                self.num_partitions,
+                Arc::clone(&self.context),
+            ));
         }
 
         let mut accum: HashMap<String, (serde_json::Value, serde_json::Value)> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
 
         for elem in &self.elements {
-            let pair = elem.as_array()
+            let pair = elem
+                .as_array()
                 .ok_or_else(|| Error::from_reason("reduce_by_key requires [key, value] arrays"))?;
             if pair.len() != 2 {
-                return Err(Error::from_reason("reduce_by_key requires 2-element arrays"));
+                return Err(Error::from_reason(
+                    "reduce_by_key requires 2-element arrays",
+                ));
             }
             let key = pair[0].clone();
             let val = pair[1].clone();
@@ -432,20 +526,27 @@ impl JsRdd {
             }
         }
 
-        let elements = order.iter()
+        let elements = order
+            .iter()
             .map(|k| {
                 let (key, val) = &accum[k];
                 Ok(serde_json::json!([key, val]))
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Remove duplicate elements.
     #[napi]
     pub fn distinct(&self) -> JsRdd {
         let mut seen = std::collections::HashSet::new();
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .filter(|e| seen.insert(e.to_string()))
             .cloned()
             .collect();
@@ -457,7 +558,9 @@ impl JsRdd {
     pub fn subtract(&self, other: &JsRdd) -> JsRdd {
         let other_set: std::collections::HashSet<String> =
             other.elements.iter().map(|e| e.to_string()).collect();
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .filter(|e| !other_set.contains(&e.to_string()))
             .cloned()
             .collect();
@@ -470,7 +573,9 @@ impl JsRdd {
         let other_set: std::collections::HashSet<String> =
             other.elements.iter().map(|e| e.to_string()).collect();
         let mut seen = std::collections::HashSet::new();
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .filter(|e| {
                 let s = e.to_string();
                 other_set.contains(&s) && seen.insert(s)
@@ -494,15 +599,22 @@ impl JsRdd {
             let result = f.call(chunk.to_vec())?;
             elements.extend(result);
         }
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Extract the key from each `[key, value]` pair.
     #[napi]
     pub fn keys(&self) -> Result<JsRdd> {
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .map(|elem| {
-                let pair = elem.as_array()
+                let pair = elem
+                    .as_array()
                     .ok_or_else(|| Error::from_reason("keys requires [key, value] arrays"))?;
                 if pair.is_empty() {
                     return Err(Error::from_reason("keys requires non-empty arrays"));
@@ -510,15 +622,22 @@ impl JsRdd {
                 Ok(pair[0].clone())
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Extract the value from each `[key, value]` pair.
     #[napi]
     pub fn values(&self) -> Result<JsRdd> {
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .map(|elem| {
-                let pair = elem.as_array()
+                let pair = elem
+                    .as_array()
                     .ok_or_else(|| Error::from_reason("values requires [key, value] arrays"))?;
                 if pair.len() < 2 {
                     return Err(Error::from_reason("values requires 2-element arrays"));
@@ -526,19 +645,31 @@ impl JsRdd {
                 Ok(pair[1].clone())
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Return all values associated with `key` from a pair RDD.
     #[napi]
     pub fn lookup(&self, key: serde_json::Value) -> Result<Vec<serde_json::Value>> {
         let key_str = Self::key_to_string(&key)?;
-        let vals = self.elements.iter()
+        let vals = self
+            .elements
+            .iter()
             .filter_map(|elem| {
                 let pair = elem.as_array()?;
-                if pair.len() != 2 { return None; }
+                if pair.len() != 2 {
+                    return None;
+                }
                 let k = Self::key_to_string(&pair[0]).ok()?;
-                if k == key_str { Some(pair[1].clone()) } else { None }
+                if k == key_str {
+                    Some(pair[1].clone())
+                } else {
+                    None
+                }
             })
             .collect();
         Ok(vals)
@@ -566,11 +697,17 @@ impl JsRdd {
                 other.elements.len()
             )));
         }
-        let elements = self.elements.iter()
+        let elements = self
+            .elements
+            .iter()
             .zip(other.elements.iter())
             .map(|(a, b)| Ok(serde_json::json!([a, b])))
             .collect::<Result<Vec<_>>>()?;
-        Ok(JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context)))
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Compute the Cartesian product of two RDDs as `[a, b]` pairs.
@@ -626,7 +763,8 @@ impl JsRdd {
     /// Return the first element. Throws if the RDD is empty.
     #[napi]
     pub fn first(&self) -> Result<serde_json::Value> {
-        self.elements.first()
+        self.elements
+            .first()
             .cloned()
             .ok_or_else(|| Error::from_reason("first: RDD is empty"))
     }
@@ -645,11 +783,17 @@ impl JsRdd {
     ) -> Result<serde_json::Value> {
         if self.context.is_distributed() {
             let fn_src = Self::fn_to_source(&f)?;
-            let partition_fn = format!("(partition) => partition.length === 0 ? [] : [partition.reduce(({}))]", fn_src);
+            let partition_fn = format!(
+                "(partition) => partition.length === 0 ? [] : [partition.reduce(({}))]",
+                fn_src
+            );
             self.stage_js_udf(partition_fn, TaskAction::Reduce)?;
-            let staged = self.staged.as_ref()
+            let staged = self
+                .staged
+                .as_ref()
                 .ok_or_else(|| Error::from_reason("no staged pipeline"))?;
-            let result_bytes = self.context
+            let result_bytes = self
+                .context
                 .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
                 .map_err(|e| Error::from_reason(format!("dispatch_pipeline: {e}")))?;
 
@@ -667,7 +811,9 @@ impl JsRdd {
             return acc.ok_or_else(|| Error::from_reason("reduce on empty RDD"));
         }
         let mut iter = self.elements.iter();
-        let first = iter.next().ok_or_else(|| Error::from_reason("reduce on empty RDD"))?;
+        let first = iter
+            .next()
+            .ok_or_else(|| Error::from_reason("reduce on empty RDD"))?;
         let mut acc = first.clone();
         for val in iter {
             acc = f.call(FnArgs::from((acc, val.clone())))?;
@@ -685,11 +831,17 @@ impl JsRdd {
         if self.context.is_distributed() {
             let zero_json = zero.to_string();
             let fn_src = Self::fn_to_source(&f)?;
-            let partition_fn = format!("(partition) => [partition.reduce(({})  , {})]", fn_src, zero_json);
+            let partition_fn = format!(
+                "(partition) => [partition.reduce(({})  , {})]",
+                fn_src, zero_json
+            );
             self.stage_js_udf(partition_fn, TaskAction::Fold)?;
-            let staged = self.staged.as_ref()
+            let staged = self
+                .staged
+                .as_ref()
                 .ok_or_else(|| Error::from_reason("no staged pipeline"))?;
-            let result_bytes = self.context
+            let result_bytes = self
+                .context
                 .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
                 .map_err(|e| Error::from_reason(format!("dispatch_pipeline: {e}")))?;
 
@@ -712,10 +864,7 @@ impl JsRdd {
 
     /// Apply `f` to each element for side effects.
     #[napi]
-    pub fn for_each(
-        &self,
-        f: Function<serde_json::Value, serde_json::Value>,
-    ) -> Result<()> {
+    pub fn for_each(&self, f: Function<serde_json::Value, serde_json::Value>) -> Result<()> {
         for elem in &self.elements {
             f.call(elem.clone())?;
         }
@@ -752,7 +901,8 @@ impl JsRdd {
     pub fn count_by_key(&self) -> Result<serde_json::Value> {
         let mut counts: HashMap<String, u64> = HashMap::new();
         for elem in &self.elements {
-            let pair = elem.as_array()
+            let pair = elem
+                .as_array()
                 .ok_or_else(|| Error::from_reason("count_by_key requires [key, value] arrays"))?;
             if pair.is_empty() {
                 return Err(Error::from_reason("count_by_key requires non-empty arrays"));
@@ -824,17 +974,28 @@ impl JsRdd {
         if let Some(ref cmp) = comparator {
             let mut sort_error: Option<Error> = None;
             sorted.sort_by(|a, b| {
-                if sort_error.is_some() { return std::cmp::Ordering::Equal; }
+                if sort_error.is_some() {
+                    return std::cmp::Ordering::Equal;
+                }
                 match cmp.call(FnArgs::from((b.clone(), a.clone()))) {
                     Ok(v) => {
-                        if v > 0.0 { std::cmp::Ordering::Greater }
-                        else if v < 0.0 { std::cmp::Ordering::Less }
-                        else { std::cmp::Ordering::Equal }
+                        if v > 0.0 {
+                            std::cmp::Ordering::Greater
+                        } else if v < 0.0 {
+                            std::cmp::Ordering::Less
+                        } else {
+                            std::cmp::Ordering::Equal
+                        }
                     }
-                    Err(e) => { sort_error = Some(e); std::cmp::Ordering::Equal }
+                    Err(e) => {
+                        sort_error = Some(e);
+                        std::cmp::Ordering::Equal
+                    }
                 }
             });
-            if let Some(e) = sort_error { return Err(e); }
+            if let Some(e) = sort_error {
+                return Err(e);
+            }
         } else {
             sorted.sort_by(|a, b| Self::json_compare(b, a));
         }
@@ -852,17 +1013,28 @@ impl JsRdd {
         if let Some(ref cmp) = comparator {
             let mut sort_error: Option<Error> = None;
             sorted.sort_by(|a, b| {
-                if sort_error.is_some() { return std::cmp::Ordering::Equal; }
+                if sort_error.is_some() {
+                    return std::cmp::Ordering::Equal;
+                }
                 match cmp.call(FnArgs::from((a.clone(), b.clone()))) {
                     Ok(v) => {
-                        if v > 0.0 { std::cmp::Ordering::Greater }
-                        else if v < 0.0 { std::cmp::Ordering::Less }
-                        else { std::cmp::Ordering::Equal }
+                        if v > 0.0 {
+                            std::cmp::Ordering::Greater
+                        } else if v < 0.0 {
+                            std::cmp::Ordering::Less
+                        } else {
+                            std::cmp::Ordering::Equal
+                        }
                     }
-                    Err(e) => { sort_error = Some(e); std::cmp::Ordering::Equal }
+                    Err(e) => {
+                        sort_error = Some(e);
+                        std::cmp::Ordering::Equal
+                    }
                 }
             });
-            if let Some(e) = sort_error { return Err(e); }
+            if let Some(e) = sort_error {
+                return Err(e);
+            }
         } else {
             sorted.sort_by(Self::json_compare);
         }
@@ -913,6 +1085,266 @@ impl JsRdd {
             result = comb_fn.call(FnArgs::from((result, part_acc)))?;
         }
         Ok(result)
+    }
+
+    // ── Join operations ───────────────────────────────────────────────────────
+
+    /// Inner join two pair RDDs on their first element (key).
+    ///
+    /// Both RDDs must contain `[key, value]` arrays.
+    /// Emits `[key, [left_value, right_value]]` for each matching key pair.
+    #[napi]
+    pub fn join(&self, other: &JsRdd) -> Result<JsRdd> {
+        let mut right_map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        for elem in &other.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("join: right RDD requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "join: right RDD requires 2-element arrays",
+                ));
+            }
+            let key_str = Self::key_to_string(&pair[0])?;
+            right_map.entry(key_str).or_default().push(pair[1].clone());
+        }
+
+        let mut elements = Vec::new();
+        for elem in &self.elements {
+            let pair = elem
+                .as_array()
+                .ok_or_else(|| Error::from_reason("join: left RDD requires [key, value] arrays"))?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "join: left RDD requires 2-element arrays",
+                ));
+            }
+            let key = &pair[0];
+            let left_val = &pair[1];
+            let key_str = Self::key_to_string(key)?;
+            if let Some(right_vals) = right_map.get(&key_str) {
+                for right_val in right_vals {
+                    elements.push(serde_json::json!([key, [left_val, right_val]]));
+                }
+            }
+        }
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Left outer join two pair RDDs on their first element (key).
+    ///
+    /// Both RDDs must contain `[key, value]` arrays.
+    /// Emits `[key, [left_value, right_value]]` for matched keys and
+    /// `[key, [left_value, null]]` for unmatched left keys.
+    #[napi]
+    pub fn left_outer_join(&self, other: &JsRdd) -> Result<JsRdd> {
+        let mut right_map: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+        for elem in &other.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("left_outer_join: right RDD requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "left_outer_join: right RDD requires 2-element arrays",
+                ));
+            }
+            let key_str = Self::key_to_string(&pair[0])?;
+            right_map.entry(key_str).or_default().push(pair[1].clone());
+        }
+
+        let mut elements = Vec::new();
+        for elem in &self.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("left_outer_join: left RDD requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "left_outer_join: left RDD requires 2-element arrays",
+                ));
+            }
+            let key = &pair[0];
+            let left_val = &pair[1];
+            let key_str = Self::key_to_string(key)?;
+            match right_map.get(&key_str) {
+                Some(right_vals) => {
+                    for right_val in right_vals {
+                        elements.push(serde_json::json!([key, [left_val, right_val]]));
+                    }
+                }
+                None => {
+                    elements.push(serde_json::json!([
+                        key,
+                        [left_val, serde_json::Value::Null]
+                    ]));
+                }
+            }
+        }
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    // ── Sorting ───────────────────────────────────────────────────────────────
+
+    /// Sort elements by a key extracted via `key_fn(element)`.
+    ///
+    /// `ascending` defaults to `true`. The key function is called on each
+    /// element; results are compared using JSON ordering (numbers numerically,
+    /// strings lexicographically).
+    #[napi]
+    pub fn sort_by(
+        &self,
+        key_fn: Function<serde_json::Value, serde_json::Value>,
+        ascending: Option<bool>,
+    ) -> Result<JsRdd> {
+        let asc = ascending.unwrap_or(true);
+        // Compute (key, element) pairs so the key function is called once per element.
+        let mut keyed: Vec<(serde_json::Value, serde_json::Value)> = self
+            .elements
+            .iter()
+            .map(|elem| {
+                let key = key_fn.call(elem.clone())?;
+                Ok((key, elem.clone()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        keyed.sort_by(|(ka, _), (kb, _)| {
+            let ord = Self::json_compare(ka, kb);
+            if asc { ord } else { ord.reverse() }
+        });
+
+        let elements = keyed.into_iter().map(|(_, v)| v).collect();
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Sort `[key, value]` pair elements by their first element (key).
+    ///
+    /// `ascending` defaults to `true`. Keys are compared using JSON ordering.
+    #[napi]
+    pub fn sort_by_key(&self, ascending: Option<bool>) -> Result<JsRdd> {
+        let asc = ascending.unwrap_or(true);
+        let mut elements = self.elements.clone();
+        let mut sort_error: Option<Error> = None;
+        elements.sort_by(|a, b| {
+            if sort_error.is_some() {
+                return std::cmp::Ordering::Equal;
+            }
+            let ka = match a.as_array() {
+                Some(arr) if !arr.is_empty() => &arr[0],
+                _ => {
+                    sort_error = Some(Error::from_reason(
+                        "sort_by_key: elements must be [key, value] arrays",
+                    ));
+                    return std::cmp::Ordering::Equal;
+                }
+            };
+            let kb = match b.as_array() {
+                Some(arr) if !arr.is_empty() => &arr[0],
+                _ => {
+                    sort_error = Some(Error::from_reason(
+                        "sort_by_key: elements must be [key, value] arrays",
+                    ));
+                    return std::cmp::Ordering::Equal;
+                }
+            };
+            let ord = Self::json_compare(ka, kb);
+            if asc { ord } else { ord.reverse() }
+        });
+        if let Some(e) = sort_error {
+            return Err(e);
+        }
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    // ── Partition access ──────────────────────────────────────────────────────
+
+    /// Return elements divided into `num_partitions` logical partition arrays.
+    ///
+    /// Returns a nested JavaScript array, one inner array per partition.
+    #[napi]
+    pub fn glom(&self) -> Vec<Vec<serde_json::Value>> {
+        let np = self.num_partitions.max(1);
+        let total = self.elements.len();
+        let chunk_size = ((total + np - 1) / np).max(1);
+        let mut result: Vec<Vec<serde_json::Value>> = self
+            .elements
+            .chunks(chunk_size)
+            .map(|c| c.to_vec())
+            .collect();
+        // Pad with empty partitions if there are fewer elements than partitions.
+        while result.len() < np {
+            result.push(Vec::new());
+        }
+        result
+    }
+
+    // ── Persistence / caching ─────────────────────────────────────────────────
+
+    /// Mark this RDD to be cached in memory on first action.
+    ///
+    /// In local mode this is a no-op — returns a clone with the same elements.
+    #[napi]
+    pub fn cache(&self) -> JsRdd {
+        JsRdd::from_data(
+            self.elements.clone(),
+            self.num_partitions,
+            Arc::clone(&self.context),
+        )
+    }
+
+    /// Mark this RDD to be persisted (alias for `cache` in local mode).
+    #[napi]
+    pub fn persist(&self) -> JsRdd {
+        self.cache()
+    }
+
+    /// Remove this RDD from the cache (no-op in local mode).
+    #[napi]
+    pub fn unpersist(&self) -> JsRdd {
+        self.cache()
+    }
+
+    /// Write all elements to `{path}/checkpoint.json` and return a new RDD
+    /// backed by the same elements.
+    ///
+    /// The write is atomic: data is first written to `{path}/checkpoint.json.tmp`
+    /// and then renamed to `{path}/checkpoint.json`.
+    #[napi]
+    pub fn checkpoint(&self, path: String) -> Result<JsRdd> {
+        std::fs::create_dir_all(&path)
+            .map_err(|e| Error::from_reason(format!("checkpoint: create_dir_all failed: {e}")))?;
+
+        let tmp_path = format!("{path}/checkpoint.json.tmp");
+        let final_path = format!("{path}/checkpoint.json");
+
+        let json = serde_json::to_vec(&self.elements)
+            .map_err(|e| Error::from_reason(format!("checkpoint: serialize failed: {e}")))?;
+
+        std::fs::write(&tmp_path, &json)
+            .map_err(|e| Error::from_reason(format!("checkpoint: write failed: {e}")))?;
+
+        std::fs::rename(&tmp_path, &final_path)
+            .map_err(|e| Error::from_reason(format!("checkpoint: rename failed: {e}")))?;
+
+        Ok(JsRdd::from_data(
+            self.elements.clone(),
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
     }
 
     /// Return the logical number of partitions.

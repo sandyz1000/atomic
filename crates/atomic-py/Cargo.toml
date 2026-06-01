@@ -17,8 +17,10 @@ pyo3 = { workspace = true, features = ["extension-module", "abi3-py311"] }
 atomic-compute = { workspace = true }
 atomic-data = { workspace = true, features = ["python"] }
 atomic-sql = { workspace = true }
+atomic-graph = { path = "../atomic-graph" }
 datafusion = "53"
 tokio = { workspace = true }
 pyo3-arrow = "0.17"
 serde_json = { workspace = true }
+parking_lot = { workspace = true }
 rayon = { workspace = true }

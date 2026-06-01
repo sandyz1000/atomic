@@ -157,13 +157,48 @@ rdd.reduceByKey((a, b) => a + b)      // RDD<readonly [string, number]>
 | `.range(start, end, step?, partitions?)` | `RDD<number>` | Integer range `[start, end)` |
 | `.defaultParallelism()` | `number` | Default partition count |
 
+### `Context` — Additional methods (Phase 4)
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `.broadcast(value)` | `BroadcastVar` | Broadcast a JSON-serializable value to all tasks |
+| `.accumulator(zero)` | `Accumulator` | Create a counter/accumulator starting at `zero` |
+| `.stop()` | `void` | Graceful shutdown |
+
+### `BroadcastVar`
+
+```typescript
+const bv = ctx.broadcast({ threshold: 10 });
+rdd.filter(x => x > bv.value().threshold);
+```
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `.value()` | `unknown` | Return the broadcast value |
+
+### `Accumulator`
+
+```typescript
+const acc = ctx.accumulator(0);
+rdd.forEach(x => acc.add(x));
+console.log(acc.value()); // sum of all elements
+```
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `.add(delta)` | `void` | Add delta (number, array append, or string concat) |
+| `.value()` | `unknown` | Return the current accumulated value |
+| `.reset()` | `void` | Reset to the initial zero value |
+
+---
+
 ### `RDD<T>` — Transformations
 
 All transformations return a new `RDD`. In local mode they execute eagerly; in distributed mode
 they are staged and dispatched together when an action is called.
 
 | Method | Returns | Description |
-|--------|---------|-------------|
+| --- | --- | --- |
 | `.map<U>(f)` | `RDD<U>` | Apply `f` to each element |
 | `.filter(predicate)` | `RDD<T>` | Keep elements where `predicate(x)` is truthy |
 | `.flatMap<U>(f)` | `RDD<U>` | Apply `f` and flatten; `f` must return an array |
@@ -173,31 +208,128 @@ they are staged and dispatched together when an action is called.
 | `.groupBy<K>(f)` | `RDD<[K, T[]]>` | Group by `f(element)` |
 | `.groupByKey<K,V>()` | `RDD<[K, V[]]>` | Group `[key, value]` pairs by key |
 | `.reduceByKey<K,V>(f)` | `RDD<[K, V]>` | Aggregate values per key with `f(acc, v)` |
+| `.join(other)` | `RDD<[K,[V1,V2]]>` | Inner join on pair RDDs |
+| `.leftOuterJoin(other)` | `RDD<[K,[V1,V2\|null]]>` | Left outer join |
+| `.sortByKey(ascending?)` | `RDD<T>` | Sort pair RDD by key |
+| `.sortBy(keyFn, ascending?)` | `RDD<T>` | Sort by key function |
+| `.glom()` | `T[][]` | Collect each partition as a sublist |
 | `.union(other)` | `RDD<T>` | Concatenate two RDDs |
 | `.zip<U>(other)` | `RDD<[T, U]>` | Zip two equal-length RDDs element-wise |
 | `.cartesian<U>(other)` | `RDD<[T, U]>` | Cartesian product |
+| `.distinct()` | `RDD<T>` | Remove duplicates |
+| `.subtract(other)` | `RDD<T>` | Elements in self but not in other |
+| `.intersection(other)` | `RDD<T>` | Elements in both RDDs |
+| `.mapPartitions(f)` | `RDD<U>` | Apply `f` to each partition array |
 | `.coalesce(n)` | `RDD<T>` | Reduce to `n` logical partitions |
-| `.repartition(n)` | `RDD<T>` | Change partition count (alias for `coalesce`) |
+| `.repartition(n)` | `RDD<T>` | Change partition count |
+| `.cache()` / `.persist()` / `.unpersist()` | `RDD<T>` | Cache hints (no-op in local mode) |
+| `.checkpoint(path)` | `RDD<T>` | Write to `{path}/checkpoint.json`; truncate lineage |
 
 ### `RDD<T>` — Actions
 
-Actions trigger computation. In distributed mode, the full staged pipeline is dispatched to
-workers when an action is called.
-
 | Method | Returns | Description |
-|--------|---------|-------------|
+| --- | --- | --- |
 | `.collect()` | `T[]` | Return all elements as an array |
 | `.count()` | `number` | Count all elements |
-| `.first()` | `T` | Return the first element (throws if empty) |
+| `.first()` | `T` | Return the first element |
 | `.take(n)` | `T[]` | Return the first `n` elements |
-| `.reduce(f)` | `T` | Aggregate with `f(acc, x)` (throws if empty) |
+| `.reduce(f)` | `T` | Aggregate with `f(acc, x)` |
 | `.fold(zero, f)` | `T` | Aggregate with an initial value |
+| `.aggregate(zero, seqFn, combFn)` | `T` | Two-phase aggregation |
+| `.forEach(f)` | `void` | Call `f(x)` for each element |
+| `.forEachPartition(f)` | `void` | Call `f(partition)` for each partition |
+| `.countByValue()` | `Record<string, number>` | Count by value |
+| `.countByKey()` | `Record<string, number>` | Count by key for pair RDDs |
+| `.isEmtpy()` | `boolean` | `true` if the RDD is empty |
+| `.max(comparator?)` / `.min(comparator?)` | `T` | Max/min element |
+| `.top(n, comparator?)` / `.takeOrdered(n, comparator?)` | `T[]` | Top/bottom n |
+| `.saveAsTextFile(path)` | `void` | Write elements to a text file |
 
 ### `RDD<T>` — Properties
 
 | Property | Type | Description |
-|----------|------|-------------|
+| --- | --- | --- |
 | `.numPartitions` | `number` | Number of logical partitions |
+
+---
+
+### Graph
+
+```typescript
+import { Graph } from '@atomic-compute/js';
+
+const g = new Graph(
+  [[1, 1.0], [2, 1.0], [3, 1.0]],          // [id, weight]
+  [[1, 2, 1.0], [2, 3, 1.0], [3, 1, 1.0]], // [src, dst, weight]
+);
+
+const ranks = g.pageRank(20, 0.15);
+// { '1': 0.33, '2': 0.33, '3': 0.33 }
+```
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `new Graph(vertices, edges)` | `Graph` | Construct from `[[id,w]]` and `[[src,dst,w]]` |
+| `.numVertices()` | `number` | Vertex count |
+| `.numEdges()` | `number` | Edge count |
+| `.pageRank(numIter, resetProb)` | `Record<string, number>` | PageRank score per vertex |
+| `.connectedComponents()` | `Record<string, number>` | Component label per vertex |
+| `.stronglyConnectedComponents()` | `Record<string, number>` | SCC label per vertex |
+| `.labelPropagation(maxIter)` | `Record<string, number>` | Community label per vertex |
+| `.triangleCount()` | `Record<string, number>` | Triangle count per vertex |
+| `.shortestPath(landmarks)` | `Record<string, Record<string, number>>` | Distance from each landmark |
+
+> **Note:** Vertex IDs are returned as string keys in JS objects (e.g. `"1"`, `"2"`).
+
+---
+
+### Streaming
+
+```typescript
+import { StreamingContext } from '@atomic-compute/js';
+
+const ssc = new StreamingContext(0.1);
+const [stream, queue] = ssc.testQueueStream();
+
+const results: unknown[] = [];
+ssc.foreachRdd(
+  stream.map((x: number) => x * 2),
+  (batch: unknown[]) => results.push(...batch),
+);
+
+queue.push([1, 2, 3]);
+ssc.runOneBatch();
+// results === [2, 4, 6]
+```
+
+**`StreamingContext` methods:**
+
+| Method | Description |
+| --- | --- |
+| `new StreamingContext(batchSecs)` | Create a context with the given batch interval |
+| `.socketTextStream(host, port)` | Read text lines from a TCP socket |
+| `.textFileStream(directory)` | Watch a directory for new text files |
+| `.testQueueStream()` | Returns `[DStream, BatchQueue]` for testing |
+| `.testPairQueueStream()` | Same, but stream is marked as a pair stream |
+| `.foreachRdd(stream, f)` | Register output op: `f(batch)` called each tick |
+| `.runOneBatch()` | Execute one batch tick synchronously |
+| `.start()` | Start the batch loop |
+| `.stop()` | Signal the batch loop to stop |
+| `.awaitTerminationOrTimeout(secs)` | Block until stopped or timeout |
+
+**`DStream` transforms:**
+
+| Method | Description |
+| --- | --- |
+| `.map(f)` | Apply `f` to each element |
+| `.filter(f)` | Keep elements where `f` is truthy |
+| `.flatMap(f)` | Apply `f` and flatten |
+| `.reduceByKey(f)` | Aggregate `[k, v]` pairs per key per batch |
+| `.groupByKey()` | Group `[k, v]` pairs → `[k, values[]]` per batch |
+| `.join(other)` | Inner join two pair DStreams per batch |
+| `.leftOuterJoin(other)` | Left outer join per batch |
+| `.updateStateByKey(f)` | Stateful: `f(newValues, oldState) → newState` |
+| `.mapValues(f)` | Apply `f` to value in `[k, v]` elements |
 
 ---
 

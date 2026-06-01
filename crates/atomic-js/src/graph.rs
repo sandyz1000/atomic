@@ -1,0 +1,189 @@
+use std::collections::HashMap;
+use atomic_graph::{
+    graph::Graph,
+    types::Edge,
+    algo::{
+        connected_component,
+        label_propagation,
+        page_rank,
+        shortest_path,
+        strongly_connected_component,
+        triangle_count,
+    },
+};
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
+
+// VertexId in atomic-graph is i64.
+type VertexId = i64;
+
+#[napi]
+pub struct JsGraph {
+    inner: Graph<f64, f64>,
+}
+
+#[napi]
+impl JsGraph {
+    /// Create a graph from explicit vertex and edge lists.
+    ///
+    /// @param vertices - Array of [vertexId, weight] tuples
+    /// @param edges    - Array of [srcId, dstId, weight] tuples
+    #[napi(constructor)]
+    pub fn new(
+        vertices: Vec<Vec<serde_json::Value>>,
+        edges: Vec<Vec<serde_json::Value>>,
+    ) -> Result<Self> {
+        let verts: Vec<(VertexId, f64)> = vertices
+            .iter()
+            .map(|v| {
+                let id = v
+                    .get(0)
+                    .and_then(|x| x.as_i64())
+                    .ok_or_else(|| napi::Error::from_reason("vertex id must be integer"))?;
+                let w = v
+                    .get(1)
+                    .and_then(|x| x.as_f64())
+                    .ok_or_else(|| napi::Error::from_reason("vertex weight must be float"))?;
+                Ok((id, w))
+            })
+            .collect::<Result<_>>()?;
+
+        let edge_list: Vec<Edge<f64>> = edges
+            .iter()
+            .map(|e| {
+                let src = e
+                    .get(0)
+                    .and_then(|x| x.as_i64())
+                    .ok_or_else(|| napi::Error::from_reason("edge src must be integer"))?;
+                let dst = e
+                    .get(1)
+                    .and_then(|x| x.as_i64())
+                    .ok_or_else(|| napi::Error::from_reason("edge dst must be integer"))?;
+                let w = e
+                    .get(2)
+                    .and_then(|x| x.as_f64())
+                    .ok_or_else(|| napi::Error::from_reason("edge weight must be float"))?;
+                Ok(Edge { src, dst, attr: w })
+            })
+            .collect::<Result<_>>()?;
+
+        Ok(Self {
+            inner: Graph::from_vertices_edges(verts, edge_list),
+        })
+    }
+
+    /// Return the number of vertices.
+    #[napi]
+    pub fn num_vertices(&self) -> u32 {
+        self.inner.num_vertices() as u32
+    }
+
+    /// Return the number of edges.
+    #[napi]
+    pub fn num_edges(&self) -> u32 {
+        self.inner.num_edges() as u32
+    }
+
+    /// Run PageRank. Returns Record<string, number> (keys are vertex ID strings).
+    #[napi(ts_return_type = "Record<string, number>")]
+    pub fn page_rank(&self, num_iter: u32, reset_prob: f64) -> serde_json::Value {
+        let result = page_rank::run(&self.inner, num_iter as usize, reset_prob);
+        i64map_f64_to_json(result)
+    }
+
+    /// Connected components (weakly). Returns Record<string, number>.
+    #[napi(ts_return_type = "Record<string, number>")]
+    pub fn connected_components(&self) -> serde_json::Value {
+        let result = connected_component::run(&self.inner, usize::MAX);
+        i64_to_i64_map_to_json(result)
+    }
+
+    /// Strongly connected components (Tarjan's). Returns Record<string, number>.
+    #[napi(ts_return_type = "Record<string, number>")]
+    pub fn strongly_connected_components(&self) -> serde_json::Value {
+        let result = strongly_connected_component::run(&self.inner, 0);
+        i64_to_i64_map_to_json(result)
+    }
+
+    /// Label propagation community detection. Returns Record<string, number>.
+    #[napi(ts_return_type = "Record<string, number>")]
+    pub fn label_propagation(&self, max_iter: u32) -> serde_json::Value {
+        let result = label_propagation::run(&self.inner, max_iter as usize);
+        i64_to_i64_map_to_json(result)
+    }
+
+    /// Triangle count per vertex. Returns Record<string, number>.
+    #[napi(ts_return_type = "Record<string, number>")]
+    pub fn triangle_count(&self) -> serde_json::Value {
+        let result = triangle_count::run(&self.inner);
+        // result is HashMap<VertexId, usize>
+        let m: serde_json::Map<String, serde_json::Value> = result
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), serde_json::Value::Number(v.into())))
+            .collect();
+        serde_json::Value::Object(m)
+    }
+
+    /// Shortest path distances from landmarks.
+    /// Returns Record<string, Record<string, number>>.
+    #[napi(ts_return_type = "Record<string, Record<string, number>>")]
+    pub fn shortest_path(&self, landmarks: Vec<i64>) -> Result<serde_json::Value> {
+        // shortest_path::run requires Graph<(), f64>; build one from our f64/f64 graph.
+        let verts: Vec<(VertexId, ())> =
+            self.inner.vertices().map(|(id, _)| (id, ())).collect();
+        let edges: Vec<Edge<f64>> = self
+            .inner
+            .edges()
+            .map(|e| Edge { src: e.src, dst: e.dst, attr: e.attr })
+            .collect();
+        let unit_graph: Graph<(), f64> = Graph::from_vertices_edges(verts, edges);
+
+        let result = shortest_path::run(&unit_graph, &landmarks);
+
+        let outer: serde_json::Map<String, serde_json::Value> = result
+            .into_iter()
+            .map(|(k, inner)| {
+                let inner_map: serde_json::Map<String, serde_json::Value> = inner
+                    .into_iter()
+                    .map(|(ik, v)| {
+                        (
+                            ik.to_string(),
+                            serde_json::Value::Number(
+                                serde_json::Number::from_f64(v)
+                                    .unwrap_or(serde_json::Number::from(0)),
+                            ),
+                        )
+                    })
+                    .collect();
+                (k.to_string(), serde_json::Value::Object(inner_map))
+            })
+            .collect();
+
+        Ok(serde_json::Value::Object(outer))
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn i64map_f64_to_json(map: HashMap<VertexId, f64>) -> serde_json::Value {
+    let m: serde_json::Map<String, serde_json::Value> = map
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k.to_string(),
+                serde_json::Value::Number(
+                    serde_json::Number::from_f64(v).unwrap_or(serde_json::Number::from(0)),
+                ),
+            )
+        })
+        .collect();
+    serde_json::Value::Object(m)
+}
+
+fn i64_to_i64_map_to_json(map: HashMap<VertexId, VertexId>) -> serde_json::Value {
+    let m: serde_json::Map<String, serde_json::Value> = map
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), serde_json::Value::Number(v.into())))
+        .collect();
+    serde_json::Value::Object(m)
+}

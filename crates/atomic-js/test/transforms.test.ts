@@ -12,12 +12,16 @@ import { describe, it, expect, beforeAll } from "vitest";
 // Dynamic require so that the test file is parseable even when the native
 // module is absent — the beforeAll guard skips the suite in that case.
 let Context: typeof import("../index.js").Context;
+let BroadcastVar: typeof import("../index.js").BroadcastVar;
+let Accumulator: typeof import("../index.js").Accumulator;
 let moduleLoaded = false;
 
 beforeAll(() => {
   try {
     const m = require("../index.js");
     Context = m.Context;
+    BroadcastVar = m.BroadcastVar;
+    Accumulator = m.Accumulator;
     moduleLoaded = true;
   } catch {
     console.warn(
@@ -417,5 +421,68 @@ describe("range", () => {
   it("respects positive step", () => {
     if (!moduleLoaded) return;
     expect(ctx().range(0, 10, 2).collect()).toEqual([0, 2, 4, 6, 8]);
+  });
+});
+
+// ── P4.2 Broadcast and Accumulators ──────────────────────────────────────────
+
+describe("P4.2 Broadcast and Accumulators", () => {
+  it("broadcast basic: broadcasts a number and reads it back", () => {
+    if (!moduleLoaded) return;
+    const bv = ctx().broadcast(42);
+    expect(bv.value()).toBe(42);
+  });
+
+  it("broadcast object: broadcasts a plain object", () => {
+    if (!moduleLoaded) return;
+    const bv = ctx().broadcast({ a: 1, b: "hello" });
+    const v = bv.value() as { a: number; b: string };
+    expect(v.a).toBe(1);
+    expect(v.b).toBe("hello");
+  });
+
+  it("broadcast array: broadcasts an array", () => {
+    if (!moduleLoaded) return;
+    const bv = ctx().broadcast([1, 2, 3]);
+    expect(bv.value()).toEqual([1, 2, 3]);
+  });
+
+  it("accumulator int: adds 1 per element and checks total", () => {
+    if (!moduleLoaded) return;
+    const acc = ctx().accumulator(0);
+    ctx().parallelize([1, 2, 3]).forEach((_x: unknown) => acc.add(1));
+    expect(acc.value()).toBe(3);
+  });
+
+  it("accumulator float: adds 0.5 per element", () => {
+    if (!moduleLoaded) return;
+    const acc = ctx().accumulator(0.0);
+    ctx().parallelize([1, 2, 3, 4]).forEach((_x: unknown) => acc.add(0.5));
+    expect((acc.value() as number)).toBeCloseTo(2.0);
+  });
+
+  it("accumulator reset: add some values then reset to initial", () => {
+    if (!moduleLoaded) return;
+    const acc = ctx().accumulator(0);
+    ctx().parallelize([1, 2, 3]).forEach((_x: unknown) => acc.add(10));
+    expect(acc.value()).toBe(30);
+    acc.reset();
+    expect(acc.value()).toBe(0);
+  });
+
+  it("accumulator array: starts empty and appends elements", () => {
+    if (!moduleLoaded) return;
+    const acc = ctx().accumulator([]);
+    ctx().parallelize([10, 20, 30]).forEach((x: unknown) => acc.add(x));
+    const v = acc.value() as number[];
+    expect(v.length).toBe(3);
+    expect(v.sort((a, b) => a - b)).toEqual([10, 20, 30]);
+  });
+
+  it("accumulator empty RDD: value stays at initial", () => {
+    if (!moduleLoaded) return;
+    const acc = ctx().accumulator(0);
+    ctx().parallelize([]).forEach((_x: unknown) => acc.add(1));
+    expect(acc.value()).toBe(0);
   });
 });
