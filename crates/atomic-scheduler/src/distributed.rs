@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicI16, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use atomic_data::{
@@ -60,6 +60,10 @@ pub struct DistributedScheduler {
     worker_failures: Arc<DashMap<SocketAddrV4, u32>>,
     /// Per-task timeout. `None` means no timeout (useful in tests / local mode).
     task_timeout: Option<Duration>,
+    /// Speculative execution multiplier. When `Some(m)`, a straggler running longer
+    /// than `m × median_task_duration` (once ≥50% of the stage has completed) gets a
+    /// speculative re-run on a different worker; the first result wins.
+    speculation_multiplier: Option<f64>,
 
     master: bool,
     active_jobs: Arc<DashMap<usize, Job>>,
@@ -67,6 +71,8 @@ pub struct DistributedScheduler {
     taskid_to_jobid: Arc<DashMap<String, usize>>,
     taskid_to_slaveid: Arc<DashMap<String, String>>,
     job_tasks: Arc<DashMap<usize, HashSet<String>>>,
+    /// Per-job cancellation tokens — cancelled when `cancel_job()` is called.
+    job_cancel_tokens: Arc<DashMap<usize, tokio_util::sync::CancellationToken>>,
 
     /// Registered worker endpoints, round-robined for task dispatch.
     server_uris: Arc<Mutex<VecDeque<SocketAddrV4>>>,
@@ -74,6 +80,9 @@ pub struct DistributedScheduler {
     scheduler_lock: Arc<Mutex<bool>>,
     live_listener_bus: LiveListenerBus,
 }
+
+/// Consecutive TCP-level failure count per worker before removal.
+const MAX_WORKER_FAILURES: u32 = 3;
 
 impl DistributedScheduler {
     pub fn new(max_failures: usize, master: bool) -> Self {
@@ -87,6 +96,7 @@ impl DistributedScheduler {
             inflight: Arc::new(DashMap::new()),
             worker_failures: Arc::new(DashMap::new()),
             task_timeout: Some(Duration::from_secs(300)), // 5-minute default
+            speculation_multiplier: None,
             master,
             active_jobs: Arc::new(DashMap::new()),
             active_job_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -96,7 +106,143 @@ impl DistributedScheduler {
             server_uris: Arc::new(Mutex::new(VecDeque::new())),
             scheduler_lock: Arc::new(Mutex::new(false)),
             live_listener_bus,
+            job_cancel_tokens: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Cancel a running job by its `run_id`.
+    ///
+    /// Fires the cancellation token — all spawned task futures for that job will
+    /// observe the cancellation on their next `tokio::select!` poll and return early.
+    /// Returns `Err` when the job is not currently tracked (already done or never started).
+    pub fn cancel_job(&self, run_id: usize) -> Result<(), SchedulerError> {
+        if let Some(token) = self.job_cancel_tokens.get(&run_id) {
+            token.cancel();
+            Ok(())
+        } else {
+            Err(SchedulerError::TaskFailed(format!(
+                "job {run_id} not found or already completed"
+            )))
+        }
+    }
+
+    /// Enable speculative execution with the given multiplier.
+    pub fn with_speculation(mut self, multiplier: f64) -> Self {
+        self.speculation_multiplier = Some(multiplier);
+        self
+    }
+
+    /// Start a proactive heartbeat loop that pings every registered worker every
+    /// `interval_secs` seconds via `GET http://<shuffle_uri>/health`.
+    ///
+    /// Workers that fail `MAX_WORKER_FAILURES` consecutive heartbeat probes are
+    /// removed from the active pool. Any stale shuffle-map outputs from a removed
+    /// worker are cleared from `MapOutputTracker`.
+    pub fn start_heartbeat(&self, interval_secs: u64, timeout_ms: u64) {
+        if interval_secs == 0 {
+            return;
+        }
+        let sched = self.clone();
+        tokio::spawn(async move {
+            let interval = Duration::from_secs(interval_secs);
+            let timeout = Duration::from_millis(timeout_ms);
+            loop {
+                tokio::time::sleep(interval).await;
+                let endpoints: Vec<SocketAddrV4> = sched
+                    .worker_capabilities
+                    .iter()
+                    .map(|e| *e.key())
+                    .collect();
+                for endpoint in endpoints {
+                    let shuffle_port = {
+                        sched.worker_capabilities
+                            .get(&endpoint)
+                            .and_then(|c| c.shuffle_server_port)
+                    };
+                    let healthy = if let Some(port) = shuffle_port {
+                        let url = format!("http://{}:{}/health", endpoint.ip(), port);
+                        let probe = tokio::time::timeout(timeout, async {
+                            // Lightweight HTTP GET via raw TCP (avoids pulling in full HTTP client)
+                            let addr = format!("{}:{}", endpoint.ip(), port);
+                            if let Ok(mut stream) = tokio::net::TcpStream::connect(&addr).await {
+                                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                                let req = format!(
+                                    "GET /health HTTP/1.0\r\nHost: {addr}\r\n\r\n"
+                                );
+                                let _ = stream.write_all(req.as_bytes()).await;
+                                let mut buf = [0u8; 16];
+                                matches!(stream.read(&mut buf).await, Ok(n) if n > 0)
+                            } else {
+                                false
+                            }
+                        })
+                        .await;
+                        probe.unwrap_or(false)
+                    } else {
+                        // Fallback: try a plain TCP connect to the task port.
+                        let probe = tokio::time::timeout(
+                            timeout,
+                            tokio::net::TcpStream::connect(endpoint),
+                        )
+                        .await;
+                        probe.is_ok_and(|r| r.is_ok())
+                    };
+
+                    if healthy {
+                        sched.worker_failures.remove(&endpoint);
+                    } else {
+                        let mut failures = sched
+                            .worker_failures
+                            .entry(endpoint)
+                            .or_insert(0);
+                        *failures += 1;
+                        let count = *failures;
+                        drop(failures);
+                        if count >= MAX_WORKER_FAILURES as u32 {
+                            log::warn!(
+                                "heartbeat: worker {endpoint} failed {count} consecutive probes; removing"
+                            );
+                            sched.remove_worker(endpoint);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Remove a worker from the active pool and clean up its state.
+    pub fn remove_worker(&self, endpoint: SocketAddrV4) {
+        self.worker_capabilities.remove(&endpoint);
+        self.server_uris.lock().retain(|e| *e != endpoint);
+        self.inflight.remove(&endpoint);
+        self.worker_failures.remove(&endpoint);
+        // Clear any stale shuffle-map outputs from this worker so failed
+        // shuffle stages can be re-submitted on surviving workers.
+        if let Some(tracker) = atomic_data::env::get_map_output_tracker() {
+            for entry in tracker.server_uris.iter() {
+                let shuffle_id = *entry.key();
+                for (map_id, uri_opt) in entry.value().iter().enumerate() {
+                    if let Some(uri) = uri_opt {
+                        if uri.contains(&endpoint.ip().to_string()) {
+                            tracker.unregister_map_output(shuffle_id, map_id, uri.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Dynamically add a new worker after the driver has started.
+    ///
+    /// Called by the HTTP `/register` route (or directly in tests) when a new
+    /// worker announces itself. Safe to call concurrently with in-flight jobs.
+    pub fn dynamically_add_worker(
+        &self,
+        endpoint: SocketAddrV4,
+        capabilities: WorkerCapabilities,
+    ) {
+        log::info!("dynamic worker registration: {endpoint} (max_tasks={})", capabilities.max_tasks);
+        self.register_worker(endpoint, capabilities);
     }
 
     pub fn register_worker(&self, endpoint: SocketAddrV4, capabilities: WorkerCapabilities) {
@@ -189,7 +335,6 @@ impl DistributedScheduler {
         &self,
         task: &TaskEnvelope,
     ) -> LibResult<(TaskResultEnvelope, SocketAddrV4)> {
-        const MAX_WORKER_FAILURES: u32 = 3;
         let mut last_err = None;
         'retry: for attempt in 0..=self.max_failures {
             let target = self.next_executor_with_capacity()?;
@@ -285,10 +430,37 @@ impl DistributedScheduler {
     /// Sends one `TaskEnvelope` per partition, each carrying the full `ops` pipeline.
     /// Workers execute ops in order, threading data through each step.
     /// Returns raw result bytes per partition in submission order.
+    /// Like `run_native_job` but attaches broadcast variable payloads to every `TaskEnvelope`.
+    pub async fn run_native_job_with_broadcasts(
+        &self,
+        ops: Vec<PipelineOp>,
+        partitions: Vec<Vec<u8>>,
+        broadcasts: Vec<(usize, Vec<u8>)>,
+    ) -> LibResult<Vec<Vec<u8>>> {
+        if broadcasts.is_empty() {
+            return self.run_native_job(ops, partitions).await;
+        }
+        // Attach broadcasts by marking each partition with them before dispatch.
+        // Re-use run_native_job internals by building envelopes with broadcasts set.
+        // For simplicity, run through the normal path and attach after construction.
+        // The cleanest approach: pass broadcasts as context into the task-build loop.
+        // We do this by intercepting at the TaskEnvelope level inside run_native_job_inner.
+        self.run_native_job_inner(ops, partitions, broadcasts).await
+    }
+
     pub async fn run_native_job(
         &self,
         ops: Vec<PipelineOp>,
         partitions: Vec<Vec<u8>>,
+    ) -> LibResult<Vec<Vec<u8>>> {
+        self.run_native_job_inner(ops, partitions, vec![]).await
+    }
+
+    async fn run_native_job_inner(
+        &self,
+        ops: Vec<PipelineOp>,
+        partitions: Vec<Vec<u8>>,
+        broadcasts: Vec<(usize, Vec<u8>)>,
     ) -> LibResult<Vec<Vec<u8>>> {
         let pipeline_label = ops
             .iter()
@@ -305,14 +477,27 @@ impl DistributedScheduler {
             (run_id, stage_id)
         };
 
-        let submits = partitions
+        let num_partitions = partitions.len();
+        let speculation_multiplier = self.speculation_multiplier;
+
+        // Create and register a cancellation token for this job.
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.job_cancel_tokens.insert(run_id, cancel_token.clone());
+
+        // Build one TaskEnvelope per partition and register with job tracking.
+        let tasks: Vec<TaskEnvelope> = partitions
             .into_iter()
             .enumerate()
             .map(|(partition_id, partition_data)| {
                 let task_id = self.get_mutators().get_next_task_id();
                 let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
                 let task_key = format!("{}:{}", run_id, task_id);
-                let task = TaskEnvelope::new(
+                self.taskid_to_jobid.insert(task_key.clone(), run_id);
+                self.job_tasks
+                    .entry(run_id)
+                    .or_default()
+                    .insert(task_key);
+                TaskEnvelope::new(
                     run_id,
                     stage_id,
                     task_id,
@@ -321,20 +506,62 @@ impl DistributedScheduler {
                     format!("native-pipeline-{}-{}", partition_id, pipeline_label),
                     ops.clone(),
                     partition_data,
-                );
+                ).with_broadcasts(broadcasts.clone())
+            })
+            .collect();
 
-                self.taskid_to_jobid.insert(task_key.clone(), run_id);
-                self.job_tasks
-                    .entry(run_id)
-                    .or_default()
-                    .insert(task_key.clone());
+        // ── Shared result slots ───────────────────────────────────────────────
+        // First successful result (original or speculative) fills the slot; all
+        // subsequent arrivals for the same partition are discarded.
+        let slots: Vec<Arc<Mutex<Option<TaskResultEnvelope>>>> = (0..num_partitions)
+            .map(|_| Arc::new(Mutex::new(None)))
+            .collect();
 
-                async move {
+        // Per-partition wall-clock start times (set when the task is first dispatched).
+        let start_times: Arc<Vec<Mutex<Option<Instant>>>> =
+            Arc::new((0..num_partitions).map(|_| Mutex::new(None)).collect());
+
+        // Durations of completed tasks — used to compute the median for straggler detection.
+        let completed_durations: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // ── Primary task handles ──────────────────────────────────────────────
+        // `DistributedScheduler` is `Clone` and all fields are `Arc<...>`, so cloning
+        // is cheap and gives a fully functional scheduler for `tokio::spawn` futures.
+        let handles: Vec<tokio::task::JoinHandle<LibResult<()>>> = tasks
+            .iter()
+            .enumerate()
+            .map(|(partition_id, task)| {
+                let task = task.clone();
+                let slot = slots[partition_id].clone();
+                let start_times = start_times.clone();
+                let completed_durations = completed_durations.clone();
+                let max_failures = self.max_failures;
+                let sched = self.clone();
+                let token = cancel_token.clone();
+
+                tokio::spawn(async move {
+                    *start_times[partition_id].lock() = Some(Instant::now());
                     let mut retry_count = 0usize;
                     loop {
-                        let (result, worker_addr) = self.submit_native_task(&task).await?;
-                        self.taskid_to_slaveid
-                            .insert(task_key.clone(), worker_addr.to_string());
+                        // Abort if a speculative copy already filled the slot.
+                        if slot.lock().is_some() {
+                            return Ok(());
+                        }
+                        // Abort if the job has been cancelled.
+                        if token.is_cancelled() {
+                            return Err(SchedulerError::TaskFailed(
+                                "job cancelled".to_string(),
+                            ));
+                        }
+                        let dispatch_start = Instant::now();
+                        let (result, worker_addr) = tokio::select! {
+                            _ = token.cancelled() => {
+                                return Err(SchedulerError::TaskFailed("job cancelled".to_string()));
+                            }
+                            r = sched.submit_native_task(&task) => r?,
+                        };
+                        let elapsed = dispatch_start.elapsed();
+
                         match result.status {
                             atomic_data::distributed::ResultStatus::FatalFailure => {
                                 return Err(SchedulerError::TaskFailed(
@@ -342,7 +569,7 @@ impl DistributedScheduler {
                                 ));
                             }
                             atomic_data::distributed::ResultStatus::RetryableFailure => {
-                                if retry_count < self.max_failures {
+                                if retry_count < max_failures {
                                     retry_count += 1;
                                     let delay = Duration::from_millis(
                                         200 * (1u64 << retry_count).min(16),
@@ -357,15 +584,139 @@ impl DistributedScheduler {
                                 ));
                             }
                             atomic_data::distributed::ResultStatus::Success => {
-                                return Ok::<_, SchedulerError>(result);
+                                let mut guard = slot.lock();
+                                if guard.is_none() {
+                                    *guard = Some(result);
+                                    sched.taskid_to_slaveid.insert(
+                                        format!("{partition_id}"),
+                                        worker_addr.to_string(),
+                                    );
+                                    completed_durations.lock().push(elapsed);
+                                }
+                                return Ok(());
                             }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // ── Speculation monitor ───────────────────────────────────────────────
+        // Polls every 500 ms. Once ≥50% of partitions complete, computes the median
+        // task duration and speculatively re-runs partitions that exceed the threshold.
+        if let Some(multiplier) = speculation_multiplier {
+            let slots_ref = slots.clone();
+            let start_times_ref = start_times.clone();
+            let completed_durations_ref = completed_durations.clone();
+            let tasks_ref = tasks.clone();
+            let sched = self.clone();
+
+            tokio::spawn(async move {
+                let mut speculated: HashSet<usize> = HashSet::new();
+                loop {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+
+                    let done_count =
+                        slots_ref.iter().filter(|s| s.lock().is_some()).count();
+                    if done_count == num_partitions {
+                        break;
+                    }
+                    if done_count * 2 < num_partitions {
+                        continue; // not enough data for a meaningful median
+                    }
+
+                    let median = {
+                        let mut durations = completed_durations_ref.lock().clone();
+                        if durations.is_empty() {
+                            continue;
+                        }
+                        durations.sort();
+                        durations[durations.len() / 2]
+                    };
+                    let threshold = median.mul_f64(multiplier);
+
+                    for partition_id in 0..num_partitions {
+                        if speculated.contains(&partition_id) {
+                            continue;
+                        }
+                        if slots_ref[partition_id].lock().is_some() {
+                            continue;
+                        }
+                        let elapsed = start_times_ref[partition_id]
+                            .lock()
+                            .map(|s| s.elapsed())
+                            .unwrap_or(Duration::ZERO);
+
+                        if elapsed > threshold {
+                            speculated.insert(partition_id);
+                            let task = tasks_ref[partition_id].clone();
+                            let slot = slots_ref[partition_id].clone();
+                            let completed_durations = completed_durations_ref.clone();
+                            let sched = sched.clone();
+
+                            log::debug!(
+                                "speculation: partition {partition_id} \
+                                 (elapsed={elapsed:?}, threshold={threshold:?})"
+                            );
+                            tokio::spawn(async move {
+                                let start = Instant::now();
+                                if let Ok((result, worker_addr)) =
+                                    sched.submit_native_task(&task).await
+                                {
+                                    if matches!(
+                                        result.status,
+                                        atomic_data::distributed::ResultStatus::Success
+                                    ) {
+                                        let mut guard = slot.lock();
+                                        if guard.is_none() {
+                                            *guard = Some(result);
+                                            sched.taskid_to_slaveid.insert(
+                                                format!("{partition_id}"),
+                                                worker_addr.to_string(),
+                                            );
+                                            completed_durations.lock().push(start.elapsed());
+                                        }
+                                    }
+                                }
+                            });
                         }
                     }
                 }
             });
+        }
 
-        let result = try_join_all(submits).await;
+        // Wait for all primary handles.
+        let join_results = futures::future::join_all(handles).await;
+        for jr in join_results {
+            match jr {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    self.cleanup_job(run_id);
+                    return Err(e);
+                }
+                Err(e) => {
+                    self.cleanup_job(run_id);
+                    return Err(SchedulerError::TaskFailed(format!("task panicked: {e}")));
+                }
+            }
+        }
 
+        self.cleanup_job(run_id);
+
+        let mut responses: Vec<TaskResultEnvelope> = slots
+            .iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                slot.lock()
+                    .take()
+                    .unwrap_or_else(|| panic!("partition {i} slot empty after join"))
+            })
+            .collect();
+        responses.sort_by_key(|r| r.partition_id);
+        Ok(responses.into_iter().map(|r| r.data).collect())
+    }
+
+    fn cleanup_job(&self, run_id: usize) {
         self.active_jobs.remove(&run_id);
         self.active_job_queue
             .lock()
@@ -376,13 +727,7 @@ impl DistributedScheduler {
                 self.taskid_to_jobid.remove(key);
             }
         }
-
-        result.map(|mut responses| {
-            // Sort by partition_id so result order matches partition submission order
-            // even when tasks are retried and land on different workers.
-            responses.sort_by_key(|r| r.partition_id);
-            responses.into_iter().map(|r| r.data).collect()
-        })
+        self.job_cancel_tokens.remove(&run_id);
     }
 
     /// Run the shuffle-map phase of a shuffle stage in distributed mode.
@@ -392,7 +737,42 @@ impl DistributedScheduler {
     /// server. The worker returns its server URI in `TaskResultEnvelope::shuffle_server_uri`.
     /// This method registers all URIs with the driver's `MapOutputTracker` so the reduce
     /// phase can locate and fetch the right buckets from each worker.
+    ///
+    /// **Fault recovery**: on stage-level failure, stale URIs are cleared from
+    /// `MapOutputTracker` and the entire map stage is re-submitted (up to `max_failures` times).
     pub async fn run_shuffle_map_stage(
+        &self,
+        shuffle_id: usize,
+        ops: Vec<PipelineOp>,
+        partitions: Vec<Vec<u8>>,
+    ) -> LibResult<()> {
+        let mut stage_attempt = 0usize;
+        loop {
+            match self.run_shuffle_map_stage_inner(shuffle_id, ops.clone(), partitions.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    stage_attempt += 1;
+                    if stage_attempt > self.max_failures {
+                        return Err(e);
+                    }
+                    // Clear stale map output URIs so the reduce phase doesn't try
+                    // to fetch from the failed workers on the next attempt.
+                    if let Some(tracker) = atomic_data::env::get_map_output_tracker() {
+                        tracker.unregister_shuffle(shuffle_id);
+                    }
+                    log::warn!(
+                        "shuffle-map stage for shuffle_id={} failed (attempt {}): {}; \
+                         cleared MapOutputTracker, retrying",
+                        shuffle_id, stage_attempt, e
+                    );
+                    let delay = Duration::from_millis(200 * (1u64 << stage_attempt).min(16));
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    async fn run_shuffle_map_stage_inner(
         &self,
         shuffle_id: usize,
         ops: Vec<PipelineOp>,

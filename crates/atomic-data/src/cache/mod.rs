@@ -105,6 +105,11 @@ impl PartitionStore {
         }
     }
 
+    /// Returns `true` if the given `(rdd_id, partition)` pair is currently in the cache.
+    pub fn contains(&self, rdd_id: usize, partition: usize) -> bool {
+        self.map.lock().unwrap().contains(&(rdd_id, partition))
+    }
+
     /// Current number of cached partitions.
     pub fn len(&self) -> usize {
         self.map.lock().unwrap().len()

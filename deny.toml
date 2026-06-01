@@ -1,0 +1,69 @@
+[graph]
+# Only check default features — optional feature deps are allowed to pull in
+# more permissive or dev-only crates.
+targets = []
+
+# ── Licenses ──────────────────────────────────────────────────────────────────
+[licenses]
+# Minimum confidence threshold for license text matching.
+confidence-threshold = 0.8
+
+# Licenses we explicitly allow in the dependency tree.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",      # Some Mozilla crates (e.g. webpki); acceptable for binary distribution
+    "CC0-1.0",
+]
+
+# Copyleft licenses that must never appear in the tree.
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "LGPL-2.0",
+    "LGPL-2.1",
+    "LGPL-3.0",
+    "AGPL-3.0",
+]
+
+# Crates whose license cannot be automatically detected — add exceptions here
+# with the actual SPDX expression.
+exceptions = []
+
+# ── Banned crates ─────────────────────────────────────────────────────────────
+[bans]
+# Deny multiple versions of the same crate in the dep tree (flag for review).
+multiple-versions = "warn"
+
+# Deny these crates outright regardless of version.
+deny = []
+
+# Allow specific duplicate versions where unavoidable (e.g. old + new tokio).
+skip = []
+
+# ── Security advisories ───────────────────────────────────────────────────────
+[advisories]
+# Path to a local advisory database clone; leave empty to fetch from GitHub.
+db-path = "~/.cargo/advisory-db"
+
+# Fetch the advisory DB on each run.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Fail on any unpatched vulnerability.
+vulnerability = "deny"
+
+# Warn on unmaintained crates.
+unmaintained = "warn"
+
+# Warn on crates yanked from crates.io.
+yanked = "warn"
+
+# Allow advisories we have reviewed and accepted.
+ignore = []

@@ -13,7 +13,7 @@ use atomic_data::distributed::{
 use atomic_data::shuffle::error::NetworkError;
 use crossbeam::channel::{Receiver, Sender, bounded};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     task::{JoinSet, spawn, spawn_blocking},
 };
@@ -23,6 +23,9 @@ pub struct Executor {
     max_concurrent_tasks: u16,
     worker_id: Arc<str>,
     backend: NativeBackend,
+    /// Pre-built TLS acceptor. `None` means plain TCP (default).
+    #[cfg(feature = "tls")]
+    tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
 }
 
 impl Executor {
@@ -32,7 +35,26 @@ impl Executor {
             max_concurrent_tasks,
             worker_id: Arc::from(format!("worker-{}", port)),
             backend: NativeBackend,
+            #[cfg(feature = "tls")]
+            tls_acceptor: None,
         }
+    }
+
+    /// Configure mutual TLS using cert/key/CA PEM files.
+    ///
+    /// Only available with the `tls` feature. When called, all incoming
+    /// connections will be upgraded to mTLS before processing.
+    #[cfg(feature = "tls")]
+    pub fn with_tls(
+        mut self,
+        cert: &std::path::Path,
+        key: &std::path::Path,
+        ca: &std::path::Path,
+    ) -> Result<Self, std::io::Error> {
+        use crate::tls::tls_impl::make_server_config;
+        let cfg = make_server_config(cert, key, ca)?;
+        self.tls_acceptor = Some(Arc::new(tokio_rustls::TlsAcceptor::from(cfg)));
+        Ok(self)
     }
 
     pub fn execute_task(
@@ -121,6 +143,20 @@ impl Executor {
                     match accepted {
                         Ok((stream, _peer)) => {
                             let exec = Arc::clone(&self);
+                            #[cfg(feature = "tls")]
+                            if let Some(acceptor) = &exec.tls_acceptor {
+                                let acceptor = acceptor.clone();
+                                tasks.spawn(async move {
+                                    match acceptor.accept(stream).await {
+                                        Ok(tls_stream) => exec.handle_connection(tls_stream).await,
+                                        Err(e) => {
+                                            log::warn!("TLS handshake failed: {e}");
+                                            Ok(crate::executor::Signal::Continue)
+                                        }
+                                    }
+                                });
+                                continue;
+                            }
                             tasks.spawn(async move { exec.handle_connection(stream).await });
                         }
                         Err(_) => break,
@@ -134,9 +170,13 @@ impl Executor {
         Err(Error::ExecutorShutdown)
     }
 
-    /// Handle a single accepted TCP connection: read one transport frame, execute it,
-    /// write the response. This runs concurrently for up to `max_concurrent_tasks` connections.
-    async fn handle_connection(self: Arc<Self>, mut stream: TcpStream) -> LibResult<Signal> {
+    /// Handle a single accepted connection (plain TCP or TLS): read one transport frame,
+    /// execute it, write the response. This runs concurrently for up to `max_concurrent_tasks`
+    /// connections.
+    async fn handle_connection<S>(self: Arc<Self>, mut stream: S) -> LibResult<Signal>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         log::debug!("received new task @{} executor", self.port);
         let (frame_kind, payload) = self.read_transport_frame(&mut stream).await?;
         let exec_clone = Arc::clone(&self);
@@ -181,10 +221,13 @@ impl Executor {
         }
     }
 
-    async fn read_transport_frame(
+    async fn read_transport_frame<S>(
         &self,
-        stream: &mut tokio::net::TcpStream,
-    ) -> LibResult<(TransportFrameKind, Vec<u8>)> {
+        stream: &mut S,
+    ) -> LibResult<(TransportFrameKind, Vec<u8>)>
+    where
+        S: AsyncRead + Unpin,
+    {
         let mut header = [0_u8; TRANSPORT_HEADER_LEN];
         stream
             .read_exact(&mut header)
@@ -200,12 +243,15 @@ impl Executor {
         Ok((frame_kind, payload))
     }
 
-    async fn write_transport_frame(
+    async fn write_transport_frame<S>(
         &self,
-        stream: &mut tokio::net::TcpStream,
+        stream: &mut S,
         frame_kind: TransportFrameKind,
         payload: &[u8],
-    ) -> LibResult<()> {
+    ) -> LibResult<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
         let frame = encode_transport_frame(frame_kind, payload);
         stream.write_all(&frame).await.map_err(Error::OutputWrite)
     }

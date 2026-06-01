@@ -240,6 +240,10 @@ pub struct TaskEnvelope {
     pub ops: Vec<PipelineOp>,
     /// Serialized partition elements (rkyv-encoded `Vec<T>`).
     pub data: Vec<u8>,
+    /// Broadcast variable payloads: `(broadcast_id, rkyv-encoded value)` pairs.
+    /// Workers deserialize these into the task-local `BroadcastRegistry` before running ops.
+    /// Empty vec means no broadcasts for this task.
+    pub broadcast_values: Vec<(usize, Vec<u8>)>,
 }
 
 impl TaskEnvelope {
@@ -264,7 +268,14 @@ impl TaskEnvelope {
             trace_id,
             ops,
             data,
+            broadcast_values: vec![],
         }
+    }
+
+    /// Attach broadcast variable payloads to this envelope.
+    pub fn with_broadcasts(mut self, values: Vec<(usize, Vec<u8>)>) -> Self {
+        self.broadcast_values = values;
+        self
     }
 }
 
@@ -284,6 +295,9 @@ pub struct TaskResultEnvelope {
     /// Carries the worker's `ShuffleManager` base URI so the driver can register
     /// it with `MapOutputTracker` without decoding `data`.
     pub shuffle_server_uri: Option<String>,
+    /// Accumulator deltas collected during task execution: `(accumulator_id, rkyv-encoded delta)`.
+    /// The driver merges these into the driver-side accumulator values after the task completes.
+    pub accumulator_deltas: Vec<(usize, Vec<u8>)>,
 }
 
 impl TaskResultEnvelope {
@@ -309,6 +323,7 @@ impl TaskResultEnvelope {
             error: None,
             worker_id,
             shuffle_server_uri,
+            accumulator_deltas: vec![],
         }
     }
 
@@ -335,6 +350,7 @@ impl TaskResultEnvelope {
             error: Some(error),
             worker_id,
             shuffle_server_uri,
+            accumulator_deltas: vec![],
         }
     }
 
@@ -359,7 +375,14 @@ impl TaskResultEnvelope {
             error: Some(error),
             worker_id,
             shuffle_server_uri: None,
+            accumulator_deltas: vec![],
         }
+    }
+
+    /// Attach accumulator deltas to a successful result (called by NativeBackend).
+    pub fn with_accumulator_deltas(mut self, deltas: Vec<(usize, Vec<u8>)>) -> Self {
+        self.accumulator_deltas = deltas;
+        self
     }
 }
 
@@ -372,6 +395,9 @@ pub struct WorkerCapabilities {
     /// Op IDs registered in this worker's `TASK_REGISTRY`.
     /// Empty means "unknown / accept all" — used for backwards compatibility with old workers.
     pub registered_ops: Vec<String>,
+    /// Port of the worker's ShuffleManager HTTP server. Used by the driver heartbeat
+    /// to probe `GET /health`. `None` if the shuffle server is not yet started.
+    pub shuffle_server_port: Option<u16>,
 }
 
 impl WorkerCapabilities {
@@ -381,7 +407,13 @@ impl WorkerCapabilities {
             worker_id,
             max_tasks,
             registered_ops,
+            shuffle_server_port: None,
         }
+    }
+
+    pub fn with_shuffle_port(mut self, port: u16) -> Self {
+        self.shuffle_server_port = Some(port);
+        self
     }
 }
 

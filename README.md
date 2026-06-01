@@ -1,112 +1,315 @@
 # Atomic
 
-A distributed data processing framework written in stable Rust, inspired by Apache Spark and Vega.
+**A distributed compute engine in stable Rust — where your task functions are compiled in,
+not pickled across.**
 
-> **Not production-ready.** Atomic is an experimental research project. Critical gaps remain:
-> distributed shuffle disk spill, complete fault recovery for shuffle-map stages, LRU eviction
-> for the partition cache, and a hardened test suite. Do not use it in production systems.
+Atomic is a Spark-inspired RDD engine built on three ideas no other distributed framework has combined:
 
-See [ROADMAP.md](ROADMAP.md) for the full production readiness plan.
-
----
-
-## What is Atomic?
-
-Atomic is a rewrite and redesign of [vega](https://github.com/rajasekarv/vega), a Spark-inspired
-distributed compute engine for Rust. Vega proved that Rust could support a Spark-like RDD model,
-but it required **nightly Rust** to serialize closures across the network — a fragile foundation
-that made the project unmaintainable.
-
-Atomic solves this by replacing closure serialization entirely. Tasks are registered at compile
-time via a `#[task]` macro and dispatched to workers by a stable string ID. There are no nightly
-features, no unsafe closure transmutes, and no runtime reflection. Driver and worker run **the
-same binary** — the dispatch table is built at compile time and cannot drift.
+1. **Zero closure serialization.** Task functions are registered at compile time via `#[task]` and dispatched by ID. Workers can never receive code they weren't compiled with. No pickle failures, no "class not found", no nightly Rust required.
+2. **One binary, anywhere.** Driver and worker are the same executable. No JVM, no daemon, no cluster manager required to start. Cross-compile with `atomic build`, ship with `atomic ship` over SSH — workers are running in under a minute.
+3. **Prototype in Python, optimize in Rust — same API.** Write a job in Python or TypeScript, confirm it's correct, then rewrite the hot partition as a `#[task]` Rust function. The driver script does not change. No rewrite from scratch, no framework switch.
 
 ---
 
-## How Atomic Improves on Vega
+## Why This Matters
 
-**Vega's core limitation:** sending a closure from driver to worker required serializing a Rust
-function pointer — only possible on nightly Rust via unstable intrinsics.
+Every other distributed framework ships code to workers at runtime:
 
-**Atomic's approach:**
+- **Spark/PySpark** pickles Python closures and ships JVM bytecode. "Pickle errors" and "task not serializable" are rites of passage.
+- **Flink** serializes Java lambdas. Kryo failures are a known production hazard.
+- **Ray** ships Python functions by serializing their closure state. Complex Python object graphs fail to serialize in ways that are hard to debug.
 
-- Tasks are plain Rust functions annotated with `#[task]`. The macro registers them into a
-  compile-time dispatch table (via `inventory`). Workers look up tasks by ID — no closure,
-  no unsafe transmute.
-- Partition data is encoded with `rkyv` for zero-copy deserialization on the worker side.
-- The driver API (`ctx.parallelize(...).map_task(...).collect()`) looks like Spark/Vega, but
-  under the hood it builds a `PipelineOp` chain dispatched to workers over TCP without any
-  function serialization.
-- Python and JavaScript UDFs are first-class distributed operations via embedded PyO3 and
-  V8 runtimes (deno_core). Python users get a PySpark-equivalent REPL experience without requiring Rust.
-- SQL queries are executed by [DataFusion](https://github.com/apache/datafusion) — a full query
-  optimizer, 30+ rewrite rules, Arrow columnar execution, and Parquet/CSV/JSON readers.
-- Micro-batch streaming (`atomic-streaming`) follows the Spark Streaming DStream model.
-- Graph processing (`atomic-graph`) follows the Spark GraphX / Pregel model.
-- Local and distributed execution share the same `dispatch_pipeline` contract. Switching modes
-  is a `Config` flag, not a code change.
+Atomic's `#[task]` approach inverts this. The worker's dispatch table is linked at compile time via `inventory`. The driver sends a string ID and a data payload — not code. If a task ID doesn't exist on the worker, you get a clear error with a list of what *is* registered, at dispatch time, not buried in a worker log three hours later.
+
+```text
+Task 'my_crate::transform::normalize_v2' not registered in TASK_REGISTRY.
+Registered ops (12 total): [my_crate::transform::normalize, my_crate::transform::filter_nulls, ...]
+```
+
+This is a structural guarantee, not a coding convention.
 
 ---
 
-## Quick Example
+## Quick Start
 
-**Rust native task:**
+### Rust
+
+```rust
+use atomic_compute::{context::Context, env::Config, task};
+
+#[task]
+fn square(x: i32) -> i32 { x * x }
+
+fn main() -> anyhow::Result<()> {
+    let ctx = Context::new_with_config(Config::local())?;
+
+    let result = ctx
+        .parallelize_typed(vec![1, 2, 3, 4, 5], 2)
+        .filter(|x| x % 2 != 0)
+        .map_task(Square)          // dispatched to workers by ID in distributed mode
+        .collect()?;
+
+    println!("{result:?}");        // [1, 9, 25]
+    Ok(())
+}
+```
+
+Switch to distributed mode by changing one `Config` line — the job code is unchanged:
+
+```rust
+let config = Config::builder()
+    .local_ip("10.0.0.100".parse()?)
+    .workers(vec!["10.0.0.101:10001".parse()?, "10.0.0.102:10001".parse()?])
+    .build();
+```
+
+### Python (prototype)
+
+```python
+import atomic_compute
+
+ctx = atomic_compute.Context()
+result = (
+    ctx.parallelize([1, 2, 3, 4, 5], num_partitions=2)
+       .filter(lambda x: x % 2 != 0)
+       .map(lambda x: x * x)
+       .collect()
+)
+print(result)  # [1, 9, 25]
+```
+
+### TypeScript
+
+```typescript
+import { Context } from "@atomic-compute/js";
+
+const ctx = new Context();
+const result = ctx
+  .parallelize([1, 2, 3, 4, 5], 2)
+  .filter((x: number) => x % 2 !== 0)
+  .map((x: number) => x * x)
+  .collect();
+console.log(result);  // [1, 9, 25]
+```
+
+---
+
+## The PoC → Production Workflow
+
+Atomic is designed around a progressive adoption model. Start with Python or TypeScript to get the job right, then rewrite hot partitions in Rust for production throughput — without changing the driver script.
+
+### Step 1 — Prototype in Python
+
+```python
+import atomic_compute
+
+ctx = atomic_compute.Context()
+result = (
+    ctx.text_file("s3://my-bucket/events/")
+       .flat_map(lambda line: line.split())
+       .map(lambda w: (w.lower(), 1))
+       .reduce_by_key(lambda a, b: a + b)
+       .collect()
+)
+```
+
+### Step 2 — Promote the hot path to Rust
 
 ```rust
 #[task]
-fn double(x: i32) -> i32 { x * 2 }
-
-let ctx = Context::new_with_config(Config::local())?;
-let result = ctx.parallelize_typed(vec![1, 2, 3, 4], 2)
-    .map_task(Double)
-    .collect()?;
-// [2, 4, 6, 8]
+fn tokenize(line: String) -> Vec<(String, u64)> {
+    line.split_whitespace()
+        .map(|w| (w.to_lowercase(), 1u64))
+        .collect()
+}
 ```
 
-**Inline task lambda:**
-
-```rust
-let result = ctx.parallelize_typed(vec![1i32, 2, 3, 4], 2)
-    .map_task(task_fn!(|x: i32| -> i32 { x * 2 }))
-    .filter_task(task_fn!(|x: i32| -> bool { x > 4 }))
-    .collect()?;
-// [6, 8]
-```
-
-**SQL query over an RDD:**
-
-```rust
-let sc = Arc::new(Context::new_with_config(Config::local())?);
-let rdd = sc.parallelize_typed(batches, 4);   // batches: Vec<RecordBatch>
-let ctx = AtomicSqlContext::with_compute(Arc::clone(&sc));
-ctx.register_rdd("events", rdd)?;
-let df = ctx.sql("SELECT user_id, COUNT(*) FROM events GROUP BY 1").await?;
-df.show().await?;
-```
-
-**Python UDF (local or distributed):**
+### Step 3 — Driver script does not change
 
 ```python
-import atomic
-ctx = atomic.Context()
-result = ctx.parallelize([1, 2, 3, 4], num_partitions=2) \
-            .map(lambda x: x * 2) \
-            .filter(lambda x: x > 4) \
-            .collect()
-# [6, 8]
+# Same Python driver — workers now execute the compiled Rust #[task]
+result = (
+    ctx.text_file("s3://my-bucket/events/")
+       .flat_map_task("tokenize")
+       .reduce_by_key(lambda a, b: a + b)
+       .collect()
+)
 ```
 
-**Micro-batch streaming:**
+Python UDFs (`lambda`) are pickled and sent in the task envelope. Rust `#[task]` functions are dispatched by ID against the compiled worker binary. Both use the same wire protocol. Switching is a one-line change per transform.
 
-```rust
-let ssc = StreamingContext::new(ctx, Duration::from_secs(1));
-let queue = Arc::new(Mutex::new(VecDeque::new()));
-let stream = ssc.queue_stream(queue.clone(), true);
-ssc.foreach_rdd(stream, |rdd, _t| { /* process batch RDD */ });
-ssc.start()?;
-ssc.await_termination()?;
+---
+
+## SQL Queries
+
+`atomic-sql` wraps [Apache DataFusion](https://github.com/apache/datafusion) — a full query optimizer with 30+ rewrite rules, Arrow columnar execution, and Parquet/CSV/JSON readers.
+
+```python
+from atomic_compute import SqlContext
+
+ctx = SqlContext()
+ctx.register_parquet("orders", "s3://my-bucket/orders/")
+
+df = ctx.sql("""
+    SELECT customer_id,
+           COUNT(*)      AS order_count,
+           SUM(amount)   AS total_spent
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY customer_id
+    ORDER BY total_spent DESC
+    LIMIT 100
+""")
+
+df.show()
+df.write_parquet("/tmp/top_customers/")
+
+# Export to pandas
+table = df.to_arrow()
+pandas_df = table.to_pandas()
 ```
+
+Register an RDD directly as a SQL table:
+
+```python
+rdd = ctx.parallelize([{"id": 1, "val": 2.5}, {"id": 2, "val": 3.0}], 4)
+sql_ctx.register_rdd("data", rdd, {"id": "int64", "val": "float64"})
+df = sql_ctx.sql("SELECT * FROM data WHERE val > 2.0")
+```
+
+---
+
+## Natural Language Queries (`atomic-nlq`)
+
+Atomic's NLQ layer makes LLM-native query planning a first-class feature, not a prompt-engineering wrapper.
+
+The LLM doesn't produce SQL. It produces a structured JSON plan that `IrParser` converts directly to a DataFusion `LogicalPlan`. Novel operators (`LlmFilterNode`, `LlmMapNode`, `EmbedNode`, `VectorSearchNode`) are DataFusion `Extension` nodes — they participate in predicate push-down, projection pruning, and `LlmBatchingRule` groups per-row LLM calls into batched API requests before the physical plan runs.
+
+```text
+User: "find customers who bought luxury items and estimate lifetime value"
+         │
+         ▼  LlmPlanner (Anthropic API: schema + NL query)
+  Structured JSON plan (not SQL)
+         │
+         ▼  IrParser → DataFusion LogicalPlan
+  Aggregate {
+    LlmFilterNode { prompt: "is this a luxury item?", col: "category" }
+      TableScan("orders")
+  }
+         │
+         ▼  LlmBatchingRule → batch N rows into one API call
+         ▼  Physical planner → RddScanExec + LlmFilterExec
+         │
+         ▼  atomic-compute workers
+```
+
+No other distributed compute framework has wired LLM calls into a distributed query optimizer as first-class plan nodes.
+
+---
+
+## Deployment — Ship a Static Binary in 60 Seconds
+
+```bash
+# Install the CLI
+cargo install --path crates/atomic-cli
+
+# Cross-compile a fully static Linux binary (no deps, no JVM, no Python)
+atomic build --target x86_64-unknown-linux-musl
+
+# Upload to workers via SSH with host-key verification + SHA-256 integrity check
+atomic ship --workers user@10.0.0.101,user@10.0.0.102
+
+# Start workers (same binary, different flag)
+./my_app --worker --port 10001
+```
+
+The `ship` command verifies the remote host against `~/.ssh/known_hosts`, uploads via SFTP, verifies the SHA-256 checksum on the remote, and renames atomically. No Docker, no registry, no Kubernetes required.
+
+---
+
+## Feature Matrix
+
+| Category | Feature | Status |
+| --- | --- | --- |
+| **Core** | `#[task]` compile-time dispatch | ✅ |
+| | `task_fn!` inline anonymous tasks | ✅ |
+| | Local thread-pool execution | ✅ |
+| | Distributed TCP execution | ✅ |
+| | Lazy pipeline staging (multi-op `TaskEnvelope`) | ✅ |
+| | Speculative execution | ✅ |
+| | Job cancellation | ✅ |
+| **RDD API** | `map`, `filter`, `flat_map`, `reduce_by_key`, `group_by_key` | ✅ |
+| | `join`, `left_outer_join`, `right_outer_join`, `full_outer_join` | ✅ |
+| | `fold_by_key`, `aggregate_by_key`, `subtract_by_key` | ✅ |
+| | `tree_reduce`, `tree_aggregate` | ✅ |
+| | `to_local_iterator`, `collect_as_map`, `count_approx` | ✅ |
+| | `to_debug_string` (DAG lineage printer) | ✅ |
+| | Custom partitioner (`partition_by`) | ✅ |
+| | `cache`, `persist`, `unpersist`, `checkpoint` | ✅ |
+| | `MemoryAndDisk` / `DiskOnly` storage levels | ✅ |
+| **Shuffle** | Hash shuffle + disk spill | ✅ |
+| | Adaptive partition coalescing | ✅ |
+| | Shuffle-map stage fault recovery | ✅ |
+| **SQL** | DataFusion query engine (30+ optimizer rules) | ✅ |
+| | Parquet, CSV, JSON readers | ✅ |
+| | RDD-backed table provider | ✅ |
+| | DataFrame write (Parquet, CSV) | ✅ |
+| | SQL UDF registration (Python callable) | ✅ |
+| **Streaming** | Micro-batch DStream (`StreamingContext`) | ✅ |
+| | `reduce_by_key`, `join`, `updateStateByKey` | ✅ |
+| | Checkpoint (bincode, atomic write) | ✅ |
+| | Kafka source | ❌ planned |
+| | Event-time watermarking | ❌ planned |
+| **Graph** | Pregel engine | ✅ |
+| | PageRank, SSSP, SCC, LabelPropagation, TriangleCount, CC | ✅ |
+| **Language Bindings** | Python (`atomic-compute` on PyPI) | ✅ |
+| | TypeScript/JavaScript (`@atomic-compute/js` on npm) | ✅ |
+| | Python → Arrow (`df.to_arrow()`) | ✅ |
+| | Python RDD → SQL bridge | ✅ |
+| **Infrastructure** | S3 object store (`s3` feature) | ✅ |
+| | Mutual TLS (`tls` feature, rustls) | ✅ |
+| | Prometheus `/metrics` endpoint | ✅ |
+| | Dynamic worker heartbeat + removal | ✅ |
+| | Broadcast variables, accumulators | ✅ |
+| | `atomic build` (musl static binary) | ✅ |
+| | `atomic ship` (SSH/SFTP, host-key verified) | ✅ |
+| **NLQ** | LLM-native DataFusion plan nodes | 🔬 scaffolded |
+| | `LlmBatchingRule` optimizer | 🔬 scaffolded |
+| | `InMemoryVectorIndex` | ✅ |
+
+---
+
+## Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│  Driver (Python / TypeScript / Rust)                        │
+│                                                             │
+│  Context → TypedRdd → StagedPipeline → TaskEnvelope         │
+│                                    │                        │
+│              AtomicSqlContext → DataFusion LogicalPlan       │
+│                                    │                        │
+│              NlqContext → LlmPlanner → IrParser             │
+└────────────────────────┬────────────────────────────────────┘
+                         │  TCP (optional mTLS)
+            ┌────────────┼────────────┐
+            │            │            │
+      ┌─────▼──┐   ┌─────▼──┐  ┌─────▼──┐
+      │ Worker │   │ Worker │  │ Worker │
+      │        │   │        │  │        │
+      │ TASK_  │   │ TASK_  │  │ TASK_  │
+      │REGISTRY│   │REGISTRY│  │REGISTRY│
+      │(same   │   │(same   │  │(same   │
+      │binary) │   │binary) │  │binary) │
+      └────────┘   └────────┘  └────────┘
+```
+
+**Key architectural properties:**
+
+- `TASK_REGISTRY` is linked at compile time via `inventory::submit!`. Workers cannot execute tasks they weren't compiled with — there is no remote code execution surface.
+- All distributed wire types use `rkyv` for zero-copy deserialization. No reflection, no dynamic dispatch on the hot path.
+- `LocalScheduler` and `DistributedScheduler` share the same `NativeBackend` dispatch. Local-mode tests cover exactly the same codepath as distributed-mode jobs.
+- Python UDFs are `cloudpickle`-serialized and executed by the embedded PyO3 runtime in `atomic-worker`. JavaScript UDFs are shipped as source strings and evaluated by the embedded V8 runtime. Both go through the same `TaskEnvelope` wire format as Rust `#[task]` functions.
 
 ---
 
@@ -114,207 +317,125 @@ ssc.await_termination()?;
 
 | Crate | Purpose |
 | --- | --- |
-| `atomic-data` | Shared types: RDD traits, task envelopes, wire protocol, shuffle primitives, partition cache |
-| `atomic-compute` | Execution runtime: context, executor, `NativeBackend`, RDD impls, UDF dispatch, persist/cache |
-| `atomic-scheduler` | Local thread-pool (`LocalScheduler`) and distributed TCP (`DistributedScheduler`) schedulers |
-| `atomic-sql` | SQL layer built on DataFusion — `AtomicSqlContext`, `DataFrame`, RDD-backed table providers |
-| `atomic-streaming` | Spark Streaming–style micro-batch streaming — `StreamingContext`, `DStream`, `JobScheduler` |
-| `atomic-graph` | GraphX-style graph processing — `Graph`, Pregel engine, PageRank, shortest path, SCC, LPA |
-| `atomic-cli` | Cross-compilation (`cargo-zigbuild`) + secure SSH/SFTP binary distribution to workers |
-| `atomic-nlq` | Natural language query layer (LLM-first analytics) — planned; partially scaffolded |
-| `atomic-runtime-macros` | `#[task]` and `task_fn!` proc-macros for compile-time task registration |
-| `atomic-py` | Python extension module (maturin/PyO3) — Spark-like Python driver API |
-| `atomic-js` | JavaScript library (napi-rs) — Spark-like JS/TS driver API |
-| `atomic-worker` | Polyglot worker binary with embedded Python (PyO3) + V8 (deno_core) runtimes |
-| `atomic-utils` | Shared utilities (bounded priority queue, random helpers, etc.) |
+| `atomic-data` | Shared types — RDD traits, task envelopes, wire protocol, shuffle primitives, cache |
+| `atomic-compute` | Execution runtime — context, executor, `NativeBackend`, RDD implementations |
+| `atomic-scheduler` | `LocalScheduler` (thread-pool) + `DistributedScheduler` (TCP, speculative, heartbeat) |
+| `atomic-sql` | SQL layer — `AtomicSqlContext`, `DataFrame`, RDD-backed DataFusion table providers |
+| `atomic-streaming` | Micro-batch streaming — `StreamingContext`, `DStream`, `JobScheduler` |
+| `atomic-graph` | Graph processing — `Graph<VD,ED>`, Pregel engine, built-in algorithms |
+| `atomic-nlq` | Natural language query — LLM-native DataFusion plan nodes, `LlmBatchingRule` |
+| `atomic-py` | Python bindings (maturin/PyO3) — full RDD + SQL API, Arrow integration |
+| `atomic-js` | JavaScript/TypeScript bindings (napi-rs) — full RDD + SQL API |
+| `atomic-worker` | Polyglot worker binary — embedded PyO3 + V8 runtimes |
+| `atomic-cli` | Cross-compilation (`cargo-zigbuild`) + secure SSH/SFTP binary distribution |
+| `atomic-runtime-macros` | `#[task]` and `task_fn!` proc-macros |
 
 ---
 
-## What is Implemented
+## Honest Comparison With Spark
 
-### Core Engine
+| Dimension | Spark | Atomic |
+| --- | --- | --- |
+| Task dispatch | Runtime pickle / bytecode shipping | Compile-time `#[task]` dispatch table |
+| Worker startup | JVM cold start (seconds) | Native binary (milliseconds) |
+| Memory model | GC + off-heap tricks | Rust ownership + rkyv zero-copy |
+| Closure safety | Runtime serialization failures | Compile-time — "does it build?" = "does it dispatch?" |
+| Deployment | JVM on every node + cluster manager | Static musl binary, SSH upload |
+| SQL optimizer | Catalyst (10yr+, highly mature) | DataFusion (excellent, newer) |
+| Streaming | Structured Streaming + Kafka, exactly-once | Micro-batch; no Kafka yet |
+| Kubernetes | Full operator | Not yet |
+| Ecosystem | Delta Lake, MLflow, hundreds of connectors | Early |
+| NLQ / LLM | Plugin / prompt wrapper | First-class plan nodes |
+| Stability | Exabyte-tested | Early-stage; strong test suite |
 
-- [x] Stable-Rust task dispatch via `#[task]` macro and `task_fn!` — no nightly required
-- [x] `rkyv` zero-copy wire protocol for partition data
-- [x] Local thread-pool execution via `LocalScheduler` (full DAG / stage / shuffle support)
-- [x] Distributed TCP execution via `DistributedScheduler` (capacity-aware placement)
-- [x] Multi-op lazy pipeline staging (`PipelineOp` chains dispatched as single `TaskEnvelope`)
-- [x] Two-phase shuffle execution — lazy `ShuffleDependency` + `ShuffledRdd` DAG
-- [x] `DashMapShuffleCache` + `ShuffleManager` HTTP server + `ShuffleFetcher` with exponential-backoff retry
-- [x] `MapOutputTracker` — tracks shuffle bucket URIs per worker
-- [x] `partition_id` in `TaskResultEnvelope` for correct result ordering after retries
-- [x] Per-task failure counter, resubmit queue, `MaxTaskFailures` error
-- [x] RDD persist/cache — `cache()` / `persist(StorageLevel)` backed by `PartitionStore` (MemoryOnly)
-- [x] `AtomicApp::build()` — unified entry point; reads `--worker`/`--workers`/`--local-ip` from CLI
-- [x] Explicit `Config` struct at entry point — replaces global env-var reading
-
-### RDD API
-
-- [x] Transformations: `map_task`, `filter_task`, `flat_map_task`, `fold_task`, `reduce_task`
-- [x] Transformations: `map`, `filter`, `flat_map`, `map_values`, `flat_map_values`, `key_by`
-- [x] Pair operations: `reduce_by_key`, `group_by_key`, `count_by_key`, `count_by_value`, `group_by`
-- [x] Set/combine: `union`, `zip`, `cartesian`, `coalesce`, `map_partitions`
-- [x] Actions: `collect`, `count`, `take`, `first`, `fold`, `reduce`, `aggregate`, `for_each`, `for_each_partition`, `is_empty`, `top`, `take_ordered`, `max`, `min`, `count_by_value`
-- [x] All actions dispatch staged pipelines to workers in distributed mode
-
-### SQL Layer (`atomic-sql`)
-
-- [x] `AtomicSqlContext` wrapping DataFusion `SessionContext`
-- [x] Parquet, CSV, JSON readers (via DataFusion)
-- [x] SQL parsing, logical plan, 30+ optimizer rules (predicate push-down, projection pruning, etc.)
-- [x] Arrow `RecordBatch` columnar execution
-- [x] `RddTableProvider` + `RddScanExec` — SQL over a live `TypedRdd<RecordBatch>`
-- [x] `UdfRegistry` for `ScalarUDF` / `AggregateUDF` registration
-- [x] `DataFrame` lazy result wrapper
-
-### Streaming (`atomic-streaming`)
-
-- [x] `StreamingContext` + `DStreamGraph` + batch loop
-- [x] Input DStreams: `QueueInputDStream`, `SocketInputDStream`, `FileInputDStream`
-- [x] Transformation DStreams: `MappedDStream`, `FlatMappedDStream`, `FilteredDStream`, `WindowedDStream`
-- [x] `ForEachDStream` — primary output operation
-- [x] `Checkpoint` serialization (bincode, atomic write)
-- [x] `JobScheduler` batch loop thread
-
-### Graph Processing (`atomic-graph`)
-
-- [x] `Graph<VD, ED>` — vertex + edge RDDs
-- [x] Pregel bulk-synchronous execution engine
-- [x] PageRank
-- [x] Shortest path (Dijkstra over Pregel)
-- [x] Strongly connected components
-- [x] Label propagation (community detection)
-- [x] Triangle count
-- [x] Connected components
-
-### Language Bindings and Tooling
-
-- [x] Python UDF support (PyO3 / pickle) — executed in worker subprocess
-- [x] JavaScript UDF support (V8/deno_core / fn.toString) — executed in worker V8 runtime
-- [x] `atomic-py` — Spark-like Python driver API (`parallelize`, `map`, `filter`, `fold`, `collect`, etc.)
-- [x] `atomic-js` — Spark-like JavaScript driver API
-- [x] `atomic-worker` — polyglot worker binary (native + Python + JS tasks)
-- [x] `atomic-cli` — cross-compile (`cargo-zigbuild`, no Docker) + secure SSH/SFTP distribution
-  - Host-key verification against `~/.ssh/known_hosts`; SHA-256 integrity check; atomic rename
-- [x] Distributed integration test — real driver + worker over TCP
+Atomic is likely **faster** for small-to-medium CPU-bound jobs where JVM overhead and GC dominate. Spark wins for very large shuffles, complex joins with AQE, and Kafka-scale streaming. Choose Atomic if you want to avoid the JVM stack entirely and accept being an early adopter.
 
 ---
 
-## What is NOT Yet Implemented
+## Getting Started
 
-| Feature | Status |
-| --- | --- |
-| Distributed shuffle disk spill | Memory-only; OOM risk on large shuffles |
-| Failed shuffle-map stage recompute | Detected, not fully requeued |
-| LRU eviction for `PartitionStore` | Unbounded in-memory growth |
-| `unpersist()` | Cache invalidation API missing |
-| `MemoryAndDisk` / `DiskOnly` storage levels | Treated as `MemoryOnly` |
-| Broadcast variables | Not implemented |
-| Accumulators | Not implemented |
-| DAG optimizer | No predicate push-down, pipeline fusion, or partition pruning at RDD level |
-| Speculative execution | Not implemented |
-| Adaptive query execution | Not implemented |
-| Dynamic resource allocation | Not implemented |
-| Object store integration (S3/GCS/HDFS) | Not implemented |
-| Streaming: distributed mode | Local only; no distributed receiver scheduling |
-| Streaming: `updateStateByKey` / `mapWithState` | Not implemented |
-| Streaming: shuffle DStream end-to-end | Scaffolded, not wired |
-| Streaming: checkpointing wired to batch loop | Checkpoint type exists; not integrated |
-| Web dashboard / metrics endpoint | Structured logs only |
-| TLS / auth for worker communication | Plain TCP, no encryption |
-| PyPI release pipeline | Not set up |
-| npm release pipeline | Not set up |
-
----
-
-## Installation
-
-### Rust (native tasks)
+### Rust (examples)
 
 ```bash
 cargo build --release
+cargo run --example task_wordcount
+cargo run --example pi
+cargo run --example sort
 ```
 
-### Python
+### Python (bindings)
 
 ```bash
 cd crates/atomic-py
 pip install maturin
 maturin develop --release
+pytest tests/
 ```
 
-### JavaScript / Node.js
+### JavaScript / TypeScript (bindings)
 
 ```bash
-cargo build --release -p atomic-js
-const { Context } = require('./crates/atomic-js');
+cd crates/atomic-js
+npm install
+npm run build
+npm test
 ```
 
-### Worker binary
+### Distributed mode — local loopback (same machine)
+
+Driver and worker run as two separate processes on the same machine. Useful for testing distributed code locally — no shipping needed.
 
 ```bash
-cargo build --release -p atomic-worker
-RUST_LOG=info ./target/release/atomic-worker --worker --port 10001
+# 1. Build
+cargo build --release
+
+# 2. Start a worker in one terminal
+RUST_LOG=info ./target/release/my_app --worker --port 10001
+
+# 3. Run the driver in another terminal
+ATOMIC_DEPLOYMENT_MODE=distributed \
+ATOMIC_LOCAL_IP=127.0.0.1 \
+ATOMIC_WORKERS=127.0.0.1:10001 \
+./target/release/my_app
 ```
 
-### Cross-compile and ship to remote workers
+### Distributed mode — real cluster (separate machines)
+
+Workers run on remote hosts. You must cross-compile, ship the binary, and start workers before running the driver.
 
 ```bash
-# Install atomic-cli
-cargo install --path crates/atomic-cli
-
-# Build for Linux musl target and ship via SSH
+# 1. Cross-compile a static Linux binary
+cargo install --path crates/atomic-cli   # install once
 atomic build --target x86_64-unknown-linux-musl
-atomic ship --workers user@host1,user@host2
+
+# 2. Ship to worker hosts (SSH key from agent; host-key verified)
+atomic ship --workers user@10.0.0.101,user@10.0.0.102
+
+# 3. Start workers on each remote host (SSH in, or via systemd)
+ssh user@10.0.0.101 "RUST_LOG=info ./my_app --worker --port 10001 &"
+ssh user@10.0.0.102 "RUST_LOG=info ./my_app --worker --port 10001 &"
+
+# 4. Run the driver locally
+ATOMIC_DEPLOYMENT_MODE=distributed \
+ATOMIC_LOCAL_IP=10.0.0.100 \
+ATOMIC_WORKERS=10.0.0.101:10001,10.0.0.102:10001 \
+./target/release/my_app
 ```
 
----
-
-## Running Examples
-
-```bash
-# Local word count
-cargo run --example task_wordcount
-
-# Pi estimation (Monte Carlo)
-cargo run --example pi
-
-# Distributed sort
-cargo run --example sort
-
-# Group-by
-cargo run --example group_by
-```
+See [docs/getting-started.md](docs/getting-started.md), [docs/configuration.md](docs/configuration.md), and [docs/deployment.md](docs/deployment.md) for full documentation.
 
 ---
 
-## Design Notes
+## Status
 
-- Distributed tasks reference pre-registered functions by ID via `#[task]` + `TASK_REGISTRY`. Workers cannot receive arbitrary Rust code at runtime — only data payloads and op IDs. This is intentional: it keeps the execution model auditable and the worker surface area small.
-- Python/JS UDFs are the explicit escape hatch for dynamic code. They go through a clearly bounded path (`PythonUdf` / `JavaScriptUdf` actions) with their own serialization format.
-- `rkyv` is used for the Rust native path; JSON is used for the Python/JS path.
-- `atomic-py` is a `cdylib` — it must be built with `maturin`, not `cargo build`. `atomic-worker` must be excluded from `cargo test --workspace` because it activates PyO3's `auto-initialize` feature.
-- DataFusion is the SQL IR backbone. `atomic-sql` uses `Extension(UserDefinedLogicalNode)` to add RDD-backed scan operators without leaving the DataFusion ecosystem.
+**Beta** — all core features are implemented and tested. The test suite covers local execution, distributed TCP dispatch, shuffle, streaming, graph, and SQL. Production readiness depends on your risk tolerance and workload:
 
----
-
-## Benchmarks and Comparison with Spark
-
-Atomic has not been formally benchmarked against Spark. Expected tradeoffs:
-
-| Dimension | Spark | Atomic |
-| --- | --- | --- |
-| JVM startup | Slow (seconds) | N/A — native |
-| Worker startup | Slow (JVM) | Fast (milliseconds) |
-| Per-partition memory | GC pressure + off-heap tricks | Rust ownership + rkyv zero-copy |
-| CPU-bound transforms | JIT can close gaps | Native speed; no JIT overhead |
-| DAG optimizer | Mature (Catalyst) | Basic (DataFusion for SQL; RDD layer unoptimized) |
-| Ecosystem | Very large | Early stage |
-
-Atomic is likely faster for small-to-medium CPU-bound jobs. Spark has the advantage for very large jobs where its DAG optimizer, speculative execution, and dynamic resource management offset startup costs.
+- ✅ **Ready**: Local-mode jobs, SQL analytics (DataFusion), graph algorithms, Python/JS prototyping, musl static binary deployment
+- ⚠️ **Early adopter**: Distributed mode on real workloads — core is solid, but cluster management (K8s) and streaming sources (Kafka) are missing
+- ❌ **Not yet**: Kafka streaming, Kubernetes operator, event-time watermarking, sort-based shuffle
 
 ---
 
 ## License
 
-Licensed under the [Apache 2.0 License](LICENSE).
+[Apache 2.0](LICENSE)

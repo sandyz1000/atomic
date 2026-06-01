@@ -1,6 +1,7 @@
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.82"
 authors = ["Sandip Dey <sandip.dey1988@yahoo.com>"]
 
 [workspace]
@@ -13,7 +14,7 @@ exclude = ["examples/py-demo", "examples/ts-demo"]
 #   - the integration test binary (integration/src/main.rs)
 #   - integration test suites in tests/
 [package]
-name = "atomic"
+name = "atomic-engine"
 version = "0.1.0"
 edition = "2024"
 
@@ -89,6 +90,14 @@ prost = "0.14.1"
 tonic-build = "0.14.5"
 hyper = "1.9.0"
 http-body-util = "0.1.3"
+prometheus = { version = "0.13", default-features = false, features = ["process"] }
+aws-sdk-s3 = { version = "1" }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = { version = "1" }
+tokio-rustls = { version = "0.26" }
+rustls = { version = "0.23" }
+rustls-pemfile = { version = "2.0" }
+rcgen = { version = "0.13" }
 rmp-serde = "1.3"
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.51.0", features = ["full"] }

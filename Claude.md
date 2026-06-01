@@ -1,4 +1,81 @@
-# Atomic Project Notes
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Critical Rules
+
+- **Do NOT modify `README.md`** in the root directory.
+- For any serialization/deserialization question, use **rkyv** for Rust native paths before considering other approaches.
+- `atomic-py` is a `cdylib` — build it only with `maturin`, never with `cargo build` alone. `cargo test` for it also requires `maturin develop`.
+- `atomic-worker` must be **excluded** from `cargo test --workspace` — it activates PyO3's `auto-initialize` feature, which breaks the link step in non-Python test binaries.
+
+---
+
+## Development Commands
+
+```bash
+# Build all Rust crates
+cargo build
+
+# Build release
+cargo build --release
+
+# Run all workspace tests (excludes atomic-py and atomic-worker by design)
+cargo test --workspace --exclude atomic-py --exclude atomic-worker
+
+# Run a single test file
+cargo test -p atomic -- test_pair_ops
+
+# Run a specific test by name
+cargo test -p atomic -- test_reduce_by_key_basic
+
+# Run the distributed integration test (spawns a real worker process)
+cargo test -p atomic -- test_distributed
+
+# Run integration binaries
+cargo run --bin integration
+cargo run --bin integration_shuffle_wordcount
+cargo run --bin integration_multi_stage
+cargo run --bin integration_fault_tolerance
+
+# Run examples
+cargo run --example task_wordcount
+cargo run --example pi
+cargo run --example sort
+cargo run --example group_by
+
+# Python binding (requires maturin)
+cd crates/atomic-py
+pip install maturin
+maturin develop --release        # installs into current venv
+pytest tests/                    # run Python tests
+
+# Worker binary
+cargo build --release -p atomic-worker
+RUST_LOG=info ./target/release/atomic-worker --worker --port 10001
+
+# Cross-compile and ship to remote workers
+cargo install --path crates/atomic-cli
+atomic build --target x86_64-unknown-linux-musl
+atomic ship --workers user@host1,user@host2
+
+# Build with TLS support
+cargo build --release --features tls
+
+# Build with S3 support
+cargo build --release --features s3
+
+# Run distributed tests (requires pre-built binary)
+cargo build --release -p atomic
+cargo test -p atomic -- --test-threads=1 --ignored
+
+# Run CI locally (mirrors GitHub Actions)
+cargo test --workspace --exclude atomic-py --exclude atomic-worker -- --test-threads=4
+cargo fmt --all -- --check
+cargo clippy --workspace --exclude atomic-py --exclude atomic-worker -- -D warnings
+```
+
+---
 
 ## Project Goal
 
@@ -16,8 +93,14 @@ Atomic is a stable-Rust rewrite and refactor of Vega.
 - `crates/atomic-scheduler`: DAG building, stage planning, job tracking, `LocalScheduler`, `DistributedScheduler`.
 - `crates/atomic-sql`: structured data and SQL query layer — built on DataFusion (see below).
 - `crates/atomic-streaming`: Spark Streaming–style micro-batch streaming on top of `atomic-compute`.
+- `crates/atomic-graph`: GraphX-style graph processing — `Graph<VD,ED>`, Pregel engine, built-in algorithms.
+- `crates/atomic-nlq`: natural language query layer — LLM-native DataFusion plan nodes, `LlmBatchingRule`, vector index (scaffolded).
+- `crates/atomic-py`: Python bindings via PyO3/maturin — full RDD API, mirrors `TypedRdd`.
+- `crates/atomic-js`: Node.js bindings via NAPI — full RDD API, mirrors `TypedRdd`.
+- `crates/atomic-worker`: standalone worker binary with embedded PyO3 + V8 runtimes.
 - `crates/atomic-cli`: cross-compilation and secure binary distribution to remote workers.
 - `crates/atomic-utils`: shared utilities.
+- `crates/atomic-tests`: integration test suite (distributed, shuffle, streaming, graph, SQL).
 - `notes/`: architecture notes and design documents.
 
 ## RDD API Convention
@@ -137,16 +220,38 @@ Distributed tasks use types from `atomic_data::distributed`.
 - **RDD persist/cache**: `TypedRdd::cache()` / `TypedRdd::persist(StorageLevel)` — partitions stored in global `PARTITION_CACHE` (`PartitionStore`) as typed `Arc<Vec<T>>`; no serialization required; subsequent actions hit the store instead of recomputing the DAG.
 - **`atomic-cli`**: cross-compilation with `cargo-zigbuild` (no Docker); secure SSH/SFTP binary distribution via `russh`; host-key verification against `~/.ssh/known_hosts`; SHA-256 integrity check on remote; atomic rename; no credentials in process list.
 - **`atomic-streaming` Phase 4**: `MappedDStream`, `FlatMappedDStream`, `FilteredDStream`, `WindowedDStream` all implement `compute()` using `MapperRdd`, `FlatMapperRdd`, and `UnionRdd`.
+- **`atomic-graph`**: `Graph<VD,ED>` (vertex RDD + edge RDD pair), Pregel bulk-synchronous message-passing engine, built-in algorithms: PageRank, ShortestPath (Dijkstra), StronglyConnectedComponent (Kosaraju), LabelPropagation (community detection), TriangleCount, ConnectedComponent (union-find).
+- **`atomic-py`**: PyO3/maturin Python bindings — full RDD API (`parallelize`, `map`, `filter`, `flat_map`, `reduce_by_key`, `group_by_key`, `collect`, etc.), mirrors `TypedRdd`.
+- **`atomic-js`**: NAPI Node.js bindings — identical RDD API to `atomic-py`, mirrors `TypedRdd`.
+- **`atomic-worker`**: standalone worker binary with embedded PyO3 and V8 (deno_core) runtimes; accepts `TaskEnvelope` over TCP.
+- **`atomic-nlq` scaffolded**: crate exists with `NlqContext`, `LlmPlanner`, `IrParser`, IR extension nodes (`LlmFilterNode`, `LlmMapNode`, `EmbedNode`, `VectorSearchNode`), `LlmBatchingRule`, physical executors, `InMemoryVectorIndex` — wiring of full pipeline in progress.
+- **LRU eviction for `PartitionStore`**: configurable max partition count (default 1024); LRU eviction when full.
+- **`unpersist()` / `is_cached()`**: `TypedRdd::unpersist()` removes all cached partitions from `PARTITION_CACHE`; `is_cached()` checks presence. `collect_partitions()` returns `Vec<Vec<T>>` (one per partition).
+- **`MemoryAndDisk` / `DiskOnly` storage levels**: `TypedRdd::persist_with_disk(level)` materialises all partitions upfront; disk path `{work_dir}/rdd-cache/{rdd_id}/{partition}.bin` (bincode-encoded). `CachedRdd::spill_path()` returns the disk path; `disk_write_partition` / `disk_read_partition` helpers in `cached.rs`.
+- **Metrics endpoint (Prometheus)**: `SchedulerMetrics` in `atomic-scheduler/src/metrics.rs`; `start_metrics_server(port)` serves `GET /metrics` in Prometheus text format via hyper. Enable with `Config { metrics_port: Some(9090), .. }`.
+- **S3 object store** (`s3` feature): `aws-sdk-s3` + `aws-config`; `Context::text_file("s3://bucket/prefix")` lists keys and returns a lazy `TypedRdd<String>`; `TypedRdd::save_as_text_file("s3://...")` uploads `part-N` objects. Credentials from standard AWS chain (env vars, `~/.aws/credentials`, IAM role).
+- **`Context::text_file(uri)`**: dispatches by URI scheme — `s3://` (requires `s3` feature), `file://` or bare local path, directory → one partition per file.
+- **`TypedRdd::save_as_text_file(uri)`**: writes one `part-N` file per partition; supports local path and `s3://` (with `s3` feature).
+- **RDD checkpointing (lineage truncation)**: `TypedRdd::checkpoint(dir)` — materialises all partitions, writes to `{dir}/{rdd_id}/{partition}.bin` (local or `s3://`), and returns a new `TypedRdd` backed by `CheckpointRdd` with no parent dependencies. `CheckpointStore::Local` or `CheckpointStore::S3`.
+- **Speculative execution**: `Config::speculation_multiplier: Option<f64>` — when `Some(m)`, `DistributedScheduler` monitors task durations; once ≥50% of partitions in a stage complete, any task running longer than `m × median_duration` gets a speculative copy on a different worker; first result wins. Set `ATOMIC_SPECULATION_MULTIPLIER` env var or `Config { speculation_multiplier: Some(1.5), .. }`.
+- **Adaptive shuffle coalescing (P2.1/P2.2)**: `Config::coalesce_shuffle_threshold_bytes` (env: `ATOMIC_COALESCE_SHUFFLE_THRESHOLD_BYTES`). After shuffle-map stage, `Mutators::compute_coalescing()` queries `SHUFFLE_CACHE` for bucket sizes and stores coalesced partition count in `MapOutputTracker::coalesced_partitions`. `ShuffledRdd::number_of_splits()` and `compute()` use this to merge small reduce partitions.
+- **Dynamic resource allocation (P2.3)**: `Config::heartbeat_interval_secs` / `heartbeat_timeout_ms`. `DistributedScheduler::start_heartbeat()` probes `GET /health` on each worker's `ShuffleManager`; removes dead workers via `remove_worker()`. `dynamically_add_worker()` for runtime worker registration. `WorkerCapabilities::shuffle_server_port` carries the health-check port.
+- **TLS for worker communication (P3.1)**: `tls` feature flag. `Executor::with_tls(cert, key, ca)` enables mTLS via `rustls`; `Executor::handle_connection` is now generic over `AsyncRead + AsyncWrite + Unpin`. `Config::tls_ca_cert/tls_cert/tls_key` (env: `ATOMIC_TLS_*`). Plain TCP when not configured.
+- **CI integration test suite (P3.4)**: `.github/workflows/ci.yml` with `test-local` (ubuntu + macos), `test-distributed` (pre-built binary + `--ignored` tests), and `lint` jobs. Distributed tests in `tests/test_distributed.rs` are now `#[ignore]`.
+- **PyPI release pipeline (P3.2)**: `.github/workflows/release-py.yml` — maturin wheels for 4 targets + sdist; PyPI OIDC publishing.
+- **npm release pipeline (P3.3)**: `.github/workflows/release-js.yml` — napi-rs `.node` bindings for 4 targets; npm publish.
 
 ### Not Done Yet
 
-- Distributed shuffle end-to-end: each worker needs to run its own `ShuffleManager` and register its URI with the driver's `MapOutputTracker`.
-- `ShuffleFetcher` retry on transient network errors.
-- Failed shuffle-map stage recompute / fault recovery.
-- `CacheTracker` distributed protocol — locality-aware scheduling using cached partition locations (deferred; local cache works correctly without it).
-- LRU eviction for `PartitionStore` — currently unbounded in-memory growth.
-- `unpersist()` — explicit cache invalidation API.
-- Windowed reduce-by-key / `updateStateByKey` / `mapWithState` in streaming.
+All P0, P1, P2, and P3 ROADMAP items are complete. Remaining known gaps:
+
+- **`MemoryAndDisk` lazy eviction**: `persist_with_disk` eagerly writes all partitions upfront; a true write-on-LRU eviction hook is not implemented.
+- **Streaming distributed receivers**: `ReceiverTracker` is a local stub; Kafka / Kinesis sources not implemented.
+- **`atomic-nlq` physical execution**: `LlmFilterExec` / `LlmMapExec` / `EmbedExec` scaffolded but not fully wired to DataFusion physical planner.
+- **Sort-based shuffle**: only hash partitioning; range-shuffle for globally sorted output not implemented.
+- **`ShuffleFetcher` transient retry**: network-level retry on temporary fetch failures not implemented.
+- **`CacheTracker` distributed protocol**: locality-aware scheduling deferred; local cache works without it.
+- **TLS for `ShuffleManager` HTTP**: executor TCP is TLS-wrapped; shuffle HTTP server is still plain HTTP.
 
 ## atomic-sql Architecture
 
@@ -471,21 +576,57 @@ RDD IDs for streaming-created RDDs use a module-level `static AtomicUsize` start
 
 ---
 
-## Planned Features
+## atomic-graph Architecture
 
-### atomic-nlq — Natural Language Query Layer (LLM-first analytics)
+`crates/atomic-graph` implements GraphX-style graph processing on top of `atomic-compute`.
 
-The long-term direction is a general-purpose analytics platform where users express intent
-in natural language and the system compiles it to an execution plan — without routing through
-SQL as an intermediate representation.
+### Core Types
 
-**DataFusion is the IR backbone.**  DataFusion's `LogicalPlan` with `Extension` nodes *is* the
-IR.  Relational operators (Scan, Filter, Aggregate, Join, …) use DataFusion's built-in plan
-nodes directly.  Novel LLM-specific operators (`LlmMap`, `LlmFilter`, `Embed`, `VectorSearch`)
-are DataFusion `Extension(UserDefinedLogicalNode)` nodes — the same pattern already used by
-`RddScanExec` in `atomic-sql`.  No custom AST enum is needed.
+| Type | File | Role |
+| --- | --- | --- |
+| `Graph<VD, ED>` | `graph.rs` | Pair of vertex RDD + edge RDD; primary entry point |
+| `Pregel<VD, ED, Msg>` | `pregel.rs` | Bulk-synchronous message-passing engine |
 
-#### Full pipeline
+### Built-in Algorithms
+
+| Algorithm | Description |
+| --- | --- |
+| `PageRank` | Iterative PageRank via Pregel |
+| `ShortestPath` | Dijkstra's via Pregel |
+| `StronglyConnectedComponent` | Kosaraju's two-pass algorithm |
+| `LabelPropagation` | Community detection |
+| `TriangleCount` | Per-vertex triangle count |
+| `ConnectedComponent` | Union-find via Pregel |
+
+### Pregel Model
+
+Each superstep: every active vertex receives messages from the previous step, runs a user-defined
+`vertex_program`, sends messages to neighbors via `send_message`, and merges incoming messages via
+`merge_message`. Vertices are deactivated when they send no messages. Terminates when no messages
+remain.
+
+```rust
+let graph = Graph::new(vertices_rdd, edges_rdd);
+let ranks = PageRank::new(0.85, 20).run(&graph)?;
+```
+
+---
+
+## atomic-nlq Architecture
+
+`crates/atomic-nlq` is **scaffolded** — the crate, module structure, and type stubs exist; the
+full execution pipeline is wiring in progress.
+
+### Vision
+
+A general-purpose analytics platform where users express intent in natural language and the system
+compiles it to an execution plan — without routing through SQL as an intermediate representation.
+
+**DataFusion is the IR backbone.** DataFusion's `LogicalPlan` with `Extension` nodes *is* the IR.
+Novel LLM-specific operators (`LlmMap`, `LlmFilter`, `Embed`, `VectorSearch`) are DataFusion
+`Extension(UserDefinedLogicalNode)` nodes.
+
+### Full Pipeline
 
 ```text
 User: "find customers who bought luxury items and estimate lifetime value"
@@ -513,83 +654,32 @@ User: "find customers who bought luxury items and estimate lifetime value"
   atomic-compute RDD DAG → LocalScheduler / DistributedScheduler → workers
 ```
 
-#### Why DataFusion instead of a custom IR enum
+### NLQ Component Types
 
-| Concern | DataFusion approach |
-| --- | --- |
-| Relational nodes (Scan, Filter, Join, …) | Built-in `LogicalPlan` variants — zero code |
-| Novel nodes (LlmMap, Embed, VectorSearch) | `Extension(Arc<dyn UserDefinedLogicalNode>)` — one struct per operator |
-| Schema resolution + type checking | DataFusion analyzer passes — built-in |
-| 30+ optimizer rules (predicate push-down, etc.) | Built-in, run automatically |
-| Custom optimization (LLM call batching) | `OptimizerRule` trait — one impl per custom pass |
-| UDFs / scalar functions | `ScalarUDF` + DataFusion `FunctionRegistry` — already wired in `atomic-sql` |
-| Arrow columnar execution | `ExecutionPlan` + `RecordBatch` — already used by `RddScanExec` |
+| Component | File | Role | Status |
+| --- | --- | --- | --- |
+| `NlqContext` | `context.rs` | Entry point — wraps `AtomicSqlContext` + Anthropic client | Scaffolded |
+| `LlmPlanner` | `planner.rs` | Calls Anthropic API → JSON plan | Scaffolded |
+| `IrParser` | `ir/` | JSON plan → DataFusion `LogicalPlan` | Scaffolded |
+| `LlmFilterNode` / `LlmMapNode` / `EmbedNode` / `VectorSearchNode` | `nodes/` | `UserDefinedLogicalNode` impls | Scaffolded |
+| `LlmFilterExec` / `LlmMapExec` / `EmbedExec` / `VectorSearchExec` | `physical/` | `ExecutionPlan` impls | Scaffolded |
+| `LlmBatchingRule` | `optimizer/` | Groups per-row LLM calls into batched API requests | Scaffolded |
+| `NlqRegistry` | `registry.rs` | UDF name → description + DataFusion `ScalarUDF` | Scaffolded |
+| `InMemoryVectorIndex` | `vector/in_memory.rs` | In-memory ANN vector index | Implemented |
+| `VectorIndexProvider` | `vector/provider.rs` | Pluggable vector index trait | Implemented |
 
-#### Novel plan nodes (each requires two impls)
-
-```text
-LlmMap(prompt_template, model, col)   ← transform each row with LLM
-LlmFilter(prompt_template, model)     ← boolean predicate via LLM
-Embed(col, model)                     ← produce vector embedding column
-VectorSearch(query_col, index, k)     ← ANN / similarity join
-```
-
-Each node follows the pattern established by `RddScanExec`:
+### NlqContext Entry Point (target API)
 
 ```rust
-// 1. Logical node — used by LlmPlanner + optimizer
-struct LlmFilterNode { prompt: String, model: String, input: LogicalPlan }
-impl UserDefinedLogicalNode for LlmFilterNode { ... }
-
-// 2. Physical node — called by DataFusion executor per partition
-struct LlmFilterExec { ... }
-impl ExecutionPlan for LlmFilterExec {
-    fn execute(&self, partition, ctx) -> SendableRecordBatchStream {
-        // call Anthropic API on this partition's RecordBatch → return filtered batches
-    }
-}
+let ctx = NlqContext::new(NlqConfig { model: "claude-opus-4-8".into(), ..Default::default() });
+ctx.register_table("orders", orders_df).await?;
+let result = ctx.query("find customers who bought luxury items").await?;
+result.show().await?;
 ```
 
-#### UDF Integration
-
-UDFs are registered in DataFusion's `FunctionRegistry` (already used in `atomic-sql` via
-`UdfRegistry`) plus a companion `description` field the LLM planner exposes as available tools.
-
-```rust
-// planned API
-registry.register_scalar("is_luxury",    "Returns true if the category is a luxury item",
-    |category: &str| -> bool { ... });
-registry.register_scalar("estimate_ltv", "Estimates customer lifetime value from customer_id",
-    |customer_id: i64| -> f64 { /* ML model */ });
-```
-
-The LLM planner system prompt includes:
-
-- Schema (tables, columns, Arrow types)
-- UDF list (name + description + signature) — same mechanism as Anthropic tool definitions
-- Instruction to produce a JSON plan tree using DataFusion node names + extension node names
-
-The LLM embeds `Call("is_luxury", col("category"))` nodes; DataFusion resolves these as
-registered `ScalarUDF` calls, identical to how SQL `SELECT is_luxury(category)` would work —
-but without going through SQL.
-
-#### Planned crate: `crates/atomic-nlq`
-
-| Component | Role | DataFusion mapping |
-| --- | --- | --- |
-| `NlqContext` | Entry point — wraps `AtomicSqlContext` + Anthropic client + `NlqRegistry` | Orchestrator |
-| `LlmPlanner` | Calls Anthropic API with schema + UDF list + NL query → JSON plan | Produces input for `IrParser` |
-| `IrParser` | Deserializes JSON plan into `LogicalPlan` with extension nodes | Replaces custom `IrNode` enum |
-| `LlmFilterNode` / `LlmMapNode` / `EmbedNode` / `VectorSearchNode` | Custom logical nodes | `UserDefinedLogicalNode` impls |
-| `LlmFilterExec` / `LlmMapExec` / `EmbedExec` / `VectorSearchExec` | Per-partition physical execution | `ExecutionPlan` impls |
-| `LlmBatchingRule` | Groups per-row LLM calls into batched API requests | `OptimizerRule` impl |
-| `NlqRegistry` | UDF name → description + signature + DataFusion `ScalarUDF` | Extends DataFusion `FunctionRegistry` |
-
-#### Guardrails for this feature
+### Guardrails for atomic-nlq
 
 - Use DataFusion's `LogicalPlan` directly — do not define a parallel AST enum.
 - The LLM never produces SQL; it produces a structured JSON tree that `IrParser` converts to `LogicalPlan`.
-- Schema resolution and basic type checking are handled by DataFusion's analyzer (built-in) — only extension-node–specific validation is custom.
 - `LlmBatchingRule` must run before the physical planner to avoid one API call per row.
-- UDF implementations may be Rust closures, Python (PyO3), or JavaScript (V8/deno_core) — matching the existing UDF dispatch model in `atomic-compute`.
 - `NlqContext::query(nl)` is the only public entry point; internal plan construction is not exposed.

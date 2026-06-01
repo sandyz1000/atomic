@@ -1,3 +1,5 @@
+use atomic_data::accumulator;
+use atomic_data::broadcast;
 use atomic_data::distributed::{TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime};
 
 use crate::backend::Backend;
@@ -26,6 +28,12 @@ impl Backend for NativeBackend {
     fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> LibResult<TaskResultEnvelope> {
         if task.ops.is_empty() {
             return Err(Error::UnknownOperation("empty pipeline".to_string()));
+        }
+
+        // Load broadcast values into the thread-local registry before executing ops.
+        // Task code calls BroadcastVar::value() to read them.
+        if !task.broadcast_values.is_empty() {
+            broadcast::load_broadcast_values(&task.broadcast_values);
         }
 
         let mut data = task.data.clone();
@@ -69,7 +77,19 @@ impl Backend for NativeBackend {
                         })()
                     }
                     _ => match TASK_REGISTRY.get(op.op_id.as_str()) {
-                        None => Err(format!("unknown op: {}", op.op_id)),
+                        None => {
+                            let registered: Vec<&str> = TASK_REGISTRY.keys().copied().collect();
+                            Err(format!(
+                                "Task '{}' not registered in TASK_REGISTRY. \
+                                 Ensure this binary was compiled with the crate that defines \
+                                 #[task] or task_fn! for '{}'. \
+                                 Registered ops ({} total): [{}]",
+                                op.op_id,
+                                op.op_id,
+                                registered.len(),
+                                registered.join(", ")
+                            ))
+                        }
                         Some(handler) => handler(&op.action, &op.payload, &data),
                     },
                 },
@@ -91,6 +111,14 @@ impl Backend for NativeBackend {
             }
         }
 
+        // Clear broadcast context after execution so it doesn't leak to subsequent tasks.
+        if !task.broadcast_values.is_empty() {
+            broadcast::clear_broadcast_values();
+        }
+
+        // Collect any accumulator deltas produced during the op loop.
+        let acc_deltas = accumulator::drain_deltas();
+
         let shuffle_server_uri = task
             .ops
             .iter()
@@ -107,7 +135,7 @@ impl Backend for NativeBackend {
             worker_id.to_string(),
             data,
             shuffle_server_uri,
-        ))
+        ).with_accumulator_deltas(acc_deltas))
     }
 }
 

@@ -47,6 +47,12 @@ atomic-runtime-macros.workspace = true
 tokio-util.workspace = true
 deno_core = { workspace = true, optional = true }
 base64 = { version = "0.22", optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+aws-credential-types = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
 
 [features]
 # Enable Python UDF execution via subprocess worker pool.
@@ -58,5 +64,10 @@ python-udf = ["base64", "atomic-data/python"]
 js-v8 = ["deno_core", "atomic-data/javascript"]
 # Enable both UDF runtimes for the atomic-worker binary.
 udf = ["python-udf", "js-v8"]
+# Enable S3 object store support via the official AWS SDK.
+s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types"]
+# Enable TLS (mutual TLS) for driver↔worker TCP communication.
+# Requires cert/key/CA paths set in Config::tls_cert/tls_key/tls_ca_cert.
+tls = ["tokio-rustls", "rustls", "rustls-pemfile", "atomic-data/tls"]
 
 [dev-dependencies]

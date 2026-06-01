@@ -36,8 +36,8 @@
 /// **Step 3** — Run the driver:
 /// ```bash
 /// RUST_LOG=info \
-/// VEGA_DEPLOYMENT_MODE=distributed \
-/// VEGA_LOCAL_IP=127.0.0.1 \
+/// ATOMIC_DEPLOYMENT_MODE=distributed \
+/// ATOMIC_LOCAL_IP=127.0.0.1 \
 ///   ./target/release/task_double --driver
 /// ```
 use atomic_compute::app::{AppRole, AtomicApp};
@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         AppRole::Driver => {
-            let mode = std::env::var("VEGA_DEPLOYMENT_MODE").unwrap_or_else(|_| "local".into());
+            let mode = std::env::var("ATOMIC_DEPLOYMENT_MODE").unwrap_or_else(|_| "local".into());
             log::info!("driver starting in {} mode", mode);
             println!("[driver] mode={}", mode);
         }

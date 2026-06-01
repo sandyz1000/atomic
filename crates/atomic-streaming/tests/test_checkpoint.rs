@@ -4,7 +4,7 @@ use std::time::Duration;
 #[test]
 fn test_write_and_read_latest_round_trip() {
     let td = tempfile::tempdir().unwrap();
-    let cp = Checkpoint::new(1_000, 50, td.path().to_string_lossy().as_ref());
+    let cp = Checkpoint::new(1_000, 50, td.path().to_string_lossy().as_ref(), None);
     cp.write(td.path()).unwrap();
 
     let loaded = Checkpoint::read_latest(td.path()).unwrap().expect("should find a checkpoint");
@@ -29,13 +29,13 @@ fn test_read_latest_returns_none_for_nonexistent_dir() {
 #[test]
 fn test_multiple_checkpoints_latest_wins() {
     let td = tempfile::tempdir().unwrap();
-    Checkpoint::new(1_000, 50, td.path().to_string_lossy().as_ref())
+    Checkpoint::new(1_000, 50, td.path().to_string_lossy().as_ref(), None)
         .write(td.path())
         .unwrap();
-    Checkpoint::new(2_000, 50, td.path().to_string_lossy().as_ref())
+    Checkpoint::new(2_000, 50, td.path().to_string_lossy().as_ref(), None)
         .write(td.path())
         .unwrap();
-    Checkpoint::new(3_000, 50, td.path().to_string_lossy().as_ref())
+    Checkpoint::new(3_000, 50, td.path().to_string_lossy().as_ref(), None)
         .write(td.path())
         .unwrap();
 
@@ -47,7 +47,7 @@ fn test_multiple_checkpoints_latest_wins() {
 fn test_clean_removes_files_below_threshold() {
     let td = tempfile::tempdir().unwrap();
     for &t in &[1_000u64, 2_000, 3_000, 4_000] {
-        Checkpoint::new(t, 50, td.path().to_string_lossy().as_ref())
+        Checkpoint::new(t, 50, td.path().to_string_lossy().as_ref(), None)
             .write(td.path())
             .unwrap();
     }

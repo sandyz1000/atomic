@@ -156,36 +156,48 @@ impl StreamingContext {
     }
 
     /// Print the first `num` elements of each batch to stdout.
-    pub fn print<T: Data + Clone + std::fmt::Debug>(
+    ///
+    /// In distributed mode, uses `Context::collect_rdd` which routes through
+    /// `dispatch_pipeline` / `run_pending_shuffle_stages` as appropriate.
+    pub fn print<T>(
         self: &Arc<Self>,
         stream: Arc<dyn DStream<T>>,
         num: usize,
-    ) {
+    )
+    where
+        T: Data + Clone + std::fmt::Debug + atomic_data::distributed::WireDecode,
+        Vec<T>: atomic_data::distributed::WireDecode,
+    {
         let sc = self.sc.clone();
         self.foreach_rdd(stream, move |rdd, time_ms| {
             println!("-------------------------------------------");
             println!("Time: {}ms", time_ms);
             println!("-------------------------------------------");
-            let owned_rdd = rdd.get_rdd();
-            match sc.run_job(owned_rdd, move |iter| iter.take(num).collect::<Vec<T>>()) {
-                Ok(results) => {
-                    for item in results.into_iter().flatten().take(num) {
+            match sc.collect_rdd(rdd) {
+                Ok(items) => {
+                    for item in items.into_iter().take(num) {
                         println!("{:?}", item);
                     }
                 }
-                Err(e) => log::error!("print: run_job failed: {}", e),
+                Err(e) => log::error!("print: collect_rdd failed: {}", e),
             }
             println!();
         });
     }
 
     /// Save each batch RDD as text files with `<prefix>-<time_ms>` directories.
-    pub fn save_as_text_files<T: Data + Clone + std::fmt::Debug>(
+    ///
+    /// In distributed mode, uses `Context::collect_rdd` for distribution-aware collection.
+    pub fn save_as_text_files<T>(
         self: &Arc<Self>,
         stream: Arc<dyn DStream<T>>,
         prefix: impl Into<String>,
         suffix: impl Into<String>,
-    ) {
+    )
+    where
+        T: Data + Clone + std::fmt::Debug + atomic_data::distributed::WireDecode,
+        Vec<T>: atomic_data::distributed::WireDecode,
+    {
         let prefix = prefix.into();
         let suffix = suffix.into();
         let sc = self.sc.clone();
@@ -195,21 +207,58 @@ impl StreamingContext {
                 log::error!("save_as_text_files: failed to create dir {}: {}", dir, e);
                 return;
             }
-            match sc.run_job(rdd.get_rdd(), |iter| iter.collect::<Vec<T>>()) {
-                Ok(partitions) => {
-                    for (i, partition) in partitions.into_iter().enumerate() {
-                        let path = format!("{}/part-{:05}", dir, i);
-                        if let Ok(mut f) = std::fs::File::create(&path) {
-                            use std::io::Write;
-                            for item in partition {
-                                let _ = writeln!(f, "{:?}", item);
-                            }
+            match sc.collect_rdd(rdd) {
+                Ok(items) => {
+                    let path = format!("{}/part-00000", dir);
+                    if let Ok(mut f) = std::fs::File::create(&path) {
+                        use std::io::Write;
+                        for item in items {
+                            let _ = writeln!(f, "{:?}", item);
                         }
                     }
                 }
-                Err(e) => log::error!("save_as_text_files: run_job failed: {}", e),
+                Err(e) => log::error!("save_as_text_files: collect_rdd failed: {}", e),
             }
         });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Recovery
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Create a new `StreamingContext` by restoring from the latest checkpoint in `dir`.
+    ///
+    /// Returns `None` if no checkpoint exists in `dir`. The caller must re-register
+    /// DStreams and output operations before calling `start()` — checkpointing does not
+    /// yet serialise the DStream graph itself, only timing metadata.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let ssc = StreamingContext::from_checkpoint(sc, "/tmp/my-stream-checkpoint")
+    ///     .expect("checkpoint exists")
+    ///     .expect("checkpoint readable");
+    /// // Re-register streams and output ops here...
+    /// ssc.start()?;
+    /// ```
+    pub fn from_checkpoint(
+        sc: Arc<Context>,
+        dir: impl Into<PathBuf>,
+    ) -> std::io::Result<Option<Arc<Self>>> {
+        use crate::checkpoint::Checkpoint;
+        let dir = dir.into();
+        let cp = match Checkpoint::read_latest(&dir)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        let batch_duration = Duration::from_millis(cp.batch_duration_ms);
+        let ssc = Self::new(sc, batch_duration);
+        *ssc.checkpoint_dir.lock() = Some(dir);
+        log::info!(
+            "Restored StreamingContext from checkpoint (batch={}ms, last_completed={:?}ms)",
+            cp.batch_duration_ms,
+            cp.last_completed_batch_time_ms
+        );
+        Ok(Some(ssc))
     }
 
     // ─────────────────────────────────────────────────────────────────────────

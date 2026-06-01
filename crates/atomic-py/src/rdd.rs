@@ -22,8 +22,8 @@ struct StagedPyPipeline {
 ///
 /// # Example (local, no env vars needed)
 /// ```python
-/// import atomic
-/// ctx = atomic.Context()
+/// import atomic_compute
+/// ctx = atomic_compute.Context()
 /// result = ctx.parallelize([1, 2, 3, 4]).map(lambda x: x * 2).collect()
 /// # [2, 4, 6, 8]
 /// ```

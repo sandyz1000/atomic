@@ -42,6 +42,10 @@ pub struct MapOutputTracker {
     fetching: Arc<DashSet<usize>>,
     generation: Arc<Mutex<i64>>,
     master_addr: SocketAddr,
+    /// Adaptive coalescing result: shuffle_id → coalesced reduce partition count.
+    /// Set by the scheduler after the map stage completes (if coalescing is configured).
+    /// Queried by `ShuffledRdd::number_of_splits()` and `ShuffleFetcher::fetch`.
+    pub coalesced_partitions: Arc<DashMap<usize, usize>>,
 }
 
 // Only master_addr doesn't have a default.
@@ -53,6 +57,7 @@ impl Default for MapOutputTracker {
             fetching: Default::default(),
             generation: Default::default(),
             master_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
+            coalesced_partitions: Arc::new(DashMap::new()),
         }
     }
 }
@@ -65,9 +70,21 @@ impl MapOutputTracker {
             fetching: Arc::new(DashSet::new()),
             generation: Arc::new(Mutex::new(0)),
             master_addr,
+            coalesced_partitions: Arc::new(DashMap::new()),
         };
         output_tracker.server();
         output_tracker
+    }
+
+    /// Record the coalesced reduce partition count for a shuffle stage.
+    /// Called by the scheduler after all shuffle-map tasks complete.
+    pub fn set_coalesced_partitions(&self, shuffle_id: usize, n: usize) {
+        self.coalesced_partitions.insert(shuffle_id, n);
+    }
+
+    /// Return the coalesced reduce partition count, if adaptive coalescing ran for this shuffle.
+    pub fn get_coalesced_partitions(&self, shuffle_id: usize) -> Option<usize> {
+        self.coalesced_partitions.get(&shuffle_id).map(|v| *v)
     }
 
     async fn client(&self, shuffle_id: usize) -> Result<Vec<String>> {
@@ -327,6 +344,16 @@ impl MapOutputTracker {
             locs
         );
         self.server_uris.insert(shuffle_id, locs);
+    }
+
+    /// Remove all map output URIs for `shuffle_id`.
+    ///
+    /// Called when a shuffle-map stage fails fatally so the scheduler can re-run
+    /// the full map stage and re-register fresh URIs.
+    pub fn unregister_shuffle(&self, shuffle_id: usize) {
+        self.server_uris.remove(&shuffle_id);
+        self.increment_generation();
+        log::debug!("MapOutputTracker: unregistered shuffle_id={}", shuffle_id);
     }
 
     pub fn unregister_map_output(&self, shuffle_id: usize, map_id: usize, server_uri: String) {

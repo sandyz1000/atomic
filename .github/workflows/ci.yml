@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "phase-*"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Job 1: Local tests (all platforms) ────────────────────────────────────────
+  test-local:
+    name: Test (local) — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run local workspace tests
+        # atomic-py requires maturin; atomic-worker breaks non-Python link step.
+        # Distributed tests are marked #[ignore] and run in a separate job.
+        run: |
+          cargo test \
+            --workspace \
+            --exclude atomic-py \
+            --exclude atomic-worker \
+            -- --test-threads=4
+
+  # ── Job 2: Distributed tests (Linux only — spawns child processes) ─────────────
+  test-distributed:
+    name: Test (distributed)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ubuntu-distributed-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ubuntu-distributed-
+
+      # Build the integration binaries first so the test harness can spawn them.
+      - name: Build integration binaries (release)
+        run: cargo build --release -p atomic-engine
+
+      # Distributed tests spawn real worker + driver processes over TCP.
+      # They are marked #[ignore] so they don't run in the local job above.
+      # Sequential execution (--test-threads=1) is required: each test binds a
+      # fixed port and spawning multiple simultaneously causes port-reuse races.
+      - name: Run distributed integration tests
+        run: |
+          cargo test \
+            -p atomic-engine \
+            -- \
+            --test-threads=1 \
+            --ignored
+
+  # ── Job 3: Dependency audit ────────────────────────────────────────────────────
+  deny:
+    name: Dependency audit (cargo deny)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Run cargo deny
+        run: cargo deny check licenses bans advisories
+
+  # ── Job 4: Lint ───────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable + rustfmt + clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ubuntu-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ubuntu-lint-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: |
+          cargo clippy \
+            --workspace \
+            --exclude atomic-py \
+            --exclude atomic-worker \
+            -- -D warnings

@@ -43,10 +43,14 @@ pub struct LocalScheduler {
 
 impl LocalScheduler {
     pub fn new(max_failures: usize, master: bool) -> Self {
+        Self::new_with_coalesce(max_failures, master, 0)
+    }
+
+    pub fn new_with_coalesce(max_failures: usize, master: bool, coalesce_threshold_bytes: u64) -> Self {
         let mut live_listener_bus = LiveListenerBus::new();
         live_listener_bus.start().unwrap();
         LocalScheduler {
-            mutators: Mutators::new(),
+            mutators: Mutators::new().with_coalesce_threshold(coalesce_threshold_bytes),
             max_failures,
             attempt_id: Arc::new(AtomicUsize::new(0)),
             resubmit_timeout: 2000,

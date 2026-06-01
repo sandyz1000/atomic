@@ -277,6 +277,8 @@ impl ShuffleService {
         let parts: Vec<_> = uri.path().split('/').collect();
         match parts.as_slice() {
             [_, endpoint] if *endpoint == "status" => Ok(ShuffleResponse::Status(StatusCode::OK)),
+            // Lightweight liveness probe used by the driver's heartbeat loop.
+            [_, endpoint] if *endpoint == "health" => Ok(ShuffleResponse::Status(StatusCode::OK)),
             [_, endpoint, shuffle_id, input_id, reduce_id] if *endpoint == "shuffle" => Ok(
                 ShuffleResponse::CachedData(
                     self.get_cached_data(uri, &[*shuffle_id, *input_id, *reduce_id])?,

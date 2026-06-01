@@ -11,7 +11,7 @@ use hyper::body::Bytes;
 pub type Body = Full<Bytes>;
 
 // Re-export commonly used types
-pub use cache::ShuffleCache;
+pub use cache::{DashMapShuffleCache, ShuffleCache, SpillableShuffleCache};
 pub use config::ShuffleConfig;
 pub use manager::ShuffleManager;
 pub use map_output::MapOutputTracker;

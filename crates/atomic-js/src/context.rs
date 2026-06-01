@@ -9,7 +9,7 @@ use crate::rdd::JsRdd;
 ///
 /// Entry point for creating RDDs. In local mode (default) transformations run
 /// eagerly in the Node.js thread. In distributed mode (set
-/// `VEGA_DEPLOYMENT_MODE=distributed`) the context dispatches pipeline ops to
+/// `ATOMIC_DEPLOYMENT_MODE=distributed`) the context dispatches pipeline ops to
 /// workers over TCP.
 ///
 /// ```javascript
@@ -122,5 +122,13 @@ impl JsContext {
     #[napi]
     pub fn default_parallelism(&self) -> u32 {
         self.default_parallelism as u32
+    }
+
+    /// Stop the context and release resources.
+    ///
+    /// In distributed mode, sends a graceful-shutdown signal to every worker.
+    #[napi]
+    pub fn stop(&self) {
+        self.inner.stop();
     }
 }
