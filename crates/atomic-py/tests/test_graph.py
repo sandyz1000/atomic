@@ -224,3 +224,76 @@ def test_strongly_connected_dag():
     scc = g.strongly_connected_components()
     # All labels should be distinct in a pure DAG.
     assert len(set(scc.values())) == 3
+
+
+# ── Custom Pregel vertex programs ─────────────────────────────────────────────
+
+def test_run_pregel_min_id_propagation():
+    """Pregel: propagate minimum vertex ID. All reachable vertices converge to 1."""
+    g = atomic_compute.Graph(
+        [(1, 1.0), (2, 2.0), (3, 3.0)],
+        [(1, 2, 1.0), (2, 3, 1.0)],
+    )
+    result = g.run_pregel(
+        initial_msg=float("inf"),
+        max_iterations=10,
+        vprog=lambda vid, vdata, msg: min(vdata, msg),
+        send_msg=lambda si, sd, di, dd, ed: [(di, sd)] if sd < dd else [],
+        merge_msg=lambda a, b: min(a, b),
+    )
+    verts = dict(result.vertices())
+    assert verts[1] == pytest.approx(1.0)
+    assert verts[2] == pytest.approx(1.0)
+    assert verts[3] == pytest.approx(1.0)
+
+
+def test_run_pregel_max_iter_zero():
+    """With max_iterations=0 only superstep 0 fires — vprog sees initial_msg."""
+    g = atomic_compute.Graph([(1, 5.0), (2, 3.0)], [(1, 2, 1.0)])
+    result = g.run_pregel(
+        initial_msg=0.0,
+        max_iterations=0,
+        vprog=lambda vid, vdata, msg: vdata + msg,
+        send_msg=lambda si, sd, di, dd, ed: [(di, sd)],
+        merge_msg=lambda a, b: a + b,
+    )
+    verts = dict(result.vertices())
+    # vprog(vid, vdata, 0.0) = vdata + 0.0 = vdata
+    assert verts[1] == pytest.approx(5.0)
+    assert verts[2] == pytest.approx(3.0)
+
+
+def test_run_pregel_sum_accumulation():
+    """Each vertex accumulates the sum of its in-neighbour data values."""
+    g = atomic_compute.Graph(
+        [(1, 1.0), (2, 1.0), (3, 1.0)],
+        [(1, 3, 10.0), (2, 3, 20.0)],
+    )
+    result = g.run_pregel(
+        initial_msg=0.0,
+        max_iterations=2,
+        vprog=lambda vid, vdata, msg: vdata + msg,
+        send_msg=lambda si, sd, di, dd, ed: [(di, sd)],
+        merge_msg=lambda a, b: a + b,
+    )
+    verts = dict(result.vertices())
+    # Vertex 3 should have received messages from 1 and 2.
+    assert verts[3] > verts[1]
+    assert verts[3] > verts[2]
+
+
+def test_run_pregel_no_messages_terminates_early():
+    """send_msg that never emits terminates after one superstep."""
+    g = atomic_compute.Graph(
+        [(1, 1.0), (2, 2.0)],
+        [(1, 2, 1.0)],
+    )
+    result = g.run_pregel(
+        initial_msg=0.0,
+        max_iterations=100,
+        vprog=lambda vid, vdata, msg: vdata,
+        send_msg=lambda si, sd, di, dd, ed: [],
+        merge_msg=lambda a, b: a + b,
+    )
+    # Should complete without error regardless of max_iterations.
+    assert result.num_vertices() == 2

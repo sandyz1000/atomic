@@ -33,7 +33,11 @@ use atomic_compute::task;
 #[task]
 fn tokenize(line: String) -> Vec<String> {
     line.split_whitespace()
-        .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphabetic()).to_string())
+        .map(|w| {
+            w.to_lowercase()
+                .trim_matches(|c: char| !c.is_alphabetic())
+                .to_string()
+        })
         .filter(|w| !w.is_empty())
         .collect()
 }
@@ -61,7 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pairs: Vec<(String, u32)> = ctx
         .parallelize_typed(lines, 2)
         .flat_map_task(Tokenize)
-        .map_task(atomic_compute::task_fn!(|w: String| -> (String, u32) { (w, 1) }))
+        .map_task(atomic_compute::task_fn!(|w: String| -> (String, u32) {
+            (w, 1)
+        }))
         .collect()?;
 
     // Aggregate on driver.

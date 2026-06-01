@@ -15,9 +15,6 @@ import atomic
 
 ctx = atomic.Context(default_parallelism=4)
 
-total = (
-    ctx.range(1, 101, num_partitions=4)
-       .fold(0, lambda acc, x: acc + x)
-)
+total = ctx.range(1, 101, num_partitions=4).fold(0, lambda acc, x: acc + x)
 
-print(f"Sum of 1..100 = {total}")   # 5050
+print(f"Sum of 1..100 = {total}")  # 5050

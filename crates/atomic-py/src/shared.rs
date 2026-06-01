@@ -25,7 +25,7 @@ pub struct PyBroadcastVar {
 #[pymethods]
 impl PyBroadcastVar {
     /// Deserialize and return the broadcast value.
-    pub fn value(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let pickle = py.import("pickle")?;
         pickle
             .call_method1("loads", (PyBytes::new(py, &self.data),))
@@ -67,7 +67,7 @@ pub struct PyAccumulator {
 #[pymethods]
 impl PyAccumulator {
     /// Add a numeric or list delta to the accumulator.
-    pub fn add(&self, py: Python<'_>, delta: PyObject) -> PyResult<()> {
+    pub fn add(&self, py: Python<'_>, delta: Py<PyAny>) -> PyResult<()> {
         let delta_val = pythonobj_to_json(py, &delta)?;
         let mut guard = self.inner.lock();
         *guard = json_add(guard.clone(), delta_val)
@@ -76,7 +76,7 @@ impl PyAccumulator {
     }
 
     /// Return the current accumulated value.
-    pub fn value(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let val = self.inner.lock().clone();
         json_to_python(py, val)
     }
@@ -102,7 +102,7 @@ impl PyAccumulator {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-pub(crate) fn pythonobj_to_json(py: Python<'_>, obj: &PyObject) -> PyResult<serde_json::Value> {
+pub(crate) fn pythonobj_to_json(py: Python<'_>, obj: &Py<PyAny>) -> PyResult<serde_json::Value> {
     let bound = obj.bind(py);
     // Bool must be checked before i64 because Python's bool is a subtype of int.
     if let Ok(b) = bound.extract::<bool>() {
@@ -120,10 +120,10 @@ pub(crate) fn pythonobj_to_json(py: Python<'_>, obj: &PyObject) -> PyResult<serd
         return Ok(serde_json::Value::String(s));
     }
     // list — append style
-    if let Ok(list) = bound.downcast::<pyo3::types::PyList>() {
+    if let Ok(list) = bound.extract::<Vec<Py<PyAny>>>() {
         let arr: Vec<serde_json::Value> = list
             .iter()
-            .map(|item| pythonobj_to_json(py, &item.unbind()))
+            .map(|item| pythonobj_to_json(py, item))
             .collect::<PyResult<_>>()?;
         return Ok(serde_json::Value::Array(arr));
     }
@@ -132,10 +132,10 @@ pub(crate) fn pythonobj_to_json(py: Python<'_>, obj: &PyObject) -> PyResult<serd
     ))
 }
 
-fn json_to_python(py: Python<'_>, val: serde_json::Value) -> PyResult<PyObject> {
+fn json_to_python(py: Python<'_>, val: serde_json::Value) -> PyResult<Py<PyAny>> {
     match val {
         serde_json::Value::Null => Ok(py.None()),
-        serde_json::Value::Bool(b) => Ok(b.into_pyobject(py)?.into_any().unbind()),
+        serde_json::Value::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Ok(i.into_pyobject(py)?.into_any().unbind())

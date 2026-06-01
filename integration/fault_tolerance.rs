@@ -21,10 +21,14 @@ use atomic_compute::task;
 use std::net::Ipv4Addr;
 
 #[task]
-fn double_i32(x: i32) -> i32 { x * 2 }
+fn double_i32(x: i32) -> i32 {
+    x * 2
+}
 
 #[task]
-fn add_i32(a: i32, b: i32) -> i32 { a + b }
+fn add_i32(a: i32, b: i32) -> i32 {
+    a + b
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -42,11 +46,7 @@ fn main() {
         let workers: Vec<std::net::SocketAddrV4> = args
             .windows(2)
             .find(|w| w[0] == "--workers")
-            .map(|w| {
-                w[1].split(',')
-                    .filter_map(|s| s.parse().ok())
-                    .collect()
-            })
+            .map(|w| w[1].split(',').filter_map(|s| s.parse().ok()).collect())
             .unwrap_or_default();
 
         let config = Config::distributed_driver(Ipv4Addr::LOCALHOST, workers);
@@ -75,9 +75,7 @@ fn run_driver(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         .collect()?;
 
     // Sum all — uses fold_task which also dispatches to workers.
-    let sum = ctx
-        .parallelize_typed(data, 4)
-        .fold_task(0i32, AddI32)?;
+    let sum = ctx.parallelize_typed(data, 4).fold_task(0i32, AddI32)?;
 
     println!("{}", serde_json::json!({ "sum": sum, "doubled": doubled }));
     Ok(())

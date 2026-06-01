@@ -99,7 +99,9 @@ impl JobScheduler {
         let mut last_completed_batch_ms: Option<u64> = None;
 
         loop {
-            // Sleep until the next batch boundary
+            // Sleep until the next batch boundary and use that boundary as the
+            // batch time. Re-computing after the sleep can land past the boundary
+            // under load, causing the same batch_time_ms to be used twice.
             let next = next_tick_ms(now_ms(), batch_ms);
             let now = now_ms();
             if next > now {
@@ -110,7 +112,7 @@ impl JobScheduler {
                 break;
             }
 
-            let batch_time_ms = next_tick_ms(now_ms().saturating_sub(1), batch_ms);
+            let batch_time_ms = next;
             log::debug!("Generating jobs for batch time {}ms", batch_time_ms);
 
             let jobs = ssc.graph.lock().generate_jobs(batch_time_ms);

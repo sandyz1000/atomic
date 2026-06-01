@@ -16,9 +16,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Context::local()?;
 
     let data: Vec<i32> = vec![
-        42, 7, 19, 3, 88, 55, 1, 33, 72, 14,
-        61, 28, 95, 6, 47, 83, 11, 39, 66, 24,
-        50, 17, 78, 5, 92, 31, 44, 68, 22, 57,
+        42, 7, 19, 3, 88, 55, 1, 33, 72, 14, 61, 28, 95, 6, 47, 83, 11, 39, 66, 24, 50, 17, 78, 5,
+        92, 31, 44, 68, 22, 57,
     ];
 
     let rdd = ctx.parallelize_typed(data, 4);
@@ -34,7 +33,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Sorted output ({} elements):", merged.len());
     println!("{:?}", merged);
-    assert!(merged.windows(2).all(|w| w[0] <= w[1]), "result is not sorted");
+    assert!(
+        merged.windows(2).all(|w| w[0] <= w[1]),
+        "result is not sorted"
+    );
     println!("Sort verified.");
 
     Ok(())

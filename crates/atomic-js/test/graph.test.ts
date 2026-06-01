@@ -178,4 +178,55 @@ describe("P4.3 Graph", () => {
     expect(g.numVertices()).toBe(1);
     expect(g.numEdges()).toBe(0);
   });
+
+  // ── Custom Pregel vertex programs ─────────────────────────────────────────
+
+  it("runPregelF64 propagates minimum vertex ID", () => {
+    if (!moduleLoaded) return;
+    // Chain 1→2→3, initial vdata = vertex ID. Min-ID should spread to all.
+    const g = new Graph(
+      [[1, 1], [2, 2], [3, 3]],
+      [[1, 2, 1], [2, 3, 1]]
+    );
+    const result = g.runPregelF64(
+      Infinity,
+      10,
+      (_vid: number, vdata: number, msg: number) => Math.min(vdata, msg),
+      (_si: number, sd: number, di: number, dd: number) => sd < dd ? [[di, sd]] : [],
+      (a: number, b: number) => Math.min(a, b)
+    );
+    const vmap = Object.fromEntries(result.vertices().map(([id, w]: [number, number]) => [id, w]));
+    expect(vmap[1]).toBeCloseTo(1);
+    expect(vmap[2]).toBeCloseTo(1);
+    expect(vmap[3]).toBeCloseTo(1);
+  });
+
+  it("runPregelF64 zero max_iterations only fires superstep 0", () => {
+    if (!moduleLoaded) return;
+    const g = new Graph([[1, 5], [2, 3]], [[1, 2, 1]]);
+    const result = g.runPregelF64(
+      0,
+      0,
+      (_vid: number, vdata: number, msg: number) => vdata + msg,
+      (_si: number, sd: number, di: number) => [[di, sd]],
+      (a: number, b: number) => a + b
+    );
+    const vmap = Object.fromEntries(result.vertices().map(([id, w]: [number, number]) => [id, w]));
+    // vprog(vid, vdata, 0) = vdata + 0 = vdata
+    expect(vmap[1]).toBeCloseTo(5);
+    expect(vmap[2]).toBeCloseTo(3);
+  });
+
+  it("runPregelF64 empty send_msg terminates early", () => {
+    if (!moduleLoaded) return;
+    const g = new Graph([[1, 1], [2, 2]], [[1, 2, 1]]);
+    const result = g.runPregelF64(
+      0,
+      100,
+      (_vid: number, vdata: number, _msg: number) => vdata,
+      (_si: number, _sd: number, _di: number, _dd: number, _ed: number): [number, number][] => [],
+      (a: number, b: number) => a + b
+    );
+    expect(result.numVertices()).toBe(2);
+  });
 });

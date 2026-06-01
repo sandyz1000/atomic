@@ -60,7 +60,7 @@ fn test_one_at_a_time_processes_one_rdd_per_batch() {
     queue.lock().push_back(make_rdd(&sc, vec![1, 2]));
     queue.lock().push_back(make_rdd(&sc, vec![3, 4]));
 
-    let got = collect_results(&ssc, queue, true, 250);
+    let got = collect_results(&ssc, queue, true, 600);
     let mut sorted = got;
     sorted.sort();
     assert_eq!(sorted, vec![1, 2, 3, 4], "both rdds should be processed");

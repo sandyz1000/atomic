@@ -307,12 +307,11 @@ These are within-scope items where the implementation is partial or has a known 
 | Streaming distributed receivers | `ReceiverTracker` is a local stub; Kafka / Kinesis sources not implemented |
 | Python/JS `StreamingContext::start()` threading | Python uses `Python::attach` for GIL in background thread; JS `start()` is a no-op stub — background batch loop for JS deferred to Phase 5 |
 | Python/JS accumulator custom merge | `Accumulator` supports int/float add, list append, string concat; user-defined merge closures deferred to Phase 5 |
-| Python/JS Pregel custom programs | Only the 6 built-in graph algorithms are exposed; generic `pregel::run` with custom vertex programs is Rust-only |
-| Python `text_file` S3 | Python binding reads local files only; S3 support for Python/JS deferred to Phase 5 |
+| Python/JS streaming windowing | Windowed DStream operations (sliding/tumbling windows) deferred to Phase 5 |
 | Python/JS streaming windowing | Windowed DStream operations (sliding/tumbling windows) deferred to Phase 5 |
 | Python/JS streaming checkpoint | Streaming checkpoint/restore deferred to Phase 5 |
 | `task_fn!` in production | The intelligent `task_fn!` op_id scheme is stable but `task_fn!` closures are best-effort for distributed use; `#[task(name = "…")]` is recommended for long-lived production tasks |
-| `atomic-nlq` physical wiring | `LlmFilterExec` / `LlmMapExec` / `EmbedExec` scaffolded; full DataFusion physical planner wiring in progress |
+| `atomic-nlq` example / real-API test | NLQ pipeline is fully wired; `test_full_nlq_pipeline` test auto-skips if `ANTHROPIC_API_KEY` is absent; run with the key set to test end-to-end |
 | `/register` HTTP endpoint | `dynamically_add_worker()` is callable in-process; a full `POST /register` HTTP route on the driver has not been added yet |
 | Distributed CI test isolation | Distributed tests run sequentially via `Mutex` and bind fixed ports — flaky if ports are already in use in CI |
 

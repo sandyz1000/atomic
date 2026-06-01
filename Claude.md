@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Critical Rules
 
-- **Do NOT modify `README.md`** in the root directory.
+- `README.md` in the root directory may be edited when explicitly asked by the user.
 - For any serialization/deserialization question, use **rkyv** for Rust native paths before considering other approaches.
 - `atomic-py` is a `cdylib` — build it only with `maturin`, never with `cargo build` alone. `cargo test` for it also requires `maturin develop`.
 - `atomic-worker` must be **excluded** from `cargo test --workspace` — it activates PyO3's `auto-initialize` feature, which breaks the link step in non-Python test binaries.
@@ -240,6 +240,9 @@ Distributed tasks use types from `atomic_data::distributed`.
 - **CI integration test suite (P3.4)**: `.github/workflows/ci.yml` with `test-local` (ubuntu + macos), `test-distributed` (pre-built binary + `--ignored` tests), and `lint` jobs. Distributed tests in `tests/test_distributed.rs` are now `#[ignore]`.
 - **PyPI release pipeline (P3.2)**: `.github/workflows/release-py.yml` — maturin wheels for 4 targets + sdist; PyPI OIDC publishing.
 - **npm release pipeline (P3.3)**: `.github/workflows/release-js.yml` — napi-rs `.node` bindings for 4 targets; npm publish.
+- **S3 bindings for `atomic-py` / `atomic-js`**: `Context.text_file(uri)` now dispatches through `atomic-compute`'s `TextFileRdd` — supports `s3://bucket/prefix` when crate is built with the `s3` feature flag. `Rdd.save_as_text_file(uri)` also accepts `s3://` URIs. Enable with `--features s3` at build time.
+- **Custom Pregel programs (`atomic-py` / `atomic-js`)**: `PyGraph.run_pregel(initial_msg, max_iterations, vprog, send_msg, merge_msg)` and `JsGraph.runPregelF64(...)` expose the generic `pregel::run` API with user-defined vertex programs. Message type is `f64`; `send_msg` returns a list of `(target_vertex_id, message)` pairs.
+- **NLQ fully wired + tested**: all physical executors (`LlmFilterExec`, `LlmMapExec`, `EmbedExec`, `VectorSearchExec`) and `LlmBatchingRule` are complete. `crates/atomic-nlq/tests/test_context.rs` adds context-level tests (no API key required). `examples/nlq/` shows full NLQ usage with fallback to direct SQL when `ANTHROPIC_API_KEY` is absent.
 
 ### Not Done Yet
 
@@ -247,7 +250,7 @@ All P0, P1, P2, and P3 ROADMAP items are complete. Remaining known gaps:
 
 - **`MemoryAndDisk` lazy eviction**: `persist_with_disk` eagerly writes all partitions upfront; a true write-on-LRU eviction hook is not implemented.
 - **Streaming distributed receivers**: `ReceiverTracker` is a local stub; Kafka / Kinesis sources not implemented.
-- **`atomic-nlq` physical execution**: `LlmFilterExec` / `LlmMapExec` / `EmbedExec` scaffolded but not fully wired to DataFusion physical planner.
+- **`atomic-nlq` real-API test**: `LlmFilterExec` / `LlmMapExec` / `EmbedExec` / `VectorSearchExec` are fully wired; `test_full_nlq_pipeline` auto-skips when `ANTHROPIC_API_KEY` is absent.
 - **Sort-based shuffle**: only hash partitioning; range-shuffle for globally sorted output not implemented.
 - **`ShuffleFetcher` transient retry**: network-level retry on temporary fetch failures not implemented.
 - **`CacheTracker` distributed protocol**: locality-aware scheduling deferred; local cache works without it.

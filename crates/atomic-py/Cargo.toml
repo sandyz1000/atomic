@@ -24,3 +24,6 @@ pyo3-arrow = "0.17"
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
+
+[features]
+s3 = ["atomic-compute/s3"]

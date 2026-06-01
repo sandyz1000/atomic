@@ -16,7 +16,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use atomic_sql::context::AtomicSqlContext;
-use pyo3_arrow::PyArrowType;
 
 // ── Async helper ──────────────────────────────────────────────────────────────
 
@@ -45,7 +44,7 @@ fn tmp_view_name() -> String {
 
 // ── RecordBatch → Python row conversion ───────────────────────────────────────
 
-fn arrow_scalar_to_py(py: Python<'_>, col: &dyn Array, row: usize) -> PyObject {
+fn arrow_scalar_to_py(py: Python<'_>, col: &dyn Array, row: usize) -> Py<PyAny> {
     if col.is_null(row) {
         return py.None();
     }
@@ -53,7 +52,7 @@ fn arrow_scalar_to_py(py: Python<'_>, col: &dyn Array, row: usize) -> PyObject {
         DataType::Boolean => col
             .as_any()
             .downcast_ref::<BooleanArray>()
-            .map(|a| a.value(row).into_pyobject(py).unwrap().into_any().unbind())
+            .map(|a| a.value(row).into_pyobject(py).unwrap().to_owned().into_any().unbind())
             .unwrap_or_else(|| py.None()),
         DataType::Int8 => col
             .as_any()
@@ -121,7 +120,7 @@ fn arrow_scalar_to_py(py: Python<'_>, col: &dyn Array, row: usize) -> PyObject {
     }
 }
 
-fn batches_to_py_list(py: Python<'_>, batches: &[RecordBatch]) -> PyResult<PyObject> {
+fn batches_to_py_list(py: Python<'_>, batches: &[RecordBatch]) -> PyResult<Py<PyAny>> {
     let rows = PyList::empty(py);
     for batch in batches {
         let schema = batch.schema();
@@ -135,7 +134,7 @@ fn batches_to_py_list(py: Python<'_>, batches: &[RecordBatch]) -> PyResult<PyObj
             rows.append(row)?;
         }
     }
-    Ok(rows.into())
+    Ok(rows.into_any().unbind())
 }
 
 // ── PyDataFrame ───────────────────────────────────────────────────────────────
@@ -166,7 +165,7 @@ impl PyDataFrame {
     /// Execute the plan and return all rows as a list of dicts.
     ///
     /// Each dict maps column name → Python value (int, float, str, bool, or None).
-    pub fn collect(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn collect(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let batches = run_sql_async(self.inner.clone().collect())
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         batches_to_py_list(py, &batches)
@@ -246,7 +245,7 @@ impl PyDataFrame {
     /// ```python
     /// df.schema()   # → {"id": "Int64", "name": "Utf8", "amount": "Float64"}
     /// ```
-    pub fn schema(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
         for field in self.inner.schema().fields() {
             dict.set_item(field.name(), field.data_type().to_string())?;
@@ -297,25 +296,43 @@ impl PyDataFrame {
     /// table = df.to_arrow()
     /// df_pandas = table.to_pandas()
     /// ```
-    pub fn to_arrow(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        use datafusion::arrow::ipc::writer::FileWriter;
+        use std::io::Cursor;
+
         let df = self.inner.clone();
         let batches: Vec<RecordBatch> = run_sql_async(async move { df.collect().await })
             .map_err(|e: datafusion::error::DataFusionError| {
                 pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
             })?;
-        let pa = py.import("pyarrow")?;
-        let py_batches: Vec<PyObject> = batches
-            .iter()
-            .map(|b| {
-                PyArrowType(b.clone())
-                    .into_pyobject(py)
-                    .map(|o| o.into_any().unbind())
-                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-            })
-            .collect::<PyResult<_>>()?;
-        let py_list = pyo3::types::PyList::new(py, py_batches)?;
-        let table = pa.call_method1("concat_tables", (py_list,))?;
-        Ok(table.into_any().unbind())
+
+        if batches.is_empty() {
+            let pa = py.import("pyarrow")?;
+            return Ok(pa
+                .call_method1("table", (pyo3::types::PyList::empty(py),))?
+                .into_any()
+                .unbind());
+        }
+
+        // Serialize to Arrow IPC format and deserialize via pyarrow
+        let schema = batches[0].schema();
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        let mut writer = FileWriter::try_new(&mut buf, &schema)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        for batch in &batches {
+            writer
+                .write(batch)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        }
+        writer
+            .finish()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let ipc_bytes = buf.into_inner();
+        let pa_ipc = py.import("pyarrow.ipc")?;
+        let py_bytes = pyo3::types::PyBytes::new(py, &ipc_bytes);
+        let reader = pa_ipc.call_method1("open_file", (py_bytes,))?;
+        Ok(reader.call_method0("read_all")?.into_any().unbind())
     }
 
     fn __repr__(&self) -> String {
@@ -474,10 +491,11 @@ impl PySqlContext {
         &self,
         py: Python<'_>,
         name: &str,
-        rdd: &crate::rdd::PyRdd,
+        rdd: &mut crate::rdd::PyRdd,
         schema: std::collections::HashMap<String, String>,
     ) -> PyResult<()> {
-        let rows: Vec<PyObject> = rdd.collect(py)?;
+        let rows_obj: Py<PyAny> = rdd.collect(py)?;
+        let rows: Vec<Py<PyAny>> = rows_obj.extract::<Vec<Py<PyAny>>>(py)?;
         let batches = python_dicts_to_batches(py, &rows, &schema)?;
         self.inner
             .register_partitioned_batches(name, vec![batches])
@@ -496,7 +514,7 @@ impl PySqlContext {
     pub fn register_udf(
         &self,
         name: &str,
-        func: PyObject,
+        func: Py<PyAny>,
         input_types: Vec<String>,
         return_type: String,
     ) -> PyResult<()> {
@@ -516,9 +534,21 @@ impl PySqlContext {
         #[derive(Debug)]
         struct PyUdf {
             name: String,
-            func: PyObject,
+            func: Py<PyAny>,
             signature: Signature,
             return_type: ArrowDataType,
+        }
+
+        impl PartialEq for PyUdf {
+            fn eq(&self, other: &Self) -> bool {
+                self.name == other.name
+            }
+        }
+        impl Eq for PyUdf {}
+        impl std::hash::Hash for PyUdf {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.name.hash(state);
+            }
         }
 
         impl ScalarUDFImpl for PyUdf {
@@ -537,10 +567,10 @@ impl PySqlContext {
                     ColumnarValue::Array(a) => a.len(),
                     ColumnarValue::Scalar(_) => 1,
                 };
-                let func = self.func.clone();
-                let results: Vec<Option<f64>> = Python::with_gil(|py| {
+                let results: Vec<Option<f64>> = Python::attach(|py| {
+                    let func = self.func.clone_ref(py);
                     (0..len).map(|i| {
-                        let arg_val: PyObject = match first_arg {
+                        let arg_val: Py<PyAny> = match first_arg {
                             ColumnarValue::Array(arr) => {
                                 // Extract element i as Python object
                                 if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
@@ -565,12 +595,12 @@ impl PySqlContext {
             }
         }
 
-        let udf = Arc::new(PyUdf {
+        let udf = PyUdf {
             name: name_owned,
             func,
             signature: Signature::exact(input_dts, Volatility::Volatile),
             return_type: return_dt_clone,
-        });
+        };
         self.session.register_udf(ScalarUDF::new_from_impl(udf));
         Ok(())
     }
@@ -605,7 +635,7 @@ fn parse_arrow_type(s: &str) -> PyResult<datafusion::arrow::datatypes::DataType>
 /// Convert a list of Python dicts to a single Arrow `RecordBatch`.
 fn python_dicts_to_batches(
     py: Python<'_>,
-    rows: &[PyObject],
+    rows: &[Py<PyAny>],
     schema: &std::collections::HashMap<String, String>,
 ) -> PyResult<Vec<RecordBatch>> {
     use datafusion::arrow::array::{
@@ -638,7 +668,7 @@ fn python_dicts_to_batches(
             ($builder_ty:ty, $extract_ty:ty) => {{
                 let mut b = <$builder_ty>::new();
                 for row in rows {
-                    let dict = row.downcast_bound::<pyo3::types::PyDict>(py)?;
+                    let dict = row.bind(py).downcast::<pyo3::types::PyDict>()?;
                     match dict.get_item(col_name)? {
                         Some(v) => b.append_option(v.extract::<$extract_ty>().ok()),
                         None => b.append_null(),
@@ -661,7 +691,7 @@ fn python_dicts_to_batches(
             DataType::Boolean => {
                 let mut b = BooleanBuilder::new();
                 for row in rows {
-                    let dict = row.downcast_bound::<pyo3::types::PyDict>(py)?;
+                    let dict = row.bind(py).downcast::<pyo3::types::PyDict>()?;
                     match dict.get_item(col_name)? {
                         Some(v) => b.append_option(v.extract::<bool>().ok()),
                         None => b.append_null(),
@@ -672,7 +702,7 @@ fn python_dicts_to_batches(
             DataType::Utf8 | _ => {
                 let mut b = StringBuilder::new();
                 for row in rows {
-                    let dict = row.downcast_bound::<pyo3::types::PyDict>(py)?;
+                    let dict = row.bind(py).downcast::<pyo3::types::PyDict>()?;
                     match dict.get_item(col_name)? {
                         Some(v) => b.append_option(v.extract::<String>().ok()),
                         None => b.append_null(),

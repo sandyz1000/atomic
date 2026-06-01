@@ -183,9 +183,66 @@ print(g.shortest_path([1]))       # {1: {1: 0, 2: 1.0, 3: 2.0, 4: 3.0}}
 
 The same API is available in TypeScript as `new Graph(vertices, edges)` with camelCase methods (`pageRank`, `connectedComponents`, `shortestPath`).
 
+Custom Pregel programs are also available:
+
+```python
+# Propagate minimum vertex ID to all reachable vertices.
+result = g.run_pregel(
+    initial_msg=float('inf'),
+    max_iterations=10,
+    vprog=lambda vid, vdata, msg: min(vdata, msg),
+    send_msg=lambda si, sd, di, dd, ed: [(di, sd)] if sd < dd else [],
+    merge_msg=lambda a, b: min(a, b),
+)
+```
+
 ---
 
-## 8. Micro-batch streaming (Python + JavaScript)
+## 8. S3 I/O
+
+Text file RDDs support `s3://` URIs when the crate is built with the `s3` feature.
+
+```python
+# Python (build with: maturin develop --features s3)
+import atomic_compute
+ctx = atomic_compute.Context()
+
+# Read from S3 (one partition per object under the prefix)
+rdd = ctx.text_file("s3://my-bucket/data/logs/")
+
+# Write to S3 (uploads part-0 under the prefix)
+rdd.map(str.upper).save_as_text_file("s3://my-bucket/output/")
+```
+
+```typescript
+// TypeScript (build with: napi build --features s3)
+const rdd = ctx.textFile('s3://my-bucket/data/logs/');
+rdd.map((line: string) => line.toUpperCase()).saveAsTextFile('s3://my-bucket/output/');
+```
+
+---
+
+## 9. Natural language queries (NLQ)
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... cargo run --example nlq
+```
+
+```rust
+use atomic_nlq::{NlqConfig, NlqContext};
+
+let ctx = NlqContext::build(NlqConfig::default()); // reads ANTHROPIC_API_KEY
+ctx.sql_ctx().register_batches("orders", batches)?;
+
+let df = ctx.query("show the top 5 customers by total spend").await?;
+df.show().await?;
+```
+
+If `ANTHROPIC_API_KEY` is not set the `examples/nlq` binary falls back to direct DataFusion SQL automatically.
+
+---
+
+## 10. Micro-batch streaming (Python + JavaScript)
 
 ```python
 import atomic_compute
@@ -214,7 +271,7 @@ print(word_counts)  # {'hello': 2, 'world': 1}
 
 ---
 
-## 9. Broadcast variables and accumulators (Python + JavaScript)
+## 11. Broadcast variables and accumulators (Python + JavaScript)
 
 ```python
 import atomic_compute
@@ -238,7 +295,7 @@ print(acc.value())  # 15
 
 ---
 
-## 10. Next steps
+## 12. Next steps
 
 - [Configuration Reference](configuration.md) — all `ATOMIC_*` env vars and `Config` fields
 - [Deployment Guide](deployment.md) — building, shipping binaries, mTLS, S3

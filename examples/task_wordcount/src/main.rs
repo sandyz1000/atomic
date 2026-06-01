@@ -53,7 +53,11 @@ atomic_compute::register_shuffle_map!(String, u32);
 #[task]
 fn tokenize(line: String) -> Vec<String> {
     line.split_whitespace()
-        .map(|w| w.to_lowercase().trim_matches(|c: char| !c.is_alphabetic()).to_string())
+        .map(|w| {
+            w.to_lowercase()
+                .trim_matches(|c: char| !c.is_alphabetic())
+                .to_string()
+        })
         .filter(|w| !w.is_empty())
         .collect()
 }
@@ -104,7 +108,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lines = corpus();
     let num_partitions = 4;
 
-    println!("Processing {} lines across {} partitions...\n", lines.len(), num_partitions);
+    println!(
+        "Processing {} lines across {} partitions...\n",
+        lines.len(),
+        num_partitions
+    );
 
     // Pipeline:
     //   1. parallelize       — split lines into `num_partitions` partitions

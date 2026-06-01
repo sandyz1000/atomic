@@ -72,19 +72,20 @@ impl PyContext {
         ))
     }
 
-    /// Create an RDD from lines of a text file.
+    /// Create an RDD from lines of a text file or S3 object.
+    ///
+    /// Accepts local paths (`/path/to/file`, `file:///path`) and, when built
+    /// with the `s3` feature, S3 URIs (`s3://bucket/key`).  A directory path
+    /// or S3 prefix produces one partition per file/object.
     pub fn text_file(&self, py: Python, path: &str) -> PyResult<PyRdd> {
-        let content = std::fs::read_to_string(path)
+        let lines: Vec<String> = self
+            .inner
+            .text_file(path)
+            .collect()
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let elements: Vec<Py<PyAny>> = content
-            .lines()
-            .map(|line| {
-                line.to_string()
-                    .into_pyobject(py)
-                    .unwrap()
-                    .into_any()
-                    .unbind()
-            })
+        let elements: Vec<Py<PyAny>> = lines
+            .into_iter()
+            .map(|line| line.into_pyobject(py).unwrap().into_any().unbind())
             .collect();
         let partitions = self.default_parallelism.max(1);
         Ok(PyRdd::from_data(
@@ -157,7 +158,7 @@ impl PyContext {
     pub fn broadcast(
         &self,
         py: Python<'_>,
-        value: PyObject,
+        value: Py<PyAny>,
     ) -> PyResult<crate::shared::PyBroadcastVar> {
         // Try cloudpickle first (supports lambdas); fall back to stdlib pickle.
         let pickle = py
@@ -182,7 +183,7 @@ impl PyContext {
     pub fn accumulator(
         &self,
         py: Python<'_>,
-        zero: PyObject,
+        zero: Py<PyAny>,
     ) -> PyResult<crate::shared::PyAccumulator> {
         let initial = crate::shared::pythonobj_to_json(py, &zero)?;
         Ok(crate::shared::PyAccumulator::new(initial))

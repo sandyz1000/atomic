@@ -7,10 +7,10 @@
 //!   ./integration --driver --workers 127.0.0.1:19201
 //!   Output: {"doubled":[2,4,6,8],"sum":10}
 
-use std::net::Ipv4Addr;
 use atomic_compute::context::{Context, start_worker};
 use atomic_compute::env::Config;
 use atomic_compute::task;
+use std::net::Ipv4Addr;
 
 #[task]
 fn double(x: i32) -> i32 {
@@ -40,11 +40,7 @@ fn main() {
         let workers: Vec<std::net::SocketAddrV4> = args
             .windows(2)
             .find(|w| w[0] == "--workers")
-            .map(|w| {
-                w[1].split(',')
-                    .filter_map(|s| s.parse().ok())
-                    .collect()
-            })
+            .map(|w| w[1].split(',').filter_map(|s| s.parse().ok()).collect())
             .unwrap_or_default();
 
         let config = Config::distributed_driver(Ipv4Addr::LOCALHOST, workers);
@@ -71,15 +67,10 @@ fn run_driver(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         .map_task(Double)
         .collect()?;
 
-    let sum = ctx
-        .parallelize_typed(input, 2)
-        .fold_task(0i32, Add)?;
+    let sum = ctx.parallelize_typed(input, 2).fold_task(0i32, Add)?;
 
     // Machine-readable JSON output — parsed by the integration test.
-    println!(
-        "{}",
-        serde_json::json!({ "doubled": doubled, "sum": sum })
-    );
+    println!("{}", serde_json::json!({ "doubled": doubled, "sum": sum }));
 
     Ok(())
 }

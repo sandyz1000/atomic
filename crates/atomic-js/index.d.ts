@@ -492,6 +492,12 @@ declare namespace AtomicJs {
     /** Number of edges. */
     numEdges(): number;
 
+    /** Return vertices as `[vertexId, weight]` pairs. */
+    vertices(): [number, number][];
+
+    /** Return edges as `[srcId, dstId, weight]` triples. */
+    edges(): [number, number, number][];
+
     /**
      * Run fixed-iteration PageRank.
      *
@@ -537,5 +543,31 @@ declare namespace AtomicJs {
      * @returns Map from vertex ID (as string) to map of landmark ID → distance.
      */
     shortestPath(landmarks: number[]): Record<string, Record<string, number>>;
+
+    /**
+     * Run a custom Pregel vertex-centric computation.
+     *
+     * All vertex data, edge data, and messages are `number` (f64) values.
+     *
+     * @param initialMsg    - Message sent to every vertex before superstep 0.
+     * @param maxIterations - Maximum number of supersteps.
+     * @param vprog         - `(vertexId, vertexData, msg) => newVertexData`
+     * @param sendMsg       - `(srcId, srcData, dstId, dstData, edgeData) => [targetId, message][]`
+     * @param mergeMsg      - `(msgA, msgB) => mergedMsg`
+     * @returns New `Graph` with updated vertex attributes.
+     */
+    runPregelF64(
+      initialMsg: number,
+      maxIterations: number,
+      vprog: (vertexId: number, vertexData: number, msg: number) => number,
+      sendMsg: (
+        srcId: number,
+        srcData: number,
+        dstId: number,
+        dstData: number,
+        edgeData: number
+      ) => [number, number][],
+      mergeMsg: (msgA: number, msgB: number) => number
+    ): Graph;
   }
 }

@@ -49,7 +49,7 @@ result = (ctx.parallelize([1, 2, 3, 4])
 | --- | --- |
 | `Context(default_parallelism=N)` | Create a context; N defaults to CPU count |
 | `parallelize(list, num_partitions=N)` | Distribute a Python list as an RDD |
-| `text_file(path)` | Create an RDD of lines from a local text file |
+| `text_file(uri)` | Create an RDD of lines from a local path or `s3://bucket/key` (requires `s3` feature) |
 | `range(start, end, step=1, num_partitions=N)` | Integer range RDD |
 | `broadcast(value)` | Broadcast a read-only value to all tasks → `BroadcastVar` |
 | `accumulator(zero)` | Create a distributed counter/accumulator → `Accumulator` |
@@ -106,7 +106,7 @@ result = (ctx.parallelize([1, 2, 3, 4])
 | `max(key=None)` / `min(key=None)` | Maximum/minimum element |
 | `top(n, key=None)` | Top `n` elements (largest first) |
 | `take_ordered(n, key=None)` | Bottom `n` elements (smallest first) |
-| `save_as_text_file(path)` | Write each element as a line to a file |
+| `save_as_text_file(uri)` | Write each element as a line to a local file or `s3://bucket/prefix/part-0` (requires `s3` feature) |
 
 ---
 
@@ -191,6 +191,25 @@ ranks = g.page_rank(num_iter=20, reset_prob=0.15)
 | `label_propagation(max_iter=10)` | `dict[int, int]` | Community label per vertex |
 | `triangle_count()` | `dict[int, int]` | Triangle count per vertex |
 | `shortest_path(landmarks)` | `dict[int, dict[int, float]]` | Distance from each landmark |
+| `run_pregel(initial_msg, max_iterations, vprog, send_msg, merge_msg)` | `Graph` | Custom Pregel computation (see below) |
+
+#### Custom Pregel programs
+
+```python
+result = g.run_pregel(
+    initial_msg=float('inf'),
+    max_iterations=10,
+    vprog=lambda vid, vdata, msg: min(vdata, msg),
+    # send_msg(src_id, src_data, dst_id, dst_data, edge_data) -> list[(target_id, msg)]
+    send_msg=lambda si, sd, di, dd, ed: [(di, sd)] if sd < dd else [],
+    merge_msg=lambda a, b: min(a, b),
+)
+# result is a new Graph with updated vertex weights
+verts = dict(result.vertices())  # {vertex_id: updated_weight}
+```
+
+All vertex data, edge data, and messages are `float`. `send_msg` returns a list of
+`(target_vertex_id, message)` pairs; use `si` (source) or `di` (destination) as target.
 
 ---
 

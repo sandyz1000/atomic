@@ -1,0 +1,13 @@
+[package]
+name = "nlq"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nlq"
+path = "src/main.rs"
+
+[dependencies]
+atomic-nlq = { workspace = true }
+datafusion = "53"
+tokio = { workspace = true, features = ["full"] }

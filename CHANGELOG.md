@@ -91,10 +91,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PyPI release pipeline (`release-py.yml`): maturin wheels for 4 targets
 - npm release pipeline (`release-js.yml`): napi-rs bindings for 4 targets
 
-#### Natural Language Query (scaffolded)
-- `atomic-nlq`: `NlqContext`, `LlmPlanner`, `IrParser`, `LlmBatchingRule`
-- `LlmFilterNode`, `LlmMapNode`, `EmbedNode`, `VectorSearchNode` extension nodes
-- `InMemoryVectorIndex` (implemented)
+#### Natural Language Query
+- `atomic-nlq`: `NlqContext`, `LlmPlanner`, `IrParser`, `LlmBatchingRule` — fully wired end-to-end
+- `LlmFilterExec`, `LlmMapExec`, `EmbedExec`, `VectorSearchExec` — physical executors complete
+- `InMemoryVectorIndex` (cosine similarity, for testing)
+- 31 unit tests; `test_full_nlq_pipeline` auto-skips without `ANTHROPIC_API_KEY`
+- `examples/nlq/` — runnable demo (NLQ path with API key; SQL fallback without)
+
+#### Language Bindings — Phase 5 additions
+
+- **S3 I/O for `atomic-py` / `atomic-js`**: `Context.text_file(uri)` and `Rdd.save_as_text_file(uri)` now dispatch through `atomic-compute`'s `TextFileRdd`, supporting `s3://bucket/prefix` when built with `--features s3`. Local paths unchanged.
+- **Custom Pregel programs for `atomic-py` / `atomic-js`**: `PyGraph.run_pregel(initial_msg, max_iterations, vprog, send_msg, merge_msg)` and `JsGraph.runPregelF64(...)` expose the full generic Pregel API with user-defined vertex programs. Message type is `f64`; `send_msg` returns `[(target_vertex_id, message)]` pairs.
+- **pyo3 0.28 compatibility**: Updated `atomic-py` bindings (`sql.rs`, `shared.rs`, `context.rs`, `graph.rs`) for pyo3 0.28 API changes — `PyObject` → `Py<PyAny>`, `Python::with_gil` → `Python::attach`, `bool::into_pyobject` `Borrowed` handling.
+- **Streaming scheduler timer fix**: Batch loop no longer recomputes `batch_time_ms` from wall clock after sleep — uses the pre-computed boundary to prevent duplicate batch execution under load.
 
 ---
 

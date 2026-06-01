@@ -150,15 +150,15 @@ Workers now execute the compiled Rust `#[task]` function instead of deserializin
 
 | Feature | Rust | Python | TypeScript |
 | --- | --- | --- | --- |
-| `#[task]` compile-time dispatch | ✅ | ❌ | ❌ |
-| Closure / lambda UDFs | ✅ (local) | ✅ (pickled) | ✅ (V8 source string) |
-| SQL (`SqlContext`) | ✅ | ✅ | ✅ |
-| Streaming (`StreamingContext`) | ✅ | ✅ | ✅ |
-| Graph (`Graph`, 6 algorithms) | ✅ | ✅ | ✅ |
-| Broadcast variables / accumulators | ✅ | ✅ | ✅ |
-| `join`, `sort_by`, `glom`, `cache`, `checkpoint` on RDD | ✅ | ✅ | ✅ |
-| S3 `text_file` / `save_as_text_file` | ✅ | ❌ (local only) | ❌ (local only) |
-| Pregel custom vertex programs | ✅ | ❌ | ❌ |
+| `#[task]` compile-time dispatch | yes | no | no |
+| Closure / lambda UDFs | yes (local) | yes (pickled) | yes (V8 source string) |
+| SQL (`SqlContext`) | yes | yes | yes |
+| Streaming (`StreamingContext`) | yes | yes | yes |
+| Graph (`Graph`, 6 algorithms) | yes | yes | yes |
+| Broadcast variables / accumulators | yes | yes | yes |
+| `join`, `sort_by`, `glom`, `cache`, `checkpoint` on RDD | yes | yes | yes |
+| S3 `text_file` / `save_as_text_file` | yes | yes (`s3` feature) | yes (`s3` feature) |
+| Pregel custom vertex programs | yes | yes (`run_pregel`) | yes (`runPregelF64`) |
 
 ---
 
@@ -277,53 +277,55 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 
 | Category | Feature | Status |
 | --- | --- | --- |
-| **Core** | `#[task]` compile-time dispatch | ✅ |
-| | `task_fn!` inline anonymous tasks | ✅ |
-| | Local thread-pool execution | ✅ |
-| | Distributed TCP execution | ✅ |
-| | Lazy pipeline staging (multi-op `TaskEnvelope`) | ✅ |
-| | Speculative execution | ✅ |
-| | Job cancellation | ✅ |
-| **RDD API** | `map`, `filter`, `flat_map`, `reduce_by_key`, `group_by_key` | ✅ |
-| | `join`, `left_outer_join`, `right_outer_join`, `full_outer_join` | ✅ |
-| | `fold_by_key`, `aggregate_by_key`, `subtract_by_key` | ✅ |
-| | `tree_reduce`, `tree_aggregate` | ✅ |
-| | `to_local_iterator`, `collect_as_map`, `count_approx` | ✅ |
-| | `to_debug_string` (DAG lineage printer) | ✅ |
-| | Custom partitioner (`partition_by`) | ✅ |
-| | `cache`, `persist`, `unpersist`, `checkpoint` | ✅ |
-| | `MemoryAndDisk` / `DiskOnly` storage levels | ✅ |
-| **Shuffle** | Hash shuffle + disk spill | ✅ |
-| | Adaptive partition coalescing | ✅ |
-| | Shuffle-map stage fault recovery | ✅ |
-| **SQL** | DataFusion query engine (30+ optimizer rules) | ✅ |
-| | Parquet, CSV, JSON readers | ✅ |
-| | RDD-backed table provider | ✅ |
-| | DataFrame write (Parquet, CSV) | ✅ |
-| | SQL UDF registration (Python callable) | ✅ |
-| **Streaming** | Micro-batch DStream (`StreamingContext`) — Rust + Python + JS | ✅ |
-| | `map`, `filter`, `flat_map`, `reduce_by_key`, `join`, `update_state_by_key` | ✅ |
-| | Checkpoint (bincode, atomic write) | ✅ |
-| | Kafka source | ❌ planned |
-| | Event-time watermarking | ❌ planned |
-| **Graph** | `Graph<VD,ED>` + Pregel engine — Rust | ✅ |
-| | `Graph(vertices, edges)` + 6 algorithms — Python + JS | ✅ |
-| | PageRank, SSSP, SCC, LabelPropagation, TriangleCount, CC | ✅ |
-| **Language Bindings** | Python (`atomic-compute` on PyPI) — RDD + SQL + Graph + Streaming | ✅ |
-| | TypeScript/JavaScript (`@atomic-compute/js` on npm) — RDD + SQL + Graph + Streaming | ✅ |
-| | `BroadcastVar`, `Accumulator` — Python + JS | ✅ |
-| | `join`, `sort_by`, `glom`, `cache`, `checkpoint` on RDD — Python + JS | ✅ |
-| | Python → Arrow (`df.to_arrow()`) | ✅ |
-| | Python RDD → SQL bridge (`register_rdd`) | ✅ |
-| **Infrastructure** | S3 object store — Rust only (`s3` feature) | ✅ |
-| | Mutual TLS (`tls` feature, rustls) | ✅ |
-| | Prometheus `/metrics` endpoint | ✅ |
-| | Dynamic worker heartbeat + removal | ✅ |
-| | `atomic build` (musl static binary) | ✅ |
-| | `atomic ship` (SSH/SFTP, host-key verified) | ✅ |
-| **NLQ** | LLM-native DataFusion plan nodes | 🔬 scaffolded |
-| | `LlmBatchingRule` optimizer | 🔬 scaffolded |
-| | `InMemoryVectorIndex` | ✅ |
+| **Core** | `#[task]` compile-time dispatch | yes |
+| | `task_fn!` inline anonymous tasks | yes |
+| | Local thread-pool execution | yes |
+| | Distributed TCP execution | yes |
+| | Lazy pipeline staging (multi-op `TaskEnvelope`) | yes |
+| | Speculative execution | yes |
+| | Job cancellation | yes |
+| **RDD API** | `map`, `filter`, `flat_map`, `reduce_by_key`, `group_by_key` | yes |
+| | `join`, `left_outer_join`, `right_outer_join`, `full_outer_join` | yes |
+| | `fold_by_key`, `aggregate_by_key`, `subtract_by_key` | yes |
+| | `tree_reduce`, `tree_aggregate` | yes |
+| | `to_local_iterator`, `collect_as_map`, `count_approx` | yes |
+| | `to_debug_string` (DAG lineage printer) | yes |
+| | Custom partitioner (`partition_by`) | yes |
+| | `cache`, `persist`, `unpersist`, `checkpoint` | yes |
+| | `MemoryAndDisk` / `DiskOnly` storage levels | yes |
+| **Shuffle** | Hash shuffle + disk spill | yes |
+| | Adaptive partition coalescing | yes |
+| | Shuffle-map stage fault recovery | yes |
+| **SQL** | DataFusion query engine (30+ optimizer rules) | yes |
+| | Parquet, CSV, JSON readers | yes |
+| | RDD-backed table provider | yes |
+| | DataFrame write (Parquet, CSV) | yes |
+| | SQL UDF registration (Python callable) | yes |
+| **Streaming** | Micro-batch DStream (`StreamingContext`) — Rust + Python + JS | yes |
+| | `map`, `filter`, `flat_map`, `reduce_by_key`, `join`, `update_state_by_key` | yes |
+| | Checkpoint (bincode, atomic write) | yes |
+| | Kafka source | planned |
+| | Event-time watermarking | planned |
+| **Graph** | `Graph<VD,ED>` + Pregel engine — Rust | yes |
+| | `Graph(vertices, edges)` + 6 algorithms — Python + JS | yes |
+| | PageRank, SSSP, SCC, LabelPropagation, TriangleCount, CC | yes |
+| **Language Bindings** | Python (`atomic-compute` on PyPI) — RDD + SQL + Graph + Streaming | yes |
+| | TypeScript/JavaScript (`@atomic-compute/js` on npm) — RDD + SQL + Graph + Streaming | yes |
+| | `BroadcastVar`, `Accumulator` — Python + JS | yes |
+| | `join`, `sort_by`, `glom`, `cache`, `checkpoint` on RDD — Python + JS | yes |
+| | Python → Arrow (`df.to_arrow()`) | yes |
+| | Python RDD → SQL bridge (`register_rdd`) | yes |
+| **Infrastructure** | S3 object store — Rust only (`s3` feature) | yes |
+| | Mutual TLS (`tls` feature, rustls) | yes |
+| | Prometheus `/metrics` endpoint | yes |
+| | Dynamic worker heartbeat + removal | yes |
+| | `atomic build` (musl static binary) | yes |
+| | `atomic ship` (SSH/SFTP, host-key verified) | yes |
+| | S3 I/O for Python + JS bindings (`s3` feature) | yes |
+| | Pregel custom vertex programs — Python + JS | yes |
+| **NLQ** | LLM-native DataFusion plan nodes | yes |
+| | `LlmBatchingRule` optimizer | yes |
+| | `InMemoryVectorIndex` | yes |
 
 ---
 
@@ -478,9 +480,9 @@ See [docs/getting-started.md](docs/getting-started.md), [docs/configuration.md](
 
 **Beta** — all core features are implemented and tested. The test suite covers local execution, distributed TCP dispatch, shuffle, streaming, graph, and SQL. Production readiness depends on your risk tolerance and workload:
 
-- ✅ **Ready**: Local-mode jobs, SQL analytics (DataFusion), graph algorithms, Python/JS prototyping, musl static binary deployment
+- yes **Ready**: Local-mode jobs, SQL analytics (DataFusion), graph algorithms, Python/JS prototyping, musl static binary deployment
 - ⚠️ **Early adopter**: Distributed mode on real workloads — core is solid, but cluster management (K8s) and streaming sources (Kafka) are missing
-- ❌ **Not yet**: Kafka streaming, Kubernetes operator, event-time watermarking, sort-based shuffle
+- no **Not yet**: Kafka streaming, Kubernetes operator, event-time watermarking, sort-based shuffle
 
 ---
 

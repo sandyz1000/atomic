@@ -7,8 +7,9 @@ Pregel bulk-synchronous message-passing engine, and six ready-to-use graph
 algorithms. All computation runs on the driver in a single process — there is no
 distributed graph partitioning at this time.
 
-> **Note:** `atomic-graph` is a **Rust-only** API. It is not exposed through the
-> Python (`atomic-compute`) or TypeScript (`@atomic-compute/js`) bindings.
+> **Python and TypeScript bindings** are available. `atomic-compute.Graph` (Python)
+> and `Graph` from `@atomic-compute/js` expose all six built-in algorithms and the
+> full custom Pregel API (`run_pregel` / `runPregelF64`).
 
 ---
 
@@ -147,6 +148,58 @@ let num_components = components.values().collect::<std::collections::HashSet<_>>
 ```toml
 [dependencies]
 atomic-graph = { path = "../atomic-graph" }
+```
+
+---
+
+---
+
+## Python and TypeScript bindings
+
+### Python (`atomic-compute.Graph`)
+
+```python
+import atomic_compute
+
+g = atomic_compute.Graph(
+    vertices=[(1, 1.0), (2, 2.0), (3, 3.0)],
+    edges=[(1, 2, 1.0), (2, 3, 1.0)],
+)
+
+# Built-in algorithms
+ranks = g.page_rank(num_iter=20, reset_prob=0.15)  # dict[int, float]
+cc    = g.connected_components()                    # dict[int, int]
+
+# Custom Pregel: propagate minimum vertex ID
+result = g.run_pregel(
+    initial_msg=float('inf'),
+    max_iterations=10,
+    vprog=lambda vid, vdata, msg: min(vdata, msg),
+    send_msg=lambda si, sd, di, dd, ed: [(di, sd)] if sd < dd else [],
+    merge_msg=lambda a, b: min(a, b),
+)
+```
+
+### TypeScript (`@atomic-compute/js`)
+
+```typescript
+import { Graph } from '@atomic-compute/js';
+
+const g = new Graph(
+  [[1, 1], [2, 2], [3, 3]],
+  [[1, 2, 1], [2, 3, 1]]
+);
+
+// Built-in algorithms
+const ranks = g.pageRank(20, 0.15);
+
+// Custom Pregel: propagate minimum vertex ID
+const result = g.runPregelF64(
+  Infinity, 10,
+  (vid, vd, msg) => Math.min(vd, msg),
+  (_si, sd, di, dd) => sd < dd ? [[di, sd]] : [],
+  (a, b) => Math.min(a, b)
+);
 ```
 
 ---

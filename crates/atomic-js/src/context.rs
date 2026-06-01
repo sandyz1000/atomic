@@ -38,9 +38,14 @@ impl JsContext {
         let inner = atomic_compute::context::Context::new()
             .map_err(|e| Error::from_reason(e.to_string()))?;
         let parallelism = default_parallelism.map(|n| n as usize).unwrap_or_else(|| {
-            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2)
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
         });
-        Ok(Self { inner, default_parallelism: parallelism })
+        Ok(Self {
+            inner,
+            default_parallelism: parallelism,
+        })
     }
 
     /// Distribute a JavaScript array as an RDD.
@@ -48,11 +53,7 @@ impl JsContext {
     /// @param data - Any JSON-serializable JavaScript array.
     /// @param numPartitions - Number of partitions. Defaults to `defaultParallelism`.
     #[napi]
-    pub fn parallelize(
-        &self,
-        data: Vec<serde_json::Value>,
-        num_partitions: Option<u32>,
-    ) -> JsRdd {
+    pub fn parallelize(&self, data: Vec<serde_json::Value>, num_partitions: Option<u32>) -> JsRdd {
         let partitions = num_partitions
             .map(|n| n as usize)
             .unwrap_or(self.default_parallelism)
@@ -60,18 +61,27 @@ impl JsContext {
         JsRdd::from_data(data, partitions, Arc::clone(&self.inner))
     }
 
-    /// Create an RDD of lines from a text file.
+    /// Create an RDD of lines from a text file or S3 object.
     ///
-    /// @param path - Absolute or relative path to the file.
+    /// Accepts local paths (`/path/to/file`, `file:///path`) and, when built
+    /// with the `s3` feature, S3 URIs (`s3://bucket/key`).  A directory path
+    /// or S3 prefix produces one partition per file/object.
+    ///
+    /// @param path - Local path or `s3://bucket/key` URI.
     #[napi]
     pub fn text_file(&self, path: String) -> Result<JsRdd> {
-        let content = std::fs::read_to_string(&path)
+        let lines: Vec<String> = self
+            .inner
+            .text_file(&path)
+            .collect()
             .map_err(|e| Error::from_reason(format!("text_file: {e}")))?;
-        let elements: Vec<serde_json::Value> = content
-            .lines()
-            .map(|l| serde_json::Value::String(l.to_string()))
-            .collect();
-        Ok(JsRdd::from_data(elements, self.default_parallelism.max(1), Arc::clone(&self.inner)))
+        let elements: Vec<serde_json::Value> =
+            lines.into_iter().map(serde_json::Value::String).collect();
+        Ok(JsRdd::from_data(
+            elements,
+            self.default_parallelism.max(1),
+            Arc::clone(&self.inner),
+        ))
     }
 
     /// Create an RDD of integers in `[start, end)` with optional `step`.
@@ -115,7 +125,11 @@ impl JsContext {
             .map(|n| n as usize)
             .unwrap_or(self.default_parallelism)
             .max(1);
-        Ok(JsRdd::from_data(elements, partitions, Arc::clone(&self.inner)))
+        Ok(JsRdd::from_data(
+            elements,
+            partitions,
+            Arc::clone(&self.inner),
+        ))
     }
 
     /// Return the default number of partitions (CPU count or constructor value).
@@ -138,8 +152,8 @@ impl JsContext {
     /// any task can read via `.value()`.
     #[napi]
     pub fn broadcast(&self, value: serde_json::Value) -> Result<crate::shared::BroadcastVar> {
-        let data = serde_json::to_vec(&value)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let data =
+            serde_json::to_vec(&value).map_err(|e| napi::Error::from_reason(e.to_string()))?;
         Ok(crate::shared::BroadcastVar::new(data))
     }
 

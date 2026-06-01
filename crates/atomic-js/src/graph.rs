@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use atomic_graph::{
     graph::Graph,
-    types::Edge,
+    pregel,
+    types::{Edge, EdgeDirection},
     algo::{
         connected_component,
         label_propagation,
@@ -160,6 +161,99 @@ impl JsGraph {
             .collect();
 
         Ok(serde_json::Value::Object(outer))
+    }
+
+    /// Run a custom Pregel vertex-centric computation.
+    ///
+    /// All vertex data, edge data, and messages are `number` (f64) values.
+    ///
+    /// @param initialMsg    - Message sent to every vertex before superstep 0.
+    /// @param maxIterations - Maximum number of supersteps.
+    /// @param vprog         - `(vertexId: number, vertexData: number, msg: number) => number`
+    ///                        Updates vertex attribute given an incoming message.
+    /// @param sendMsg       - `(srcId, srcData, dstId, dstData, edgeData) => Array<[number, number]>`
+    ///                        Returns `[targetVertexId, message]` pairs to send.
+    ///                        Use `srcId` or `dstId` as the target.
+    /// @param mergeMsg      - `(msgA: number, msgB: number) => number`
+    ///                        Commutative combiner for messages to the same vertex.
+    ///
+    /// Returns a new `Graph` with updated vertex attributes.
+    ///
+    /// @example
+    /// ```javascript
+    /// // Propagate minimum vertex ID to all reachable vertices.
+    /// const result = g.runPregelF64(
+    ///   Infinity, 10,
+    ///   (vid, vd, msg) => Math.min(vd, msg),
+    ///   (si, sd, di, dd, ed) => sd < dd ? [[di, sd]] : [],
+    ///   (a, b) => Math.min(a, b),
+    /// );
+    /// ```
+    #[napi]
+    pub fn run_pregel_f64(
+        &self,
+        initial_msg: f64,
+        max_iterations: u32,
+        vprog: Function<FnArgs<(f64, f64, f64)>, f64>,
+        send_msg: Function<FnArgs<(f64, f64, f64, f64, f64)>, Vec<Vec<f64>>>,
+        merge_msg: Function<FnArgs<(f64, f64)>, f64>,
+    ) -> Result<JsGraph> {
+        // Implement the Pregel loop directly so JS functions stay on the current
+        // thread and no Send/Sync bounds are needed.
+        let graph = &self.inner;
+
+        // Superstep 0: apply vprog with initial_msg to every vertex.
+        let mut vdata: HashMap<VertexId, f64> = graph
+            .vertices()
+            .map(|(vid, vd)| {
+                let new_vd = vprog.call(FnArgs::from((vid as f64, *vd, initial_msg)))?;
+                Ok((vid, new_vd))
+            })
+            .collect::<Result<_>>()?;
+
+        for _ in 0..max_iterations as usize {
+            // Collect messages using original graph structure + current vdata.
+            let mut msgs: HashMap<VertexId, f64> = HashMap::new();
+
+            for edge in graph.edges() {
+                let src_vd = vdata.get(&edge.src).copied().unwrap_or(0.0);
+                let dst_vd = vdata.get(&edge.dst).copied().unwrap_or(0.0);
+                let pairs = send_msg.call(FnArgs::from((
+                    edge.src as f64,
+                    src_vd,
+                    edge.dst as f64,
+                    dst_vd,
+                    edge.attr,
+                )))?;
+                for pair in pairs {
+                    if pair.len() >= 2 {
+                        let target = pair[0] as i64;
+                        let m = pair[1];
+                        if let Some(existing) = msgs.get(&target).copied() {
+                            msgs.insert(target, merge_msg.call(FnArgs::from((existing, m)))?);
+                        } else {
+                            msgs.insert(target, m);
+                        }
+                    }
+                }
+            }
+
+            if msgs.is_empty() {
+                break;
+            }
+
+            // Apply vprog to vertices that received a message.
+            for (vid, msg) in &msgs {
+                if let Some(&old_vd) = vdata.get(vid) {
+                    let new_vd = vprog.call(FnArgs::from((*vid as f64, old_vd, *msg)))?;
+                    vdata.insert(*vid, new_vd);
+                }
+            }
+        }
+
+        // Rebuild graph with final vertex data.
+        let result = graph.map_vertices(|vid, old_vd| *vdata.get(&vid).unwrap_or(old_vd));
+        Ok(JsGraph { inner: result })
     }
 }
 

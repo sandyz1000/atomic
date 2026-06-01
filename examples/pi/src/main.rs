@@ -88,7 +88,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Samples : {}", total_samples);
     println!("Hits    : {}", total_hits);
     println!("π ≈     : {:.6}", pi_estimate);
-    println!("Error   : {:.6}", (pi_estimate - std::f64::consts::PI).abs());
+    println!(
+        "Error   : {:.6}",
+        (pi_estimate - std::f64::consts::PI).abs()
+    );
 
     Ok(())
 }

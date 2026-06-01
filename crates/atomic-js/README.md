@@ -153,7 +153,7 @@ rdd.reduceByKey((a, b) => a + b)      // RDD<readonly [string, number]>
 |--------|---------|-------------|
 | `new Context(parallelism?)` | `Context` | Create a context. `parallelism` defaults to CPU count. |
 | `.parallelize(data, partitions?)` | `RDD<T>` | Distribute a JS/TS array as an RDD |
-| `.textFile(path)` | `RDD<string>` | Read a text file as one string per line |
+| `.textFile(uri)` | `RDD<string>` | Read a local file or `s3://bucket/key` (requires `s3` feature) |
 | `.range(start, end, step?, partitions?)` | `RDD<number>` | Integer range `[start, end)` |
 | `.defaultParallelism()` | `number` | Default partition count |
 
@@ -243,7 +243,7 @@ they are staged and dispatched together when an action is called.
 | `.isEmtpy()` | `boolean` | `true` if the RDD is empty |
 | `.max(comparator?)` / `.min(comparator?)` | `T` | Max/min element |
 | `.top(n, comparator?)` / `.takeOrdered(n, comparator?)` | `T[]` | Top/bottom n |
-| `.saveAsTextFile(path)` | `void` | Write elements to a text file |
+| `.saveAsTextFile(uri)` | `void` | Write elements to a local file or `s3://bucket/prefix/part-0` (requires `s3` feature) |
 
 ### `RDD<T>` — Properties
 
@@ -278,8 +278,28 @@ const ranks = g.pageRank(20, 0.15);
 | `.labelPropagation(maxIter)` | `Record<string, number>` | Community label per vertex |
 | `.triangleCount()` | `Record<string, number>` | Triangle count per vertex |
 | `.shortestPath(landmarks)` | `Record<string, Record<string, number>>` | Distance from each landmark |
+| `.runPregelF64(initialMsg, maxIter, vprog, sendMsg, mergeMsg)` | `Graph` | Custom Pregel computation (see below) |
 
 > **Note:** Vertex IDs are returned as string keys in JS objects (e.g. `"1"`, `"2"`).
+
+#### Custom Pregel programs
+
+```typescript
+// Propagate minimum vertex ID to all reachable vertices.
+const result = g.runPregelF64(
+  Infinity,
+  10,
+  (vid: number, vd: number, msg: number) => Math.min(vd, msg),
+  // sendMsg(srcId, srcData, dstId, dstData, edgeData) => [targetId, message][]
+  (_si: number, sd: number, di: number, dd: number) =>
+    sd < dd ? [[di, sd]] : [],
+  (a: number, b: number) => Math.min(a, b)
+);
+const verts = result.vertices();  // [number, number][] — [vertexId, weight]
+```
+
+All vertex data, edge data, and messages are `number`. `sendMsg` returns an array of
+`[targetVertexId, message]` pairs; use `srcId` or `dstId` as the target.
 
 ---
 

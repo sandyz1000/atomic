@@ -9,6 +9,7 @@ use atomic_graph::{
     types::Edge,
 };
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 
 // ── VertexId alias (atomic_graph uses i64) ────────────────────────────────────
 type VId = i64;
@@ -70,10 +71,7 @@ impl PyGraph {
 
     /// Return edges as a list of `(src_id, dst_id, weight)` tuples.
     pub fn edges(&self) -> Vec<(VId, VId, f64)> {
-        self.inner
-            .edges()
-            .map(|e| (e.src, e.dst, e.attr))
-            .collect()
+        self.inner.edges().map(|e| (e.src, e.dst, e.attr)).collect()
     }
 
     /// Compute PageRank.
@@ -144,6 +142,103 @@ impl PyGraph {
             .collect();
         let unit_graph: Graph<(), f64> = Graph::from_vertices_edges(verts, edges);
         shortest_path::run(&unit_graph, &landmarks)
+    }
+
+    /// Run a custom Pregel vertex-centric computation.
+    ///
+    /// All vertex data, edge data, and messages are `float` values.
+    ///
+    /// Parameters:
+    /// * `initial_msg`    — message sent to every vertex before superstep 0.
+    /// * `max_iterations` — maximum number of supersteps.
+    /// * `vprog`          — `(vertex_id: int, vertex_data: float, msg: float) -> float`
+    ///                      Updates the vertex attribute given an incoming message.
+    /// * `send_msg`       — `(src_id, src_data, dst_id, dst_data, edge_data) -> list[(int, float)]`
+    ///                      Returns a list of `(target_vertex_id, message)` pairs to send.
+    ///                      Use `src_id` or `dst_id` as the target.
+    /// * `merge_msg`      — `(msg_a: float, msg_b: float) -> float`
+    ///                      Commutative combiner for messages arriving at the same vertex.
+    ///
+    /// Returns a new `Graph` with updated vertex attributes.
+    ///
+    /// # Example
+    /// ```python
+    /// # Propagate minimum vertex ID to all reachable vertices.
+    /// result = g.run_pregel(
+    ///     initial_msg=float('inf'),
+    ///     max_iterations=10,
+    ///     vprog=lambda vid, vdata, msg: min(vdata, msg),
+    ///     send_msg=lambda si, sd, di, dd, ed: [(di, sd)] if sd < dd else [],
+    ///     merge_msg=lambda a, b: min(a, b),
+    /// )
+    /// ```
+    #[pyo3(signature = (initial_msg, max_iterations, vprog, send_msg, merge_msg))]
+    pub fn run_pregel(
+        &self,
+        py: Python<'_>,
+        initial_msg: f64,
+        max_iterations: usize,
+        vprog: Py<PyAny>,
+        send_msg: Py<PyAny>,
+        merge_msg: Py<PyAny>,
+    ) -> PyResult<PyGraph> {
+        // Implement the Pregel loop manually so the GIL token stays in scope
+        // throughout — Python::with_gil is not available in pyo3 0.22+.
+        let graph = &self.inner;
+
+        // Superstep 0: apply vprog with initial_msg to every vertex.
+        let mut vdata: HashMap<VId, f64> = graph
+            .vertices()
+            .map(|(vid, vd)| -> PyResult<(VId, f64)> {
+                let new_vd = vprog
+                    .call1(py, (vid, *vd, initial_msg))?
+                    .extract::<f64>(py)?;
+                Ok((vid, new_vd))
+            })
+            .collect::<PyResult<_>>()?;
+
+        for _ in 0..max_iterations {
+            let mut msgs: HashMap<VId, f64> = HashMap::new();
+
+            for edge in graph.edges() {
+                let src_vd = vdata.get(&edge.src).copied().unwrap_or(0.0);
+                let dst_vd = vdata.get(&edge.dst).copied().unwrap_or(0.0);
+                let result = send_msg.call1(
+                    py,
+                    (edge.src, src_vd, edge.dst, dst_vd, edge.attr),
+                )?;
+                let pairs: Vec<(i64, f64)> = result
+                    .bind(py)
+                    .extract::<Vec<(i64, f64)>>()
+                    .unwrap_or_default();
+                for (target, m) in pairs {
+                    if let Some(existing) = msgs.get(&target).copied() {
+                        let merged = merge_msg
+                            .call1(py, (existing, m))?
+                            .extract::<f64>(py)?;
+                        msgs.insert(target, merged);
+                    } else {
+                        msgs.insert(target, m);
+                    }
+                }
+            }
+
+            if msgs.is_empty() {
+                break;
+            }
+
+            for (vid, msg) in &msgs {
+                if let Some(&old_vd) = vdata.get(vid) {
+                    let new_vd = vprog
+                        .call1(py, (*vid, old_vd, *msg))?
+                        .extract::<f64>(py)?;
+                    vdata.insert(*vid, new_vd);
+                }
+            }
+        }
+
+        let result = graph.map_vertices(|vid, old_vd| *vdata.get(&vid).unwrap_or(old_vd));
+        Ok(PyGraph { inner: result })
     }
 
     pub fn __repr__(&self) -> String {

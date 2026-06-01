@@ -44,11 +44,7 @@ fn main() {
         let workers: Vec<std::net::SocketAddrV4> = args
             .windows(2)
             .find(|w| w[0] == "--workers")
-            .map(|w| {
-                w[1].split(',')
-                    .filter_map(|s| s.parse().ok())
-                    .collect()
-            })
+            .map(|w| w[1].split(',').filter_map(|s| s.parse().ok()).collect())
             .unwrap_or_default();
 
         let config = Config::distributed_driver(Ipv4Addr::LOCALHOST, workers);

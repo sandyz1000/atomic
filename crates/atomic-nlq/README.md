@@ -64,8 +64,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Register an Arrow in-memory table
     ctx.sql_ctx()
-        .register_record_batches("orders", schema, batches)
-        .await?;
+        .register_batches("orders", batches)?;
 
     // Execute a natural language query
     let df = ctx.query("show the top 5 customers by total spend").await?;
@@ -195,20 +194,25 @@ crates/atomic-nlq/src/
 
 ## Running the demo
 
-```
-ANTHROPIC_API_KEY=... cargo run -p atomic-nlq --example nlq_demo
+```bash
+# With an Anthropic API key: runs NLQ queries via the LLM pipeline
+ANTHROPIC_API_KEY=sk-ant-... cargo run --example nlq
+
+# Without a key: falls back to direct SQL, demonstrating DataFusion integration
+cargo run --example nlq
 ```
 
 ## Testing
 
-```
+```bash
 cargo test -p atomic-nlq
 ```
 
-27 unit tests covering: relational plan parsing, LlmFilter node + batching rule, UDF registry, schema validation.
+31 tests covering: NlqContext build and SQL execution, IrParser roundtrip (TableScan / Filter / Projection / Aggregate), LlmFilter node and batching rule, UDF registry, schema validation.
 
-Integration tests (require a live API key) are gated behind the `integration` feature flag:
+The full end-to-end LLM pipeline test (`test_full_nlq_pipeline`) runs automatically when
+`ANTHROPIC_API_KEY` is set in the environment; it is skipped silently when not set:
 
-```
-ANTHROPIC_API_KEY=... cargo test -p atomic-nlq --features integration
+```bash
+ANTHROPIC_API_KEY=sk-ant-... cargo test -p atomic-nlq test_full_nlq_pipeline
 ```
