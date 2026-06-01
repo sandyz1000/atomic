@@ -13,7 +13,12 @@ pub struct Checkpoint {
     /// Path to the checkpoint directory.
     pub checkpoint_dir: String,
     /// Batch times that were in progress when the checkpoint was written.
+    /// For the synchronous batch loop this is always empty at checkpoint write time;
+    /// it would be non-empty in a future async/pipelined batch model.
     pub pending_batch_times: Vec<u64>,
+    /// The last batch time for which all jobs completed successfully.
+    /// On recovery, resume from `last_completed_batch_time_ms + batch_duration_ms`.
+    pub last_completed_batch_time_ms: Option<u64>,
 }
 
 impl Checkpoint {
@@ -21,13 +26,23 @@ impl Checkpoint {
         checkpoint_time_ms: u64,
         batch_duration_ms: u64,
         checkpoint_dir: impl Into<String>,
+        last_completed_batch_time_ms: Option<u64>,
     ) -> Self {
         Checkpoint {
             checkpoint_time_ms,
             batch_duration_ms,
             checkpoint_dir: checkpoint_dir.into(),
             pending_batch_times: Vec::new(),
+            last_completed_batch_time_ms,
         }
+    }
+
+    /// The batch time to resume from after recovery.
+    /// Returns the next batch time after the last completed one, or `None` if
+    /// no batches have completed yet.
+    pub fn resume_from_batch_ms(&self) -> Option<u64> {
+        self.last_completed_batch_time_ms
+            .map(|t| t + self.batch_duration_ms)
     }
 
     /// Write this checkpoint atomically to `dir`.

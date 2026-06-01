@@ -206,6 +206,36 @@ async fn test_partition_store_remove_rdd_clears_partitions() {
 
 // ── Multiple StorageLevel variants ───────────────────────────────────────────
 
+// ── unpersist() / is_cached() ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_unpersist_clears_cache() {
+    let ctx = ctx();
+    let rdd = ctx.parallelize_typed(vec![1i32, 2, 3], 1).cache();
+    let _ = rdd.collect().unwrap();
+    assert!(rdd.is_cached(), "RDD should be cached after first collect");
+    let rdd = rdd.unpersist();
+    assert!(!rdd.is_cached(), "RDD should not be cached after unpersist");
+}
+
+#[tokio::test]
+async fn test_is_cached_false_before_action() {
+    let ctx = ctx();
+    let rdd = ctx.parallelize_typed(vec![1i32, 2, 3], 2).cache();
+    assert!(!rdd.is_cached(), "RDD should not be cached before any action");
+}
+
+#[tokio::test]
+async fn test_unpersist_then_recompute() {
+    let ctx = ctx();
+    let rdd = ctx.parallelize_typed(vec![1i32, 2, 3], 1).cache();
+    let _ = rdd.collect().unwrap();
+    let rdd = rdd.unpersist();
+    let mut result = rdd.collect().unwrap();
+    result.sort();
+    assert_eq!(result, vec![1, 2, 3]);
+}
+
 /// `persist(StorageLevel::MemoryOnly)` is the default and must work identically
 /// to `cache()`. All other levels fall back to MemoryOnly per the docs.
 #[tokio::test]
@@ -223,4 +253,33 @@ async fn test_persist_memory_only_works_like_cache() {
     r2.sort();
     assert_eq!(r1, r2);
     assert_eq!(r1, data);
+}
+
+#[tokio::test]
+async fn test_persist_memory_and_disk_produces_correct_results() {
+    use atomic_data::cache::StorageLevel;
+    let ctx = ctx();
+    let data: Vec<i32> = (1..=6).collect();
+    let rdd = ctx
+        .parallelize_typed(data.clone(), 2)
+        .persist(StorageLevel::MemoryAndDisk);
+    let mut r1 = rdd.collect().unwrap();
+    let mut r2 = rdd.collect().unwrap();
+    r1.sort();
+    r2.sort();
+    assert_eq!(r1, r2);
+    assert_eq!(r1, data);
+}
+
+#[tokio::test]
+async fn test_persist_disk_only_produces_correct_results() {
+    use atomic_data::cache::StorageLevel;
+    let ctx = ctx();
+    let data: Vec<i32> = (1..=4).collect();
+    let rdd = ctx
+        .parallelize_typed(data.clone(), 2)
+        .persist(StorageLevel::DiskOnly);
+    let mut result = rdd.collect().unwrap();
+    result.sort();
+    assert_eq!(result, data);
 }

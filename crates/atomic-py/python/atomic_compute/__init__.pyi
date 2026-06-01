@@ -15,8 +15,8 @@ class Rdd(Generic[T]):
 
     Example (local)::
 
-        import atomic
-        ctx = atomic.Context()
+        import atomic_compute
+        ctx = atomic_compute.Context()
         result = ctx.parallelize([1, 2, 3, 4]).map(lambda x: x * 2).collect()
         # [2, 4, 6, 8]
     """
@@ -180,6 +180,64 @@ class Rdd(Generic[T]):
         """Write each element as a line to ``path``."""
         ...
 
+    # ── New actions (Phase 1) ─────────────────────────────────────────────────
+
+    def to_local_iterator(self) -> Iterator[T]:
+        """Stream elements partition-by-partition without loading all into memory."""
+        ...
+
+    def collect_as_map(self) -> "dict[K, V]":
+        """Collect a pair RDD to a dict. Last value wins on duplicate keys."""
+        ...
+
+    def to_debug_string(self) -> str:
+        """Return a multi-line description of the RDD's DAG lineage."""
+        ...
+
+    def right_outer_join(self, other: "Rdd[Tuple[K, U]]") -> "Rdd[Tuple[K, Tuple[Optional[V], U]]]":
+        """Right outer join: all right-side keys preserved."""
+        ...
+
+    def full_outer_join(self, other: "Rdd[Tuple[K, U]]") -> "Rdd[Tuple[K, Tuple[Optional[V], Optional[U]]]]":
+        """Full outer join: all keys from both sides preserved."""
+        ...
+
+    def fold_by_key(self, zero: V, f: Callable[[V, V], V], num_partitions: int) -> "Rdd[Tuple[K, V]]":
+        """Fold values for each key with an initial zero value."""
+        ...
+
+    def aggregate_by_key(
+        self,
+        zero: U,
+        seq_fn: Callable[[U, V], U],
+        comb_fn: Callable[[U, U], U],
+        num_partitions: int,
+    ) -> "Rdd[Tuple[K, U]]":
+        """Aggregate values per key with different combiner type."""
+        ...
+
+    def subtract_by_key(self, other: "Rdd[Tuple[K, U]]") -> "Rdd[Tuple[K, V]]":
+        """Return pairs whose key does NOT appear in ``other``."""
+        ...
+
+    def tree_reduce(self, f: Callable[[T, T], T], depth: int = 2) -> T:
+        """Balanced tree reduce — more numerically stable than linear reduce."""
+        ...
+
+    def tree_aggregate(
+        self,
+        zero: U,
+        seq_fn: Callable[[U, T], U],
+        comb_fn: Callable[[U, U], U],
+        depth: int = 2,
+    ) -> U:
+        """Balanced tree aggregation."""
+        ...
+
+    def count_approx(self, confidence: float) -> int:
+        """Approximate count by sampling ``confidence`` fraction of partitions."""
+        ...
+
     def aggregate(
         self,
         zero: U,
@@ -211,8 +269,8 @@ class Context:
 
     Example (local mode)::
 
-        import atomic
-        ctx = atomic.Context()
+        import atomic_compute
+        ctx = atomic_compute.Context()
         result = ctx.parallelize([1, 2, 3, 4]).map(lambda x: x + 1).collect()
         # [2, 3, 4, 5]
 
@@ -221,7 +279,7 @@ class Context:
         import os, atomic
         os.environ["VEGA_DEPLOYMENT_MODE"] = "distributed"
         os.environ["VEGA_LOCAL_IP"] = "127.0.0.1"
-        ctx = atomic.Context()
+        ctx = atomic_compute.Context()
         result = ctx.parallelize(range(100), num_partitions=4).map(lambda x: x * 2).collect()
     """
 
@@ -282,4 +340,64 @@ class Context:
 
     def default_parallelism(self) -> int:
         """Return the default number of partitions (CPU count or constructor value)."""
+        ...
+
+    def stop(self) -> None:
+        """Stop the context and send shutdown signals to workers (distributed mode)."""
+        ...
+
+    def cancel_job(self, job_id: int) -> None:
+        """Cancel a running distributed job by its run ID."""
+        ...
+
+
+class DataFrame:
+    """Lazy result of a SQL query. Actions execute the query."""
+
+    def collect(self) -> List[dict]: ...
+    def show(self, n: int = 20) -> None: ...
+    def show_limit(self, n: int) -> None: ...
+    def count(self) -> int: ...
+    def filter(self, expr: str) -> "DataFrame": ...
+    def select(self, columns: List[str]) -> "DataFrame": ...
+    def limit(self, n: int) -> "DataFrame": ...
+    def sort(self, col: str, ascending: bool = True) -> "DataFrame": ...
+    def schema(self) -> dict: ...
+    def write_parquet(self, path: str) -> None: ...
+    def write_csv(self, path: str) -> None: ...
+    def to_arrow(self) -> "pyarrow.Table": ...  # requires pyarrow installed
+
+
+class SqlContext:
+    """SQL execution context backed by DataFusion."""
+
+    def __init__(self) -> None: ...
+
+    def sql(self, query: str) -> DataFrame: ...
+    def register_csv(self, name: str, path: str) -> None: ...
+    def register_parquet(self, name: str, path: str) -> None: ...
+    def register_json(self, name: str, path: str) -> None: ...
+    def deregister_table(self, name: str) -> None: ...
+
+    def register_rdd(
+        self,
+        name: str,
+        rdd: "Rdd",
+        schema: "dict[str, str]",
+    ) -> None:
+        """Register a Python RDD as a SQL table.
+
+        ``schema`` maps column names to Arrow type strings
+        (``"int64"``, ``"float64"``, ``"utf8"``, …).
+        """
+        ...
+
+    def register_udf(
+        self,
+        name: str,
+        func: Callable,
+        input_types: "List[str]",
+        return_type: str,
+    ) -> None:
+        """Register a Python callable as a SQL scalar UDF."""
         ...

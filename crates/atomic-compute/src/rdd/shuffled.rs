@@ -141,6 +141,12 @@ where
     }
 
     fn number_of_splits(&self) -> usize {
+        // If adaptive coalescing ran for this shuffle, return the coalesced count.
+        if let Some(tracker) = atomic_data::env::get_map_output_tracker() {
+            if let Some(n) = tracker.get_coalesced_partitions(self.shuffle_id) {
+                return n;
+            }
+        }
         self.part.get_num_of_partitions()
     }
 
@@ -194,19 +200,41 @@ where
         log::debug!("compute inside shuffled rdd");
         let start = Instant::now();
 
-        let fut = self
-            .fetcher
-            .fetch::<K, C>(self.shuffle_id, split.get_index());
+        let coalesced_id = split.get_index();
+        let original_num_partitions = self.part.get_num_of_partitions();
+
+        // Determine which original reduce-partition IDs this coalesced split covers.
+        let original_ids: Vec<usize> = if let Some(tracker) =
+            atomic_data::env::get_map_output_tracker()
+        {
+            if let Some(coalesced_n) = tracker.get_coalesced_partitions(self.shuffle_id) {
+                // Map coalesced_id → original reduce partition range.
+                // Simple even-split mapping: coalesced partition i covers
+                // [i * (original / coalesced), (i+1) * (original / coalesced)).
+                let ratio = original_num_partitions.max(1);
+                let per_coalesced = (ratio + coalesced_n - 1) / coalesced_n; // ceil
+                let start_id = coalesced_id * per_coalesced;
+                let end_id = ((coalesced_id + 1) * per_coalesced).min(original_num_partitions);
+                (start_id..end_id).collect()
+            } else {
+                vec![coalesced_id]
+            }
+        } else {
+            vec![coalesced_id]
+        };
+
         let mut combiners: HashMap<K, C> = HashMap::new();
-        // Use the Tokio runtime handle so hyper HTTP connections get a reactor.
-        let result = Handle::current()
-            .block_on(fut)
-            .map_err(|e| BaseError::Other(format!("Shuffle fetch error: {}", e)))?;
-        for (k, c) in result.into_iter() {
-            combiners
-                .entry(k)
-                .and_modify(|old| (self.aggregator.merge_combiners)(old, c.clone()))
-                .or_insert(c);
+        for orig_id in original_ids {
+            let fut = self.fetcher.fetch::<K, C>(self.shuffle_id, orig_id);
+            let result = Handle::current()
+                .block_on(fut)
+                .map_err(|e| BaseError::Other(format!("Shuffle fetch error: {}", e)))?;
+            for (k, c) in result {
+                combiners
+                    .entry(k)
+                    .and_modify(|old| (self.aggregator.merge_combiners)(old, c.clone()))
+                    .or_insert(c);
+            }
         }
 
         log::debug!("time taken for fetching {}", start.elapsed().as_millis());

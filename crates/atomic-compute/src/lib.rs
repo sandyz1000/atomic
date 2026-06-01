@@ -11,6 +11,7 @@ pub mod io;
 pub mod rdd;
 pub mod task_registry;
 pub mod task_traits;
+pub mod tls;
 
 pub mod __macro_support {
     pub use crate::task_registry::{ShuffleKeyEntry, ShuffleMapEntry, TaskEntry};

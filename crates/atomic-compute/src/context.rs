@@ -6,6 +6,8 @@ use crate::backend::NativeBackend;
 use crate::rdd::typed::TypedRdd;
 use crate::rdd::{ParallelCollection, UnionRdd};
 use crate::{env, hosts};
+use atomic_data::accumulator::{Accumulator, MergeFn, make_merge_fn, next_accumulator_id};
+use atomic_data::broadcast::{BroadcastVar, next_broadcast_id};
 use atomic_data::data::Data;
 use atomic_data::distributed::{
     TRANSPORT_HEADER_LEN, PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime,
@@ -45,6 +47,12 @@ pub struct Context {
     pub address_map: Vec<SocketAddrV4>,
     pub distributed_driver: bool,
     pub work_dir: PathBuf,
+    /// Driver-side broadcast variable store: `broadcast_id → rkyv-encoded bytes`.
+    /// Attached to every TaskEnvelope dispatched to workers.
+    pub broadcast_store: Arc<dashmap::DashMap<usize, Vec<u8>>>,
+    /// Driver-side accumulator store: `accumulator_id → (current_bytes, merge_fn)`.
+    /// Updated by `merge_accumulator_deltas` after each task completes.
+    pub accumulator_store: Arc<dashmap::DashMap<usize, (Vec<u8>, Arc<MergeFn>)>>,
 }
 
 impl Drop for Context {
@@ -95,7 +103,7 @@ impl Context {
 
     /// Create a context from environment variables.
     ///
-    /// Reads `VEGA_DEPLOYMENT_MODE`, `VEGA_LOCAL_IP`, `VEGA_SLAVE_PORT`, etc.
+    /// Reads `ATOMIC_DEPLOYMENT_MODE`, `ATOMIC_LOCAL_IP`, `ATOMIC_SLAVE_PORT`, etc.
     /// Prefer [`Context::new_with_config`] for new Rust programs; this exists for
     /// Python/JS bindings and legacy code where explicit config is not practical.
     pub fn new() -> Result<Arc<Self>, Error> {
@@ -144,11 +152,26 @@ impl Context {
 
         let _ = env_logger::try_init();
         atomic_data::cache::init_partition_cache();
+        // Set the RDD cache spill directory for MemoryAndDisk / DiskOnly partitions.
+        let spill_dir = job_work_dir.join("rdd-cache");
+        fs::create_dir_all(&spill_dir).ok();
+        atomic_data::env::set_rdd_cache_spill_dir(spill_dir);
+        // Start Prometheus metrics server if a port is configured.
+        if let Some(port) = config.metrics_port {
+            atomic_scheduler::metrics::init_metrics();
+            env::Env::run_in_async_rt(|| {
+                atomic_scheduler::metrics::start_metrics_server(port);
+            });
+        }
         let config = Arc::new(config);
         if let Err(e) = env::Env::run_in_async_rt(|| env::init_shuffle(&config)) {
             log::warn!("shuffle service could not start (wide transforms will be local-only): {e}");
         }
-        let local = Arc::new(LocalScheduler::new(20, true));
+        let local = Arc::new(LocalScheduler::new_with_coalesce(
+            20,
+            true,
+            config.coalesce_shuffle_threshold_bytes,
+        ));
         let scheduler = Schedulers::Local(local.clone());
 
         Ok(Arc::new(Context {
@@ -160,6 +183,8 @@ impl Context {
             address_map: vec![SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)],
             distributed_driver: false,
             work_dir: job_work_dir,
+            broadcast_store: Arc::new(dashmap::DashMap::new()),
+            accumulator_store: Arc::new(dashmap::DashMap::new()),
         }))
     }
 
@@ -179,7 +204,11 @@ impl Context {
             log::warn!("shuffle service could not start: {e}");
         }
 
-        let scheduler = Arc::new(DistributedScheduler::new(20, true));
+        let mut dist_sched = DistributedScheduler::new(20, true);
+        if let Some(m) = config.speculation_multiplier {
+            dist_sched = dist_sched.with_speculation(m);
+        }
+        let scheduler = Arc::new(dist_sched);
         let mut address_map = Vec::new();
 
         for &endpoint in &config.workers {
@@ -206,8 +235,20 @@ impl Context {
             ));
         }
 
+        // Start proactive heartbeat loop if configured.
+        env::Env::run_in_async_rt(|| {
+            scheduler.start_heartbeat(
+                config.heartbeat_interval_secs,
+                config.heartbeat_timeout_ms,
+            );
+        });
+
         let scheduler = Schedulers::Distributed(scheduler);
-        let driver_scheduler = Arc::new(LocalScheduler::new(20, false));
+        let driver_scheduler = Arc::new(LocalScheduler::new_with_coalesce(
+            20,
+            false,
+            config.coalesce_shuffle_threshold_bytes,
+        ));
 
         Ok(Arc::new(Context {
             config,
@@ -218,6 +259,8 @@ impl Context {
             address_map,
             distributed_driver: true,
             work_dir: job_work_dir,
+            broadcast_store: Arc::new(dashmap::DashMap::new()),
+            accumulator_store: Arc::new(dashmap::DashMap::new()),
         }))
     }
 
@@ -334,12 +377,126 @@ impl Context {
         }
     }
 
+    /// Cancel a running distributed job by its `run_id`.
+    ///
+    /// The cancellation is best-effort: tasks that have already received their results
+    /// from a worker are not rolled back.  In local mode this is a no-op.
+    pub fn cancel_job(&self, run_id: usize) -> Result<(), Error> {
+        match &self.scheduler {
+            atomic_scheduler::Schedulers::Distributed(sched) => {
+                sched.cancel_job(run_id).map_err(Error::from)
+            }
+            atomic_scheduler::Schedulers::Local(_) => Ok(()),
+        }
+    }
+
+    /// Gracefully stop this context.
+    ///
+    /// In distributed mode, sends a `ShutDownGracefully` signal to every registered worker.
+    /// Clears the global shuffle infrastructure so a new context can be started in the same
+    /// process.  In local mode this is a no-op (local threads finish naturally on drop).
+    pub fn stop(&self) {
+        if !self.config.workers.is_empty() {
+            Context::drop_executors(&self.config.workers);
+        }
+        atomic_data::env::clear_shuffle_infrastructure();
+    }
+
+    /// Collect all elements of an RDD into a `Vec`, distribution-aware.
+    ///
+    /// In **local mode** runs via the driver's thread-pool scheduler.
+    /// In **distributed mode** delegates to `TypedRdd::collect()` which routes
+    /// staged pipelines through `dispatch_pipeline()` and shuffle deps through
+    /// `run_pending_shuffle_stages()`.
+    ///
+    /// This is the preferred method for streaming output operations that receive
+    /// an `Arc<dyn Rdd>` from the DStream graph and want to materialise it.
+    pub fn collect_rdd<T>(self: &Arc<Self>, rdd: Arc<dyn Rdd<Item = T>>) -> Result<Vec<T>, Error>
+    where
+        T: Data + Clone + WireDecode,
+        Vec<T>: WireDecode,
+    {
+        use crate::rdd::TypedRdd;
+        TypedRdd::new(rdd, self.clone())
+            .collect()
+            .map_err(Error::from)
+    }
+
     pub fn new_rdd_id(self: &Arc<Self>) -> usize {
         self.next_rdd_id.fetch_add(1, Ordering::SeqCst)
     }
 
     pub fn new_shuffle_id(self: &Arc<Self>) -> usize {
         self.next_shuffle_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Create a broadcast variable.
+    ///
+    /// The value is rkyv-encoded on the driver and embedded in every `TaskEnvelope`
+    /// dispatched to workers. Workers call `broadcast_var.value()` inside `#[task]`
+    /// functions to read the data without re-serializing per element.
+    ///
+    /// In local mode the broadcast value is still loaded into the thread-local registry
+    /// before each task, so the same `#[task]` code works in both modes.
+    pub fn broadcast<T>(self: &Arc<Self>, value: T) -> BroadcastVar<T>
+    where
+        T: atomic_data::distributed::WireEncode + atomic_data::distributed::WireDecode,
+    {
+        let id = next_broadcast_id();
+        let bytes = value.encode_wire().expect("broadcast: encode failed");
+        self.broadcast_store.insert(id, bytes);
+        BroadcastVar::new(id)
+    }
+
+    /// Return a snapshot of all broadcast values as `(id, bytes)` pairs.
+    /// Used by `dispatch_pipeline` and `run_shuffle_map_stage` to attach broadcasts
+    /// to outgoing `TaskEnvelope`s.
+    pub fn broadcast_snapshot(&self) -> Vec<(usize, Vec<u8>)> {
+        self.broadcast_store
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect()
+    }
+
+    /// Create an accumulator with an initial value and an associative merge function.
+    ///
+    /// Workers call `acc.add(delta)` inside `#[task]` functions. The driver merges
+    /// per-task deltas by calling `merge(current, delta)` after every task result.
+    /// Read the current driver-side value with `Context::accumulator_value(&acc)`.
+    pub fn accumulator<T, F>(self: &Arc<Self>, init: T, merge: F) -> Accumulator<T>
+    where
+        T: atomic_data::distributed::WireEncode + atomic_data::distributed::WireDecode + 'static,
+        F: Fn(T, T) -> T + Send + Sync + 'static,
+    {
+        let id = next_accumulator_id();
+        let bytes = init.encode_wire().expect("accumulator: encode init failed");
+        let merge_fn = Arc::new(make_merge_fn::<T, F>(merge));
+        self.accumulator_store.insert(id, (bytes, merge_fn));
+        Accumulator::new(id)
+    }
+
+    /// Read the current driver-side value of an accumulator.
+    pub fn accumulator_value<T>(&self, acc: &Accumulator<T>) -> T
+    where
+        T: atomic_data::distributed::WireDecode,
+    {
+        let entry = self
+            .accumulator_store
+            .get(&acc.id)
+            .unwrap_or_else(|| panic!("accumulator {}: not registered on this context", acc.id));
+        T::decode_wire(&entry.value().0).expect("accumulator_value: decode failed")
+    }
+
+    /// Merge incoming accumulator deltas from a completed task result into driver-side values.
+    /// Called by the scheduler after each successful task.
+    pub fn merge_accumulator_deltas(&self, deltas: &[(usize, Vec<u8>)]) {
+        for (id, delta_bytes) in deltas {
+            if let Some(mut entry) = self.accumulator_store.get_mut(id) {
+                let merge_fn = entry.value().1.clone();
+                let new_bytes = merge_fn(entry.value().0.clone(), delta_bytes.clone());
+                entry.value_mut().0 = new_bytes;
+            }
+        }
     }
 
     /// Default number of output partitions for wide transformations (reduce_by_key, group_by_key).
@@ -410,6 +567,62 @@ impl Context {
         C: ReaderConfiguration<I>,
     {
         config.make_reader(self.clone(), func)
+    }
+
+    /// Read a text file (or directory of files, or S3 prefix) as a `TypedRdd<String>`.
+    ///
+    /// URI schemes:
+    /// - `s3://bucket/prefix` — lists all objects under the prefix; each key is one partition.
+    ///   Requires the `s3` feature flag.
+    /// - `file:///absolute/path` or `/absolute/path` or `relative/path` — reads a local file
+    ///   (single partition) or, if the path is a directory, all files in the directory (one
+    ///   partition per file).
+    ///
+    /// Each partition yields one line per element.
+    pub fn text_file(self: &Arc<Self>, uri: &str) -> TypedRdd<String> {
+        use crate::io::{TextFileRdd, TextFileSource};
+
+        let sources: Vec<TextFileSource> = if uri.starts_with("s3://") {
+            #[cfg(feature = "s3")]
+            {
+                use crate::io::s3::s3_impl::S3Uri;
+                if let Some(s3uri) = S3Uri::parse(uri) {
+                    let keys = crate::io::s3::s3_impl::list_keys(&s3uri.bucket, &s3uri.key);
+                    if keys.is_empty() {
+                        // Treat the URI itself as a single key (file, not a prefix directory).
+                        vec![TextFileSource::S3 { bucket: s3uri.bucket, key: s3uri.key }]
+                    } else {
+                        keys.into_iter()
+                            .map(|k| TextFileSource::S3 { bucket: s3uri.bucket.clone(), key: k })
+                            .collect()
+                    }
+                } else {
+                    vec![]
+                }
+            }
+            #[cfg(not(feature = "s3"))]
+            {
+                log::warn!("text_file: s3:// URI requested but 's3' feature is disabled");
+                vec![]
+            }
+        } else {
+            // Local filesystem — strip file:// if present
+            let path = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri));
+            if path.is_dir() {
+                std::fs::read_dir(path)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| TextFileSource::Local(entry.path()))
+                    .collect()
+            } else {
+                vec![TextFileSource::Local(path.to_path_buf())]
+            }
+        };
+
+        let id = self.new_rdd_id();
+        let rdd = Arc::new(TextFileRdd::new(id, sources));
+        TypedRdd::new(rdd, self.clone())
     }
 
     pub fn run_job<T: Data, U: Data + Clone, F>(
@@ -585,6 +798,7 @@ impl Context {
         source_partitions: Vec<Vec<u8>>,
         ops: Vec<PipelineOp>,
     ) -> Result<Vec<Vec<u8>>, Error> {
+        let broadcasts = self.broadcast_snapshot();
         match &self.scheduler {
             Schedulers::Local(_) => {
                 let backend = NativeBackend;
@@ -597,10 +811,15 @@ impl Context {
                             format!("local-pipeline-{}", part_id),
                             ops.clone(),
                             data,
-                        );
+                        ).with_broadcasts(broadcasts.clone());
                         let result = backend.execute("local-driver", &task)?;
                         match result.status {
-                            ResultStatus::Success => Ok(result.data),
+                            ResultStatus::Success => {
+                                if !result.accumulator_deltas.is_empty() {
+                                    self.merge_accumulator_deltas(&result.accumulator_deltas);
+                                }
+                                Ok(result.data)
+                            }
                             _ => Err(Error::InvalidPayload(
                                 result.error.unwrap_or_else(|| "task failed".to_string()),
                             )),
@@ -610,7 +829,9 @@ impl Context {
             }
             Schedulers::Distributed(sched) => {
                 env::Env::run_in_async_rt(|| {
-                    futures::executor::block_on(sched.run_native_job(ops, source_partitions))
+                    futures::executor::block_on(
+                        sched.run_native_job_with_broadcasts(ops, source_partitions, broadcasts)
+                    )
                 })
                 .map_err(Error::from)
             }
@@ -767,7 +988,21 @@ pub fn start_worker(config: Config) -> ! {
             "start_worker called without a WorkerConfig — use Config::worker(ip, port)",
         ))
         .and_then(|(port, max_tasks)| {
-            let executor = Arc::new(Executor::new(port, max_tasks));
+            let mut executor = Executor::new(port, max_tasks);
+            // If TLS cert/key/CA are configured, upgrade to mutual TLS.
+            #[cfg(feature = "tls")]
+            if crate::tls::tls_is_configured(
+                config.tls_ca_cert.as_deref(),
+                config.tls_cert.as_deref(),
+                config.tls_key.as_deref(),
+            ) {
+                executor = executor.with_tls(
+                    config.tls_cert.as_ref().unwrap(),
+                    config.tls_key.as_ref().unwrap(),
+                    config.tls_ca_cert.as_ref().unwrap(),
+                ).map_err(|e| Error::GetOrCreateConfig(Box::leak(format!("TLS init: {e}").into_boxed_str())))?;
+            }
+            let executor = Arc::new(executor);
             executor.worker()
         });
 

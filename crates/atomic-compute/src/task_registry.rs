@@ -24,12 +24,34 @@ inventory::collect!(TaskEntry);
 /// `inventory::submit!(TaskEntry { ... })` calls linked into the binary.
 ///
 /// Keyed by `op_id`. Workers call `TASK_REGISTRY.get(op_id)` to dispatch.
+///
+/// Panics at startup if two entries share the same `op_id` AND point to different
+/// handler addresses (a sign of a copy-paste error in `#[task(name = "…")]`).
+/// Identical handlers for the same `op_id` are silently deduplicated — this is the
+/// expected case for two `task_fn!` closures with the same body in the same module.
 pub static TASK_REGISTRY: Lazy<HashMap<&'static str, fn(&TaskAction, &[u8], &[u8]) -> Result<Vec<u8>, String>>> =
     Lazy::new(|| {
-        inventory::iter::<TaskEntry>
-            .into_iter()
-            .map(|entry| (entry.op_id, entry.handler))
-            .collect()
+        let mut map: HashMap<&'static str, fn(&TaskAction, &[u8], &[u8]) -> Result<Vec<u8>, String>> = HashMap::new();
+        for entry in inventory::iter::<TaskEntry> {
+            if let Some(&existing) = map.get(entry.op_id) {
+                // Two handlers for the same op_id: allow only if they are the same
+                // function (identical task_fn! bodies → same handler pointer).
+                if existing as usize != entry.handler as usize {
+                    panic!(
+                        "Atomic task registry: duplicate op_id \"{}\".\n\
+                         Two different handlers are registered for the same key.\n\
+                         This is usually caused by copy-pasting a `#[task(name = \"...\")]` \
+                         attribute without changing the name.\n\
+                         Fix: give each task a unique name.",
+                        entry.op_id
+                    );
+                }
+                // Same handler (identical task_fn! body) — silently deduplicate.
+            } else {
+                map.insert(entry.op_id, entry.handler);
+            }
+        }
+        map
     });
 
 // ── Shuffle-map registry ──────────────────────────────────────────────────────

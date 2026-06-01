@@ -1,7 +1,7 @@
 """Local-mode coverage for every RDD transform and action (PY-G2)."""
 import os
 import pytest
-import atomic
+import atomic_compute
 
 
 # ── Basic transforms ──────────────────────────────────────────────────────────

@@ -4,12 +4,12 @@ Each test is named after the bug ID it guards.  A failure here means a
 previously-fixed bug has regressed.
 """
 import pytest
-import atomic
+import atomic_compute
 
 
 @pytest.fixture
 def ctx():
-    return atomic.Context(default_parallelism=2)
+    return atomic_compute.Context(default_parallelism=2)
 
 
 # ── PY-B1: group_by_key used repr() for key equality ─────────────────────────

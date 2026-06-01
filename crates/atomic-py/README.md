@@ -29,9 +29,9 @@ pip install ../../target/wheels/atomic-*.whl
 ## Quick start
 
 ```python
-import atomic
+import atomic_compute
 
-ctx = atomic.Context(default_parallelism=4)
+ctx = atomic_compute.Context(default_parallelism=4)
 
 result = ctx.parallelize([1, 2, 3, 4]) \
             .map(lambda x: x * 2) \
@@ -52,7 +52,7 @@ python demo/python/local_word_count.py
 
 ## API
 
-### `atomic.Context`
+### `atomic_compute.Context`
 
 | Method | Description |
 |---|---|

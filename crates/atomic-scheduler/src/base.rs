@@ -326,9 +326,17 @@ pub trait NativeScheduler: Send + Sync {
                             .iter()
                             .map(|x| x.first().map(|s| s.to_owned()))
                             .collect();
-                        log::debug!("locs for shuffle id #{}: {:?}", dep.get_shuffle_id(), locs);
-                        m.register_map_outputs(dep.get_shuffle_id(), locs);
+                        let shuffle_id = dep.get_shuffle_id();
+                        log::debug!("locs for shuffle id #{}: {:?}", shuffle_id, locs);
+                        m.register_map_outputs(shuffle_id, locs);
                         log::debug!("finished registering map outputs");
+
+                        // ── Adaptive coalescing ───────────────────────────────
+                        // After the map stage completes, compute the optimal number
+                        // of reduce partitions based on actual bucket byte sizes.
+                        if m.coalesce_threshold_bytes > 0 {
+                            m.compute_coalescing(shuffle_id, stage.num_partitions);
+                        }
                     }
                     // TODO: Cache
                     self.update_cache_locs().await?;
@@ -568,6 +576,9 @@ pub struct Mutators {
     pub next_task_id: Arc<AtomicUsize>,
     /// Monotonically increasing counter used to allocate unique stage IDs.
     pub next_stage_id: Arc<AtomicUsize>,
+    /// Adaptive coalescing threshold in bytes (0 = disabled).
+    /// Copied from `Config::coalesce_shuffle_threshold_bytes` at context init.
+    pub coalesce_threshold_bytes: u64,
 }
 
 impl Mutators {
@@ -581,7 +592,13 @@ impl Mutators {
             next_job_id: Arc::new(AtomicUsize::new(0)),
             next_task_id: Arc::new(AtomicUsize::new(0)),
             next_stage_id: Arc::new(AtomicUsize::new(0)),
+            coalesce_threshold_bytes: 0,
         }
+    }
+
+    pub fn with_coalesce_threshold(mut self, bytes: u64) -> Self {
+        self.coalesce_threshold_bytes = bytes;
+        self
     }
 
     #[inline]
@@ -625,6 +642,74 @@ impl Mutators {
     pub fn register_map_outputs(&self, shuffle_id: usize, locs: Vec<Option<String>>) {
         if let Some(tracker) = &self.map_output_tracker {
             tracker.register_map_outputs(shuffle_id, locs)
+        }
+    }
+
+    /// Compute the optimal coalesced reduce partition count for a completed shuffle-map
+    /// stage and store it in the `MapOutputTracker`.
+    ///
+    /// Uses the global `SHUFFLE_CACHE` to measure the total bytes written per reduce
+    /// partition (summed across all map tasks). Merges adjacent small partitions until
+    /// each coalesced partition holds at least `coalesce_threshold_bytes / original_n`
+    /// average bytes.
+    pub fn compute_coalescing(&self, shuffle_id: usize, num_map_partitions: usize) {
+        let tracker = match &self.map_output_tracker {
+            Some(t) => t.clone(),
+            None => return,
+        };
+        let cache = match atomic_data::env::get_shuffle_cache() {
+            Some(c) => c,
+            None => return,
+        };
+
+        // server_uris[shuffle_id].len() gives the original number of reduce partitions.
+        let num_reduce_partitions = tracker
+            .server_uris
+            .get(&shuffle_id)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        if num_reduce_partitions <= 1 {
+            return; // nothing to coalesce
+        }
+
+        // Compute total bytes for each reduce partition across all map tasks.
+        let bucket_bytes: Vec<u64> = (0..num_reduce_partitions)
+            .map(|reduce_id| {
+                cache.bytes_for_reduce_partition(shuffle_id, num_map_partitions, reduce_id)
+            })
+            .collect();
+
+        let total_bytes: u64 = bucket_bytes.iter().sum();
+        if total_bytes == 0 {
+            return; // empty shuffle — no coalescing needed
+        }
+
+        // Target: each coalesced partition should hold at least `threshold / original_n` bytes.
+        // Greedily merge adjacent partitions until each meets the target.
+        let target_bytes_per_partition =
+            (self.coalesce_threshold_bytes / num_reduce_partitions as u64).max(1);
+
+        let mut coalesced_count = 0usize;
+        let mut running = 0u64;
+        for &bytes in &bucket_bytes {
+            running += bytes;
+            if running >= target_bytes_per_partition {
+                coalesced_count += 1;
+                running = 0;
+            }
+        }
+        // Any remaining bytes form the last coalesced partition.
+        if running > 0 {
+            coalesced_count += 1;
+        }
+
+        let coalesced_count = coalesced_count.max(1).min(num_reduce_partitions);
+        if coalesced_count < num_reduce_partitions {
+            log::info!(
+                "adaptive coalescing: shuffle #{shuffle_id} coalesced {num_reduce_partitions} → \
+                 {coalesced_count} partitions ({total_bytes} bytes total)"
+            );
+            tracker.set_coalesced_partitions(shuffle_id, coalesced_count);
         }
     }
 

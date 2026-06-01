@@ -138,7 +138,7 @@ fn test_stop_with_stop_sc_true_shuts_down_context() {
 
 /// B10: Verifies that `checkpoint-<ms>` files are written after each batch.
 #[test]
-fn test_checkpoint_directory_remains_empty_after_batches() {
+fn test_checkpoint_files_written_after_batches() {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     let sc = compute_ctx();
@@ -185,6 +185,23 @@ fn test_checkpoint_directory_remains_empty_after_batches() {
         "expected at least one checkpoint file in {:?}, but directory is empty",
         checkpoint_path
     );
+}
+
+/// Verify that `from_checkpoint` restores batch duration from a written checkpoint.
+#[test]
+fn test_from_checkpoint_restores_batch_duration() {
+    use atomic_streaming::checkpoint::Checkpoint;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cp = Checkpoint::new(1_000_000, 100, dir.path().to_string_lossy().as_ref(), Some(999_900));
+    cp.write(dir.path()).unwrap();
+
+    let sc = compute_ctx();
+    let ssc = StreamingContext::from_checkpoint(sc, dir.path())
+        .expect("read ok")
+        .expect("checkpoint found");
+
+    assert_eq!(ssc.batch_duration.as_millis(), 100);
 }
 
 // ── Batch processing correctness ─────────────────────────────────────────────
@@ -239,6 +256,62 @@ async fn test_foreach_rdd_processes_all_batches() {
         "expected sum of all batches (0+1+2=3), got {}",
         sum.load(Ordering::Relaxed)
     );
+}
+
+// ── Streaming pair ops ────────────────────────────────────────────────────────
+
+atomic_compute::register_shuffle_map!(String, i32);
+
+#[test]
+fn test_streaming_reduce_by_key() {
+    use atomic_streaming::dstream::pair::PairDStreamFunctions;
+    let sc = compute_ctx();
+    let ssc = StreamingContext::new(sc, Duration::from_millis(50));
+
+    let queue: Arc<Mutex<VecDeque<Arc<dyn atomic_data::rdd::Rdd<Item = (String, i32)>>>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+
+    // Push one batch: word count pairs
+    let batch_rdd: Arc<dyn atomic_data::rdd::Rdd<Item = (String, i32)>> = Arc::new(
+        atomic_compute::rdd::parallel_collection::ParallelCollection::new(
+            0,
+            vec![
+                ("hello".to_string(), 1i32),
+                ("world".to_string(), 1),
+                ("hello".to_string(), 1),
+            ],
+            1,
+        )
+    );
+    queue.lock().push_back(batch_rdd);
+
+    let stream = ssc.queue_stream(queue, true);
+    let pair_ops = PairDStreamFunctions::new(stream, ssc.clone());
+
+    let result_store: Arc<Mutex<Vec<(String, i32)>>> = Arc::new(Mutex::new(Vec::new()));
+    let result_clone = result_store.clone();
+
+    let sc_ref = ssc.sc.clone();
+    let reduced = pair_ops.reduce_by_key(|a, b| a + b, 2);
+    ssc.foreach_rdd(reduced as Arc<dyn atomic_streaming::dstream::DStream<(String, i32)>>, move |rdd, _t| {
+        if let Ok(mut items) = sc_ref.collect_rdd(rdd) {
+            items.sort_by_key(|(k, _)| k.clone());
+            if !items.is_empty() {
+                *result_clone.lock() = items;
+            }
+        }
+    });
+
+    ssc.start().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    ssc.stop(false, false);
+
+    let results = result_store.lock().clone();
+    assert!(!results.is_empty(), "expected reduce_by_key results, got empty");
+    let hello = results.iter().find(|(k, _)| k == "hello");
+    assert_eq!(hello.map(|(_, v)| v), Some(&2i32), "hello count should be 2");
+    let world = results.iter().find(|(k, _)| k == "world");
+    assert_eq!(world.map(|(_, v)| v), Some(&1i32), "world count should be 1");
 }
 
 /// `await_termination_or_timeout()` must return within the given deadline.

@@ -8,13 +8,13 @@ use crate::rdd::PyRdd;
 /// The Atomic execution context.
 ///
 /// Entry point for creating RDDs. In **local mode** (default) transformations run
-/// eagerly in the calling thread. In **distributed mode** (set `VEGA_DEPLOYMENT_MODE=distributed`)
+/// eagerly in the calling thread. In **distributed mode** (set `ATOMIC_DEPLOYMENT_MODE=distributed`)
 /// the context connects to remote workers and dispatches pipeline ops over TCP.
 ///
 /// # Local mode
 /// ```python
-/// import atomic
-/// ctx = atomic.Context()
+/// import atomic_compute
+/// ctx = atomic_compute.Context()
 /// result = ctx.parallelize([1, 2, 3, 4]).map(lambda x: x + 1).collect()
 /// # [2, 3, 4, 5]
 /// ```
@@ -22,11 +22,11 @@ use crate::rdd::PyRdd;
 /// # Distributed mode
 /// ```python
 /// import os
-/// os.environ["VEGA_DEPLOYMENT_MODE"] = "distributed"
-/// os.environ["VEGA_LOCAL_IP"] = "127.0.0.1"
-/// # Workers are listed in ~/hosts.conf or via VEGA_SLAVES env var.
-/// import atomic
-/// ctx = atomic.Context()
+/// os.environ["ATOMIC_DEPLOYMENT_MODE"] = "distributed"
+/// os.environ["ATOMIC_LOCAL_IP"] = "127.0.0.1"
+/// # Workers are listed in ~/hosts.conf or via ATOMIC_SLAVES env var.
+/// import atomic_compute
+/// ctx = atomic_compute.Context()
 /// result = ctx.parallelize(range(100), num_partitions=4).map(lambda x: x * 2).collect()
 /// ```
 #[pyclass(name = "Context")]
@@ -141,6 +141,14 @@ impl PyContext {
 
     pub fn default_parallelism(&self) -> usize {
         self.default_parallelism
+    }
+
+    /// Stop the context and release resources.
+    ///
+    /// In distributed mode, sends a graceful-shutdown signal to every worker.
+    /// Safe to call multiple times.
+    pub fn stop(&self) {
+        self.inner.stop();
     }
 }
 

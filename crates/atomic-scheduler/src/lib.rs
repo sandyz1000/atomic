@@ -5,6 +5,7 @@ pub mod error;
 pub mod job;
 pub mod listener;
 pub mod local;
+pub mod metrics;
 pub mod stage;
 
 use atomic_data::partial::{ApproximateEvaluator, result::PartialResult};

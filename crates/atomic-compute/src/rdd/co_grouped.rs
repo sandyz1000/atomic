@@ -5,81 +5,66 @@ use std::sync::Arc;
 
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::*;
-use atomic_data::aggregator::Aggregator;
 use atomic_data::dependency::Dependency;
 use atomic_data::error::BaseError;
-use atomic_data::partitioner::Partitioner;
-use atomic_data::split::{CoGroupSplit, CoGroupSplitDep, Split};
-use bincode::Encode;
+use atomic_data::split::{Split};
 
-// Note: CoGroupedRdd uses Arc<dyn Data> instead of Box<dyn Data> for values
-// because Arc is Clone-able while Box is not. This allows the Item type to
-// satisfy the Data trait bound which requires Clone.
-
+/// Two-parent cogroup: pairs items from `rdd1: Rdd<(K, V1)>` and `rdd2: Rdd<(K, V2)>` by key.
+///
+/// Each output partition merges the corresponding partition from each parent by key into a
+/// `(K, Vec<V1>, Vec<V2>)` triple.  Both parents must have the same partition count (narrow dep).
+/// For mismatched partitioners, shuffle both sides first via `reduce_by_key` before calling
+/// `cogroup`.
+///
+/// This design avoids all `Box<dyn Data>` type-erasure by storing typed RDD references.
 #[derive(Clone)]
-pub struct CoGroupedRdd<K: Data> {
-    pub vals: Arc<RddVals>,
-    pub rdds: Vec<Arc<dyn RddBase>>,
-
-    pub part: Partitioner,
+pub struct CoGroupedRdd<K, V1, V2> {
+    vals: Arc<RddVals>,
+    rdd1: Arc<dyn Rdd<Item = (K, V1)>>,
+    rdd2: Arc<dyn Rdd<Item = (K, V2)>>,
+    num_partitions: usize,
     _marker: PhantomData<K>,
 }
 
-impl<K: Data + Eq + Hash + Encode + Clone> CoGroupedRdd<K> {
+impl<K, V1, V2> CoGroupedRdd<K, V1, V2>
+where
+    K: Data + Eq + Hash + Clone,
+    V1: Data + Clone,
+    V2: Data + Clone,
+{
     pub fn new(
         id: usize,
-        _shuffle_id: usize,
-        rdds: Vec<Arc<dyn RddBase>>,
-        part: Partitioner,
+        rdd1: Arc<dyn Rdd<Item = (K, V1)>>,
+        rdd2: Arc<dyn Rdd<Item = (K, V2)>>,
     ) -> Self {
-        let mut vals = RddVals::new(id);
+        let n1 = rdd1.get_rdd_base().number_of_splits();
+        let n2 = rdd2.get_rdd_base().number_of_splits();
+        let num_partitions = n1.max(n2);
 
-        // Use Arc<dyn Data> instead of Box<dyn Data> to support Clone
-        let create_combiner = Arc::new(|v: Arc<dyn Data>| vec![v])
-            as Arc<dyn Fn(Arc<dyn Data>) -> Vec<Arc<dyn Data>> + Send + Sync>;
-        let merge_value = Arc::new(|buf: &mut Vec<Arc<dyn Data>>, v: Arc<dyn Data>| {
-            buf.push(v);
-        })
-            as Arc<dyn Fn(&mut Vec<Arc<dyn Data>>, Arc<dyn Data>) + Send + Sync>;
-        let merge_combiners = Arc::new(|b1: &mut Vec<Arc<dyn Data>>, b2: Vec<Arc<dyn Data>>| {
-            b1.extend(b2);
-        })
-            as Arc<dyn Fn(&mut Vec<Arc<dyn Data>>, Vec<Arc<dyn Data>>) + Send + Sync>;
-        let _aggr = Arc::new(Aggregator::<K, Arc<dyn Data>, Vec<Arc<dyn Data>>>::new(
-            create_combiner,
-            merge_value,
-            merge_combiners,
-        ));
-        let mut deps = Vec::new();
-        for rdd in rdds.iter() {
-            let part = part.clone();
-            if rdd.partitioner().is_some_and(|p| p.equals(&part)) {
-                let rdd_base = rdd.clone();
-                deps.push(Dependency::OneToOne { rdd_base })
-            } else {
-                // Note: Cannot create shuffle dependency with type-erased Arc<dyn Data>
-                // because it doesn't implement Encode. Would need typed ShuffledRdd instead.
-                // For now, using OneToOne dependency (requires pre-shuffled data).
-                log::warn!(
-                    "CoGroupedRdd: Partitioner mismatch but cannot create shuffle with type-erased data - using OneToOne. \
-                    Data should be pre-shuffled or use typed operations."
-                );
-                let rdd_base = rdd.clone();
-                deps.push(Dependency::OneToOne { rdd_base });
-            }
-        }
-        vals.dependencies = deps;
-        let vals = Arc::new(vals);
+        let mut vals = RddVals::new(id);
+        vals.dependencies.push(Dependency::OneToOne {
+            rdd_base: rdd1.get_rdd_base(),
+        });
+        vals.dependencies.push(Dependency::OneToOne {
+            rdd_base: rdd2.get_rdd_base(),
+        });
+
         CoGroupedRdd {
-            vals,
-            rdds,
-            part,
+            vals: Arc::new(vals),
+            rdd1,
+            rdd2,
+            num_partitions,
             _marker: PhantomData,
         }
     }
 }
 
-impl<K: Eq + Hash + Data + Clone> RddBase for CoGroupedRdd<K> {
+impl<K, V1, V2> RddBase for CoGroupedRdd<K, V1, V2>
+where
+    K: Data + Eq + Hash + Clone,
+    V1: Data + Clone,
+    V2: Data + Clone,
+{
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -89,53 +74,33 @@ impl<K: Eq + Hash + Data + Clone> RddBase for CoGroupedRdd<K> {
     }
 
     fn splits(&self) -> Vec<Box<dyn Split>> {
-        let mut splits = Vec::new();
-        for i in 0..self.part.get_num_of_partitions() {
-            splits.push(Box::new(CoGroupSplit::new(
-                i,
-                self.rdds
-                    .iter()
-                    .enumerate()
-                    .map(|(i, r)| match &self.get_dependencies()[i] {
-                        Dependency::Shuffle(s) => CoGroupSplitDep::ShuffleCoGroupSplitDep {
-                            shuffle_id: s.get_shuffle_id(),
-                        },
-                        _ => CoGroupSplitDep::NarrowCoGroupSplitDep {
-                            rdd: r.clone(),
-                            split: r.splits()[i].clone(),
-                        },
-                    })
-                    .collect(),
-            )) as Box<dyn Split>)
-        }
-        splits
+        (0..self.num_partitions)
+            .map(|i| Box::new(atomic_data::split::ShuffledRddSplit::new(i)) as Box<dyn Split>)
+            .collect()
     }
 
     fn number_of_splits(&self) -> usize {
-        self.part.get_num_of_partitions()
-    }
-
-    fn partitioner(&self) -> Option<Partitioner> {
-        Some(self.part.clone())
+        self.num_partitions
     }
 
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
-        log::debug!("inside iterator_any CoGroupedRdd");
         Ok(Box::new(
             self.compute(split)?
-                .map(|(k, v)| Box::new((k, v)) as Box<dyn Data>),
+                .map(|item| Box::new(item) as Box<dyn Data>),
         ))
     }
 }
 
-impl<K> Rdd for CoGroupedRdd<K>
+impl<K, V1, V2> Rdd for CoGroupedRdd<K, V1, V2>
 where
     K: Data + Eq + Hash + Clone,
+    V1: Data + Clone,
+    V2: Data + Clone,
 {
-    type Item = (K, Vec<Vec<Arc<dyn Data>>>);
+    type Item = (K, Vec<V1>, Vec<V2>);
 
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
         Arc::new(self.clone())
@@ -145,66 +110,30 @@ where
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    #[allow(clippy::type_complexity)]
     fn compute(
         &self,
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
-        if let Some(split) = split.as_any().downcast_ref::<CoGroupSplit>() {
-            let mut agg: HashMap<K, Vec<Vec<Arc<dyn Data>>>> = HashMap::new();
-            for (dep_num, dep) in split.clone().deps.into_iter().enumerate() {
-                match dep {
-                    CoGroupSplitDep::NarrowCoGroupSplitDep { rdd, split } => {
-                        log::debug!("inside iterator CoGroupedRdd narrow dep");
-                        for i in rdd.iterator_any(split)? {
-                            log::debug!(
-                                "inside iterator CoGroupedRdd narrow dep iterator any: {:?}",
-                                i
-                            );
-                            // TODO: This downcasting logic is complex and error-prone
-                            // The issue is that we receive Box<dyn Data> which could be a tuple (K, V)
-                            // But we can't easily extract K and convert V to Arc<dyn Data>
-                            // This would require either:
-                            // 1. Making Data object-safe for cloning (add clone_box method)
-                            // 2. Redesigning CoGroupedRdd to not use type erasure
-                            // 3. Using unsafe code to transmute Box to Arc (not recommended)
+        let idx = split.get_index();
+        let n1 = self.rdd1.get_rdd_base().number_of_splits();
+        let n2 = self.rdd2.get_rdd_base().number_of_splits();
 
-                            // For now, log a warning and skip this item
-                            log::warn!(
-                                "CoGroupedRdd: Skipping narrow dependency item - downcasting from Box<dyn Data> to concrete types not yet implemented"
-                            );
-                            // TODO: Implement proper downcasting when Data trait is enhanced
-                            continue;
-                        }
-                    }
-                    CoGroupSplitDep::ShuffleCoGroupSplitDep { shuffle_id: _ } => {
-                        log::debug!("inside iterator CoGroupedRdd shuffle dep, agg: {:?}", agg);
-                        let num_rdds = self.rdds.len();
-                        // TODO: Fix ShuffleFetcher API - needs tracker instance
-                        // For now, use the same pattern as shuffle.rs which also needs fixing
-                        // let fetcher = &crate::env::Env::get().shuffle_fetcher;
-                        // let fut = fetcher.fetch::<K, Vec<Arc<dyn Data>>>(
-                        //     shuffle_id,
-                        //     split.get_index(),
-                        // );
+        // Map partition index into each parent, wrapping if the parent has fewer partitions.
+        let split1 = self.rdd1.get_rdd_base().splits().remove(idx % n1.max(1));
+        let split2 = self.rdd2.get_rdd_base().splits().remove(idx % n2.max(1));
 
-                        // Temporary workaround - return empty iterator
-                        // This needs to be fixed when ShuffleFetcher API is properly integrated
-                        log::warn!("ShuffleFetcher not yet integrated - returning empty results");
-                        let empty_iter: Vec<(K, Vec<Arc<dyn Data>>)> = Vec::new();
-                        for (k, c) in empty_iter.into_iter() {
-                            let temp = agg.entry(k).or_insert_with(|| vec![Vec::new(); num_rdds]);
-                            for v in c {
-                                temp[dep_num].push(v);
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(Box::new(agg.into_iter()))
-        } else {
-            panic!("Got split object from different concrete type other than CoGroupSplit")
+        let mut agg: HashMap<K, (Vec<V1>, Vec<V2>)> = HashMap::new();
+
+        for (k, v) in self.rdd1.iterator(split1)? {
+            agg.entry(k).or_default().0.push(v);
         }
+        for (k, v) in self.rdd2.iterator(split2)? {
+            agg.entry(k).or_default().1.push(v);
+        }
+
+        Ok(Box::new(
+            agg.into_iter().map(|(k, (v1s, v2s))| (k, v1s, v2s)),
+        ))
     }
 
     fn iterator(

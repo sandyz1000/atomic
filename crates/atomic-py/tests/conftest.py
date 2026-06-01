@@ -3,10 +3,10 @@
 Run with:  maturin develop && pytest
 """
 import pytest
-import atomic
+import atomic_compute
 
 
 @pytest.fixture
 def ctx():
     """A local (non-distributed) Context with 2 partitions."""
-    return atomic.Context(default_parallelism=2)
+    return atomic_compute.Context(default_parallelism=2)

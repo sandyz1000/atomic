@@ -190,6 +190,35 @@ async fn test_left_outer_join() {
     assert_eq!(result[1], ("b".to_string(), (2, None)));
 }
 
+// ── Range partitioner ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_range_partitioner_assigns_to_correct_partition() {
+    use atomic_data::partitioner::Partitioner;
+    use std::any::Any;
+    // bounds = [3, 7]: partition 0 = keys < 3, partition 1 = 3..7, partition 2 = >= 7
+    let p = Partitioner::range(vec![3i32, 7i32], true);
+    assert_eq!(p.get_num_of_partitions(), 3);
+    assert_eq!(p.get_partition(&1i32 as &dyn Any), 0);
+    assert_eq!(p.get_partition(&3i32 as &dyn Any), 1);
+    assert_eq!(p.get_partition(&6i32 as &dyn Any), 1);
+    assert_eq!(p.get_partition(&7i32 as &dyn Any), 2);
+    assert_eq!(p.get_partition(&100i32 as &dyn Any), 2);
+}
+
+#[tokio::test]
+async fn test_sort_by_key_range_globally_sorted() {
+    let ctx = ctx();
+    let data: Vec<(i32, i32)> = vec![(5, 50), (1, 10), (3, 30), (7, 70), (2, 20), (6, 60), (4, 40)];
+    let sorted = ctx
+        .parallelize_typed(data, 3)
+        .sort_by_key_range(3, true)
+        .collect()
+        .unwrap();
+    let keys: Vec<i32> = sorted.iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys, vec![1, 2, 3, 4, 5, 6, 7]);
+}
+
 // ── sort_by_key() ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -394,4 +423,53 @@ async fn test_reduce_by_key_empty_partitions() {
         result,
         vec![("alpha".to_string(), 3), ("beta".to_string(), 10)]
     );
+}
+
+// ── cogroup() ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_cogroup_basic() {
+    let ctx = ctx();
+    let rdd1 = ctx.parallelize_typed(
+        vec![("a".to_string(), 1i32), ("b".to_string(), 2), ("a".to_string(), 3)],
+        2,
+    );
+    let rdd2 = ctx.parallelize_typed(
+        vec![("a".to_string(), 10u32), ("c".to_string(), 30)],
+        2,
+    );
+    let mut result = rdd1.cogroup(rdd2).collect().unwrap();
+    result.sort_by_key(|(k, _, _)| k.clone());
+
+    // "a" appears in both: v1s=[1,3] or [3,1], v2s=[10]
+    let a = result.iter().find(|(k, _, _)| k == "a").unwrap();
+    let mut a_v1 = a.1.clone(); a_v1.sort();
+    assert_eq!(a_v1, vec![1, 3]);
+    assert_eq!(a.2, vec![10u32]);
+
+    // "b" only in rdd1
+    let b = result.iter().find(|(k, _, _)| k == "b").unwrap();
+    assert_eq!(b.1, vec![2]);
+    assert!(b.2.is_empty());
+
+    // "c" only in rdd2
+    let c = result.iter().find(|(k, _, _)| k == "c").unwrap();
+    assert!(c.1.is_empty());
+    assert_eq!(c.2, vec![30u32]);
+}
+
+#[tokio::test]
+async fn test_cogroup_empty_sides() {
+    let ctx = ctx();
+    let rdd1 = ctx.parallelize_typed(vec![("x".to_string(), 1i32)], 1);
+    let rdd2 = ctx.parallelize_typed(vec![("y".to_string(), 2i32)], 1);
+    let mut result = rdd1.cogroup(rdd2).collect().unwrap();
+    result.sort_by_key(|(k, _, _)| k.clone());
+    assert_eq!(result.len(), 2);
+    let x = result.iter().find(|(k, _, _)| k == "x").unwrap();
+    assert_eq!(x.1, vec![1]);
+    assert!(x.2.is_empty());
+    let y = result.iter().find(|(k, _, _)| k == "y").unwrap();
+    assert!(y.1.is_empty());
+    assert_eq!(y.2, vec![2]);
 }

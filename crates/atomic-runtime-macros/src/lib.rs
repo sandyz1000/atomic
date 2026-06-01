@@ -93,20 +93,23 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
             .map(|lit| lit.value())
             .or_else(|| {
                 let attr2: proc_macro2::TokenStream = attr.into();
-                syn::parse2::<syn::MetaNameValue>(attr2).ok().and_then(|mnv| {
-                    if mnv.path.is_ident("name") {
-                        if let syn::Expr::Lit(syn::ExprLit {
-                            lit: syn::Lit::Str(s), ..
-                        }) = mnv.value
-                        {
-                            Some(s.value())
+                syn::parse2::<syn::MetaNameValue>(attr2)
+                    .ok()
+                    .and_then(|mnv| {
+                        if mnv.path.is_ident("name") {
+                            if let syn::Expr::Lit(syn::ExprLit {
+                                lit: syn::Lit::Str(s),
+                                ..
+                            }) = mnv.value
+                            {
+                                Some(s.value())
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }
-                    } else {
-                        None
-                    }
-                })
+                    })
             })
     };
 
@@ -166,7 +169,9 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
     let is_vec_return = match &input.sig.output {
         ReturnType::Type(_, ty) => {
             if let Type::Path(tp) = ty.as_ref() {
-                tp.path.segments.last()
+                tp.path
+                    .segments
+                    .last()
                     .map(|s| s.ident == "Vec")
                     .unwrap_or(false)
             } else {
@@ -404,15 +409,92 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
 
     let body = &closure.body;
 
-    // Generate a content-stable op_id by hashing the closure's normalized token text.
-    // This is stable across line-number shifts and reformatting; it changes only when
-    // the closure logic itself changes (which is correct: new logic = new dispatch entry).
     let struct_ident = syn::Ident::new("__TaskFnStruct", Span::call_site());
     let dispatch_fn_ident = syn::Ident::new("__task_fn_dispatch", Span::call_site());
-    let closure_token_str = quote! { #closure }.to_string();
-    let hash = fnv1a_hash(&closure_token_str);
-    let op_id_str = format!("task_fn::{hash:016x}");
-    let op_id_expr = quote! { #op_id_str };
+
+    // ── Intelligent op_id scheme ──────────────────────────────────────────────
+    //
+    // Format: "task_fn::{module_path}::{Action}<{types}>::{short_hash}"
+    //
+    // Components:
+    //   module_path  — from module_path!() at the call site; stable to line/column
+    //                  changes and reformatting; changes only on module reorganisation.
+    //   Action       — derived from the closure signature: Map / Filter / FlatMap / Reduce.
+    //   types        — comma-separated input/output type names (whitespace-normalised).
+    //   short_hash   — 8-hex FNV-1a of the BODY tokens only; disambiguates two closures
+    //                  with the same module + action + types but different logic.
+    //
+    // Stability properties:
+    //   ✓  Line-number changes (adding code above/below)
+    //   ✓  rustfmt / reformatting
+    //   ✓  File rename within same module structure
+    //   ✗  Moving to a different module (intentional — that IS a different location)
+    //   ✗  Changing the closure body (intentional — short_hash catches this)
+    //
+    // Duplicate bodies: two closures with identical bodies in the same module at the
+    // same action+types share the same op_id. This is safe — their handlers are
+    // functionally identical and the registry deduplicates them at startup.
+
+    // Hash only the body, not the full closure, so argument names (x vs item) and
+    // argument patterns don't affect the id — only the actual logic does.
+    let body_token_str = quote! { #body }.to_string();
+    let body_hash = fnv1a_hash(&body_token_str);
+    let short_hash = format!("{:08x}", body_hash as u32);
+
+    // Normalise a type token stream to a compact string: remove whitespace.
+    let normalise_ty = |ts: &proc_macro2::TokenStream| -> String {
+        ts.to_string()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    };
+
+    // Determine Action label and type string from the signature.
+    // (is_bool / is_vec / num_inputs are computed later; replicate the detection here
+    //  for op_id construction before the if-else branches below.)
+    let (action_label, types_str): (String, String) = if num_inputs == 2 {
+        let (_, t) = &typed_args[0];
+        ("Reduce".to_owned(), normalise_ty(t))
+    } else {
+        let (_, t) = &typed_args[0];
+        let input_ty = normalise_ty(t);
+        match &closure.output {
+            ReturnType::Type(_, ret_ty) => {
+                let ret_ts = quote! { #ret_ty };
+                let ret_str = normalise_ty(&ret_ts);
+                let is_bool_ret = if let Type::Path(tp) = ret_ty.as_ref() {
+                    tp.path.is_ident("bool")
+                } else {
+                    false
+                };
+                let is_vec_ret = if let Type::Path(tp) = ret_ty.as_ref() {
+                    tp.path
+                        .segments
+                        .last()
+                        .map(|s| s.ident == "Vec")
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+
+                if is_bool_ret {
+                    ("Filter".to_owned(), input_ty)
+                } else if is_vec_ret {
+                    ("FlatMap".to_owned(), format!("{input_ty},{ret_str}"))
+                } else {
+                    ("Map".to_owned(), format!("{input_ty},{ret_str}"))
+                }
+            }
+            ReturnType::Default => ("Map".to_owned(), input_ty),
+        }
+    };
+
+    // The full op_id is built at compile time using module_path!() so it picks up the
+    // correct module at the call site, not in the macro crate itself.
+    let op_id_suffix = format!("{action_label}<{types_str}>::{short_hash}");
+    let op_id_expr = quote! {
+        concat!(module_path!(), "::task_fn::", #op_id_suffix)
+    };
 
     if num_inputs == 2 {
         // Binary fn(T, T) -> T → BinaryTask<T>
@@ -496,15 +578,25 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
         // Detect if return type is bool → Filter dispatch; Vec<_> → FlatMap; else Map.
         let is_bool = match &closure.output {
             ReturnType::Type(_, ty) => {
-                if let Type::Path(tp) = ty.as_ref() { tp.path.is_ident("bool") } else { false }
+                if let Type::Path(tp) = ty.as_ref() {
+                    tp.path.is_ident("bool")
+                } else {
+                    false
+                }
             }
             _ => false,
         };
         let is_vec = match &closure.output {
             ReturnType::Type(_, ty) => {
                 if let Type::Path(tp) = ty.as_ref() {
-                    tp.path.segments.last().map(|s| s.ident == "Vec").unwrap_or(false)
-                } else { false }
+                    tp.path
+                        .segments
+                        .last()
+                        .map(|s| s.ident == "Vec")
+                        .unwrap_or(false)
+                } else {
+                    false
+                }
             }
             _ => false,
         };

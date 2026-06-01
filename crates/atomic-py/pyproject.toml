@@ -3,7 +3,7 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "atomic"
+name = "atomic-compute"
 version = "0.1.0"
 requires-python = ">=3.11"
 description = "Atomic compute engine — Spark-like Python driver API backed by stable Rust"
@@ -34,7 +34,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.maturin]
-module-name = "atomic"
+module-name = "atomic_compute"
 features = ["pyo3/extension-module"]
-# Pick up type stubs from python/atomic/__init__.pyi
-python-packages = ["python/atomic"]
+# Pick up type stubs from python/atomic_compute/__init__.pyi
+python-packages = ["python/atomic_compute"]

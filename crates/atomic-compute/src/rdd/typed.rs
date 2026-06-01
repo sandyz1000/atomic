@@ -114,12 +114,138 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
 
     /// Persist this RDD's partitions using the given storage level.
     ///
-    /// Currently all storage levels are treated as `MemoryOnly`.  Disk-spill
-    /// variants are reserved for future implementation.
-    pub fn persist(self, _level: StorageLevel) -> Self {
+    /// - `MemoryOnly` / `MemoryOnlySer`: memoises in the global `PartitionStore` (LRU-bounded).
+    /// - `MemoryAndDisk` / `DiskOnly`: accepted but fall back to memory semantics unless `T`
+    ///   implements `bincode::Encode + bincode::Decode<()>`. For actual disk spill, call
+    ///   `persist_with_disk(level)` instead.
+    pub fn persist(self, level: StorageLevel) -> Self {
         let ctx = self.get_context();
-        let cached = Arc::new(CachedRdd::new(self.into_rdd()));
+        let cached = Arc::new(CachedRdd::new_with_level(self.into_rdd(), level));
         TypedRdd::new(cached as RddRef<T>, ctx)
+    }
+
+    /// Persist with real disk spill for `MemoryAndDisk` and `DiskOnly` levels.
+    ///
+    /// Requires `T: bincode::Encode + bincode::Decode<()>` so partitions can be
+    /// serialized to `{work_dir}/rdd-cache/{rdd_id}/{partition}.bin`.
+    ///
+    /// - `MemoryAndDisk`: memory-first; on LRU eviction falls back to disk; on miss reads disk.
+    /// - `DiskOnly`: always reads from disk; never occupies `PartitionStore` memory.
+    /// - Other levels: identical to `persist(level)`.
+    pub fn persist_with_disk(self, level: StorageLevel) -> Self
+    where
+        T: bincode::Encode + bincode::Decode<()>,
+    {
+        use crate::rdd::cached::{disk_read_partition, disk_write_partition};
+        use atomic_data::cache::PARTITION_CACHE;
+
+        match level {
+            StorageLevel::MemoryAndDisk | StorageLevel::DiskOnly => {
+                let ctx = self.get_context();
+                let rdd_id = self.rdd.get_rdd_id();
+                let num_parts = self.rdd.number_of_splits();
+
+                // Eagerly materialise all partitions — write memory + disk.
+                for part_idx in 0..num_parts {
+                    let splits = self.rdd.splits();
+                    if let Ok(items) = self.rdd.compute(splits[part_idx].clone()) {
+                        let data: Vec<T> = items.collect();
+                        let arc = Arc::new(data.clone());
+
+                        if level == StorageLevel::MemoryAndDisk {
+                            if let Some(store) = PARTITION_CACHE.get() {
+                                store.put::<T>(rdd_id, part_idx, arc);
+                            }
+                        }
+                        if let Some(path) = CachedRdd::new_with_level(
+                            self.rdd.clone(), level
+                        ).spill_path(part_idx) {
+                            let _ = disk_write_partition(&path, &data);
+                        }
+                    }
+                }
+
+                // Return a CachedRdd that reads from disk on miss.
+                let cached = Arc::new(CachedRdd::new_with_level(self.rdd.clone(), level));
+                TypedRdd::new(cached as RddRef<T>, ctx)
+            }
+            other => self.persist(other),
+        }
+    }
+
+    /// Remove all cached partitions for this RDD from the global `PartitionStore`.
+    ///
+    /// After `unpersist()` the next action on the returned RDD will recompute all
+    /// partitions from scratch.  Equivalent to Spark's `RDD.unpersist()`.
+    pub fn unpersist(self) -> Self {
+        if let Some(store) = atomic_data::cache::PARTITION_CACHE.get() {
+            let rdd_id = self.rdd.get_rdd_id();
+            let n = self.rdd.number_of_splits();
+            store.remove_rdd(rdd_id, n);
+        }
+        self
+    }
+
+    /// Returns `true` if at least one partition of this RDD is currently held in
+    /// the global `PartitionStore` (i.e., the RDD has been cached and not evicted).
+    pub fn is_cached(&self) -> bool {
+        atomic_data::cache::PARTITION_CACHE
+            .get()
+            .map(|store| {
+                let rdd_id = self.rdd.get_rdd_id();
+                let n = self.rdd.number_of_splits();
+                (0..n).any(|p| store.contains(rdd_id, p))
+            })
+            .unwrap_or(false)
+    }
+
+    /// Materialise this RDD, write each partition to `dir` (local path or `s3://`),
+    /// and return a new `TypedRdd` backed by a `CheckpointRdd` — fully truncating
+    /// the upstream lineage.
+    ///
+    /// Partitions are written to `{dir}/{rdd_id}/{partition}.bin` (bincode-encoded).
+    ///
+    /// Requires `T: bincode::Encode + bincode::Decode<()>`.
+    pub fn checkpoint(self, dir: impl AsRef<str>) -> Result<TypedRdd<T>, BaseError>
+    where
+        T: bincode::Encode + bincode::Decode<()>,
+    {
+        use crate::rdd::cached::disk_write_partition;
+        use crate::rdd::checkpoint::{CheckpointRdd, CheckpointStore};
+
+        let store = CheckpointStore::from_uri(dir.as_ref());
+        let ctx = self.get_context();
+        let rdd_id = self.rdd.get_rdd_id();
+        let partitions = self.collect_partitions()?;
+        let num_partitions = partitions.len();
+
+        for (idx, data) in partitions.iter().enumerate() {
+            match &store {
+                CheckpointStore::Local(base) => {
+                    let path = base.join(format!("{rdd_id}")).join(format!("{idx}.bin"));
+                    disk_write_partition(&path, data).map_err(|e| {
+                        BaseError::Other(format!("checkpoint write failed: {e}"))
+                    })?;
+                }
+
+                #[cfg(feature = "s3")]
+                CheckpointStore::S3 { bucket, prefix } => {
+                    use crate::io::s3::s3_impl::write_text;
+                    let bytes = bincode::encode_to_vec(data, bincode::config::standard())
+                        .map_err(|e| BaseError::Other(format!("checkpoint encode: {e}")))?;
+                    let b64 = base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &bytes,
+                    );
+                    let key = format!("{prefix}/{rdd_id}/{idx}.bin");
+                    write_text(bucket, &key, b64)
+                        .map_err(|e| BaseError::Other(e))?;
+                }
+            }
+        }
+
+        let checkpoint_rdd = Arc::new(CheckpointRdd::new(ctx.new_rdd_id(), store, num_partitions));
+        Ok(TypedRdd::new(checkpoint_rdd as RddRef<T>, ctx))
     }
 }
 
@@ -264,6 +390,35 @@ impl<T: Data + Clone> TypedRdd<T> {
             }))
     }
 
+    /// Collect each partition as a separate `Vec<T>`, preserving partition boundaries.
+    ///
+    /// Returns `Vec<Vec<T>>` where index `i` holds the elements of partition `i`.
+    /// Useful for `save_as_text_file` and `checkpoint` which write one file per partition.
+    pub fn collect_partitions(&self) -> Result<Vec<Vec<T>>, BaseError> {
+        let cl = |iter: Box<dyn Iterator<Item = T>>| iter.collect::<Vec<T>>();
+        self.context.run_job(self.rdd.clone(), cl).map_err(Into::into)
+    }
+
+    /// Stream elements partition-by-partition to the driver without holding all partitions
+    /// in memory simultaneously.
+    ///
+    /// Unlike `collect()` which materialises every partition before returning, this method
+    /// fetches one partition at a time and yields its elements before fetching the next.
+    /// This reduces peak driver-side memory for large datasets where the caller processes
+    /// elements incrementally.
+    pub fn to_local_iterator(&self) -> Result<impl Iterator<Item = T>, BaseError> {
+        let n = self.num_partitions();
+        let mut result: Vec<T> = Vec::new();
+        for i in 0..n {
+            let partition_data = self
+                .context
+                .run_job_with_partitions(self.rdd.clone(), |iter| iter.collect::<Vec<T>>(), [i])
+                .map_err(BaseError::from)?;
+            result.extend(partition_data.into_iter().flatten());
+        }
+        Ok(result.into_iter())
+    }
+
     /// Count the number of elements in the RDD.
     ///
     /// In distributed mode, if a lazy pipeline is staged, it dispatches to workers
@@ -377,6 +532,28 @@ impl<T: Data + Clone> TypedRdd<T> {
         Ok(self.take(1)?.is_empty())
     }
 
+    /// Approximate count within a time budget.
+    ///
+    /// Samples `max(1, ceil(confidence × num_partitions))` partitions and extrapolates.
+    /// `confidence` must be in `(0.0, 1.0]`; use `1.0` for a full (non-approximate) scan.
+    /// The result is an estimate — the actual count may differ from the return value.
+    pub fn count_approx(&self, confidence: f64) -> Result<u64, BaseError> {
+        let n = self.num_partitions();
+        let sample_n = ((confidence.clamp(0.001, 1.0) * n as f64).ceil() as usize).max(1).min(n);
+        let sample_indices: Vec<usize> = (0..sample_n).collect();
+        let counts = self
+            .context
+            .run_job_with_partitions(
+                self.rdd.clone(),
+                |iter| iter.count() as u64,
+                sample_indices,
+            )
+            .map_err(BaseError::from)?;
+        let sampled_total: u64 = counts.iter().sum();
+        let estimate = (sampled_total as f64 * n as f64 / sample_n as f64).round() as u64;
+        Ok(estimate)
+    }
+
     /// Aggregate elements with different accumulator and result types.
     ///
     /// In distributed mode, collects all elements from workers then applies
@@ -399,6 +576,89 @@ impl<T: Data + Clone> TypedRdd<T> {
             move |iter: Box<dyn Iterator<Item = T>>| iter.fold(zero.clone(), &seq_fn);
         let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
         Ok(results.into_iter().fold(init, comb_fn))
+    }
+
+    /// Reduce elements using a balanced binary tree of merge operations.
+    ///
+    /// More numerically stable than a linear `reduce` for large datasets, because partial
+    /// results are merged in a balanced tree rather than accumulated left-to-right.
+    /// `depth` controls the number of tree levels (default 2 is usually sufficient).
+    ///
+    /// Returns `None` if the RDD is empty.
+    pub fn tree_reduce<F>(&self, f: F, depth: usize) -> Result<Option<T>, BaseError>
+    where
+        T: Clone,
+        F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
+    {
+        let f_job = f.clone();
+        let reduce_partition =
+            move |iter: Box<dyn Iterator<Item = T>>| iter.reduce(|a, b| f_job(a, b));
+        let mut partials: Vec<T> = self
+            .context
+            .run_job(self.rdd.clone(), reduce_partition)?
+            .into_iter()
+            .flatten()
+            .collect();
+
+        let levels = depth.max(1);
+        for _ in 0..levels {
+            if partials.len() <= 1 {
+                break;
+            }
+            let mut next = Vec::with_capacity(partials.len() / 2 + 1);
+            let mut iter = partials.into_iter();
+            loop {
+                match (iter.next(), iter.next()) {
+                    (Some(a), Some(b)) => next.push(f(a, b)),
+                    (Some(a), None) => next.push(a),
+                    _ => break,
+                }
+            }
+            partials = next;
+        }
+        Ok(partials.into_iter().next())
+    }
+
+    /// Aggregate elements using a balanced binary tree of combine operations.
+    ///
+    /// `seq_fn(acc, elem)` accumulates elements within each partition.
+    /// `comb_fn(acc, acc)` merges partition accumulators in a balanced tree.
+    /// `depth` controls the number of tree merge levels (default 2).
+    pub fn tree_aggregate<U, SF, CF>(
+        &self,
+        zero: U,
+        seq_fn: SF,
+        comb_fn: CF,
+        depth: usize,
+    ) -> Result<U, BaseError>
+    where
+        U: Data + Clone,
+        SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
+        CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
+    {
+        let z = zero.clone();
+        let reduce_partition = move |iter: Box<dyn Iterator<Item = T>>| {
+            iter.fold(z.clone(), &seq_fn)
+        };
+        let mut partials: Vec<U> = self.context.run_job(self.rdd.clone(), reduce_partition)?;
+
+        let levels = depth.max(1);
+        for _ in 0..levels {
+            if partials.len() <= 1 {
+                break;
+            }
+            let mut next = Vec::with_capacity(partials.len() / 2 + 1);
+            let mut iter = partials.into_iter();
+            loop {
+                match (iter.next(), iter.next()) {
+                    (Some(a), Some(b)) => next.push(comb_fn(a, b)),
+                    (Some(a), None) => next.push(a),
+                    _ => break,
+                }
+            }
+            partials = next;
+        }
+        Ok(partials.into_iter().next().unwrap_or(zero))
     }
 
     /// Apply a function to each element (for side effects).
@@ -899,6 +1159,200 @@ where
         TypedRdd::new(Arc::new(MapperRdd::new(id, self.rdd, move |(k, v)| (k, f(v)))), self.context)
     }
 
+    /// Combine values for each key using three aggregation functions.
+    ///
+    /// - `create_combiner(V) -> C`: starts a combiner for the first value of a key.
+    /// - `merge_value(C, V) -> C`: merges a new value into an existing combiner.
+    /// - `merge_combiners(C, C) -> C`: merges two combiners (for cross-partition merging).
+    ///
+    /// This is the generalisation of `reduce_by_key` (`C = V`) and `group_by_key` (`C = Vec<V>`).
+    pub fn combine_by_key<C, CC, MV, MC>(
+        self,
+        create_combiner: CC,
+        merge_value: MV,
+        merge_combiners: MC,
+        num_partitions: usize,
+    ) -> TypedRdd<(K, C)>
+    where
+        C: Data + Clone + bincode::Encode + bincode::Decode<()>,
+        CC: Fn(V) -> C + Clone + Send + Sync + 'static,
+        MV: Fn(C, V) -> C + Clone + Send + Sync + 'static,
+        MC: Fn(C, C) -> C + Clone + Send + Sync + 'static,
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        use crate::rdd::shuffled::ShuffledRdd;
+        use atomic_data::aggregator::Aggregator;
+        use atomic_data::shuffle::fetcher::ShuffleFetcher;
+
+        let mv2 = merge_value.clone();
+        let mc2 = merge_combiners.clone();
+        let aggregator = Arc::new(Aggregator::<K, V, C>::new(
+            Arc::new(move |v: V| create_combiner(v)),
+            Arc::new(move |c: &mut C, v: V| *c = mv2(c.clone(), v)),
+            Arc::new(move |c1: &mut C, c2: C| *c1 = mc2(c1.clone(), c2)),
+        ));
+
+        let partitioner = Partitioner::hash::<K>(num_partitions.max(1));
+        let shuffle_id = self.context.new_shuffle_id();
+        let rdd_id = self.context.new_rdd_id();
+        let tracker = atomic_data::env::get_map_output_tracker()
+            .unwrap_or_else(|| Arc::new(atomic_data::shuffle::MapOutputTracker::default()));
+        let fetcher = Arc::new(ShuffleFetcher::new(tracker));
+
+        let staged_info = if self.context.is_distributed() {
+            self.staged.as_ref().map(|s| (s.source_partitions.clone(), s.ops.clone()))
+        } else {
+            None
+        };
+
+        let shuffled = ShuffledRdd::<K, V, C>::new_with_staged(
+            rdd_id, shuffle_id, self.rdd, aggregator, partitioner, fetcher, staged_info,
+        );
+        TypedRdd::new(Arc::new(shuffled), self.context)
+    }
+
+    /// Re-partition this pair RDD using a user-defined `CustomPartitioner`.
+    ///
+    /// All existing `(K, V)` pairs are preserved; only the partition assignment changes.
+    /// Triggers a shuffle.
+    pub fn partition_by<P>(self, partitioner: P) -> TypedRdd<(K, V)>
+    where
+        P: atomic_data::partitioner::CustomPartitioner + 'static,
+        V: bincode::Encode + bincode::Decode<()>,
+        K: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        let p = Partitioner::from_custom(partitioner);
+        self.combine_by_key_with_partitioner(|v| v, |_, v| v, |c, _| c, p)
+    }
+
+    /// Internal: `combine_by_key` with an explicit `Partitioner` instead of hash.
+    fn combine_by_key_with_partitioner<C, CC, MV, MC>(
+        self,
+        create_combiner: CC,
+        merge_value: MV,
+        merge_combiners: MC,
+        partitioner: Partitioner,
+    ) -> TypedRdd<(K, C)>
+    where
+        C: Data + Clone + bincode::Encode + bincode::Decode<()>,
+        CC: Fn(V) -> C + Clone + Send + Sync + 'static,
+        MV: Fn(C, V) -> C + Clone + Send + Sync + 'static,
+        MC: Fn(C, C) -> C + Clone + Send + Sync + 'static,
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        use crate::rdd::shuffled::ShuffledRdd;
+        use atomic_data::aggregator::Aggregator;
+        use atomic_data::shuffle::fetcher::ShuffleFetcher;
+
+        let mv2 = merge_value.clone();
+        let mc2 = merge_combiners.clone();
+        let aggregator = Arc::new(Aggregator::<K, V, C>::new(
+            Arc::new(move |v: V| create_combiner(v)),
+            Arc::new(move |c: &mut C, v: V| *c = mv2(c.clone(), v)),
+            Arc::new(move |c1: &mut C, c2: C| *c1 = mc2(c1.clone(), c2)),
+        ));
+
+        let shuffle_id = self.context.new_shuffle_id();
+        let rdd_id = self.context.new_rdd_id();
+        let tracker = atomic_data::env::get_map_output_tracker()
+            .unwrap_or_else(|| Arc::new(atomic_data::shuffle::MapOutputTracker::default()));
+        let fetcher = Arc::new(ShuffleFetcher::new(tracker));
+
+        let staged_info = if self.context.is_distributed() {
+            self.staged.as_ref().map(|s| (s.source_partitions.clone(), s.ops.clone()))
+        } else {
+            None
+        };
+
+        let shuffled = ShuffledRdd::<K, V, C>::new_with_staged(
+            rdd_id, shuffle_id, self.rdd, aggregator, partitioner, fetcher, staged_info,
+        );
+        TypedRdd::new(Arc::new(shuffled), self.context)
+    }
+
+    /// Fold values for each key with an initial zero value.
+    ///
+    /// Equivalent to `combine_by_key` where the combiner type equals the value type.
+    /// `zero` must be a neutral element: `f(zero.clone(), v) == v`.
+    pub fn fold_by_key<F>(self, zero: V, f: F, num_partitions: usize) -> TypedRdd<(K, V)>
+    where
+        F: Fn(V, V) -> V + Clone + Send + Sync + 'static,
+        V: bincode::Encode + bincode::Decode<()>,
+        K: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        let f1 = f.clone();
+        let f2 = f.clone();
+        let f3 = f;
+        let z1 = zero.clone();
+        self.combine_by_key(
+            move |v| f1(z1.clone(), v),
+            move |c, v| f2(c, v),
+            move |c1, c2| f3(c1, c2),
+            num_partitions,
+        )
+    }
+
+    /// Aggregate values for each key with a different accumulator type.
+    ///
+    /// `zero` is the initial accumulator value per partition.
+    /// `seq_fn(acc, value)` merges a value into the partition accumulator.
+    /// `comb_fn(acc1, acc2)` merges two partition accumulators on the driver.
+    pub fn aggregate_by_key<C, SF, CF>(
+        self,
+        zero: C,
+        seq_fn: SF,
+        comb_fn: CF,
+        num_partitions: usize,
+    ) -> TypedRdd<(K, C)>
+    where
+        C: Data + Clone + bincode::Encode + bincode::Decode<()>,
+        SF: Fn(C, V) -> C + Clone + Send + Sync + 'static,
+        CF: Fn(C, C) -> C + Clone + Send + Sync + 'static,
+        V: bincode::Encode + bincode::Decode<()>,
+        K: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        let z = zero;
+        self.combine_by_key(move |_v| z.clone(), seq_fn, comb_fn, num_partitions)
+    }
+
+    /// Return elements whose key is NOT present in `other`.
+    ///
+    /// Collects all keys from `other` to the driver, then filters `self` to exclude them.
+    pub fn subtract_by_key<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, V)>
+    where
+        U: Data + Clone,
+        K: std::hash::Hash + Eq,
+        Vec<(K, U)>: Data + Clone,
+    {
+        use std::collections::HashSet;
+        let ctx = self.context.clone();
+        let id = ctx.new_rdd_id();
+
+        let other_parts = other
+            .context
+            .run_job(other.rdd, |iter| iter.map(|(k, _)| k).collect::<Vec<K>>())
+            .unwrap_or_default();
+        let excluded: Arc<HashSet<K>> = Arc::new(other_parts.into_iter().flatten().collect());
+
+        let rdd = Arc::new(MapPartitionsRdd::new(
+            id,
+            self.rdd,
+            move |_idx, iter| {
+                let excl = excluded.clone();
+                Box::new(iter.filter(move |(k, _)| !excl.contains(k)))
+                    as Box<dyn Iterator<Item = (K, V)>>
+            },
+        ));
+        TypedRdd::new(rdd, ctx)
+    }
+
     /// Reduce values for each key using an associative function.
     ///
     /// Produces a globally correct result by creating a shuffle dependency (like Spark).
@@ -1057,6 +1511,26 @@ where
         Ok(partition_values.into_iter().flatten().collect())
     }
 
+    /// Collect a pair RDD into a `HashMap<K, V>`.
+    ///
+    /// When a key appears multiple times, the last value encountered wins.
+    /// Equivalent to Spark's `collectAsMap()`.
+    pub fn collect_as_map(&self) -> Result<std::collections::HashMap<K, V>, BaseError>
+    where
+        K: std::hash::Hash + Eq,
+    {
+        let partitions = self
+            .context
+            .run_job(self.rdd.clone(), |iter| iter.collect::<Vec<(K, V)>>())?;
+        let mut map = std::collections::HashMap::new();
+        for pairs in partitions {
+            for (k, v) in pairs {
+                map.insert(k, v);
+            }
+        }
+        Ok(map)
+    }
+
     /// Inner join with another pair RDD on matching keys.
     ///
     /// Collects both sides to the driver and performs a hash join. For every (K, V) on the
@@ -1144,6 +1618,161 @@ where
         }
         ctx.parallelize_typed(result, num_partitions)
     }
+
+    /// Right outer join with another pair RDD.
+    ///
+    /// Every key on the right side is preserved; unmatched left keys produce `None`.
+    pub fn right_outer_join<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, (Option<V>, U))>
+    where
+        U: Data + Clone,
+        K: std::hash::Hash + Eq,
+        Vec<(K, V)>: Data + Clone,
+        Vec<(K, U)>: Data + Clone,
+    {
+        use std::collections::HashMap;
+        let ctx = self.context.clone();
+        let num_partitions = self.rdd.number_of_splits();
+
+        let left_parts = ctx
+            .run_job(self.rdd, |iter| iter.collect::<Vec<(K, V)>>())
+            .unwrap_or_default();
+        let mut left_map: HashMap<K, Vec<V>> = HashMap::new();
+        for partition in left_parts {
+            for (k, v) in partition {
+                left_map.entry(k).or_default().push(v);
+            }
+        }
+
+        let right_parts = other
+            .context
+            .run_job(other.rdd, |iter| iter.collect::<Vec<(K, U)>>())
+            .unwrap_or_default();
+        let mut result: Vec<(K, (Option<V>, U))> = Vec::new();
+        for partition in right_parts {
+            for (k, u) in partition {
+                match left_map.get(&k) {
+                    Some(vs) => {
+                        for v in vs {
+                            result.push((k.clone(), (Some(v.clone()), u.clone())));
+                        }
+                    }
+                    None => result.push((k.clone(), (None, u))),
+                }
+            }
+        }
+        ctx.parallelize_typed(result, num_partitions)
+    }
+
+    /// Full outer join with another pair RDD.
+    ///
+    /// All keys from both sides are preserved; missing sides produce `None`.
+    pub fn full_outer_join<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, (Option<V>, Option<U>))>
+    where
+        U: Data + Clone,
+        K: std::hash::Hash + Eq,
+        Vec<(K, V)>: Data + Clone,
+        Vec<(K, U)>: Data + Clone,
+    {
+        use std::collections::HashMap;
+        let ctx = self.context.clone();
+        let num_partitions = self.rdd.number_of_splits();
+
+        let left_parts = ctx
+            .run_job(self.rdd, |iter| iter.collect::<Vec<(K, V)>>())
+            .unwrap_or_default();
+        let right_parts = other
+            .context
+            .run_job(other.rdd, |iter| iter.collect::<Vec<(K, U)>>())
+            .unwrap_or_default();
+
+        let mut left_map: HashMap<K, Vec<V>> = HashMap::new();
+        for partition in left_parts {
+            for (k, v) in partition {
+                left_map.entry(k).or_default().push(v);
+            }
+        }
+        let mut right_map: HashMap<K, Vec<U>> = HashMap::new();
+        for partition in right_parts {
+            for (k, u) in partition {
+                right_map.entry(k).or_default().push(u);
+            }
+        }
+
+        let mut result: Vec<(K, (Option<V>, Option<U>))> = Vec::new();
+        // Keys from the left
+        for (k, vs) in &left_map {
+            match right_map.get(k) {
+                Some(us) => {
+                    for v in vs {
+                        for u in us {
+                            result.push((k.clone(), (Some(v.clone()), Some(u.clone()))));
+                        }
+                    }
+                }
+                None => {
+                    for v in vs {
+                        result.push((k.clone(), (Some(v.clone()), None)));
+                    }
+                }
+            }
+        }
+        // Keys only in the right
+        for (k, us) in &right_map {
+            if !left_map.contains_key(k) {
+                for u in us {
+                    result.push((k.clone(), (None, Some(u.clone()))));
+                }
+            }
+        }
+        ctx.parallelize_typed(result, num_partitions)
+    }
+
+    /// Cogroup two pair RDDs on matching keys.
+    ///
+    /// For each key K that appears in either RDD, produces `(K, Vec<V>, Vec<U>)` where the
+    /// Vec holds all values associated with that key in each parent.  Keys present in only one
+    /// side produce an empty Vec for the missing side.
+    ///
+    /// Collects both sides to the driver and performs the grouping in-memory, then
+    /// re-parallelizes. For shuffle-based cogroup without driver collection, pre-shuffle both
+    /// sides to the same partitioner first.
+    pub fn cogroup<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, Vec<V>, Vec<U>)>
+    where
+        U: Data + Clone,
+        K: Eq + std::hash::Hash,
+        Vec<(K, V)>: Data + Clone,
+        Vec<(K, U)>: Data + Clone,
+    {
+        use std::collections::HashMap;
+        let ctx = self.context.clone();
+        let num_partitions = self.rdd.number_of_splits();
+
+        let left_parts = ctx
+            .run_job(self.rdd, |iter| iter.collect::<Vec<(K, V)>>())
+            .unwrap_or_default();
+        let right_parts = other
+            .context
+            .run_job(other.rdd, |iter| iter.collect::<Vec<(K, U)>>())
+            .unwrap_or_default();
+
+        let mut agg: HashMap<K, (Vec<V>, Vec<U>)> = HashMap::new();
+        for partition in left_parts {
+            for (k, v) in partition {
+                agg.entry(k).or_default().0.push(v);
+            }
+        }
+        for partition in right_parts {
+            for (k, u) in partition {
+                agg.entry(k).or_default().1.push(u);
+            }
+        }
+
+        let result: Vec<(K, Vec<V>, Vec<U>)> = agg
+            .into_iter()
+            .map(|(k, (vs, us))| (k, vs, us))
+            .collect();
+        ctx.parallelize_typed(result, num_partitions)
+    }
 }
 
 // ============================================================================
@@ -1173,22 +1802,109 @@ impl<T: Data> TypedRdd<T> {
         )
     }
 
-    /// Convert each element to a string and save to a text file.
+    /// Write each partition as a text file.
     ///
-    /// Note: This is a placeholder implementation. Full implementation would require
-    /// file system integration.
+    /// URI schemes:
+    /// - `s3://bucket/prefix` — uploads `part-N` objects to that prefix (requires `s3` feature).
+    /// - Local path — creates the directory and writes `part-N` files inside it.
     ///
-    /// # Example
-    /// ```ignore
-    /// rdd.save_as_text_file("/path/to/output")?;
-    /// ```
-    pub fn save_as_text_file(&self, _path: &str) -> Result<(), BaseError>
+    /// Each element is converted to a string via `Display` and written as one line.
+    pub fn save_as_text_file(&self, uri: &str) -> Result<(), BaseError>
     where
-        T: std::fmt::Display,
+        T: std::fmt::Display + Clone,
     {
-        // TODO: Implement actual file saving
-        // For now, just return Ok
+        if uri.starts_with("s3://") {
+            #[cfg(feature = "s3")]
+            {
+                use crate::io::s3::s3_impl::{S3Uri, write_text};
+                let s3uri = S3Uri::parse(uri).ok_or_else(|| {
+                    BaseError::Other(format!("save_as_text_file: invalid S3 URI: {uri}"))
+                })?;
+                for (idx, partition) in self.collect_partitions()?.into_iter().enumerate() {
+                    let key = format!("{}/part-{idx}", s3uri.key.trim_end_matches('/'));
+                    let content: String = partition
+                        .into_iter()
+                        .map(|item| format!("{item}\n"))
+                        .collect();
+                    write_text(&s3uri.bucket, &key, content)
+                        .map_err(|e| BaseError::Other(e))?;
+                }
+                return Ok(());
+            }
+            #[cfg(not(feature = "s3"))]
+            {
+                return Err(BaseError::Other(
+                    "save_as_text_file: s3:// URI requires the 's3' feature flag".to_owned(),
+                ));
+            }
+        }
+
+        // Local path
+        let path = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri));
+        std::fs::create_dir_all(path).map_err(|e| {
+            BaseError::Other(format!("save_as_text_file: cannot create dir {}: {e}", path.display()))
+        })?;
+        for (idx, partition) in self.collect_partitions()?.into_iter().enumerate() {
+            use std::io::Write;
+            let file_path = path.join(format!("part-{idx}"));
+            let mut f = std::fs::File::create(&file_path).map_err(|e| {
+                BaseError::Other(format!("save_as_text_file: {}: {e}", file_path.display()))
+            })?;
+            for item in partition {
+                writeln!(f, "{item}").map_err(|e| BaseError::Other(e.to_string()))?;
+            }
+        }
         Ok(())
+    }
+}
+
+// ============================================================================
+// DEBUG / INTROSPECTION
+// ============================================================================
+
+impl<T: Data> TypedRdd<T> {
+    /// Return a multi-line string describing the RDD's lineage (DAG).
+    ///
+    /// Each line shows one RDD node in the dependency chain, indented by depth.
+    /// Shuffle boundaries are annotated with `[Shuffle]`; narrow dependencies with `[Narrow]`.
+    ///
+    /// Useful for understanding what transformations will run and where shuffles occur.
+    pub fn to_debug_string(&self) -> String {
+        fn describe(rdd: &dyn RddBase, depth: usize, out: &mut String) {
+            let indent = "  ".repeat(depth);
+            let name = rdd.get_op_name();
+            out.push_str(&format!("{indent}({depth}) {name} [id={}]\n", rdd.get_rdd_id()));
+            for dep in rdd.get_dependencies() {
+                match &dep {
+                    Dependency::OneToOne { rdd_base } => {
+                        out.push_str(&format!("{indent}  +- [Narrow]\n"));
+                        describe(rdd_base.as_ref(), depth + 1, out);
+                    }
+                    Dependency::Range { rdd_base, in_start, out_start, length } => {
+                        out.push_str(&format!(
+                            "{indent}  +- [Range in={in_start}..{} out={out_start}]\n",
+                            in_start + length
+                        ));
+                        describe(rdd_base.as_ref(), depth + 1, out);
+                    }
+                    Dependency::CoalescedSplitDep { rdd: inner, .. } => {
+                        out.push_str(&format!("{indent}  +- [Coalesced]\n"));
+                        describe(inner.as_ref(), depth + 1, out);
+                    }
+                    Dependency::Shuffle(sd) => {
+                        out.push_str(&format!(
+                            "{indent}  +- [Shuffle id={}] partitions={}\n",
+                            sd.get_shuffle_id(),
+                            sd.get_num_output_partitions()
+                        ));
+                        describe(sd.get_rdd_base().as_ref(), depth + 1, out);
+                    }
+                }
+            }
+        }
+        let mut out = String::new();
+        describe(self.rdd.as_ref(), 0, &mut out);
+        out
     }
 }
 
@@ -1264,6 +1980,51 @@ where
             data.sort_by(|(a, _), (b, _)| b.cmp(a));
         }
         ctx.parallelize_typed(data, num_partitions)
+    }
+
+    /// Sort pair RDD elements by key using range-based partitioning.
+    ///
+    /// Samples the input RDD to estimate the key distribution, derives
+    /// `num_partitions - 1` split-point bounds via a `RangePartitioner`, collects
+    /// and sorts all data, then distributes it so partition `i` contains only keys
+    /// in the i-th range.  The result is globally sorted across partitions.
+    ///
+    /// Returns a `TypedRdd<(K,V)>` with `num_partitions` partitions where each
+    /// partition covers a contiguous, non-overlapping key range.
+    pub fn sort_by_key_range(self, num_partitions: usize, ascending: bool) -> Self
+    where
+        Vec<(K, V)>: WireDecode,
+        K: WireEncode,
+        V: WireEncode,
+    {
+        use atomic_data::partitioner::Partitioner;
+        let ctx = self.context.clone();
+
+        // Collect all data to driver.
+        let mut data = self.collect().unwrap_or_default();
+        if ascending {
+            data.sort_by(|(a, _), (b, _)| a.cmp(b));
+        } else {
+            data.sort_by(|(a, _), (b, _)| b.cmp(a));
+        }
+
+        // Build range-partition bounds from the sorted data.
+        let step = (data.len() / num_partitions).max(1);
+        let bounds: Vec<K> = (1..num_partitions)
+            .filter_map(|i| data.get(i * step).map(|(k, _)| k.clone()))
+            .collect();
+
+        // Distribute data into range-aligned partitions.
+        let partitioner = Partitioner::range(bounds, ascending);
+        let mut partitions: Vec<Vec<(K, V)>> = vec![vec![]; num_partitions];
+        for item in data {
+            let p = partitioner.get_partition(&item.0 as &dyn std::any::Any);
+            partitions[p].push(item);
+        }
+
+        // Flatten in partition order → globally sorted vec → re-parallelize.
+        let sorted: Vec<(K, V)> = partitions.into_iter().flatten().collect();
+        ctx.parallelize_typed(sorted, num_partitions)
     }
 }
 

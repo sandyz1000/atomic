@@ -45,6 +45,21 @@ pub fn set_map_output_tracker(v: Arc<MapOutputTracker>) {
     *MAP_OUTPUT_TRACKER.write().unwrap() = Some(v);
 }
 
+// ── RDD cache spill directory ─────────────────────────────────────────────────
+
+/// Base directory for `MemoryAndDisk` / `DiskOnly` partition spill files.
+/// Set by `Context` during init (`rdd-cache/` under the job work_dir).
+/// `None` means disk storage levels fall back to `MemoryOnly`.
+pub static RDD_CACHE_SPILL_DIR: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
+
+pub fn set_rdd_cache_spill_dir(dir: std::path::PathBuf) {
+    *RDD_CACHE_SPILL_DIR.write().unwrap() = Some(dir);
+}
+
+pub fn get_rdd_cache_spill_dir() -> Option<std::path::PathBuf> {
+    RDD_CACHE_SPILL_DIR.read().unwrap().clone()
+}
+
 // ── Teardown ───────────────────────────────────────────────────────────────────
 
 /// Clear all shuffle infrastructure state.

@@ -98,6 +98,8 @@ pub struct BlockGenerator {
     state: Mutex<GeneratorState>,
     next_block_id: AtomicUsize,
     stopped: Arc<AtomicBool>,
+    /// Optional ReceiverTracker to notify when a block is generated.
+    receiver_tracker: Option<Arc<crate::scheduler::receiver::ReceiverTracker>>,
 }
 
 impl BlockGenerator {
@@ -109,7 +111,18 @@ impl BlockGenerator {
             state: Mutex::new(GeneratorState::Initialised),
             next_block_id: AtomicUsize::new(0),
             stopped: Arc::new(AtomicBool::new(false)),
+            receiver_tracker: None,
         }
+    }
+
+    /// Attach a ReceiverTracker so that each generated block is registered
+    /// for metadata tracking (block ID, record count).
+    pub fn with_tracker(
+        mut self,
+        tracker: Arc<crate::scheduler::receiver::ReceiverTracker>,
+    ) -> Self {
+        self.receiver_tracker = Some(tracker);
+        self
     }
 
     /// Add an item to the current buffer.
@@ -130,20 +143,34 @@ impl BlockGenerator {
         let interval = self.block_interval;
         let stopped = self.stopped.clone();
         let stream_id = self.stream_id;
+        let tracker = self.receiver_tracker.clone();
+        let next_id = &self.next_block_id as *const AtomicUsize as usize;
 
         std::thread::Builder::new()
             .name(format!("block-generator-{}", stream_id))
             .spawn(move || {
+                // Safety: next_id points to self.next_block_id which lives as long as
+                // BlockGenerator. In practice, stop() is called before drop.
+                let next_block_id = unsafe { &*(next_id as *const AtomicUsize) };
                 while !stopped.load(Ordering::SeqCst) {
                     std::thread::sleep(interval);
                     let block: Vec<_> = buffer.lock().drain(..).collect();
                     if !block.is_empty() {
+                        let num_records = block.len() as u64;
+                        let unique_id = next_block_id.fetch_add(1, Ordering::Relaxed);
+                        let block_id = StreamBlockId::new(stream_id, unique_id as u64);
                         log::debug!(
-                            "BlockGenerator[{}]: pushed block with {} items",
-                            stream_id,
-                            block.len()
+                            "BlockGenerator[{}]: block {} with {} items",
+                            stream_id, unique_id, num_records
                         );
-                        // TODO Phase 4: hand block to BlockManager / ReceiverTracker
+                        if let Some(ref t) = tracker {
+                            t.add_block(stream_id, ReceivedBlockInfo {
+                                stream_id,
+                                block_id,
+                                num_records: Some(num_records),
+                                metadata: None,
+                            });
+                        }
                     }
                 }
             })

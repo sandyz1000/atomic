@@ -1,0 +1,102 @@
+name: Release — JavaScript (npm)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-bindings:
+    name: Build native binding — ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            node-arch: x64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            node-arch: arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            node-arch: x64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            node-arch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cross-compilation for aarch64-linux requires a linker.
+      - name: Install cross-compilation linker (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install JS dependencies
+        working-directory: crates/atomic-js
+        run: npm install
+
+      - name: Build native addon
+        working-directory: crates/atomic-js
+        run: |
+          npx napi build \
+            --platform \
+            --release \
+            --target ${{ matrix.target }}
+
+      - name: Upload .node binding artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: crates/atomic-js/*.node
+
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs: build-bindings
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install JS dependencies
+        working-directory: crates/atomic-js
+        run: npm install
+
+      - name: Download all binding artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "bindings-*"
+          merge-multiple: true
+          path: crates/atomic-js/
+
+      # napi prepublish step: copies .node files to platform-specific packages
+      # and updates the root package.json optionalDependencies map.
+      - name: Prepublish (bundle platform packages)
+        working-directory: crates/atomic-js
+        run: npx napi prepublish --skip-gh-release
+
+      - name: Publish to npm
+        working-directory: crates/atomic-js
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

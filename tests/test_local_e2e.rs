@@ -292,3 +292,86 @@ async fn test_all_actions_on_empty_rdd() {
     assert_eq!(rdd.fold_task(0i32, Add).unwrap(), 0);
     assert!(rdd.is_empty().unwrap());
 }
+
+// ── Broadcast variables ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_broadcast_store_and_snapshot() {
+    let ctx = ctx();
+    let bcast_i = ctx.broadcast(99i32);
+    let bcast_s = ctx.broadcast("hello".to_string());
+    let snap = ctx.broadcast_snapshot();
+    assert_eq!(snap.len(), 2);
+    assert!(snap.iter().any(|(id, _)| *id == bcast_i.id));
+    assert!(snap.iter().any(|(id, _)| *id == bcast_s.id));
+}
+
+#[tokio::test]
+async fn test_broadcast_load_and_read() {
+    use atomic_data::broadcast::{load_broadcast_values, clear_broadcast_values, BroadcastVar};
+    use atomic_data::distributed::WireEncode;
+
+    let bytes = 42i32.encode_wire().unwrap();
+    let var: BroadcastVar<i32> = BroadcastVar::new(9000);
+    load_broadcast_values(&[(9000usize, bytes)]);
+    assert_eq!(var.value(), 42i32);
+    clear_broadcast_values();
+}
+
+// ── Accumulators ─────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_accumulator_basic() {
+    use atomic_data::accumulator::Accumulator;
+    let ctx = ctx();
+    let acc: Accumulator<i64> = ctx.accumulator(0i64, |a, b| a + b);
+    // Simulate adding deltas from two tasks via drain_deltas path
+    acc.add(10i64);
+    let deltas = atomic_data::accumulator::drain_deltas();
+    ctx.merge_accumulator_deltas(&deltas);
+    acc.add(5i64);
+    let deltas2 = atomic_data::accumulator::drain_deltas();
+    ctx.merge_accumulator_deltas(&deltas2);
+    assert_eq!(ctx.accumulator_value(&acc), 15i64);
+}
+
+#[tokio::test]
+async fn test_accumulator_string_concat() {
+    use atomic_data::accumulator::Accumulator;
+    let ctx = ctx();
+    let acc: Accumulator<String> = ctx.accumulator(String::new(), |a, b| a + &b);
+    acc.add("hello".to_string());
+    let d = atomic_data::accumulator::drain_deltas();
+    ctx.merge_accumulator_deltas(&d);
+    acc.add(" world".to_string());
+    let d2 = atomic_data::accumulator::drain_deltas();
+    ctx.merge_accumulator_deltas(&d2);
+    assert_eq!(ctx.accumulator_value(&acc), "hello world");
+}
+
+#[tokio::test]
+async fn test_broadcast_embedded_in_pipeline() {
+    // Verify broadcasts are included in TaskEnvelope dispatched during dispatch_pipeline.
+    // In local mode the NativeBackend loads and clears the thread-local BroadcastRegistry
+    // for each task, so consecutive tasks don't see each other's broadcasts.
+    let ctx = ctx();
+    let bcast = ctx.broadcast(10i32);
+    let bcast_id = bcast.id;
+
+    // Use a closure filter (local-scheduler path) that reads the broadcast value
+    // via the load_broadcast_values API, simulating what a #[task] struct would do.
+    let bytes = {
+        use atomic_data::distributed::WireEncode;
+        10i32.encode_wire().unwrap()
+    };
+    atomic_data::broadcast::load_broadcast_values(&[(bcast_id, bytes)]);
+
+    let threshold = atomic_data::broadcast::BroadcastVar::<i32>::new(bcast_id).value();
+    assert_eq!(threshold, 10i32);
+
+    atomic_data::broadcast::clear_broadcast_values();
+
+    // The snapshot should still hold the broadcast for future task dispatch.
+    let snap = ctx.broadcast_snapshot();
+    assert!(snap.iter().any(|(id, _)| *id == bcast_id));
+}

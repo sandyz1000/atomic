@@ -96,6 +96,8 @@ impl JobScheduler {
             zero_time_ms
         );
 
+        let mut last_completed_batch_ms: Option<u64> = None;
+
         loop {
             // Sleep until the next batch boundary
             let next = next_tick_ms(now_ms(), batch_ms);
@@ -113,6 +115,7 @@ impl JobScheduler {
 
             let jobs = ssc.graph.lock().generate_jobs(batch_time_ms);
             let num_jobs = jobs.len();
+            let mut all_succeeded = true;
 
             for job in jobs {
                 if stop.load(Ordering::SeqCst) {
@@ -124,7 +127,12 @@ impl JobScheduler {
                         batch_time_ms,
                         e
                     );
+                    all_succeeded = false;
                 }
+            }
+
+            if all_succeeded {
+                last_completed_batch_ms = Some(batch_time_ms);
             }
 
             log::debug!("Completed {} jobs for batch time {}ms", num_jobs, batch_time_ms);
@@ -135,6 +143,7 @@ impl JobScheduler {
                     batch_time_ms,
                     ssc.batch_duration.as_millis() as u64,
                     dir.to_string_lossy().as_ref(),
+                    last_completed_batch_ms,
                 );
                 if let Err(e) = cp.write(&dir) {
                     log::warn!("checkpoint write failed for batch {}ms: {}", batch_time_ms, e);
