@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] — QOL Refactor
+
+### Changed
+
+- **Backend file renames**: `native.rs` → `native_executor.rs`, `python_pool.rs` → `python_executor.rs`, `js_runtime.rs` → `js_executor.rs`. Names now reflect responsibility (executor), not implementation detail (pool/runtime).
+- **`NativeBackend` refactored** (`backend/native_executor.rs`): now holds `HashMap<TaskRuntime, Box<dyn OpDispatcher>>` for O(1) per-op routing. `OpDispatcher` trait (`backend/mod.rs`) allows adding a new runtime via one new `impl` + one `HashMap::insert` — `execute()` never changes.
+- **`RddCore<T>` applied to `map_partitions.rs`**: `MapPartitionsRdd` and `MapPartitionsPairRdd` now use the shared `RddCore<T>` composition struct, eliminating ~30 lines of duplicated boilerplate. Pattern already applied to `mapper.rs` and `flatmapper.rs`.
+- **`TypedRdd::map_rdd` helper**: private method replaces the 3-line `new_rdd_id` / `clone context` / `Arc::new(SomeRdd::new(id, rdd, ...))` construction idiom at 18+ call sites.
+- **`group_by_key` delegates to `group_by_key_n`**: removed ~40-line duplicate body; `group_by_key_n` is now the single source of truth.
+- **`TaskRuntime` derives `Hash`** in `atomic-data`: enables `HashMap<TaskRuntime, _>` keying without a wrapper type.
+
+### Fixed
+
+- `_market_u` typo in `rdd/cartesian.rs` corrected to `_marker_u`.
+- Removed no-op `ConfigBuilder::app_name` method that ignored its parameter and did a pointless self-clone.
+- Removed misleading `log::debug!` calls with trailing commas in `pair.rs` and `map_partitions.rs`.
+- Removed stale commented-out `impl PairRdd` block from `pair.rs`.
+- Removed stale `// #[derive(Serialize, Deserialize)]` comment from `partitionwise_sampled.rs`.
+
+---
+
 ## [Unreleased] — RDD Spark Behavioral Parity
 
 ### RDD API — Spark Parity

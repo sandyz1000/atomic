@@ -102,7 +102,7 @@ Atomic is a stable-Rust rewrite and refactor of Vega.
 ## Repository Structure
 
 - `crates/atomic-data`: shared types — RDD traits, task envelopes, distributed structs, shuffle primitives, dependency DAG, partition cache.
-- `crates/atomic-compute`: execution runtime — context, executor, `NativeBackend`, UDF dispatch, RDD implementations, persist/cache layer.
+- `crates/atomic-compute`: execution runtime — context, executor, `NativeBackend`, UDF dispatch, RDD implementations, persist/cache layer. Backend executors: `native_executor.rs` (Rust `#[task]` registry), `python_executor.rs` (PyO3 subprocess pool), `js_executor.rs` (V8/deno_core thread-local runtime).
 - `crates/atomic-scheduler`: DAG building, stage planning, job tracking, `LocalScheduler`, `DistributedScheduler`.
 - `crates/atomic-sql`: structured data and SQL query layer — built on DataFusion (see below).
 - `crates/atomic-streaming`: Spark Streaming–style micro-batch streaming on top of `atomic-compute`.
@@ -192,7 +192,19 @@ Workers are started with the same binary: `./my_app --worker --port 10001`.
 
 ### The Only Backend: NativeBackend
 
-There is one execution backend: `NativeBackend`. It looks up each `op_id` in the compile-time `TASK_REGISTRY` and calls the registered handler. Docker and WASM backends are not part of this project.
+There is one execution backend: `NativeBackend` (`backend/native_executor.rs`). It holds a
+`HashMap<TaskRuntime, Box<dyn OpDispatcher>>` registry populated in `Default`. Each runtime
+has a concrete `OpDispatcher` impl in its own file:
+
+| File | Runtime | Responsibility |
+| --- | --- | --- |
+| `native_executor.rs` | `TaskRuntime::Native` | compile-time `TASK_REGISTRY` lookup + shuffle-map writes |
+| `python_executor.rs` | `TaskRuntime::Python` | PyO3 subprocess pool dispatch |
+| `js_executor.rs` | `TaskRuntime::JavaScript` | V8/deno_core thread-local runtime dispatch |
+
+Adding a new runtime requires only one new `impl OpDispatcher` + one `HashMap::insert` in
+`NativeBackend::default()` — `execute()` never changes. Docker and WASM backends are not part
+of this project.
 
 ### Shuffle
 
@@ -216,7 +228,11 @@ Distributed tasks use types from `atomic_data::distributed`.
 
 - `#[task]` proc-macro + `TASK_REGISTRY` compile-time dispatch.
 - `task_fn!` macro for inline task lambdas — identical to `#[task]` at dispatch level.
-- `NativeBackend` — executes task pipelines by op_id lookup.
+- `NativeBackend` — `HashMap<TaskRuntime, Box<dyn OpDispatcher>>` registry; `execute()` is pure orchestration, runtime routing is in each `OpDispatcher` impl (`native_executor.rs`, `python_executor.rs`, `js_executor.rs`).
+- **`OpDispatcher` trait + backend file renames**: `native.rs` → `native_executor.rs`, `python_pool.rs` → `python_executor.rs`, `js_runtime.rs` → `js_executor.rs`. Adding a runtime = one new impl + one `HashMap::insert` in `Default`.
+- **`RddCore<T>` struct** (`rdd/core.rs`): shared fields + `RddBase` delegation helpers for narrow-dependency RDDs; applied to `mapper.rs`, `flatmapper.rs`, `map_partitions.rs`.
+- **`TypedRdd::map_rdd` helper**: private method replacing the 3-line `new_rdd_id` / `clone context` / `Arc::new` construction idiom at 18+ call sites.
+- **`group_by_key` delegates to `group_by_key_n`**: duplicate ~40-line body removed.
 - `LocalScheduler` — full DAG/stage/shuffle support, thread-pool execution.
 - `DistributedScheduler` — TCP dispatch, capacity-aware placement.
 - rkyv distributed envelope types (`TaskEnvelope`, `TaskResultEnvelope`, `WorkerCapabilities`).

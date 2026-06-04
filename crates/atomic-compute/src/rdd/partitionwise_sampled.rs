@@ -9,7 +9,6 @@ use atomic_utils::random::RandomSampler;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-// #[derive(Serialize, Deserialize)]
 pub struct PartitionwiseSampledRdd<T: Data> {
     prev: Arc<dyn Rdd<Item = T>>,
     vals: Arc<RddVals>,

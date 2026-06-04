@@ -7,9 +7,6 @@ use atomic_data::split::Split;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-// Implementing the PairRdd trait for all types which implements Rdd
-// impl<K: Data + Eq + Hash, V: Data, T> PairRdd<K, V> for Arc<T> where T: Rdd<Item = (K, V)> {}
-
 pub struct MappedValuesRdd<K: Data, V: Data, U: Data, F>
 where
     F: RddFn<V, U>,
@@ -183,7 +180,6 @@ where
         &self,
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
-        log::debug!("inside iterator_any flatmapvaluesrdd",);
         Ok(Box::new(
             self.iterator(split)?
                 .map(|(k, v)| Box::new((k, v)) as Box<dyn Data>),
@@ -193,7 +189,6 @@ where
         &self,
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
-        log::debug!("inside iterator_any flatmapvaluesrdd",);
         Ok(Box::new(
             self.iterator(split)?
                 .map(|(k, v)| Box::new((k, Box::new(v))) as Box<dyn Data>),

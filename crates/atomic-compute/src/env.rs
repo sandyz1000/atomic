@@ -438,13 +438,6 @@ impl ConfigBuilder {
         self
     }
 
-    /// Set a human-readable app name (stored in log config for now).
-    pub fn app_name(mut self, name: &str) -> Self {
-        self.inner.log.log_level = self.inner.log.log_level.clone();
-        let _ = name; // app_name is metadata; extend LogConfig if needed
-        self
-    }
-
     /// Set the driver's local IP address.
     pub fn local_ip(mut self, ip: std::net::Ipv4Addr) -> Self {
         self.inner.local_ip = ip;

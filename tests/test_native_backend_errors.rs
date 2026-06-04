@@ -1,22 +1,23 @@
-//! Bug B5: `NativeBackend::execute()` edge cases — empty pipeline and pipeline
+//! `NativeBackend::execute()` edge cases — empty pipeline and pipeline
 //! data-threading correctness.
 //!
-//! The existing inline test in `native.rs` covers the unknown-op-id path.
+//! The existing inline test in `native_executor.rs` covers the unknown-op-id path.
 //! These tests add coverage for:
 //!
 //!   • Empty `ops` vector: should return `Err` (or `FatalFailure`), not panic.
-//!     Currently handled at line 27-29 of `native.rs` — returning
-//!     `Err(Error::UnknownOperation("empty pipeline"))`.
+//!     Currently handled at the top of `NativeBackend::execute` in `native_executor.rs` —
+//!     returning `Err(Error::UnknownOperation("empty pipeline"))`.
 //!
 //!   • Multi-op pipeline data threading: each op must receive the OUTPUT of the
-//!     previous op as its input. Verifies the for-loop at native.rs:33.
+//!     previous op as its input. Verifies the `for op in &task.ops` loop in
+//!     `native_executor.rs`.
 //!
 //!   • FatalFailure is propagated cleanly — the scheduler must never see a panic.
 //!
 //! Note: these tests call `NativeBackend` and `TaskEnvelope` via the public API
 //! (`atomic_compute::backend::NativeBackend`, `atomic_data::distributed::*`).
 
-use atomic_compute::backend::NativeBackend;
+use atomic_compute::backend::{Backend, NativeBackend};
 use atomic_compute::context::Context;
 use atomic_compute::env::Config;
 use atomic_compute::task;
@@ -66,18 +67,18 @@ fn single_op(op_id: &str, action: TaskAction) -> PipelineOp {
     }
 }
 
-// ── Bug B5: empty pipeline ────────────────────────────────────────────────────
+// ── Empty pipeline ────────────────────────────────────────────────────────────
 
 /// Empty `ops` must return `Err`, not panic.
 ///
-/// **Current behaviour (line 27-29 of native.rs):** already returns
-/// `Err(Error::UnknownOperation("empty pipeline"))`.
+/// `NativeBackend::execute` guards against this at the top of the function —
+/// returning `Err(Error::UnknownOperation("empty pipeline"))`.
 ///
-/// This test documents and pins that the error is returned correctly (not panic).
-/// If this test breaks in the future, someone removed the guard — a regression.
+/// This test documents and pins that behaviour. If it breaks, someone removed
+/// the guard — a regression.
 #[test]
 fn test_empty_pipeline_returns_error_not_panic() {
-    let backend = NativeBackend;
+    let backend = NativeBackend::default();
     let task = make_envelope_with_ops(vec![], vec![]);
     let result = backend.execute("worker-0", &task);
     assert!(
@@ -96,10 +97,10 @@ fn test_empty_pipeline_returns_error_not_panic() {
 /// An unknown op_id must produce `FatalFailure`, not panic, and include the
 /// op_id in the error message for easy debugging.
 ///
-/// This complements the inline test in `native.rs` with an external call.
+/// This complements the inline test in `native_executor.rs` with an external call.
 #[test]
 fn test_unknown_op_id_produces_fatal_failure_with_op_name() {
-    let backend = NativeBackend;
+    let backend = NativeBackend::default();
     let task = make_envelope_with_ops(
         vec![single_op("no.such.handler.xyz", TaskAction::Map)],
         encode(vec![1i32, 2, 3]),
@@ -118,13 +119,13 @@ fn test_unknown_op_id_produces_fatal_failure_with_op_name() {
 /// A two-op pipeline must feed each op the output of the previous op.
 ///
 /// Pipeline: vec![1, 2, 3]
-///   op1: add_ten  → [11, 12, 13]
+///   op1: add_ten   → [11, 12, 13]
 ///   op2: double_val → [22, 24, 26]
 ///
-/// Validates the data-threading loop at `native.rs:33` (the `for op in &task.ops` loop).
+/// Validates the data-threading loop in `native_executor.rs`.
 #[test]
 fn test_two_op_pipeline_threads_data_correctly() {
-    let backend = NativeBackend;
+    let backend = NativeBackend::default();
     let input: Vec<i32> = vec![1, 2, 3];
     let ops = vec![
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
@@ -140,12 +141,12 @@ fn test_two_op_pipeline_threads_data_correctly() {
 /// A three-op pipeline to stress data threading further.
 ///
 /// Pipeline: vec![5, -3, 8]
-///   op1: add_ten  → [15, 7, 18]
-///   op2: add_ten  → [25, 17, 28]
+///   op1: add_ten   → [15, 7, 18]
+///   op2: add_ten   → [25, 17, 28]
 ///   op3: double_val → [50, 34, 56]
 #[test]
 fn test_three_op_pipeline_threads_data_correctly() {
-    let backend = NativeBackend;
+    let backend = NativeBackend::default();
     let input: Vec<i32> = vec![5, -3, 8];
     let ops = vec![
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
@@ -163,7 +164,7 @@ fn test_three_op_pipeline_threads_data_correctly() {
 /// subsequent ops (the pipeline stops at the first error).
 #[test]
 fn test_failed_mid_pipeline_op_short_circuits() {
-    let backend = NativeBackend;
+    let backend = NativeBackend::default();
     let ops = vec![
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
         single_op("DOES_NOT_EXIST", TaskAction::Map), // fails here
@@ -180,7 +181,7 @@ fn test_failed_mid_pipeline_op_short_circuits() {
 /// This test verifies that builtin `sum::i32` correctly sums a partition.
 #[test]
 fn test_fold_op_sums_partition() {
-    let backend = NativeBackend;
+    let backend = NativeBackend::default();
     let zero: i32 = 0;
     let items: Vec<i32> = vec![1, 2, 3, 4, 5];
     let op = PipelineOp {

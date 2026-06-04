@@ -17,7 +17,7 @@ pub struct CartesianRdd<T: Data, U: Data> {
     rdd2: Arc<dyn Rdd<Item = U>>,
     num_partitions_in_rdd2: usize,
     _marker_t: PhantomData<T>,
-    _market_u: PhantomData<U>,
+    _marker_u: PhantomData<U>,
 }
 
 impl<T: Data, U: Data> CartesianRdd<T, U> {
@@ -34,7 +34,7 @@ impl<T: Data, U: Data> CartesianRdd<T, U> {
             rdd2,
             num_partitions_in_rdd2,
             _marker_t: PhantomData,
-            _market_u: PhantomData,
+            _marker_u: PhantomData,
         }
     }
 }
@@ -47,7 +47,7 @@ impl<T: Data, U: Data> Clone for CartesianRdd<T, U> {
             rdd2: self.rdd2.clone(),
             num_partitions_in_rdd2: self.num_partitions_in_rdd2,
             _marker_t: PhantomData,
-            _market_u: PhantomData,
+            _marker_u: PhantomData,
         }
     }
 }

@@ -122,3 +122,67 @@ impl<T: Data> Clone for RddCore<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::Context;
+    use crate::env::Config;
+    use std::sync::Arc;
+
+    fn make_ctx_and_parent() -> (Arc<Context>, Arc<dyn Rdd<Item = i32>>) {
+        let sc = Context::new_with_config(Config::local()).unwrap();
+        let rdd = sc.parallelize_typed(vec![1i32, 2, 3], 2).into_rdd();
+        (sc, rdd)
+    }
+
+    #[test]
+    fn new_registers_one_to_one_dependency() {
+        let (sc, parent) = make_ctx_and_parent();
+        let core = RddCore::<i32>::new(sc.new_rdd_id(), parent, "test_op");
+        assert_eq!(core.dependencies().len(), 1);
+    }
+
+    #[test]
+    fn rdd_id_matches_constructor_arg() {
+        let (sc, parent) = make_ctx_and_parent();
+        let id = sc.new_rdd_id();
+        let core = RddCore::<i32>::new(id, parent, "test_op");
+        assert_eq!(core.rdd_id(), id);
+    }
+
+    #[test]
+    fn op_name_roundtrip() {
+        let (sc, parent) = make_ctx_and_parent();
+        let core = RddCore::<i32>::new(sc.new_rdd_id(), parent, "my_op");
+        assert_eq!(core.op_name(), "my_op");
+        core.set_op_name("renamed");
+        assert_eq!(core.op_name(), "renamed");
+    }
+
+    #[test]
+    fn splits_and_number_delegate_to_parent() {
+        let (sc, parent) = make_ctx_and_parent();
+        let parent_splits = parent.splits().len();
+        let core = RddCore::<i32>::new(sc.new_rdd_id(), Arc::clone(&parent), "test_op");
+        assert_eq!(core.splits().len(), parent_splits);
+        assert_eq!(core.number_of_splits(), parent_splits);
+    }
+
+    #[test]
+    fn clone_produces_independent_name() {
+        let (sc, parent) = make_ctx_and_parent();
+        let core = RddCore::<i32>::new(sc.new_rdd_id(), parent, "original");
+        let cloned = core.clone();
+        cloned.set_op_name("cloned_name");
+        assert_eq!(core.op_name(), "original");
+        assert_eq!(cloned.op_name(), "cloned_name");
+    }
+
+    #[test]
+    fn pinned_starts_false() {
+        let (sc, parent) = make_ctx_and_parent();
+        let core = RddCore::<i32>::new(sc.new_rdd_id(), parent, "op");
+        assert!(!core.is_pinned());
+    }
+}
