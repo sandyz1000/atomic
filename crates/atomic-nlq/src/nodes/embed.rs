@@ -20,8 +20,8 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 
-use crate::anthropic::embed_client::EmbedClient;
 use crate::config::NlqConfig;
+use crate::openai::OpenAiClient;
 
 // ── Known model dimensions ─────────────────────────────────────────────────────
 fn model_dim(model: &str, config_override: Option<usize>) -> i32 {
@@ -151,7 +151,7 @@ pub struct EmbedExec {
     output_col: String,
     model: String,
     dim: i32,
-    embed_client: Arc<EmbedClient>,
+    client: Arc<OpenAiClient>,
     config: Arc<NlqConfig>,
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
@@ -171,7 +171,7 @@ impl EmbedExec {
     pub fn new(
         node: &EmbedNode,
         input: Arc<dyn ExecutionPlan>,
-        embed_client: Arc<EmbedClient>,
+        client: Arc<OpenAiClient>,
         config: Arc<NlqConfig>,
     ) -> Self {
         let mut fields: Vec<FieldRef> = input.schema().fields().iter().cloned().collect();
@@ -194,7 +194,7 @@ impl EmbedExec {
             output_col: node.output_col.clone(),
             model: node.model.clone(),
             dim: node.dim,
-            embed_client,
+            client,
             config,
             input,
             schema,
@@ -236,7 +236,7 @@ impl ExecutionPlan for EmbedExec {
             output_col: self.output_col.clone(),
             model: self.model.clone(),
             dim: self.dim,
-            embed_client: self.embed_client.clone(),
+            client: self.client.clone(),
             config: self.config.clone(),
             schema: self.schema.clone(),
             properties: self.properties.clone(),
@@ -249,7 +249,7 @@ impl ExecutionPlan for EmbedExec {
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let mut stream = self.input.execute(partition, context)?;
-        let embed_client = self.embed_client.clone();
+        let client = self.client.clone();
         let input_col = self.input_col.clone();
         let output_col = self.output_col.clone();
         let model = self.model.clone();
@@ -310,7 +310,7 @@ impl ExecutionPlan for EmbedExec {
                     let end = (offset + batch_size).min(texts.len());
                     let chunk = &texts[offset..end];
                     log::debug!("EmbedExec: embedding {} texts", chunk.len());
-                    match embed_client.embed(&chunk.to_vec(), &model).await {
+                    match client.embed(&model, chunk.to_vec()).await {
                         Ok(mut vecs) => {
                             // Validate dimension
                             for v in &vecs {

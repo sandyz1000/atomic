@@ -1,4 +1,5 @@
 pub mod cached;
+pub(crate) mod core;
 pub mod checkpoint;
 pub mod cartesian;
 pub mod co_grouped;

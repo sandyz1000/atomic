@@ -1,18 +1,16 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::SchemaRef;
-use serde_json::Value;
 
-use crate::anthropic::client::AnthropicClient;
-use crate::anthropic::retry::messages_with_retry;
-use crate::anthropic::types::{MessagesRequest, RequestMessage};
 use crate::config::NlqConfig;
 use crate::errors::{NlqError, Result};
-use crate::registry::UdfDescription;
+use crate::openai::OpenAiClient;
+use crate::registry::ToolRegistry;
+use crate::workflow::{AgentContext, WorkflowPlan};
 
-use super::{prompt::build_system_prompt, schema_encoder::encode_schema};
+use super::prompt::build_plan_prompt;
 
-/// Truncate to 2000 chars and strip ASCII control characters to prevent prompt injection.
 fn sanitize_nl_query(q: &str) -> String {
     q.chars()
         .filter(|c| !c.is_ascii_control() || *c == '\n' || *c == '\t')
@@ -21,72 +19,76 @@ fn sanitize_nl_query(q: &str) -> String {
 }
 
 pub struct LlmPlanner {
-    client: Arc<AnthropicClient>,
+    client: Arc<OpenAiClient>,
     config: Arc<NlqConfig>,
 }
 
 impl LlmPlanner {
-    pub fn new(client: Arc<AnthropicClient>, config: Arc<NlqConfig>) -> Self {
+    pub fn new(client: Arc<OpenAiClient>, config: Arc<NlqConfig>) -> Self {
         Self { client, config }
     }
 
-    /// Translate a natural language query into a raw JSON plan tree.
+    /// Expose the client so `AgentLoop` can reuse it for the evaluation step.
+    pub fn client(&self) -> &OpenAiClient {
+        &self.client
+    }
+
+    /// Translate a natural language query into a `WorkflowPlan`.
+    ///
+    /// The LLM receives the table schemas, registered tools, and any prior-round
+    /// results, then outputs a JSON dependency graph of tool calls.
     pub async fn plan(
         &self,
         nl_query: &str,
-        tables: &[(String, SchemaRef)],
-        udfs: &[UdfDescription],
-    ) -> Result<Value> {
-        let schema_json = encode_schema(tables);
-        let system = build_system_prompt(&schema_json, udfs);
+        tables: &HashMap<String, SchemaRef>,
+        tools: &ToolRegistry,
+        ctx: &AgentContext,
+    ) -> Result<WorkflowPlan> {
+        let system = build_plan_prompt(tables, tools, ctx);
+        let user = sanitize_nl_query(nl_query);
 
-        // Sanitize: truncate to 2000 chars, strip control chars.
-        let nl_query = sanitize_nl_query(nl_query);
-        let nl_query = nl_query.as_str();
-
-        let mut last_err: Option<String> = None;
+        let mut last_err = String::new();
         for attempt in 0..=2u32 {
-            // On retry, add the previous parse error as feedback so the LLM can self-correct.
-            let user_content = match &last_err {
-                None => nl_query.to_string(),
-                Some(prev) => format!(
-                    "{nl_query}\n\n[Previous attempt produced invalid JSON: {prev}. Output ONLY valid JSON this time.]"
-                ),
-            };
-
-            let req = MessagesRequest {
-                model: self.config.default_model.clone(),
-                max_tokens: 4096,
-                system: Some(system.clone()),
-                messages: vec![RequestMessage {
-                    role: "user".to_string(),
-                    content: user_content,
-                }],
+            let user_msg = if attempt == 0 {
+                user.clone()
+            } else {
+                format!(
+                    "{user}\n\n[Previous attempt produced invalid JSON: {last_err}. Output ONLY valid JSON this time.]"
+                )
             };
 
             log::debug!("LlmPlanner: plan attempt {}", attempt + 1);
-            let resp = messages_with_retry(&self.client, req, self.config.max_retries).await?;
-            let text = resp
-                .content
-                .into_iter()
-                .find_map(|block| match block {
-                    crate::anthropic::types::ContentBlock::Text { text } => Some(text),
-                    _ => None,
-                })
-                .unwrap_or_default();
+            let text = self
+                .client
+                .chat_with_retry(&self.config.model, &system, &user_msg, 4096)
+                .await?;
 
-            match serde_json::from_str::<Value>(&text) {
-                Ok(json) => {
-                    log::debug!("LlmPlanner: plan parsed successfully on attempt {}", attempt + 1);
-                    return Ok(json);
+            // Strip markdown code fences if the model wrapped the JSON.
+            let json_str = strip_code_fence(&text);
+
+            match serde_json::from_str::<WorkflowPlan>(json_str) {
+                Ok(plan) => {
+                    log::debug!(
+                        "LlmPlanner: plan with {} steps on attempt {}",
+                        plan.steps.len(),
+                        attempt + 1
+                    );
+                    return Ok(plan);
                 }
                 Err(e) => {
-                    let msg = format!("{e}; got: {text}");
-                    log::warn!("LlmPlanner: attempt {} JSON parse error: {e}", attempt + 1);
-                    last_err = Some(msg);
+                    last_err = format!("{e}; got: {}", &text[..text.len().min(300)]);
+                    log::warn!("LlmPlanner: attempt {} parse error: {e}", attempt + 1);
                 }
             }
         }
-        Err(NlqError::PlanParse(last_err.unwrap_or_default()))
+        Err(NlqError::PlanParse(last_err))
     }
+}
+
+fn strip_code_fence(s: &str) -> &str {
+    let s = s.trim();
+    let s = s.strip_prefix("```json").unwrap_or(s);
+    let s = s.strip_prefix("```").unwrap_or(s);
+    let s = s.strip_suffix("```").unwrap_or(s);
+    s.trim()
 }

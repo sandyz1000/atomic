@@ -303,7 +303,7 @@ These are within-scope items where the implementation is partial or has a known 
 | `MemoryAndDisk` lazy eviction | `persist_with_disk()` writes all partitions eagerly at persist time; true write-on-LRU-eviction requires an eviction hook in `PartitionStore` |
 | Shuffle HTTP TLS | Worker TCP task port is TLS-wrapped; `ShuffleManager` HTTP server is still plain HTTP |
 | `ShuffleFetcher` transient retry | Network-level retry on temporary fetch failures not implemented (only stage-level retry on full failure) |
-| Sort-based shuffle | Only hash partitioning; range-shuffle for globally sorted output not implemented |
+| `sort_by` (non-pair) distributed | `sort_by` on a plain `TypedRdd<T>` still collects all data to the driver; the key function's type param cannot be given serialization bounds generically. Use `sort_by_key` on pair RDDs for distributed sort. |
 | Streaming distributed receivers | `ReceiverTracker` is a local stub; Kafka / Kinesis sources not implemented |
 | Python/JS `StreamingContext::start()` threading | Python uses `Python::attach` for GIL in background thread; JS `start()` is a no-op stub — background batch loop for JS deferred to Phase 5 |
 | Python/JS accumulator custom merge | `Accumulator` supports int/float add, list append, string concat; user-defined merge closures deferred to Phase 5 |

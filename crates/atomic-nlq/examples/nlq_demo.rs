@@ -1,7 +1,7 @@
 /// Smoke test: register an in-memory table and run a few NL queries.
 ///
 /// Run with:
-///   ANTHROPIC_API_KEY=sk-... cargo run -p atomic-nlq --example nlq_demo
+///   OPENAI_API_KEY=sk-... cargo run -p atomic-nlq --example nlq_demo
 use std::sync::Arc;
 
 use atomic_nlq::{NlqConfig, NlqContext};
@@ -11,7 +11,6 @@ use datafusion::arrow::record_batch::RecordBatch;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ── 1. Build a small in-memory orders table ───────────────────────────────
     let schema = Arc::new(Schema::new(vec![
         Field::new("customer_id", DataType::Int64, false),
         Field::new("amount", DataType::Float64, false),
@@ -40,25 +39,21 @@ async fn main() -> anyhow::Result<()> {
         ],
     )?;
 
-    // ── 2. Build NlqContext and register the table ────────────────────────────
     let config = NlqConfig::default();
     let ctx = NlqContext::build(config);
+    ctx.sql_ctx().register_partitioned_batches("orders", vec![vec![batch]])?;
 
-    ctx.sql_ctx()
-        .register_partitioned_batches("orders", vec![vec![batch]])?;
-
-    // ── 3. Run a relational NL query ──────────────────────────────────────────
-    println!("Query 1: count all orders");
-    let df = ctx.query("count all orders").await?;
-    df.show().await?;
-
-    println!("\nQuery 2: top 3 customers by total spend");
-    let df = ctx.query("show the top 3 customers by total spend").await?;
-    df.show().await?;
-
-    println!("\nQuery 3: orders with amount greater than 200");
-    let df = ctx.query("orders where amount is greater than 200").await?;
-    df.show().await?;
+    for query in [
+        "count all orders",
+        "show the top 3 customers by total spend",
+        "orders where amount is greater than 200",
+    ] {
+        println!("Query: {query}");
+        match ctx.query(query).await {
+            Ok(result) => println!("  Answer: {}\n", result.answer),
+            Err(e) => eprintln!("  Error: {e}\n"),
+        }
+    }
 
     Ok(())
 }

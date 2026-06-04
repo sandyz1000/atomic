@@ -62,7 +62,6 @@ impl AtomicApp {
 
         let _ = env_logger::try_init();
 
-        // ── Worker path ──────────────────────────────────────────────────────
         if args.iter().any(|a| a == "--worker") {
             let port = args
                 .windows(2)
@@ -82,7 +81,6 @@ impl AtomicApp {
             });
         }
 
-        // ── Driver path ──────────────────────────────────────────────────────
         if args.iter().any(|a| a == "--driver") {
             log::info!("role=driver (explicit --driver flag)");
         }
@@ -130,8 +128,6 @@ impl AtomicApp {
             "driver_context() called on a Worker-role AtomicApp — use run_worker() instead",
         ))
     }
-
-    // ── Helpers ──────────────────────────────────────────────────────────────
 
     /// Parse `--workers host:port,...` into a `Vec<SocketAddrV4>`.
     pub fn worker_addresses(args: &[String]) -> Vec<SocketAddrV4> {

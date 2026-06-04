@@ -79,7 +79,6 @@ where
         fetcher: Arc<ShuffleFetcher>,
         staged: Option<(Vec<Vec<u8>>, Vec<atomic_data::distributed::PipelineOp>)>,
     ) -> Self {
-        use atomic_data::distributed::PipelineOp;
         let mut vals = RddVals::new(id);
 
         let shuffle_dep = ShuffleDependency::new(

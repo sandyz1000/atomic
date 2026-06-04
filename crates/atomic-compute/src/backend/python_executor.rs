@@ -80,58 +80,69 @@ while True:
 
 #[derive(Serialize)]
 struct TaskFrame<'a> {
-    fn_b64:   String,
+    fn_b64: String,
     data_json: &'a str,
 }
 
 #[derive(Deserialize)]
 struct ResultFrame {
-    ok:       bool,
+    ok: bool,
     data_json: Option<String>,
-    error:    Option<String>,
+    error: Option<String>,
 }
 
 // ── Worker handle ─────────────────────────────────────────────────────────────
 
 struct PythonWorkerHandle {
-    stdin:  BufWriter<ChildStdin>,
+    stdin: BufWriter<ChildStdin>,
     stdout: BufReader<ChildStdout>,
-    child:  Child,
+    child: Child,
 }
 
 impl PythonWorkerHandle {
     async fn send_task(&mut self, frame: &TaskFrame<'_>) -> Result<Vec<u8>, String> {
-        let payload = serde_json::to_vec(frame)
-            .map_err(|e| format!("serialize task frame: {e}"))?;
+        let payload =
+            serde_json::to_vec(frame).map_err(|e| format!("serialize task frame: {e}"))?;
         let len = (payload.len() as u32).to_be_bytes();
 
-        self.stdin.write_all(&len).await
+        self.stdin
+            .write_all(&len)
+            .await
             .map_err(|e| format!("write frame len: {e}"))?;
-        self.stdin.write_all(&payload).await
+        self.stdin
+            .write_all(&payload)
+            .await
             .map_err(|e| format!("write frame payload: {e}"))?;
-        self.stdin.flush().await
+        self.stdin
+            .flush()
+            .await
             .map_err(|e| format!("flush stdin: {e}"))?;
 
         let result = self.read_result().await?;
         if result.ok {
             Ok(result.data_json.unwrap_or_default().into_bytes())
         } else {
-            Err(result.error.unwrap_or_else(|| "unknown python error".to_string()))
+            Err(result
+                .error
+                .unwrap_or_else(|| "unknown python error".to_string()))
         }
     }
 
     async fn read_result(&mut self) -> Result<ResultFrame, String> {
         let mut len_buf = [0u8; 4];
-        self.stdout.read_exact(&mut len_buf).await
+        self.stdout
+            .read_exact(&mut len_buf)
+            .await
             .map_err(|e| format!("read result len: {e}"))?;
         let len = u32::from_be_bytes(len_buf) as usize;
 
         let mut buf = vec![0u8; len];
-        self.stdout.read_exact(&mut buf).await
+        self.stdout
+            .read_exact(&mut buf)
+            .await
             .map_err(|e| format!("read result payload: {e}"))?;
 
-        serde_json::from_slice(&buf)
-            .map_err(|e| format!("deserialize result frame: {e}"))
+        serde_json::from_slice(&buf).map_err(|e| format!("deserialize result frame: {e}"))
     }
 
     fn is_alive(&mut self) -> bool {
@@ -143,30 +154,42 @@ impl PythonWorkerHandle {
 
 /// Process-wide pool of persistent Python worker subprocesses.
 pub struct PythonWorkerPool {
-    idle_tx:   mpsc::Sender<PythonWorkerHandle>,
-    idle_rx:   Mutex<mpsc::Receiver<PythonWorkerHandle>>,
+    idle_tx: mpsc::Sender<PythonWorkerHandle>,
+    idle_rx: Mutex<mpsc::Receiver<PythonWorkerHandle>>,
     script_path: std::path::PathBuf,
     pool_size: usize,
 }
 
 impl PythonWorkerPool {
-    /// Spawn `pool_size` Python worker subprocesses and return a ready pool.
-    pub async fn new(pool_size: usize) -> Result<Self, String> {
-        // Write the embedded worker script to a temp file. The file is kept alive
-        // by the returned `PythonWorkerPool` via `script_path` (NamedTempFile would
-        // delete on drop; we persist it for the process lifetime via into_temp_path).
-        let mut tmp = NamedTempFile::new()
-            .map_err(|e| format!("create worker script temp file: {e}"))?;
+    /// Resolve the worker script path.
+    ///
+    /// If `ATOMIC_PYTHON_WORKER_SCRIPT` is set, use that file directly (useful for
+    /// debugging — point it at a local `.py` file and edits take effect on next pool
+    /// restart without recompiling). Otherwise write the embedded `WORKER_SCRIPT` to
+    /// a temp file that persists for the process lifetime.
+    fn write_worker_script() -> Result<std::path::PathBuf, String> {
+        if let Ok(path) = std::env::var("ATOMIC_PYTHON_WORKER_SCRIPT") {
+            return Ok(std::path::PathBuf::from(path));
+        }
+        let mut tmp =
+            NamedTempFile::new().map_err(|e| format!("create worker script temp file: {e}"))?;
         std::io::Write::write_all(&mut tmp, WORKER_SCRIPT.as_bytes())
             .map_err(|e| format!("write worker script: {e}"))?;
-        let script_path = tmp.into_temp_path().keep()
-            .map_err(|e| format!("keep temp script: {e}"))?;
+        tmp.into_temp_path()
+            .keep()
+            .map_err(|e| format!("keep temp script: {e}"))
+    }
+
+    /// Spawn `pool_size` Python worker subprocesses and return a ready pool.
+    pub async fn new(pool_size: usize) -> Result<Self, String> {
+        let script_path = Self::write_worker_script()?;
 
         let (tx, rx) = mpsc::channel(pool_size);
 
         for _ in 0..pool_size {
             let handle = Self::spawn_worker(&script_path).await?;
-            tx.send(handle).await
+            tx.send(handle)
+                .await
                 .map_err(|_| "pool channel closed during init".to_string())?;
         }
 
@@ -179,8 +202,8 @@ impl PythonWorkerPool {
     }
 
     async fn spawn_worker(script_path: &std::path::Path) -> Result<PythonWorkerHandle, String> {
-        use tokio::process::Command;
         use std::process::Stdio;
+        use tokio::process::Command;
 
         let mut child = Command::new("python3")
             .arg(script_path)
@@ -190,11 +213,11 @@ impl PythonWorkerPool {
             .spawn()
             .map_err(|e| format!("spawn python3: {e}"))?;
 
-        let stdin  = child.stdin.take().ok_or("no stdin on python worker")?;
+        let stdin = child.stdin.take().ok_or("no stdin on python worker")?;
         let stdout = child.stdout.take().ok_or("no stdout on python worker")?;
 
         Ok(PythonWorkerHandle {
-            stdin:  BufWriter::new(stdin),
+            stdin: BufWriter::new(stdin),
             stdout: BufReader::new(stdout),
             child,
         })
@@ -204,14 +227,9 @@ impl PythonWorkerPool {
     ///
     /// If the chosen subprocess has died, it is restarted and the task is retried
     /// once. A second failure returns an error.
-    pub async fn execute(
-        &self,
-        spec: &PythonUdfPayload,
-        data: &[u8],
-    ) -> Result<Vec<u8>, String> {
-        let fn_b64   = B64.encode(&spec.fn_bytes);
-        let data_str = std::str::from_utf8(data)
-            .map_err(|e| format!("data utf8: {e}"))?;
+    pub async fn execute(&self, spec: &PythonUdfPayload, data: &[u8]) -> Result<Vec<u8>, String> {
+        let fn_b64 = B64.encode(&spec.fn_bytes);
+        let data_str = std::str::from_utf8(data).map_err(|e| format!("data utf8: {e}"))?;
 
         let frame = TaskFrame {
             fn_b64,
@@ -232,7 +250,8 @@ impl PythonWorkerPool {
             }
             Err(first_err) => {
                 log::warn!("python worker task failed ({first_err}); retrying with fresh worker");
-                let mut fresh = Self::spawn_worker(&self.script_path).await
+                let mut fresh = Self::spawn_worker(&self.script_path)
+                    .await
                     .map_err(|e| format!("respawn after failure: {e}"))?;
                 match fresh.send_task(&frame).await {
                     Ok(result) => {
@@ -263,8 +282,6 @@ impl PythonWorkerPool {
     }
 }
 
-// ── Global singleton ──────────────────────────────────────────────────────────
-
 /// Process-wide Python worker pool. Initialized once at worker startup via
 /// [`init_python_worker_pool`].
 pub static PYTHON_WORKER_POOL: OnceLock<PythonWorkerPool> = OnceLock::new();
@@ -284,6 +301,32 @@ pub fn init_python_worker_pool(pool_size: usize) {
         rt.block_on(PythonWorkerPool::new(pool_size))
             .expect("failed to start Python worker pool")
     });
+}
+
+// ── Dispatcher ───────────────────────────────────────────────────────────────
+
+/// [`OpDispatcher`] for `TaskRuntime::Python` ops.
+///
+/// Decodes the [`PythonUdfPayload`] from `op.payload` and forwards the partition
+/// bytes to the process-wide [`PYTHON_WORKER_POOL`].
+pub(crate) struct PythonDispatcher;
+
+impl crate::backend::OpDispatcher for PythonDispatcher {
+    fn dispatch(
+        &self,
+        op: &atomic_data::distributed::PipelineOp,
+        _partition_id: usize,
+        data: &[u8],
+    ) -> std::result::Result<Vec<u8>, String> {
+        let spec: PythonUdfPayload = serde_json::from_slice(&op.payload)
+            .map_err(|e| format!("python_udf payload decode: {e}"))?;
+        let pool = PYTHON_WORKER_POOL
+            .get()
+            .ok_or("PythonWorkerPool not initialized — call init_python_worker_pool() at startup")?;
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(pool.execute(&spec, data))
+        })
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -313,13 +356,13 @@ mod tests {
         };
 
         let pool = PythonWorkerPool::new(2).await.expect("pool init");
-        let spec = PythonUdfPayload { fn_bytes, zero_bytes: vec![] };
+        let spec = PythonUdfPayload {
+            fn_bytes,
+            zero_bytes: vec![],
+        };
         let data = b"[1, 2, 3]";
 
-        let result = pool
-            .execute(&spec, data)
-            .await
-            .expect("map succeeded");
+        let result = pool.execute(&spec, data).await.expect("map succeeded");
 
         let parsed: Vec<i64> = serde_json::from_slice(&result).unwrap();
         assert_eq!(parsed, vec![2, 4, 6]);

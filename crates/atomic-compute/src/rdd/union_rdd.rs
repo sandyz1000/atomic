@@ -119,17 +119,11 @@ impl<T: Data> UnionVariants<T> {
             .is_ok()
     }
 
-    // TODO: Preferred locations functionality needs to be reimplemented at Context/Scheduler layer
-    // fn current_pref_locs<'a>(
-    //     &'a self,
-    //     rdd: Arc<dyn RddBase>,
-    //     split: &dyn Split,
-    //     context: Arc<Context>,
-    // ) -> impl Iterator<Item = std::net::Ipv4Addr> + 'a {
-    //     context
-    //         .get_preferred_locs(rdd, split.get_index())
-    //         .into_iter()
-    // }
+    // Preferred-location computation is intentionally omitted here.
+    // Locality-aware scheduling requires the Context/Scheduler layer to track which
+    // workers hold cached partitions. That protocol (`CacheTracker`) is deferred;
+    // until it is implemented `preferred_locations` returns an empty Vec for all
+    // UnionRdd variants.
 }
 
 impl<T: Data + Clone> RddBase for UnionRdd<T> {
@@ -166,10 +160,9 @@ impl<T: Data + Clone> RddBase for UnionRdd<T> {
                     return Vec::new();
                 };
 
-                // TODO: Preferred locations need to be computed through Context/Scheduler
-                // layer rather than at RDD level after decoupling context from RDDs
+                // Locality-aware location tracking is deferred (requires CacheTracker protocol).
                 log::debug!(
-                    "Preferred locations for PartitionerAwareUnionRdd temporarily disabled"
+                    "Preferred locations for PartitionerAwareUnionRdd not yet implemented"
                 );
                 Vec::new()
             }

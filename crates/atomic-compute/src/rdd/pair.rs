@@ -68,7 +68,10 @@ where
     fn number_of_splits(&self) -> usize {
         self.prev.number_of_splits()
     }
-    // TODO: Analyze the possible error in invariance here
+    // Type invariance note: `iterator_any` erases `(K, V)` to `Box<dyn Data>` by boxing the
+    // pair. Callers that downcast back must use the exact `(K, V)` type this RDD was created
+    // with — there is no runtime check. The invariant is upheld because `MapValuesRdd` is only
+    // constructed by `TypedRdd::map_values`, which encodes the types at compile time.
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
@@ -173,7 +176,9 @@ where
     fn number_of_splits(&self) -> usize {
         self.prev.number_of_splits()
     }
-    // TODO: Analyze the possible error in invariance here
+    // Type invariance note: same as `MapValuesRdd::iterator_any` above — the `(K, V)` pair
+    // is erased to `Box<dyn Data>`. The invariant is upheld at construction by
+    // `TypedRdd::flat_map_values`.
     fn iterator_any(
         &self,
         split: Box<dyn Split>,

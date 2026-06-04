@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] — RDD Spark Behavioral Parity
+
+### RDD API — Spark Parity
+
+Five unintentional divergences from Spark's RDD semantics have been closed. The core
+transformation/action API (~85-90% of real-world usage) was already semantically correct; these
+fixes address the remaining behavioral gaps.
+
+- **Shuffle-based joins/cogroup** — `join`, `left_outer_join`, `right_outer_join`,
+  `full_outer_join`, and `cogroup` now route through two shuffle stages instead of collecting both
+  RDDs to the driver. O(partition_size) memory per worker; no single-machine bottleneck at scale.
+  - Driver-side (small-data) variants retained as `join_local`, `left_outer_join_local`,
+    `right_outer_join_local`, `full_outer_join_local`, `cogroup_local`.
+  - `cogroup_shuffle(other, num_partitions)` exposed as a public low-level building block.
+
+- **Distributed `sort_by_key`** — replaced driver-side collect-and-sort with a three-step
+  distributed approach: sample ~20 keys per partition → build `RangePartitioner` from sample
+  boundaries → shuffle into range-ordered buckets → sort within each partition. No full-dataset
+  driver collect.
+
+- **`repartition_shuffle(n)`** — true element-level redistribution across `n` partitions using a
+  stride-based bucket assignment and a modulo custom partitioner. `repartition(n)` / `coalesce(n,
+  true)` continue to use whole-partition reassignment (no type-bound requirements); use
+  `repartition_shuffle` when element uniformity matters.
+
+- **`flat_map_values(f)`** — like `flat_map` but keys are preserved and emitted once per output
+  value. Wraps the existing (but previously unexposed) `FlatMappedValuesRdd`.
+
+- **`map_partitions_to_pair(f)`** — pair-aware `map_partitions` where the output correctly
+  participates in `reduce_by_key`, `join`, and `cogroup`. The critical difference from plain
+  `map_partitions`: `cogroup_iterator_any` boxes key and value separately, satisfying the cogroup
+  protocol. Backed by the now-complete `MapPartitionsPairRdd`.
+
+---
+
 ## [1.0.0] — Unreleased
 
 ### Added
@@ -21,10 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### RDD API
 - Full `TypedRdd<T>` API: `map`, `filter`, `flat_map`, `reduce_by_key`, `group_by_key`, `combine_by_key`
-- Pair RDD operations: `join`, `left_outer_join`, `cogroup`, `keys`, `values`, `map_values`
-- Partition operations: `map_partitions`, `map_partitions_with_index`, `glom`, `coalesce`, `repartition`
+- Pair RDD operations: `join`, `left_outer_join`, `right_outer_join`, `full_outer_join`, `cogroup` (shuffle-based), `*_local` driver-side variants, `cogroup_shuffle`, `keys`, `values`, `map_values`, `flat_map_values`
+- Partition operations: `map_partitions`, `map_partitions_with_index`, `map_partitions_to_pair`, `glom`, `coalesce`, `repartition`, `repartition_shuffle`
 - Set operations: `union`, `cartesian`, `zip`, `distinct`, `subtract`, `intersection`
-- Sort operations: `sort_by`, `sort_by_key`, `sort_by_key_range` (range partitioner)
+- Sort operations: `sort_by`, `sort_by_key` (distributed, range-partition), `sort_by_key_range`
 - Actions: `collect`, `count`, `take`, `first`, `reduce`, `fold`, `aggregate`, `for_each`, `for_each_partition`, `count_by_value`, `is_empty`, `top`, `take_ordered`, `max`, `min`
 - Pair actions: `count_by_key`, `lookup`, `collect_partitions`
 - `AtomicApp::build()` — unified driver/worker entry point

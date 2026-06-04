@@ -112,7 +112,7 @@ where
 /// - feature `python`     → enables [`TaskRuntime::Python`]
 /// - feature `javascript` → enables [`TaskRuntime::JavaScript`]
 #[derive(
-    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize,
+    Debug, Clone, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize,
     Serialize, Deserialize, Default,
 )]
 #[serde(rename_all = "snake_case")]

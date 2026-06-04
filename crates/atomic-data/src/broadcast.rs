@@ -5,15 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::distributed::{WireDecode, WireEncode};
 
-// ── Global broadcast ID counter ───────────────────────────────────────────────
-
 static NEXT_BROADCAST_ID: AtomicUsize = AtomicUsize::new(1);
 
 pub fn next_broadcast_id() -> usize {
     NEXT_BROADCAST_ID.fetch_add(1, Ordering::SeqCst)
 }
-
-// ── Task-local broadcast registry ─────────────────────────────────────────────
 
 // Each worker task populates this before executing ops and clears it after.
 thread_local! {
@@ -36,8 +32,6 @@ pub fn load_broadcast_values(values: &[(usize, Vec<u8>)]) {
 pub fn clear_broadcast_values() {
     BROADCAST_CTX.with(|ctx| ctx.borrow_mut().clear());
 }
-
-// ── BroadcastVar ─────────────────────────────────────────────────────────────
 
 /// A handle to a broadcast variable.
 ///

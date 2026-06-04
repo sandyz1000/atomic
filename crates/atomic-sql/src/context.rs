@@ -98,8 +98,6 @@ impl AtomicSqlContext {
         }
     }
 
-    // ── RDD-backed table registration ─────────────────────────────────────────
-
     /// Register a [`TypedRdd<RecordBatch>`] as a SQL table.
     ///
     /// Each RDD partition becomes one DataFusion partition. When a query runs,
@@ -145,15 +143,11 @@ impl AtomicSqlContext {
         Ok(())
     }
 
-    // ── SQL execution ─────────────────────────────────────────────────────────
-
     /// Parse and execute a SQL query, returning a lazy [`DataFrame`].
     pub async fn sql(&self, query: &str) -> Result<DataFrame> {
         let df = self.session.sql(query).await?;
         Ok(DataFrame::new(df))
     }
-
-    // ── Table registration ────────────────────────────────────────────────────
 
     /// Register a flat list of [`RecordBatch`]es as a single-partition table.
     pub fn register_batches(&self, name: &str, batches: Vec<RecordBatch>) -> Result<()> {
@@ -213,8 +207,6 @@ impl AtomicSqlContext {
         Ok(())
     }
 
-    // ── DataFrame builder ─────────────────────────────────────────────────────
-
     /// Create a [`DataFrame`] directly from pre-loaded batches without
     /// registering the table in the catalog.
     pub fn read_batches(&self, batches: Vec<RecordBatch>) -> Result<DataFrame> {
@@ -222,8 +214,6 @@ impl AtomicSqlContext {
         let df = self.session.read_table(provider)?;
         Ok(DataFrame::new(df))
     }
-
-    // ── Access to the underlying SessionContext ───────────────────────────────
 
     /// Access the inner DataFusion [`SessionContext`] for advanced use-cases.
     pub fn inner(&self) -> &SessionContext {

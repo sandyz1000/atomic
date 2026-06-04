@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::context::Context;
-use crate::error::{Error, LibResult};
+use crate::error::{Error, Result};
 use crate::io::*;
 use crate::rdd::{Rdd, RddBase, map_partitions::MapPartitionsRdd, mapper::MapperRdd};
 use atomic_data::data::Data;
@@ -142,7 +142,7 @@ impl<T> LocalFsReader<T> {
 
     /// This function should be called once per host to come with the paralel workload.
     /// Is safe to recompute on failure though.
-    pub(super) fn load_local_files(&self) -> LibResult<Vec<Vec<PathBuf>>> {
+    pub(super) fn load_local_files(&self) -> Result<Vec<Vec<PathBuf>>> {
         let mut total_size = 0_u64;
         if self.is_single_file {
             let files = vec![vec![self.path.clone()]];
@@ -277,9 +277,9 @@ impl<T> LocalFsReader<T> {
             // If the number of specified partitions is relativelly equal to the number of files
             // or the file size of the last files is low skew can happen and there can be fewer
             // partitions than specified. This the number of partitions is actually the specified.
-            if partitions.get(current_pos).unwrap().len() > 1 {
-                // Only get elements from part as long as it has more than one element
-                let last_part = partitions.get_mut(current_pos).unwrap().pop().unwrap();
+            if partitions[current_pos].len() > 1 {
+                // Only take from this partition while it has more than one element.
+                let last_part = partitions[current_pos].pop().expect("checked non-empty above");
                 partitions.push(vec![last_part])
             } else if current_pos > 0 {
                 current_pos -= 1;

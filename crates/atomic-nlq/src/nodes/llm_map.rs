@@ -20,10 +20,8 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 
-use crate::anthropic::client::AnthropicClient;
-use crate::anthropic::retry::messages_with_retry;
-use crate::anthropic::types::{ContentBlock, MessagesRequest, RequestMessage};
 use crate::config::NlqConfig;
+use crate::openai::OpenAiClient;
 use crate::nodes::llm_filter::record_batch_to_json_rows;
 
 // ── Logical node ──────────────────────────────────────────────────────────────
@@ -149,7 +147,7 @@ pub struct LlmMapExec {
     output_col: String,
     output_type: DataType,
     batch_size: usize,
-    client: Arc<AnthropicClient>,
+    client: Arc<OpenAiClient>,
     config: Arc<NlqConfig>,
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
@@ -168,7 +166,7 @@ impl LlmMapExec {
     pub fn new(
         node: &LlmMapNode,
         input: Arc<dyn ExecutionPlan>,
-        client: Arc<AnthropicClient>,
+        client: Arc<OpenAiClient>,
         config: Arc<NlqConfig>,
     ) -> Self {
         let mut fields: Vec<Arc<Field>> =
@@ -248,7 +246,6 @@ impl ExecutionPlan for LlmMapExec {
         let prompt = self.prompt.clone();
         let model = self.model.clone();
         let batch_size = self.batch_size;
-        let max_retries = self.config.max_retries;
         let max_chunk_bytes = self.config.max_chunk_bytes;
         let output_col = self.output_col.clone();
         let output_type = self.output_type.clone();
@@ -277,7 +274,7 @@ impl ExecutionPlan for LlmMapExec {
                 while row_offset < rows {
                     let end = (row_offset + batch_size).min(rows);
                     let chunk = batch.slice(row_offset, end - row_offset);
-                    match llm_map_chunk(&client, &prompt, &model, &output_type, max_retries, max_chunk_bytes, &chunk).await {
+                    match llm_map_chunk(&client, &prompt, &model, &output_type, max_chunk_bytes, &chunk).await {
                         Ok(mut vals) => {
                             // P1c: validate response length
                             if vals.len() != chunk.num_rows() {
@@ -311,11 +308,10 @@ impl ExecutionPlan for LlmMapExec {
 }
 
 async fn llm_map_chunk(
-    client: &Arc<AnthropicClient>,
+    client: &Arc<OpenAiClient>,
     prompt: &str,
     model: &str,
     output_type: &DataType,
-    max_retries: u32,
     max_chunk_bytes: usize,
     batch: &RecordBatch,
 ) -> crate::errors::Result<Vec<serde_json::Value>> {
@@ -330,7 +326,6 @@ async fn llm_map_chunk(
 
     let rows_str = serde_json::to_string(&rows).unwrap_or_default();
 
-    // P4b: guard against oversized payloads
     if rows_str.len() > max_chunk_bytes {
         return Err(crate::errors::NlqError::Internal(format!(
             "LlmMap chunk serialized to {} bytes (limit {}); reduce llm_batch_size",
@@ -339,29 +334,15 @@ async fn llm_map_chunk(
         )));
     }
 
-    let user_content = format!(
-        "Transform instruction: {prompt}\n\nRows (JSON array):\n{rows_str}\n\nReturn a JSON array of {type_hint}, one per row. ONLY the JSON array."
+    let system = format!(
+        "You are a row transformer. For each input row, produce one {type_hint} value. Output ONLY a JSON array."
+    );
+    let user = format!(
+        "Transform: {prompt}\n\nRows:\n{rows_str}\n\nReturn a JSON array of {type_hint}, one per row."
     );
 
-    let req = MessagesRequest {
-        model: model.to_string(),
-        max_tokens: 2048,
-        system: Some(format!(
-            "You are a row transformer. For each input row, produce one {type_hint} value. Output ONLY a JSON array."
-        )),
-        messages: vec![RequestMessage { role: "user".to_string(), content: user_content }],
-    };
-
     log::debug!("LlmMap: sending {} rows to LLM", batch.num_rows());
-    let resp = messages_with_retry(client, req, max_retries).await?;
-    let text = resp
-        .content
-        .into_iter()
-        .find_map(|b| match b {
-            ContentBlock::Text { text } => Some(text),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let text = client.chat_with_retry(model, &system, &user, 2048).await?;
 
     let vals: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| {
         crate::errors::NlqError::PlanParse(format!(

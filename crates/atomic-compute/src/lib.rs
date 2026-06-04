@@ -57,5 +57,4 @@ macro_rules! register_shuffle_map {
 pub use atomic_runtime_macros::task;
 pub use atomic_runtime_macros::task_fn;
 
-// Re-export primary config types for ergonomic use in entry points.
 pub use env::{Config, WorkerConfig};

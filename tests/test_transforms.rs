@@ -1,8 +1,17 @@
 use atomic_compute::{context::Context, rdd::typed::TypedRdd};
 use std::sync::{Arc, Mutex};
 
+atomic_compute::register_shuffle_map!(String, i32);
+atomic_compute::register_shuffle_map!(usize, i32);
+
 fn ctx() -> Arc<Context> {
     Context::local().unwrap()
+}
+
+static SHUFFLE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn shuffle_guard() -> std::sync::MutexGuard<'static, ()> {
+    SHUFFLE_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap()
 }
 
 // ── coalesce() ────────────────────────────────────────────────────────────────
@@ -183,4 +192,53 @@ async fn test_sort_by_ascending() {
         .collect()
         .unwrap();
     assert_eq!(result, vec![1, 1, 3, 4, 5]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_map_partitions_to_pair_reduce() {
+    let _g = shuffle_guard();
+    let ctx = ctx();
+    // Each partition emits word-count pairs; reduce_by_key sums them up.
+    let data = vec![
+        "hello world hello".to_string(),
+        "world world foo".to_string(),
+    ];
+    let rdd = ctx.parallelize_typed(data, 2);
+    let mut result = rdd
+        .map_partitions_to_pair(|_idx, iter| {
+            Box::new(iter.flat_map(|line| {
+                line.split_whitespace()
+                    .map(|w| (w.to_string(), 1i32))
+                    .collect::<Vec<_>>()
+            })) as Box<dyn Iterator<Item = (String, i32)>>
+        })
+        .reduce_by_key(|a, b| a + b)
+        .collect()
+        .unwrap();
+    result.sort_by_key(|(k, _)| k.clone());
+    assert_eq!(
+        result,
+        vec![
+            ("foo".to_string(), 1),
+            ("hello".to_string(), 2),
+            ("world".to_string(), 3),
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_repartition_shuffle_redistributes() {
+    let _g = shuffle_guard();
+    let ctx = ctx();
+    // 1000 items in 2 partitions (skewed: 500 each). Repartition to 5.
+    // All 5 output partitions must be non-empty and total count must be preserved.
+    let data: Vec<i32> = (0..1000).collect();
+    let rdd = ctx.parallelize_typed(data, 2);
+    let partitions = rdd.repartition_shuffle(5).collect_partitions().unwrap();
+    assert_eq!(partitions.len(), 5, "should have 5 output partitions");
+    let total: usize = partitions.iter().map(|p| p.len()).sum();
+    assert_eq!(total, 1000, "all elements must be preserved");
+    for (i, part) in partitions.iter().enumerate() {
+        assert!(!part.is_empty(), "partition {i} should be non-empty after shuffle repartition");
+    }
 }

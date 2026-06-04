@@ -27,8 +27,6 @@ impl DataFrame {
         Self { inner }
     }
 
-    // ── Transformations (lazy) ────────────────────────────────────────────────
-
     /// Project columns by expression.
     pub fn select(self, exprs: Vec<Expr>) -> Result<Self> {
         Ok(Self::new(self.inner.select(exprs)?))
@@ -96,8 +94,6 @@ impl DataFrame {
         Ok(Self::new(self.inner.union(other.inner)?))
     }
 
-    // ── Actions (trigger execution) ───────────────────────────────────────────
-
     /// Execute the plan and collect all results as a `Vec<RecordBatch>`.
     pub async fn collect(self) -> Result<Vec<RecordBatch>> {
         Ok(self.inner.collect().await?)
@@ -141,8 +137,6 @@ impl DataFrame {
         self.inner.write_csv(path, options, writer_options).await?;
         Ok(())
     }
-
-    // ── Introspection ─────────────────────────────────────────────────────────
 
     /// Return the logical schema of this DataFrame.
     pub fn schema(&self) -> &datafusion::common::DFSchema {

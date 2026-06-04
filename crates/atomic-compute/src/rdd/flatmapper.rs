@@ -1,32 +1,22 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::rdd::rdd_val::RddVals;
+use crate::rdd::core::RddCore;
 use crate::rdd::{Rdd, RddBase};
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
 use atomic_data::error::BaseError;
 use atomic_data::fn_traits::RddFlatMapFn;
 use atomic_data::split::Split;
+use std::net::Ipv4Addr;
 
 pub struct FlatMapperRdd<T: Data, U: Data, F>
 where
     F: RddFlatMapFn<T, U>,
 {
-    prev: Arc<dyn Rdd<Item = T>>,
-    vals: Arc<RddVals>,
+    core: RddCore<T>,
     f: Arc<F>,
-    _marker: PhantomData<(T, U)>,
-}
-
-pub struct FlatMapperPairRdd<T: Data, K: Data + Clone, V: Data + Clone, F>
-where
-    F: RddFlatMapFn<T, (K, V)>,
-{
-    prev: Arc<dyn Rdd<Item = T>>,
-    vals: Arc<RddVals>,
-    f: Arc<F>,
-    _marker: PhantomData<(T, K, V)>,
+    _marker: PhantomData<U>,
 }
 
 impl<T: Data, U: Data, F> Clone for FlatMapperRdd<T, U, F>
@@ -35,8 +25,7 @@ where
 {
     fn clone(&self) -> Self {
         FlatMapperRdd {
-            prev: self.prev.clone(),
-            vals: self.vals.clone(),
+            core: self.core.clone(),
             f: self.f.clone(),
             _marker: PhantomData,
         }
@@ -48,14 +37,8 @@ where
     F: RddFlatMapFn<T, U>,
 {
     pub fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
-        let mut vals = RddVals::new(id);
-        vals.dependencies.push(Dependency::OneToOne {
-            rdd_base: prev.get_rdd_base(),
-        });
-        let vals = Arc::new(vals);
         FlatMapperRdd {
-            prev,
-            vals,
+            core: RddCore::new(id, prev, "flat_map"),
             f: Arc::new(f),
             _marker: PhantomData,
         }
@@ -66,36 +49,26 @@ impl<T: Data, U: Data, F> RddBase for FlatMapperRdd<T, U, F>
 where
     F: RddFlatMapFn<T, U>,
 {
-    fn get_rdd_id(&self) -> usize {
-        self.vals.id
+    fn get_rdd_id(&self) -> usize                           { self.core.rdd_id() }
+    fn get_op_name(&self) -> String                         { self.core.op_name() }
+    fn register_op_name(&self, name: &str)                  { self.core.set_op_name(name) }
+    fn get_dependencies(&self) -> Vec<Dependency>           { self.core.dependencies() }
+    fn splits(&self) -> Vec<Box<dyn Split>>                 { self.core.splits() }
+    fn number_of_splits(&self) -> usize                     { self.core.number_of_splits() }
+    fn is_pinned(&self) -> bool                             { self.core.is_pinned() }
+    fn preferred_locations(&self, s: Box<dyn Split>) -> Vec<Ipv4Addr> {
+        self.core.preferred_locations(s)
     }
-
-    fn get_dependencies(&self) -> Vec<Dependency> {
-        self.vals.dependencies.clone()
-    }
-
-    fn splits(&self) -> Vec<Box<dyn Split>> {
-        self.prev.splits()
-    }
-    fn number_of_splits(&self) -> usize {
-        self.prev.number_of_splits()
-    }
-
     fn cogroup_iterator_any(
-        &self,
-        split: Box<dyn Split>,
+        &self, split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         self.iterator_any(split)
     }
-
     fn iterator_any(
-        &self,
-        split: Box<dyn Split>,
+        &self, split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
-        log::debug!("inside iterator_any flatmaprdd",);
-        Ok(Box::new(
-            self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
-        ))
+        log::debug!("inside iterator_any flatmaprdd");
+        self.core.iterator_any(split, self)
     }
 }
 
@@ -104,26 +77,30 @@ where
     F: RddFlatMapFn<T, U>,
 {
     type Item = U;
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        Arc::new(self.clone()) as Arc<dyn RddBase>
-    }
 
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
-        Arc::new(self.clone())
-    }
+    fn get_rdd_base(&self) -> Arc<dyn RddBase> { Arc::new(self.clone()) as Arc<dyn RddBase> }
+    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> { Arc::new(self.clone()) }
 
     fn compute(
-        &self,
-        split: Box<dyn Split>,
+        &self, split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let f = self.f.clone();
-        Ok(Box::new(self.prev.iterator(split)?.flat_map(move |x| f(x))))
+        Ok(Box::new(self.core.prev.iterator(split)?.flat_map(move |x| f(x))))
     }
 }
 
 // ============================================================================
-// FlatMapperPairRdd - Specialized implementation for tuple outputs (K, V)
+// FlatMapperPairRdd — flat_map to (K, V)
 // ============================================================================
+
+pub struct FlatMapperPairRdd<T: Data, K: Data + Clone, V: Data + Clone, F>
+where
+    F: RddFlatMapFn<T, (K, V)>,
+{
+    core: RddCore<T>,
+    f: Arc<F>,
+    _marker: PhantomData<(K, V)>,
+}
 
 impl<T: Data, K: Data + Clone, V: Data + Clone, F> Clone for FlatMapperPairRdd<T, K, V, F>
 where
@@ -131,8 +108,7 @@ where
 {
     fn clone(&self) -> Self {
         FlatMapperPairRdd {
-            prev: self.prev.clone(),
-            vals: self.vals.clone(),
+            core: self.core.clone(),
             f: self.f.clone(),
             _marker: PhantomData,
         }
@@ -144,14 +120,8 @@ where
     F: RddFlatMapFn<T, (K, V)>,
 {
     pub fn new(id: usize, prev: Arc<dyn Rdd<Item = T>>, f: F) -> Self {
-        let mut vals = RddVals::new(id);
-        vals.dependencies.push(Dependency::OneToOne {
-            rdd_base: prev.get_rdd_base(),
-        });
-        let vals = Arc::new(vals);
         FlatMapperPairRdd {
-            prev,
-            vals,
+            core: RddCore::new(id, prev, "flat_map"),
             f: Arc::new(f),
             _marker: PhantomData,
         }
@@ -162,41 +132,29 @@ impl<T: Data, K: Data + Clone, V: Data + Clone, F> RddBase for FlatMapperPairRdd
 where
     F: RddFlatMapFn<T, (K, V)>,
 {
-    fn get_rdd_id(&self) -> usize {
-        self.vals.id
+    fn get_rdd_id(&self) -> usize                           { self.core.rdd_id() }
+    fn get_op_name(&self) -> String                         { self.core.op_name() }
+    fn register_op_name(&self, name: &str)                  { self.core.set_op_name(name) }
+    fn get_dependencies(&self) -> Vec<Dependency>           { self.core.dependencies() }
+    fn splits(&self) -> Vec<Box<dyn Split>>                 { self.core.splits() }
+    fn number_of_splits(&self) -> usize                     { self.core.number_of_splits() }
+    fn is_pinned(&self) -> bool                             { self.core.is_pinned() }
+    fn preferred_locations(&self, s: Box<dyn Split>) -> Vec<Ipv4Addr> {
+        self.core.preferred_locations(s)
     }
-
-    fn get_dependencies(&self) -> Vec<Dependency> {
-        self.vals.dependencies.clone()
-    }
-
-    fn splits(&self) -> Vec<Box<dyn Split>> {
-        self.prev.splits()
-    }
-
-    fn number_of_splits(&self) -> usize {
-        self.prev.number_of_splits()
-    }
-
     fn cogroup_iterator_any(
-        &self,
-        split: Box<dyn Split>,
+        &self, split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside cogroup_iterator_any flatmapperpairrdd");
         Ok(Box::new(
-            self.iterator(split)?
-                .map(|pair| Box::new(pair) as Box<dyn Data>),
+            self.iterator(split)?.map(|pair| Box::new(pair) as Box<dyn Data>),
         ))
     }
-
     fn iterator_any(
-        &self,
-        split: Box<dyn Split>,
+        &self, split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside iterator_any flatmapperpairrdd");
-        Ok(Box::new(
-            self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
-        ))
+        self.core.iterator_any(split, self)
     }
 }
 
@@ -206,19 +164,13 @@ where
 {
     type Item = (K, V);
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        Arc::new(self.clone()) as Arc<dyn RddBase>
-    }
-
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
-        Arc::new(self.clone())
-    }
+    fn get_rdd_base(&self) -> Arc<dyn RddBase> { Arc::new(self.clone()) as Arc<dyn RddBase> }
+    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> { Arc::new(self.clone()) }
 
     fn compute(
-        &self,
-        split: Box<dyn Split>,
+        &self, split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
         let f = self.f.clone();
-        Ok(Box::new(self.prev.iterator(split)?.flat_map(move |x| f(x))))
+        Ok(Box::new(self.core.prev.iterator(split)?.flat_map(move |x| f(x))))
     }
 }

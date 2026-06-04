@@ -5,15 +5,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::distributed::{WireDecode, WireEncode};
 
-// ── Global accumulator ID counter ────────────────────────────────────────────
-
 static NEXT_ACCUMULATOR_ID: AtomicUsize = AtomicUsize::new(1);
 
 pub fn next_accumulator_id() -> usize {
     NEXT_ACCUMULATOR_ID.fetch_add(1, Ordering::SeqCst)
 }
-
-// ── Task-local delta registry ─────────────────────────────────────────────────
 
 // Workers accumulate deltas here during task execution. NativeBackend serialises
 // and returns them in TaskResultEnvelope::accumulator_deltas after the op loop.
@@ -34,8 +30,6 @@ pub fn add_delta(id: usize, delta_bytes: Vec<u8>) {
 pub fn drain_deltas() -> Vec<(usize, Vec<u8>)> {
     ACCUMULATOR_DELTAS.with(|d| d.borrow_mut().drain().collect())
 }
-
-// ── Accumulator ───────────────────────────────────────────────────────────────
 
 /// A distributed accumulator.
 ///
@@ -70,8 +64,6 @@ where
         add_delta(self.id, bytes);
     }
 }
-
-// ── Driver-side merge registry ────────────────────────────────────────────────
 
 /// A type-erased merge function: takes `(current_bytes, delta_bytes)` and returns
 /// merged bytes.  Registered once per accumulator at `Context::accumulator()` time.

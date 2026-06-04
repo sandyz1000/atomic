@@ -55,15 +55,12 @@ rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 
 [features]
-# Enable Python UDF execution via subprocess worker pool.
-# Spawns num_cpus Python processes at startup; each has its own GIL — true parallelism.
-python-udf = ["base64", "atomic-data/python"]
-# Enable JavaScript UDF execution via embedded V8 (deno_core).
-# Thread-local JsRuntime per tokio blocking thread, warm from a V8 startup snapshot.
-# Supports context_json for closure-like capture of driver-side values.
-js-v8 = ["deno_core", "atomic-data/javascript"]
-# Enable both UDF runtimes for the atomic-worker binary.
-udf = ["python-udf", "js-v8"]
+# Subprocess Python worker pool — each process has its own GIL, true parallelism.
+python = ["base64", "atomic-data/python"]
+# Embedded V8 (deno_core) — thread-local JsRuntime per tokio blocking thread.
+js = ["deno_core", "atomic-data/javascript"]
+# Enable both UDF runtimes (used by atomic-worker).
+udf = ["python", "js"]
 # Enable S3 object store support via the official AWS SDK.
 s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types"]
 # Enable TLS (mutual TLS) for driver↔worker TCP communication.

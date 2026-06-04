@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use atomic_nlq::registry::NlqRegistry;
+use atomic_nlq::registry::ToolRegistry;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{
@@ -75,9 +75,9 @@ impl ScalarUDFImpl for EstimateLtv {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-fn make_registry() -> NlqRegistry {
+fn make_registry() -> ToolRegistry {
     let ctx = Arc::new(SessionContext::new());
-    NlqRegistry::new(ctx)
+    ToolRegistry::new(ctx)
 }
 
 #[test]

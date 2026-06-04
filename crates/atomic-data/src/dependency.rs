@@ -45,18 +45,14 @@ pub enum Dependency {
         /// Used to track the lineage of transformations leading to this coalesced split.
         prev: Arc<dyn RddBase>,
     },
-    /// Shuffle dependency representing a shuffle operation
-    /// Uses type-erased box to allow heterogeneous shuffle dependencies with different type parameters
     Shuffle(Arc<ShuffleDependencyBox>),
 }
 
 impl Dependency {
-    /// Create a new one-to-one dependency
     pub fn new_one_to_one(rdd_base: Arc<dyn RddBase>) -> Self {
         Dependency::OneToOne { rdd_base }
     }
 
-    /// Create a new range dependency
     pub fn new_range(
         rdd_base: Arc<dyn RddBase>,
         in_start: usize,
@@ -71,7 +67,6 @@ impl Dependency {
         }
     }
 
-    /// Get parent partition IDs for a given partition (for narrow dependencies)
     pub fn get_parents(&self, partition_id: usize) -> Vec<usize> {
         match self {
             Dependency::OneToOne { .. } => vec![partition_id],
@@ -99,7 +94,6 @@ impl Dependency {
         }
     }
 
-    /// Get the RDD base for this dependency
     pub fn get_rdd_base(&self) -> Arc<dyn RddBase> {
         match self {
             Dependency::OneToOne { rdd_base } => rdd_base.clone(),
@@ -109,12 +103,10 @@ impl Dependency {
         }
     }
 
-    /// Check if this is a shuffle dependency
     pub fn is_shuffle(&self) -> bool {
         matches!(self, Dependency::Shuffle(_))
     }
 
-    /// Get the dependency type
     pub fn dependency_type(&self) -> DependencyType {
         match self {
             Dependency::OneToOne { .. }
@@ -124,7 +116,6 @@ impl Dependency {
         }
     }
 
-    /// Get shuffle ID (only for shuffle dependencies)
     pub fn get_shuffle_id(&self) -> Option<usize> {
         match self {
             Dependency::Shuffle(dep) => Some(dep.get_shuffle_id()),
@@ -132,7 +123,6 @@ impl Dependency {
         }
     }
 
-    /// Get shuffle dependency box (only for shuffle dependencies)
     pub fn get_shuffle_dep(&self) -> Option<&ShuffleDependencyBox> {
         match self {
             Dependency::Shuffle(dep) => Some(dep),
@@ -141,8 +131,6 @@ impl Dependency {
     }
 }
 
-/// Type-erased wrapper for ShuffleDependency that can be cloned and stored
-/// This eliminates the need for ShuffleDependencyTrait and follows the same pattern as ResultTaskBox
 #[derive(Clone)]
 pub struct ShuffleDependencyBox {
     pub shuffle_id: usize,
@@ -171,28 +159,22 @@ pub struct ShuffleDependencyBox {
 }
 
 impl ShuffleDependencyBox {
-    /// Get the shuffle ID
     pub fn get_shuffle_id(&self) -> usize {
         self.shuffle_id
     }
 
-    /// Get the RDD base (type-erased)
     pub fn get_rdd_base(&self) -> Arc<dyn RddBase> {
         self.rdd_base.clone()
     }
 
-    /// Check if this is a cogroup operation
     pub fn is_cogroup(&self) -> bool {
         self.is_cogroup
     }
 
-    /// Execute the shuffle task for a given partition
-    /// Returns the server URI where shuffle data is stored
     pub fn do_shuffle_task(&self, partition: usize) -> String {
         (self.do_shuffle)(partition)
     }
 
-    /// Get the number of output partitions
     pub fn get_num_output_partitions(&self) -> usize {
         self.num_output_partitions
     }

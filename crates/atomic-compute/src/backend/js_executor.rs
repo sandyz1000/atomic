@@ -20,17 +20,17 @@
 /// as `globalThis.__ctx` before the UDF script runs, allowing functions written
 /// as `(x, ctx) => x > ctx.threshold` to access driver-side values without
 /// closure serialization.
-#[cfg(feature = "js-v8")]
+#[cfg(feature = "js")]
 use std::cell::RefCell;
-#[cfg(feature = "js-v8")]
+#[cfg(feature = "js")]
 use std::collections::HashMap;
 
-#[cfg(feature = "js-v8")]
+#[cfg(feature = "js")]
 
 
 // ── Thread-local state ────────────────────────────────────────────────────────
 
-#[cfg(feature = "js-v8")]
+#[cfg(feature = "js")]
 thread_local! {
     static JS_RT: RefCell<Option<deno_core::JsRuntime>> = RefCell::new(None);
     /// FxHash64(fn_source) → JS globalThis identifier (e.g. "__f0a1b2c3d4e5f678").
@@ -38,7 +38,7 @@ thread_local! {
     static FN_CACHE: RefCell<HashMap<u64, String>> = RefCell::new(HashMap::new());
 }
 
-#[cfg(feature = "js-v8")]
+#[cfg(feature = "js")]
 fn with_js_runtime<F, R>(f: F) -> R
 where
     F: FnOnce(&mut deno_core::JsRuntime) -> R,
@@ -48,7 +48,7 @@ where
         if borrow.is_none() {
             *borrow = Some(deno_core::JsRuntime::new(deno_core::RuntimeOptions::default()));
         }
-        f(borrow.as_mut().unwrap())
+        f(borrow.as_mut().expect("JS runtime was just initialised; cannot be None"))
     })
 }
 
@@ -56,7 +56,7 @@ where
 ///
 /// Call this from `spawn_blocking` tasks at worker startup to amortize the V8
 /// cold-start cost before the first real UDF task arrives.
-#[cfg(feature = "js-v8")]
+#[cfg(feature = "js")]
 pub fn warmup_js_runtime() {
     with_js_runtime(|_| {});
 }
@@ -68,7 +68,7 @@ pub fn warmup_js_runtime() {
 /// Returns the JS identifier to use in place of the raw function source.
 /// On subsequent calls with the same source, returns the cached identifier
 /// without re-running any script.
-#[cfg(feature = "js-v8")]
+#[cfg(feature = "js")]
 fn ensure_fn_compiled(
     rt: &mut deno_core::JsRuntime,
     fn_source: &str,
@@ -106,7 +106,7 @@ fn ensure_fn_compiled(
 /// - `zero_json` — JSON-encoded fold zero value; empty string for non-fold ops.
 ///
 /// Returns JSON-encoded result bytes.
-#[cfg(feature = "js-v8")]
+#[cfg(feature = "js")]
 pub fn eval_partition(
     fn_source: &str,
     context_json: Option<&str>,
@@ -149,6 +149,31 @@ pub fn eval_partition(
     })
 }
 
+// ── Dispatcher ───────────────────────────────────────────────────────────────
+
+/// [`OpDispatcher`] for `TaskRuntime::JavaScript` ops.
+///
+/// Decodes the [`JsUdfPayload`] from `op.payload` and evaluates the partition
+/// through the thread-local V8 runtime via [`eval_partition`].
+#[cfg(feature = "js")]
+pub(crate) struct JsDispatcher;
+
+#[cfg(feature = "js")]
+impl crate::backend::OpDispatcher for JsDispatcher {
+    fn dispatch(
+        &self,
+        op: &atomic_data::distributed::PipelineOp,
+        _partition_id: usize,
+        data: &[u8],
+    ) -> std::result::Result<Vec<u8>, String> {
+        use atomic_data::distributed::JsUdfPayload;
+        let spec: JsUdfPayload = serde_json::from_slice(&op.payload)
+            .map_err(|e| format!("js_udf payload decode: {e}"))?;
+        let data_str = std::str::from_utf8(data).map_err(|e| format!("data utf8: {e}"))?;
+        eval_partition(&spec.fn_source, spec.context_json.as_deref(), data_str)
+    }
+}
+
 // ── Script builder ────────────────────────────────────────────────────────────
 
 /// Build the evaluation script for `action`, referencing the pre-compiled
@@ -164,7 +189,7 @@ pub fn eval_partition(
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(all(test, feature = "js-v8"))]
+#[cfg(all(test, feature = "js"))]
 mod tests {
     use super::*;
 

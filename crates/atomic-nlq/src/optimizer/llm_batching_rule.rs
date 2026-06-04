@@ -22,6 +22,10 @@ impl LlmBatchingRule {
     pub fn new(batch_size: usize) -> Self {
         Self { batch_size }
     }
+
+    pub fn batch_size(&self) -> usize {
+        self.batch_size
+    }
 }
 
 impl OptimizerRule for LlmBatchingRule {

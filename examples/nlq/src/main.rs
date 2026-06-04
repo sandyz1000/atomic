@@ -1,24 +1,18 @@
 /// Natural language query example.
 ///
 /// Demonstrates querying an in-memory Arrow table using plain English via
-/// the `atomic-nlq` crate.  The LLM translates the query into a DataFusion
-/// logical plan which is then executed locally.
+/// the `atomic-nlq` crate. The LLM translates the query into a workflow plan
+/// executed on the Atomic compute engine.
 ///
 /// # Prerequisites
 ///
-/// Set the Anthropic API key in the environment:
+/// Set the OpenAI API key in the environment:
 ///
 /// ```bash
-/// export ANTHROPIC_API_KEY=sk-ant-...
+/// export OPENAI_API_KEY=sk-...
 /// ```
 ///
-/// # Running
-///
-/// ```bash
-/// cargo run --example nlq
-/// ```
-///
-/// If `ANTHROPIC_API_KEY` is not set, the example falls back to a direct SQL
+/// If `OPENAI_API_KEY` is not set, the example falls back to a direct SQL
 /// query to demonstrate the DataFusion integration without an API call.
 use std::sync::Arc;
 
@@ -29,7 +23,6 @@ use datafusion::arrow::record_batch::RecordBatch;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Build an in-memory orders table.
     let schema = Arc::new(Schema::new(vec![
         Field::new("customer_id", DataType::Int64, false),
         Field::new("amount", DataType::Float64, false),
@@ -54,11 +47,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
     )?;
 
-    let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
     let has_key = !api_key.is_empty();
 
     let config = NlqConfig {
-        anthropic_api_key: if has_key {
+        openai_api_key: if has_key {
             api_key
         } else {
             "dummy-key-no-api-call".to_string()
@@ -70,8 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.sql_ctx().register_batches("orders", vec![batch])?;
 
     if has_key {
-        // Full NLQ path: natural language -> LLM -> DataFusion plan -> results.
-        println!("Running natural language query via Anthropic API...\n");
+        println!("Running natural language queries via OpenAI...\n");
 
         let queries = [
             "how many orders are there in total",
@@ -82,8 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for nl in queries {
             println!("Query: {nl}");
             match ctx.query(nl).await {
-                Ok(df) => {
-                    df.show().await?;
+                Ok(result) => {
+                    println!("Answer: {}", result.answer);
+                    println!("  ({} rounds, {} steps executed)", result.rounds, result.steps.len());
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
@@ -92,8 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!();
         }
     } else {
-        // Fallback: direct SQL to demonstrate DataFusion integration.
-        println!("ANTHROPIC_API_KEY not set — running direct SQL queries to demonstrate DataFusion integration.\n");
+        println!("OPENAI_API_KEY not set — running direct SQL queries to demonstrate DataFusion integration.\n");
 
         let queries = [
             ("Total order count", "SELECT COUNT(*) AS total_orders FROM orders"),

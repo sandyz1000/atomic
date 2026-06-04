@@ -79,9 +79,8 @@ impl<T: Data> ParallelCollection<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        if num_slices < 1 {
-            panic!("Number of slices should be greater than or equal to 1");
-        } else {
+        assert!(num_slices >= 1, "num_slices must be at least 1, got {}", num_slices);
+        {
             let mut slice_count = 0;
             let data: Vec<_> = data.into_iter().collect();
             let data_len = data.len();
@@ -131,7 +130,7 @@ impl<T: Data + Clone> RddBase for ParallelCollection<T> {
                 Box::new(ParallelCollectionSplit::new(
                     self.rdd_vals.vals.id as i64,
                     i,
-                    self.rdd_vals.splits_[{ i }].clone(),
+                    self.rdd_vals.splits_[i].clone(),
                 )) as Box<dyn Split>
             })
             .collect::<Vec<Box<dyn Split>>>()

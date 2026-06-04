@@ -25,10 +25,12 @@ impl RddBase for LocalFsReader<BytesReader> {
     }
 
     fn preferred_locations(&self, split: Box<dyn Split>) -> Vec<Ipv4Addr> {
-        // for a given split there is only one preferred location because this is pinned,
-        // the preferred location is the host at which this split will be executed;
-        let split = split.as_any().downcast_ref::<BytesReader>().unwrap();
-        vec![split.host]
+        // Pinned RDD: the preferred location is the host embedded in the split.
+        if let Some(split) = split.as_any().downcast_ref::<BytesReader>() {
+            vec![split.host]
+        } else {
+            vec![]
+        }
     }
 
     fn splits(&self) -> Vec<Box<dyn Split>> {
@@ -68,8 +70,11 @@ impl RddBase for LocalFsReader<FileReader> {
     }
 
     fn preferred_locations(&self, split: Box<dyn Split>) -> Vec<Ipv4Addr> {
-        let split = split.as_any().downcast_ref::<FileReader>().unwrap();
-        vec![split.host]
+        if let Some(split) = split.as_any().downcast_ref::<FileReader>() {
+            vec![split.host]
+        } else {
+            vec![]
+        }
     }
 
     fn splits(&self) -> Vec<Box<dyn Split>> {
@@ -107,7 +112,10 @@ impl Rdd for LocalFsReader<BytesReader> {
     }
 
     fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        let split = split.as_any().downcast_ref::<BytesReader>().unwrap();
+        let split = split
+            .as_any()
+            .downcast_ref::<BytesReader>()
+            .ok_or_else(|| BaseError::DowncastFailure("expected BytesReader split for LocalFsReader".into()))?;
         let files_by_part = self.load_local_files()?;
         let idx = split.idx;
         let host = split.host;
@@ -131,7 +139,10 @@ impl Rdd for LocalFsReader<FileReader> {
     }
 
     fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        let split = split.as_any().downcast_ref::<FileReader>().unwrap();
+        let split = split
+            .as_any()
+            .downcast_ref::<FileReader>()
+            .ok_or_else(|| BaseError::DowncastFailure("expected FileReader split for LocalFsReader".into()))?;
         let files_by_part = self.load_local_files()?;
         let idx = split.idx;
         let host = split.host;

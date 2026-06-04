@@ -119,7 +119,6 @@ impl Partitioner {
         }
     }
 
-    /// Get the number of partitions
     pub fn num_partitions(&self) -> usize {
         match self {
             Partitioner::Hash { num_partitions, .. }
@@ -128,12 +127,10 @@ impl Partitioner {
         }
     }
 
-    /// Get the number of partitions (alias for `num_partitions`)
     pub fn get_num_of_partitions(&self) -> usize {
         self.num_partitions()
     }
 
-    /// Get the partition index for a given key
     pub fn get_partition(&self, key: &dyn Any) -> usize {
         match self {
             Partitioner::Hash { get_partition_fn, .. }

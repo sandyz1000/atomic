@@ -7,20 +7,20 @@ edition.workspace = true
 integration = []
 
 [dependencies]
-atomic-sql     = { workspace = true }
+atomic-sql = { workspace = true }
 atomic-compute = { workspace = true }
-datafusion     = "53"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-serde          = { workspace = true, features = ["derive"] }
-serde_json     = { workspace = true }
-tokio          = { workspace = true, features = ["full"] }
-async-trait    = { workspace = true }
-futures        = { workspace = true }
-thiserror      = { workspace = true }
-dashmap        = { workspace = true }
-log            = { workspace = true }
-async-stream   = "0.3"
-parking_lot    = "0.12"
+datafusion = "53"
+async-openai = { version = "0.40", features = ["chat-completion", "embedding"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+dashmap = { workspace = true }
+log = { workspace = true }
+async-stream = "0.3"
+parking_lot = "0.12"
 
 [dev-dependencies]
 tokio = { workspace = true }

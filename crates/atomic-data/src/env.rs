@@ -17,8 +17,6 @@ pub static SHUFFLE_SERVER_URI: RwLock<Option<String>> = RwLock::new(None);
 /// and ShuffledRdd (to look up server URIs when fetching shuffle data).
 pub static MAP_OUTPUT_TRACKER: RwLock<Option<Arc<MapOutputTracker>>> = RwLock::new(None);
 
-// ── Accessors ──────────────────────────────────────────────────────────────────
-
 pub fn get_shuffle_cache() -> Option<Arc<dyn ShuffleCache>> {
     SHUFFLE_CACHE.read().unwrap().clone()
 }
@@ -30,8 +28,6 @@ pub fn get_shuffle_server_uri() -> Option<String> {
 pub fn get_map_output_tracker() -> Option<Arc<MapOutputTracker>> {
     MAP_OUTPUT_TRACKER.read().unwrap().clone()
 }
-
-// ── Setters ────────────────────────────────────────────────────────────────────
 
 pub fn set_shuffle_cache(v: Arc<dyn ShuffleCache>) {
     *SHUFFLE_CACHE.write().unwrap() = Some(v);
@@ -45,8 +41,6 @@ pub fn set_map_output_tracker(v: Arc<MapOutputTracker>) {
     *MAP_OUTPUT_TRACKER.write().unwrap() = Some(v);
 }
 
-// ── RDD cache spill directory ─────────────────────────────────────────────────
-
 /// Base directory for `MemoryAndDisk` / `DiskOnly` partition spill files.
 /// Set by `Context` during init (`rdd-cache/` under the job work_dir).
 /// `None` means disk storage levels fall back to `MemoryOnly`.
@@ -59,8 +53,6 @@ pub fn set_rdd_cache_spill_dir(dir: std::path::PathBuf) {
 pub fn get_rdd_cache_spill_dir() -> Option<std::path::PathBuf> {
     RDD_CACHE_SPILL_DIR.read().unwrap().clone()
 }
-
-// ── Teardown ───────────────────────────────────────────────────────────────────
 
 /// Clear all shuffle infrastructure state.
 /// Called from `Context::drop()` so the next Context starts with a clean slate.

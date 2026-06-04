@@ -153,13 +153,12 @@ impl<T: Data> Rdd for CoalescedRdd<T> {
 type SplitIdx = usize;
 
 /// A PartitionCoalescer defines how to coalesce the partitions of a given RDD.
+///
+/// `Send + Sync` are retained for future compatibility (e.g. if coalescing is
+/// ever moved to a background thread). In practice `coalesce()` is called
+/// single-threadedly on the driver during `splits()`. They impose no real cost
+/// since `DefaultPartitionCoalescer` is stateless.
 pub trait PartitionCoalescer: Send + Sync {
-    // FIXME: Decide upon this really requiring any of those trait bounds.
-    // The implementation in Scala embeeds the coalescer into the rdd itself, so on initial
-    // transliteration this was added. But in reality the only moment this being called
-    // is upon task computation in the driver at the main thread in a completely synchronous and
-    // single-threaded environment under the splits subroutine.
-    // With the current implementation all those required traits could be dropped entirely.
 
     /// Coalesce the partitions of the given RDD.
     ///
@@ -284,9 +283,11 @@ impl PartitionLocations {
     }
 
     /// Gets the *current* preferred locations from the DAGScheduler (as opposed to the static ones).
+    ///
+    /// Takes `Split` by value because `RddBase::preferred_locations` requires ownership.
+    /// A future refactor could add a `preferred_locs_ref(&dyn Split)` method to `RddBase`
+    /// to avoid the clone cost at call sites that hold a reference.
     fn current_pref_locs(part: Box<dyn Split>, prev: &dyn RddBase) -> Vec<Ipv4Addr> {
-        // TODO: this is inefficient and likely to happen in more places,
-        //we should add a preferred_locs method that takes split by ref (&dyn Split) not by value
         prev.preferred_locations(part)
     }
 }

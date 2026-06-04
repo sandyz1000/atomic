@@ -22,10 +22,8 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 use serde_json::json;
 
-use crate::anthropic::client::AnthropicClient;
-use crate::anthropic::retry::messages_with_retry;
-use crate::anthropic::types::{ContentBlock, MessagesRequest, RequestMessage};
 use crate::config::NlqConfig;
+use crate::openai::OpenAiClient;
 
 // ── Logical node ──────────────────────────────────────────────────────────────
 
@@ -111,7 +109,7 @@ pub struct LlmFilterExec {
     prompt: String,
     model: String,
     batch_size: usize,
-    client: Arc<AnthropicClient>,
+    client: Arc<OpenAiClient>,
     config: Arc<NlqConfig>,
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
@@ -131,7 +129,7 @@ impl LlmFilterExec {
     pub fn new(
         node: &LlmFilterNode,
         input: Arc<dyn ExecutionPlan>,
-        client: Arc<AnthropicClient>,
+        client: Arc<OpenAiClient>,
         config: Arc<NlqConfig>,
     ) -> Self {
         let schema = input.schema().clone();
@@ -204,7 +202,6 @@ impl ExecutionPlan for LlmFilterExec {
         let prompt = self.prompt.clone();
         let model = self.model.clone();
         let batch_size = self.batch_size;
-        let max_retries = self.config.max_retries;
         let max_chunk_bytes = self.config.max_chunk_bytes;
         let schema = self.schema.clone();
 
@@ -215,7 +212,6 @@ impl ExecutionPlan for LlmFilterExec {
                     Err(e) => { yield Err(e); continue; }
                 };
 
-                // P1b: skip empty batches without an API call
                 if batch.num_rows() == 0 {
                     yield Ok(batch);
                     continue;
@@ -228,7 +224,7 @@ impl ExecutionPlan for LlmFilterExec {
                 while row_offset < rows {
                     let end = (row_offset + batch_size).min(rows);
                     let chunk = batch.slice(row_offset, end - row_offset);
-                    match llm_filter_chunk(&client, &prompt, &model, max_retries, max_chunk_bytes, &chunk).await {
+                    match llm_filter_chunk(&client, &prompt, &model, max_chunk_bytes, &chunk).await {
                         Ok(mask) => {
                             // P1c: validate response length
                             if mask.len() != chunk.num_rows() {
@@ -267,17 +263,15 @@ impl ExecutionPlan for LlmFilterExec {
 }
 
 async fn llm_filter_chunk(
-    client: &Arc<AnthropicClient>,
+    client: &Arc<OpenAiClient>,
     prompt: &str,
     model: &str,
-    max_retries: u32,
     max_chunk_bytes: usize,
     batch: &RecordBatch,
 ) -> crate::errors::Result<Vec<bool>> {
     let rows = record_batch_to_json_rows(batch);
     let rows_str = serde_json::to_string(&rows).unwrap_or_default();
 
-    // P4b: guard against oversized payloads
     if rows_str.len() > max_chunk_bytes {
         return Err(crate::errors::NlqError::Internal(format!(
             "LlmFilter chunk serialized to {} bytes (limit {}); reduce llm_batch_size",
@@ -286,27 +280,15 @@ async fn llm_filter_chunk(
         )));
     }
 
-    let user_content = format!(
-        "User predicate: {prompt}\n\nRows (JSON array):\n{rows_str}\n\nReturn a JSON array of booleans, one per row (true = keep, false = discard). Return ONLY the JSON array."
+    let system = "You are a row-level boolean classifier. For each row in the provided JSON array, \
+        return a JSON array of booleans (true = keep row, false = discard). \
+        Output ONLY the JSON array, no explanation.";
+    let user = format!(
+        "Predicate: {prompt}\n\nRows:\n{rows_str}\n\nReturn a JSON array of booleans, one per row."
     );
 
-    let req = MessagesRequest {
-        model: model.to_string(),
-        max_tokens: 1024,
-        system: Some("You are a row-level boolean classifier. For each row in the provided JSON array, return a JSON array of booleans (true = keep row, false = discard). Output ONLY the JSON array, no explanation.".to_string()),
-        messages: vec![RequestMessage { role: "user".to_string(), content: user_content }],
-    };
-
     log::debug!("LlmFilter: sending {} rows to LLM", batch.num_rows());
-    let resp = messages_with_retry(client, req, max_retries).await?;
-    let text = resp
-        .content
-        .into_iter()
-        .find_map(|b| match b {
-            ContentBlock::Text { text } => Some(text),
-            _ => None,
-        })
-        .unwrap_or_default();
+    let text = client.chat_with_retry(model, system, &user, 1024).await?;
 
     let bools: Vec<bool> = serde_json::from_str(&text).map_err(|e| {
         crate::errors::NlqError::PlanParse(format!(
@@ -317,7 +299,7 @@ async fn llm_filter_chunk(
     Ok(bools)
 }
 
-pub(crate) fn record_batch_to_json_rows(batch: &RecordBatch) -> Vec<serde_json::Value> {
+pub fn record_batch_to_json_rows(batch: &RecordBatch) -> Vec<serde_json::Value> {
     let mut rows = Vec::with_capacity(batch.num_rows());
     for row_idx in 0..batch.num_rows() {
         let mut map = serde_json::Map::new();

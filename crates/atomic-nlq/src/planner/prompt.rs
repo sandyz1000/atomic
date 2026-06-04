@@ -1,72 +1,122 @@
-use serde_json::Value;
+use std::collections::HashMap;
 
-use crate::registry::UdfDescription;
+use datafusion::arrow::datatypes::SchemaRef;
+use serde_json::{Value, json};
 
-/// Build the system prompt for the LLM planner.
+use crate::registry::ToolRegistry;
+use crate::workflow::AgentContext;
+
+/// Build the system prompt for the LLM workflow planner.
 ///
-/// The prompt instructs the model to output a single JSON object representing
-/// the query plan, matching the `JsonPlanNode` schema. No SQL, no prose.
-pub fn build_system_prompt(schema_json: &Value, udfs: &[UdfDescription]) -> String {
-    let schema_str = serde_json::to_string_pretty(schema_json).unwrap_or_default();
-
-    let udf_section = if udfs.is_empty() {
-        "No custom functions are available.".to_string()
-    } else {
-        let lines: Vec<String> = udfs
-            .iter()
-            .map(|u| format!("- {}({}): {}", u.name, u.signature, u.description))
-            .collect();
-        format!("Available functions:\n{}", lines.join("\n"))
-    };
+/// Instructs the model to output a `WorkflowPlan` JSON object — a dependency
+/// graph of tool calls. No SQL, no prose, no IR.
+pub fn build_plan_prompt(
+    tables: &HashMap<String, SchemaRef>,
+    tools: &ToolRegistry,
+    ctx: &AgentContext,
+) -> String {
+    let schema_section = build_schema_section(tables);
+    let tools_section = build_tools_section(tools);
+    let history_section = build_history_section(ctx);
 
     format!(
-        r#"You are a query planner. Given a natural language query, produce a JSON execution plan.
+        r#"You are a workflow planner for a distributed data processing system.
+Given a natural language query, produce a JSON workflow plan that calls the available tools.
 
 OUTPUT REQUIREMENTS:
 - Output ONLY a single JSON object. No SQL, no markdown, no prose.
-- The JSON must match one of the node types below.
-- Use double-quoted strings. No trailing commas.
+- The JSON must match: {{"steps": [<step>, ...]}}
+- Each step: {{"id": "<unique_id>", "tool": "<tool_name>", "args": {{...}}, "depends_on": [<step_id>, ...]}}
+- Steps with empty "depends_on" run in parallel. Steps that list upstream ids wait for those results.
+- Use short, descriptive step ids like "get_orders", "filter_high_value", "compute_ltv".
 
-DATABASE SCHEMA:
-{schema_str}
+{schema_section}
 
-{udf_section}
+{tools_section}
 
-PLAN NODE TYPES:
-
-TableScan: {{"type":"TableScan","table":"<name>","projection":["col1","col2"] or null}}
-Filter: {{"type":"Filter","predicate":<expr>,"input":<node>}}
-Projection: {{"type":"Projection","exprs":[<expr>...],"input":<node>}}
-Aggregate: {{"type":"Aggregate","group_by":[<expr>...],"aggs":[{{"func":"sum|count|avg|min|max","expr":<expr>,"alias":"<name>"}}...],"input":<node>}}
-Sort: {{"type":"Sort","exprs":[{{"expr":<expr>,"asc":true|false,"nulls_first":true|false}}...],"input":<node>}}
-Limit: {{"type":"Limit","skip":0,"fetch":<n or null>,"input":<node>}}
-Join: {{"type":"Join","join_type":"Inner|Left|Right|Full","left":<node>,"right":<node>,"on":[[<left_expr>,<right_expr>]...]}}
-LlmFilter: {{"type":"LlmFilter","prompt":"<predicate description>","model":null,"input":<node>}}
-LlmMap: {{"type":"LlmMap","prompt":"<transform description>","output_col":"<name>","output_type":"Utf8|Float64|Int64|Boolean","model":null,"input":<node>}}
-Embed: {{"type":"Embed","input_col":"<text_column>","output_col":"<embedding_column>","model":null,"input":<node>}}
-VectorSearch: {{"type":"VectorSearch","query_col":"<embedding_column>","index_name":"<registered_index>","top_k":<k>,"input":<node>}}
-
-EXPRESSION TYPES:
-Column: {{"type":"Col","name":"<column_name>","table":null}}
-Literal string: {{"type":"Lit","value":"<string>"}}
-Literal number: {{"type":"LitNum","value":<number>}}
-Literal bool: {{"type":"LitBool","value":true|false}}
-Binary op: {{"type":"BinOp","op":"Eq|NotEq|Lt|LtEq|Gt|GtEq|And|Or|Plus|Minus|Multiply|Divide","left":<expr>,"right":<expr>}}
-IsNull: {{"type":"IsNull","expr":<expr>}}
-IsNotNull: {{"type":"IsNotNull","expr":<expr>}}
-Not: {{"type":"Not","expr":<expr>}}
-Call (UDF): {{"type":"Call","func":"<function_name>","args":[<expr>...]}}
-Alias: {{"type":"Alias","expr":<expr>,"name":"<alias>"}}
+{history_section}
 
 EXAMPLES:
 
 Query: "count all orders"
-{{"type":"Aggregate","group_by":[],"aggs":[{{"func":"count","expr":{{"type":"LitNum","value":1}},"alias":"count"}}],"input":{{"type":"TableScan","table":"orders","projection":null}}}}
+{{"steps":[{{"id":"count_orders","tool":"sql_query","args":{{"query":"SELECT COUNT(*) AS total FROM orders"}},"depends_on":[]}}]}}
 
-Query: "show the top 5 customers by total amount"
-{{"type":"Limit","skip":0,"fetch":5,"input":{{"type":"Sort","exprs":[{{"expr":{{"type":"Col","name":"total_amount","table":null}},"asc":false,"nulls_first":false}}],"input":{{"type":"Aggregate","group_by":[{{"type":"Col","name":"customer_id","table":null}}],"aggs":[{{"func":"sum","expr":{{"type":"Col","name":"amount","table":null}},"alias":"total_amount"}}],"input":{{"type":"TableScan","table":"orders","projection":null}}}}}}}}
-"#,
-        schema_str = schema_str,
-        udf_section = udf_section,
+Query: "get churned customers from last month and compute their average LTV"
+{{"steps":[
+  {{"id":"get_churned","tool":"sql_query","args":{{"query":"SELECT customer_id FROM events WHERE status='churned' AND month='last'"}},"depends_on":[]}},
+  {{"id":"compute_ltv","tool":"sql_query","args":{{"query":"SELECT AVG(ltv) FROM customers WHERE customer_id IN (SELECT customer_id FROM churned)"}},"depends_on":["get_churned"]}}
+]}}"#,
+        schema_section = schema_section,
+        tools_section = tools_section,
+        history_section = history_section,
+    )
+}
+
+fn build_schema_section(tables: &HashMap<String, SchemaRef>) -> String {
+    if tables.is_empty() {
+        return "TABLES: No tables registered.".to_string();
+    }
+    let table_descs: Vec<Value> = tables
+        .iter()
+        .map(|(name, schema)| {
+            let columns: Vec<Value> = schema
+                .fields()
+                .iter()
+                .map(|f| {
+                    json!({
+                        "name": f.name(),
+                        "type": format!("{:?}", f.data_type()),
+                        "nullable": f.is_nullable()
+                    })
+                })
+                .collect();
+            json!({ "table": name, "columns": columns })
+        })
+        .collect();
+    let schema_str =
+        serde_json::to_string_pretty(&Value::Array(table_descs)).unwrap_or_default();
+    format!("TABLES:\n{schema_str}")
+}
+
+fn build_tools_section(tools: &ToolRegistry) -> String {
+    let all = tools.all_tools();
+    if all.is_empty() {
+        return "TOOLS: No tools registered.".to_string();
+    }
+    let lines: Vec<String> = all
+        .iter()
+        .map(|t| {
+            let schema_str =
+                serde_json::to_string(&t.input_schema).unwrap_or_else(|_| "{}".to_string());
+            format!("- {}: {} | args schema: {}", t.name, t.description, schema_str)
+        })
+        .collect();
+    format!("TOOLS:\n{}", lines.join("\n"))
+}
+
+fn build_history_section(ctx: &AgentContext) -> String {
+    if ctx.previous_results.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<String> = ctx
+        .previous_results
+        .iter()
+        .map(|r| {
+            let kind = match &r.output {
+                crate::workflow::StepOutput::DataFrame(b) => {
+                    format!("DataFrame ({} buffers)", b.len())
+                }
+                crate::workflow::StepOutput::Text(t) => {
+                    format!("Text: {}", &t[..t.len().min(150)])
+                }
+                crate::workflow::StepOutput::Empty => "Empty".to_string(),
+            };
+            format!("  step '{}': {kind}", r.step_id)
+        })
+        .collect();
+    format!(
+        "PREVIOUS ROUND RESULTS (round {}):\n{}",
+        ctx.rounds,
+        lines.join("\n")
     )
 }

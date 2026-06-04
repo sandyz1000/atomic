@@ -393,7 +393,7 @@ where
         let ctx = self.ssc.sc.clone();
         let left_typed: TypedRdd<(K, V)> = TypedRdd::new(left_rdd, ctx.clone());
         let right_typed: TypedRdd<(K, W)> = TypedRdd::new(right_rdd, ctx);
-        Some(left_typed.join(right_typed).into_rdd())
+        Some(left_typed.join_local(right_typed).into_rdd())
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, (V, W))>>> {
@@ -466,7 +466,7 @@ where
         let ctx = self.ssc.sc.clone();
         let left_typed: TypedRdd<(K, V)> = TypedRdd::new(left_rdd, ctx.clone());
         let right_typed: TypedRdd<(K, W)> = TypedRdd::new(right_rdd, ctx);
-        Some(left_typed.left_outer_join(right_typed).into_rdd())
+        Some(left_typed.left_outer_join_local(right_typed).into_rdd())
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, (V, Option<W>))>>> {

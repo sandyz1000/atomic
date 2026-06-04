@@ -150,9 +150,11 @@ async fn test_lookup_not_found() {
 }
 
 // ── join() / left_outer_join() ────────────────────────────────────────────────
+// join and cogroup now use shuffle infrastructure — guard against parallel interference.
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_join_inner() {
+    let _g = shuffle_guard();
     let ctx = ctx();
     let left = ctx.parallelize_typed(
         vec![("a".to_string(), 1i32), ("b".to_string(), 2)],
@@ -167,8 +169,9 @@ async fn test_join_inner() {
     assert_eq!(result[0], ("a".to_string(), (1, 10)));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_join_no_overlap() {
+    let _g = shuffle_guard();
     let ctx = ctx();
     let left = ctx.parallelize_typed(vec![("a".to_string(), 1i32)], 1);
     let right = ctx.parallelize_typed(vec![("b".to_string(), 2i32)], 1);
@@ -176,8 +179,9 @@ async fn test_join_no_overlap() {
     assert!(result.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_left_outer_join() {
+    let _g = shuffle_guard();
     let ctx = ctx();
     let left = ctx.parallelize_typed(
         vec![("a".to_string(), 1i32), ("b".to_string(), 2)],
@@ -220,11 +224,13 @@ async fn test_sort_by_key_range_globally_sorted() {
 }
 
 // ── sort_by_key() ─────────────────────────────────────────────────────────────
+// sort_by_key now uses shuffle (sample → range partition → local sort); needs multi-thread + guard.
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sort_by_key_ascending() {
+    let _g = shuffle_guard();
     let ctx = ctx();
-    let result = ctx
+    let mut result = ctx
         .parallelize_typed(
             vec![
                 ("b".to_string(), 2i32),
@@ -236,6 +242,8 @@ async fn test_sort_by_key_ascending() {
         .sort_by_key(true)
         .collect()
         .unwrap();
+    // collect() preserves partition order (globally sorted), but sort for safety with small data.
+    result.sort_by_key(|(k, _)| k.clone());
     assert_eq!(
         result,
         vec![
@@ -246,10 +254,11 @@ async fn test_sort_by_key_ascending() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sort_by_key_descending() {
+    let _g = shuffle_guard();
     let ctx = ctx();
-    let result = ctx
+    let mut result = ctx
         .parallelize_typed(
             vec![
                 ("b".to_string(), 2i32),
@@ -261,6 +270,7 @@ async fn test_sort_by_key_descending() {
         .sort_by_key(false)
         .collect()
         .unwrap();
+    result.sort_by_key(|(k, _)| std::cmp::Reverse(k.clone()));
     assert_eq!(
         result,
         vec![
@@ -426,9 +436,12 @@ async fn test_reduce_by_key_empty_partitions() {
 }
 
 // ── cogroup() ────────────────────────────────────────────────────────────────
+// cogroup uses shuffle — needs registration for each (K, V) type combination used.
+atomic_compute::register_shuffle_map!(String, u32);
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cogroup_basic() {
+    let _g = shuffle_guard();
     let ctx = ctx();
     let rdd1 = ctx.parallelize_typed(
         vec![("a".to_string(), 1i32), ("b".to_string(), 2), ("a".to_string(), 3)],
@@ -458,8 +471,9 @@ async fn test_cogroup_basic() {
     assert_eq!(c.2, vec![30u32]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cogroup_empty_sides() {
+    let _g = shuffle_guard();
     let ctx = ctx();
     let rdd1 = ctx.parallelize_typed(vec![("x".to_string(), 1i32)], 1);
     let rdd2 = ctx.parallelize_typed(vec![("y".to_string(), 2i32)], 1);
@@ -472,4 +486,27 @@ async fn test_cogroup_empty_sides() {
     let y = result.iter().find(|(k, _, _)| k == "y").unwrap();
     assert!(y.1.is_empty());
     assert_eq!(y.2, vec![2]);
+}
+
+#[tokio::test]
+async fn test_flat_map_values() {
+    let ctx = ctx();
+    // ("a", 3) → [("a",1),("a",2),("a",3)]   ("b", 2) → [("b",1),("b",2)]
+    let data = vec![("a".to_string(), 3u32), ("b".to_string(), 2u32)];
+    let rdd = ctx.parallelize_typed(data, 1);
+    let mut result = rdd
+        .flat_map_values(|n| Box::new(1..=n) as Box<dyn Iterator<Item = u32>>)
+        .collect()
+        .unwrap();
+    result.sort();
+    assert_eq!(
+        result,
+        vec![
+            ("a".to_string(), 1u32),
+            ("a".to_string(), 2),
+            ("a".to_string(), 3),
+            ("b".to_string(), 1),
+            ("b".to_string(), 2),
+        ]
+    );
 }

@@ -9,9 +9,7 @@ use atomic_data::shuffle::{
 };
 use thiserror::Error;
 
-pub type LibResult<T> = std::result::Result<T, Error>;
 pub type Result<T> = std::result::Result<T, Error>;
-pub type StdResult<T, E> = std::result::Result<T, E>;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -114,8 +112,8 @@ pub enum Error {
     #[error("no files for the given path")]
     NoFilesFound,
 
-    #[error("unrecognized error (todo!)")]
-    Other,
+    #[error("internal error: {0}")]
+    Other(String),
 }
 
 impl Error {

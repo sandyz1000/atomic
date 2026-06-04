@@ -1,154 +1,83 @@
-use std::sync::Arc;
+use atomic_nlq::{NlqConfig, NlqContext, ToolDefinition, ToolRuntime};
 
-use atomic_nlq::{NlqConfig, NlqContext};
-use datafusion::arrow::array::{Float64Array, Int64Array, StringArray};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
-use datafusion::arrow::record_batch::RecordBatch;
-
-fn make_config() -> NlqConfig {
+fn test_config() -> NlqConfig {
     NlqConfig {
-        anthropic_api_key: "test-dummy-key".to_string(),
-        embed_api_key: "test-dummy-embed-key".to_string(),
-        ..NlqConfig::default()
+        openai_api_key: std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "sk-test".to_string()),
+        ..Default::default()
     }
 }
 
-fn orders_batch() -> RecordBatch {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("customer_id", DataType::Int64, false),
-        Field::new("amount", DataType::Float64, false),
-        Field::new("category", DataType::Utf8, true),
-    ]));
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(Int64Array::from(vec![1, 2, 1, 3, 2])),
-            Arc::new(Float64Array::from(vec![100.0, 200.0, 150.0, 50.0, 300.0])),
-            Arc::new(StringArray::from(vec!["A", "B", "A", "C", "B"])),
-        ],
-    )
-    .expect("batch creation failed")
+#[test]
+fn test_config_default_values() {
+    let cfg = NlqConfig::default();
+    assert_eq!(cfg.model, "gpt-4o");
+    assert_eq!(cfg.embed_model, "text-embedding-3-small");
+    assert_eq!(cfg.max_rounds, 5);
+    assert!(cfg.llm_batch_size > 0);
+}
+
+#[test]
+fn test_config_validation_empty_key() {
+    let cfg = NlqConfig { openai_api_key: String::new(), ..Default::default() };
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_config_validation_zero_batch() {
+    let cfg = NlqConfig {
+        openai_api_key: "sk-test".to_string(),
+        llm_batch_size: 0,
+        ..Default::default()
+    };
+    assert!(cfg.validate().is_err());
+}
+
+#[test]
+fn test_config_validation_ok() {
+    let cfg = NlqConfig { openai_api_key: "sk-test".to_string(), ..Default::default() };
+    assert!(cfg.validate().is_ok());
 }
 
 #[tokio::test]
-async fn test_nlq_context_builds_and_registers_table() {
-    let ctx = NlqContext::build(make_config());
-    let batch = orders_batch();
-
-    ctx.sql_ctx()
-        .register_batches("orders", vec![batch])
-        .expect("register_batches failed");
-
-    let df = ctx
-        .sql_ctx()
-        .sql("SELECT COUNT(*) AS n FROM orders")
-        .await
-        .expect("sql failed");
-    let results = df.collect().await.expect("collect failed");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].num_rows(), 1);
+async fn test_nlq_context_builds() {
+    let ctx = NlqContext::build(test_config());
+    let tools = ctx.registry.all_tools();
+    assert!(tools.iter().any(|t| t.name == "sql_query"));
+    assert!(tools.iter().any(|t| t.name == "llm_filter"));
+    assert!(tools.iter().any(|t| t.name == "llm_map"));
 }
 
 #[tokio::test]
-async fn test_sql_filter_and_aggregation() {
-    let ctx = NlqContext::build(make_config());
-    ctx.sql_ctx()
-        .register_batches("orders", vec![orders_batch()])
-        .expect("register_batches failed");
-
-    let df = ctx
-        .sql_ctx()
-        .sql("SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id ORDER BY customer_id")
-        .await
-        .expect("sql failed");
-    let results = df.collect().await.expect("collect failed");
-
-    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 3, "expected one row per distinct customer_id");
-}
-
-#[tokio::test]
-async fn test_ir_parser_roundtrip_via_context() {
-    use std::collections::HashMap;
-    use atomic_nlq::ir::json_plan::{JsonExpr, JsonPlanNode};
-    use atomic_nlq::ir::parser::IrParser;
-    use datafusion::arrow::datatypes::SchemaRef;
-    use datafusion::execution::context::SessionContext;
-    use datafusion::logical_expr::LogicalPlan;
-
-    let ctx = SessionContext::new();
-    let state_ref = ctx.state_ref();
-
-    let schema: SchemaRef = Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
-        Field::new("customer_id", DataType::Int64, false),
-        Field::new("amount", DataType::Float64, false),
-    ]));
-    let mut schemas = HashMap::new();
-    schemas.insert("orders".to_string(), schema);
-
-    let parser = IrParser::new(
-        state_ref,
-        schemas,
-        "claude-sonnet-4-6".to_string(),
-        "voyage-3".to_string(),
-        None,
-        50,
-    );
-
-    // TableScan → Filter → Projection
-    let plan_node = JsonPlanNode::Projection {
-        exprs: vec![JsonExpr::Col { name: "customer_id".to_string(), table: None }],
-        input: Box::new(JsonPlanNode::Filter {
-            predicate: JsonExpr::BinOp {
-                op: ">".to_string(),
-                left: Box::new(JsonExpr::Col { name: "amount".to_string(), table: None }),
-                right: Box::new(JsonExpr::LitNum {
-                    value: serde_json::Number::from_f64(100.0).unwrap(),
-                }),
-            },
-            input: Box::new(JsonPlanNode::TableScan {
-                table: "orders".to_string(),
-                projection: None,
-            }),
+async fn test_register_python_tool() {
+    let ctx = NlqContext::build(test_config());
+    ctx.register_tool(ToolDefinition {
+        name: "my_tool".to_string(),
+        description: "A test Python tool".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": { "table": { "type": "string" } }
         }),
-    };
-
-    let logical_plan = parser.parse(&plan_node).expect("IrParser::parse failed");
-    assert!(
-        matches!(logical_plan, LogicalPlan::Projection(_)),
-        "top-level node should be Projection"
-    );
+        runtime: ToolRuntime::Python("def run(args): return []".to_string()),
+    });
+    let tool = ctx.registry.get_tool("my_tool");
+    assert!(tool.is_some());
+    assert_eq!(tool.unwrap().name, "my_tool");
 }
 
-/// Full end-to-end test with a real Anthropic API key.
-///
-/// Skipped automatically if ANTHROPIC_API_KEY is not set in the environment.
-/// Run manually with:
-///   ANTHROPIC_API_KEY=sk-... cargo test -p atomic-nlq test_full_nlq_pipeline
 #[tokio::test]
-async fn test_full_nlq_pipeline() {
-    let api_key = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(k) if !k.is_empty() => k,
-        _ => {
-            eprintln!("ANTHROPIC_API_KEY not set — skipping test_full_nlq_pipeline");
-            return;
-        }
-    };
+async fn test_register_js_tool() {
+    let ctx = NlqContext::build(test_config());
+    ctx.register_tool(ToolDefinition {
+        name: "js_tool".to_string(),
+        description: "A test JS tool".to_string(),
+        input_schema: serde_json::json!({}),
+        runtime: ToolRuntime::JavaScript("function run(args) { return []; }".to_string()),
+    });
+    assert!(ctx.registry.get_tool("js_tool").is_some());
+}
 
-    let config = NlqConfig {
-        anthropic_api_key: api_key,
-        ..NlqConfig::default()
-    };
-    let ctx = NlqContext::build(config);
-
-    ctx.sql_ctx()
-        .register_batches("orders", vec![orders_batch()])
-        .expect("register_batches failed");
-
-    let df = ctx
-        .query("count how many orders there are")
-        .await
-        .expect("NlqContext::query failed");
-    let results = df.collect().await.expect("collect failed");
-    assert!(!results.is_empty(), "expected at least one result batch");
+#[tokio::test]
+async fn test_sql_ctx_accessible() {
+    let ctx = NlqContext::build(test_config());
+    let _sql = ctx.sql_ctx();
 }

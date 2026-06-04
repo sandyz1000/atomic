@@ -26,7 +26,11 @@ impl Env {
             let _guard = rt.enter();
             func()
         } else {
-            unreachable!()
+            panic!(
+                "no Tokio runtime available: \
+                 call Env::run_in_async_rt from within a Tokio context \
+                 or before the ASYNC_RT lazy was initialised"
+            )
         }
     }
 
@@ -38,7 +42,7 @@ impl Env {
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
-                    .unwrap(),
+                    .expect("failed to build Tokio multi-thread runtime for Atomic"),
             )
         }
     }

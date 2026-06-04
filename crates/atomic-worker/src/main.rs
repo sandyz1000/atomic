@@ -1,7 +1,10 @@
-/// atomic-worker — polyglot distributed task worker.
+/// atomic-worker — standalone deployable worker binary.
 ///
-/// Starts a long-running Atomic worker process that accepts task requests over TCP.
-/// Run one instance per worker node:
+/// This exists as a separate binary so worker nodes can be provisioned without
+/// shipping driver application code. A driver binary built with `AtomicApp::build()`
+/// also supports `--worker`, but couples the worker to the driver's task registry.
+/// `atomic-worker` is the generic option: any cluster node can run it without knowing
+/// which driver application it will serve.
 ///
 ///   atomic-worker --port 10001
 ///   atomic-worker --port 10001 --local-ip 192.168.1.5
@@ -27,8 +30,5 @@ fn main() {
         .and_then(|w| w[1].parse().ok())
         .unwrap_or(Ipv4Addr::LOCALHOST);
 
-    let config = Config::worker(local_ip, port);
-
-    // start_worker initialises shuffle, enters the TCP executor loop, and never returns.
-    start_worker(config);
+    start_worker(Config::worker(local_ip, port));
 }

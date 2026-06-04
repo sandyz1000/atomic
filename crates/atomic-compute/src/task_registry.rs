@@ -54,8 +54,6 @@ pub static TASK_REGISTRY: Lazy<HashMap<&'static str, fn(&TaskAction, &[u8], &[u8
         map
     });
 
-// ── Shuffle-map registry ──────────────────────────────────────────────────────
-
 /// A compile-time shuffle-write handler registered for a specific `(K, V)` type pair.
 ///
 /// Place `register_shuffle_map!(K, V)` in your binary once per pair used with
@@ -94,8 +92,6 @@ pub static SHUFFLE_MAP_REGISTRY: Lazy<HashMap<&'static str, fn(&[u8], usize, usi
             .map(|entry| ((entry.type_id)(), entry.handler))
             .collect()
     });
-
-// ── Shuffle-key registry ──────────────────────────────────────────────────────
 
 /// Maps a concrete `(K, V)` `TypeId` to its stable shuffle dispatch key.
 ///

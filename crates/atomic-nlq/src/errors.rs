@@ -2,14 +2,23 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum NlqError {
-    #[error("Anthropic API error (status {status}): {body}")]
-    Api { status: u16, body: String },
+    #[error("OpenAI API error: {0}")]
+    Api(String),
 
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("configuration error: {0}")]
+    Config(String),
 
-    #[error("JSON plan parse error: {0}")]
+    #[error("workflow plan parse error: {0}")]
     PlanParse(String),
+
+    #[error("workflow execution error: {0}")]
+    WorkflowExecution(String),
+
+    #[error("tool not found: {0}")]
+    ToolNotFound(String),
+
+    #[error("agent exceeded max rounds ({0})")]
+    MaxRoundsExceeded(usize),
 
     #[error("DataFusion error: {0}")]
     DataFusion(#[from] datafusion::error::DataFusionError),

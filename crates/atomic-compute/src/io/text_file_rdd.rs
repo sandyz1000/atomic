@@ -15,8 +15,6 @@ use atomic_data::split::Split;
 
 use crate::rdd::rdd_val::RddVals;
 
-// ── TextFileSource ─────────────────────────────────────────────────────────────
-
 /// One partition source — either a local file or an S3 object key.
 #[derive(Debug, Clone)]
 pub enum TextFileSource {
@@ -24,8 +22,6 @@ pub enum TextFileSource {
     #[cfg(feature = "s3")]
     S3 { bucket: String, key: String },
 }
-
-// ── SimpleSplit ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 struct TextFileSplit {
@@ -40,8 +36,6 @@ impl Split for TextFileSplit {
         self
     }
 }
-
-// ── TextFileRdd ────────────────────────────────────────────────────────────────
 
 /// Lazy text-line RDD. Each element is one line (`String`) from the source.
 pub struct TextFileRdd {

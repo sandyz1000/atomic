@@ -2,9 +2,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::NativeBackend;
+use crate::backend::{Backend, NativeBackend};
 use crate::env;
-use crate::error::{Error, LibResult};
+use crate::error::{Error, Result};
 use atomic_data::distributed::{
     TRANSPORT_HEADER_LEN, TaskEnvelope, TransportFrameKind, WireDecode, WireEncode,
     WorkerCapabilities, encode_transport_frame, parse_transport_header,
@@ -14,7 +14,7 @@ use atomic_data::shuffle::error::NetworkError;
 use crossbeam::channel::{Receiver, Sender, bounded};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     task::{JoinSet, spawn, spawn_blocking},
 };
 
@@ -34,7 +34,7 @@ impl Executor {
             port,
             max_concurrent_tasks,
             worker_id: Arc::from(format!("worker-{}", port)),
-            backend: NativeBackend,
+            backend: NativeBackend::default(),
             #[cfg(feature = "tls")]
             tls_acceptor: None,
         }
@@ -60,7 +60,7 @@ impl Executor {
     pub fn execute_task(
         &self,
         task: &TaskEnvelope,
-    ) -> LibResult<atomic_data::distributed::TaskResultEnvelope> {
+    ) -> Result<atomic_data::distributed::TaskResultEnvelope> {
         self.backend
             .execute(&self.worker_id, task)
             .map_err(|e| Error::InvalidPayload(e.to_string()))
@@ -90,9 +90,9 @@ impl Executor {
 
     /// Worker loop: binds TCP port, reads transport frames, dispatches via NativeBackend.
     #[allow(dropping_copy_types)]
-    pub fn worker(self: Arc<Self>) -> LibResult<Signal> {
-        env::Env::run_in_async_rt(move || -> LibResult<Signal> {
-            futures::executor::block_on(async move {
+    pub fn worker(self: Arc<Self>) -> Result<Signal> {
+        env::Env::run_in_async_rt(move || -> Result<Signal> {
+            tokio::runtime::Handle::current().block_on(async move {
                 let (send_child, rcv_main) = bounded::<Signal>(100);
                 let process_err = Arc::clone(&self).process_stream(rcv_main);
                 let handler_err = spawn(Arc::clone(&self).signal_handler(send_child));
@@ -104,14 +104,14 @@ impl Executor {
         })
     }
 
-    async fn process_stream(self: Arc<Self>, rcv_main: Receiver<Signal>) -> LibResult<Signal> {
+    async fn process_stream(self: Arc<Self>, rcv_main: Receiver<Signal>) -> Result<Signal> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port));
         let listener = TcpListener::bind(addr)
             .await
             .map_err(NetworkError::TcpListener)?;
         log::info!("[{}] worker listening on {}", self.worker_id, addr);
 
-        let mut tasks: JoinSet<LibResult<Signal>> = JoinSet::new();
+        let mut tasks: JoinSet<Result<Signal>> = JoinSet::new();
 
         loop {
             // Check for a shutdown signal before accepting the next connection.
@@ -173,7 +173,7 @@ impl Executor {
     /// Handle a single accepted connection (plain TCP or TLS): read one transport frame,
     /// execute it, write the response. This runs concurrently for up to `max_concurrent_tasks`
     /// connections.
-    async fn handle_connection<S>(self: Arc<Self>, mut stream: S) -> LibResult<Signal>
+    async fn handle_connection<S>(self: Arc<Self>, mut stream: S) -> Result<Signal>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -193,7 +193,7 @@ impl Executor {
         self: &Arc<Self>,
         frame_kind: TransportFrameKind,
         payload: Vec<u8>,
-    ) -> LibResult<(TransportFrameKind, Vec<u8>)> {
+    ) -> Result<(TransportFrameKind, Vec<u8>)> {
         match frame_kind {
             TransportFrameKind::TaskEnvelope => {
                 let task = TaskEnvelope::decode_wire(&payload)
@@ -224,7 +224,7 @@ impl Executor {
     async fn read_transport_frame<S>(
         &self,
         stream: &mut S,
-    ) -> LibResult<(TransportFrameKind, Vec<u8>)>
+    ) -> Result<(TransportFrameKind, Vec<u8>)>
     where
         S: AsyncRead + Unpin,
     {
@@ -248,7 +248,7 @@ impl Executor {
         stream: &mut S,
         frame_kind: TransportFrameKind,
         payload: &[u8],
-    ) -> LibResult<()>
+    ) -> Result<()>
     where
         S: AsyncWrite + Unpin,
     {
@@ -257,13 +257,13 @@ impl Executor {
     }
 
     /// Listens on `port + 10` for graceful or error shutdown signals.
-    async fn signal_handler(self: Arc<Self>, send_child: Sender<Signal>) -> LibResult<Signal> {
+    async fn signal_handler(self: Arc<Self>, send_child: Sender<Signal>) -> Result<Signal> {
         let addr = SocketAddr::from(([0, 0, 0, 0], self.port + 10));
         log::debug!("signal handler port open @ {}", addr.port());
         let listener = TcpListener::bind(addr)
             .await
             .map_err(NetworkError::TcpListener)?;
-        let mut signal: LibResult<Signal> = Err(Error::ExecutorShutdown);
+        let mut signal: Result<Signal> = Err(Error::ExecutorShutdown);
         loop {
             let (mut stream, _peer) = match listener.accept().await {
                 Ok(conn) => conn,
@@ -287,7 +287,7 @@ impl Executor {
                     log::info!("received error shutdown signal @ {}", self.port);
                     send_child
                         .send(Signal::ShutDownError)
-                        .map_err(|_| Error::Other)?;
+                        .map_err(|e| Error::Other(e.to_string()))?;
                     signal = Err(Error::ExecutorShutdown);
                     break;
                 }
@@ -295,7 +295,7 @@ impl Executor {
                     log::info!("received graceful shutdown signal @ {}", self.port);
                     send_child
                         .send(Signal::ShutDownGracefully)
-                        .map_err(|_| Error::Other)?;
+                        .map_err(|e| Error::Other(e.to_string()))?;
                     signal = Ok(Signal::ShutDownGracefully);
                     break;
                 }
@@ -311,9 +311,9 @@ impl Executor {
 /// Inspect one completed `JoinSet` result.
 /// Disconnections are logged and swallowed; other errors propagate.
 fn propagate_task_result(
-    result: Result<LibResult<Signal>, tokio::task::JoinError>,
+    result: std::result::Result<Result<Signal>, tokio::task::JoinError>,
     port: u16,
-) -> LibResult<()> {
+) -> Result<()> {
     match result {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(Error::InputRead(_))) | Ok(Err(Error::OutputWrite(_))) => {
@@ -355,7 +355,7 @@ mod tests {
         Arc::new(Executor::new(port, num_cpus::get().max(1) as u16))
     }
 
-    fn connect_to_executor(mut port: u16, signal_handler: bool) -> LibResult<std::net::TcpStream> {
+    fn connect_to_executor(mut port: u16, signal_handler: bool) -> Result<std::net::TcpStream> {
         use std::net::TcpStream;
 
         let mut i: usize = 0;
@@ -363,8 +363,8 @@ mod tests {
             port += 10;
         }
 
+        let addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], port));
         loop {
-            let addr: SocketAddr = format!("{}:{}", "0.0.0.0", port).parse().unwrap();
             if let Ok(stream) = TcpStream::connect(addr) {
                 return Ok(stream);
             }
@@ -374,11 +374,14 @@ mod tests {
                 break;
             }
         }
-        Err(Error::Other)
+        Err(Error::Other(format!(
+            "timed out after 10 retries connecting to executor at port {}",
+            port
+        )))
     }
 
-    fn shutdown_msg(stream: &mut std::net::TcpStream) -> LibResult<()> {
-        let json = serde_json::to_vec(&Signal::ShutDownGracefully).map_err(|_| Error::Other)?;
+    fn shutdown_msg(stream: &mut std::net::TcpStream) -> Result<()> {
+        let json = serde_json::to_vec(&Signal::ShutDownGracefully).map_err(|e| Error::Other(e.to_string()))?;
         let len = (json.len() as u32).to_le_bytes();
         stream.write_all(&len).map_err(Error::OutputWrite)?;
         stream.write_all(&json).map_err(Error::OutputWrite)?;
@@ -387,7 +390,7 @@ mod tests {
 
     fn read_transport_response(
         stream: &mut std::net::TcpStream,
-    ) -> LibResult<(TransportFrameKind, Vec<u8>)> {
+    ) -> Result<(TransportFrameKind, Vec<u8>)> {
         let mut header = [0_u8; TRANSPORT_HEADER_LEN];
         std::io::Read::read_exact(stream, &mut header).map_err(Error::InputRead)?;
         let (kind, payload_len) = parse_transport_header(&header)
@@ -397,10 +400,10 @@ mod tests {
         Ok((kind, payload))
     }
 
-    async fn _start_test<TF, CF>(test_func: TF, checker_func: CF) -> LibResult<()>
+    async fn _start_test<TF, CF>(test_func: TF, checker_func: CF) -> Result<()>
     where
-        TF: FnOnce(Receiver<ComputeResult>, Port) -> LibResult<()> + Send + 'static,
-        CF: FnOnce(Sender<ComputeResult>, LibResult<Signal>) -> LibResult<()>,
+        TF: FnOnce(Receiver<ComputeResult>, Port) -> Result<()> + Send + 'static,
+        CF: FnOnce(Sender<ComputeResult>, Result<Signal>) -> Result<()>,
     {
         let executor = initialize_exec();
         let port = executor.port;
@@ -414,13 +417,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_shutdown_signal() -> LibResult<()> {
-        fn test(client_rcv: Receiver<ComputeResult>, port: Port) -> LibResult<()> {
+    async fn send_shutdown_signal() -> Result<()> {
+        fn test(client_rcv: Receiver<ComputeResult>, port: Port) -> Result<()> {
             let end = Instant::now() + Duration::from_millis(150);
             while Instant::now() < end {
                 match client_rcv.try_recv() {
                     Ok(Ok(_)) => return Ok(()),
-                    Ok(Err(_)) => return Err(Error::Other),
+                    Ok(Err(_)) => return Err(Error::Other("test failure".to_string())),
                     _ => {}
                 }
                 if let Ok(mut stream) = connect_to_executor(port, true) {
@@ -429,21 +432,21 @@ mod tests {
                 }
                 thread::sleep(time::Duration::from_millis(5));
             }
-            Err(Error::Other)
+            Err(Error::Other("unexpected error".to_string()))
         }
 
         fn result_checker(
             sender: Sender<ComputeResult>,
-            result: LibResult<Signal>,
-        ) -> LibResult<()> {
+            result: Result<Signal>,
+        ) -> Result<()> {
             match result {
                 Ok(Signal::ShutDownGracefully) => {
                     sender.send(Ok(()));
                     Ok(())
                 }
                 Ok(_) | Err(_) => {
-                    sender.send(Err(Error::Other));
-                    Err(Error::Other)
+                    sender.send(Err(Error::Other("unexpected error".to_string())));
+                    Err(Error::Other("unexpected error".to_string()))
                 }
             }
         }
@@ -452,15 +455,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reports_worker_capabilities() -> LibResult<()> {
-        fn test(client_rcv: Receiver<ComputeResult>, port: Port) -> LibResult<()> {
+    async fn reports_worker_capabilities() -> Result<()> {
+        fn test(client_rcv: Receiver<ComputeResult>, port: Port) -> Result<()> {
             let frame = encode_transport_frame(TransportFrameKind::WorkerCapabilities, &[]);
 
             let end = Instant::now() + Duration::from_millis(150);
             while Instant::now() < end {
                 match client_rcv.try_recv() {
                     Ok(Ok(_)) => return Ok(()),
-                    Ok(Err(_)) => return Err(Error::Other),
+                    Ok(Err(_)) => return Err(Error::Other("test failure".to_string())),
                     _ => {}
                 }
 
@@ -479,21 +482,21 @@ mod tests {
                 }
             }
 
-            Err(Error::Other)
+            Err(Error::Other("unexpected error".to_string()))
         }
 
         fn result_checker(
             sender: Sender<ComputeResult>,
-            result: LibResult<Signal>,
-        ) -> LibResult<()> {
+            result: Result<Signal>,
+        ) -> Result<()> {
             match result {
                 Ok(Signal::ShutDownGracefully) => Ok(()),
                 Ok(_) => {
-                    sender.send(Err(Error::Other));
-                    Err(Error::Other)
+                    sender.send(Err(Error::Other("unexpected error".to_string())));
+                    Err(Error::Other("unexpected error".to_string()))
                 }
                 Err(err) => {
-                    sender.send(Err(Error::Other));
+                    sender.send(Err(Error::Other("unexpected error".to_string())));
                     Err(err)
                 }
             }

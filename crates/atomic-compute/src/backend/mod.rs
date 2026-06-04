@@ -1,15 +1,15 @@
-pub mod native;
+pub mod native_executor;
 
-#[cfg(feature = "python-udf")]
-pub mod python_pool;
+#[cfg(feature = "python")]
+pub mod python_executor;
 
-#[cfg(feature = "js-v8")]
-pub mod js_runtime;
+#[cfg(feature = "js")]
+pub mod js_executor;
 
-pub use native::NativeBackend;
+pub use native_executor::NativeBackend;
 
-use atomic_data::distributed::{TaskEnvelope, TaskResultEnvelope};
-use crate::error::LibResult;
+use atomic_data::distributed::{PipelineOp, TaskEnvelope, TaskResultEnvelope};
+use crate::error::Result;
 
 /// Full-task execution backend.
 ///
@@ -22,5 +22,24 @@ use crate::error::LibResult;
 /// instantiated with no configuration, making it usable as a type parameter
 /// (e.g. `fn run<B: Backend>(env: &Env) { let b = B::default(); ... }`).
 pub trait Backend: Default + Send + Sync {
-    fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> LibResult<TaskResultEnvelope>;
+    fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> Result<TaskResultEnvelope>;
+}
+
+/// Dispatches a single pipeline operation for one specific runtime.
+///
+/// Register concrete implementations in `NativeBackend::default()` keyed by
+/// [`TaskRuntime`].  Adding a new runtime = one new `impl OpDispatcher` + one
+/// `HashMap` entry.  `NativeBackend::execute()` never needs to change.
+pub(crate) trait OpDispatcher: Send + Sync {
+    /// Execute one pipeline op and return the transformed output bytes.
+    ///
+    /// `partition_id` is forwarded from the enclosing [`TaskEnvelope`]; most
+    /// dispatchers ignore it, but the native shuffle-map path needs it to write
+    /// the correct bucket.
+    fn dispatch(
+        &self,
+        op: &PipelineOp,
+        partition_id: usize,
+        data: &[u8],
+    ) -> std::result::Result<Vec<u8>, String>;
 }

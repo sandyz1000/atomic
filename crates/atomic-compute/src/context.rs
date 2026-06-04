@@ -2,7 +2,7 @@ use crate::env::{Config, DeploymentMode};
 use crate::error::Error;
 use crate::executor::{Executor, Signal};
 use crate::io::ReaderConfiguration;
-use crate::backend::NativeBackend;
+use crate::backend::{Backend, NativeBackend};
 use crate::rdd::typed::TypedRdd;
 use crate::rdd::{ParallelCollection, UnionRdd};
 use crate::{env, hosts};
@@ -42,17 +42,17 @@ pub struct Context {
     /// Closures cannot be sent to remote workers, so all `collect()`, `count()`,
     /// `fold()`, `take()` etc. execute here regardless of deployment mode.
     driver_scheduler: Arc<LocalScheduler>,
-    pub next_rdd_id: Arc<AtomicUsize>,
-    pub next_shuffle_id: Arc<AtomicUsize>,
-    pub address_map: Vec<SocketAddrV4>,
-    pub distributed_driver: bool,
-    pub work_dir: PathBuf,
+    pub(crate) next_rdd_id: Arc<AtomicUsize>,
+    pub(crate) next_shuffle_id: Arc<AtomicUsize>,
+    pub(crate) address_map: Vec<SocketAddrV4>,
+    pub(crate) distributed_driver: bool,
+    pub(crate) work_dir: PathBuf,
     /// Driver-side broadcast variable store: `broadcast_id → rkyv-encoded bytes`.
     /// Attached to every TaskEnvelope dispatched to workers.
-    pub broadcast_store: Arc<dashmap::DashMap<usize, Vec<u8>>>,
+    pub(crate) broadcast_store: Arc<dashmap::DashMap<usize, Vec<u8>>>,
     /// Driver-side accumulator store: `accumulator_id → (current_bytes, merge_fn)`.
     /// Updated by `merge_accumulator_deltas` after each task completes.
-    pub accumulator_store: Arc<dashmap::DashMap<usize, (Vec<u8>, Arc<MergeFn>)>>,
+    pub(crate) accumulator_store: Arc<dashmap::DashMap<usize, (Vec<u8>, Arc<MergeFn>)>>,
 }
 
 impl Drop for Context {
@@ -68,17 +68,22 @@ impl Drop for Context {
     }
 }
 
-pub fn save<R: Data>(ctx: TaskContext, iter: Box<dyn Iterator<Item = R>>, path: String) {
-    std::fs::create_dir_all(&path).unwrap();
+pub fn save<R: Data>(
+    ctx: TaskContext,
+    iter: Box<dyn Iterator<Item = R>>,
+    path: String,
+) -> crate::error::Result<()> {
+    std::fs::create_dir_all(&path).map_err(crate::error::Error::OutputWrite)?;
     let id = ctx.split_id;
     let file_path = std::path::Path::new(&path).join(format!("part-{}", id));
-    let f = std::fs::File::create(file_path).expect("unable to create file");
+    let f = std::fs::File::create(file_path).map_err(crate::error::Error::OutputWrite)?;
     let mut f = std::io::BufWriter::new(f);
     for item in iter {
         let line = format!("{:?}", item);
         f.write_all(line.as_bytes())
-            .expect("error while writing to file");
+            .map_err(crate::error::Error::OutputWrite)?;
     }
+    Ok(())
 }
 
 impl Context {
@@ -148,7 +153,7 @@ impl Context {
     fn init_local_scheduler(config: Config) -> Result<Arc<Self>, Error> {
         let job_id = Uuid::new_v4().to_string();
         let job_work_dir = config.work_dir.join(format!("ns-session-{}", job_id));
-        fs::create_dir_all(&job_work_dir).unwrap();
+        fs::create_dir_all(&job_work_dir).map_err(Error::OutputWrite)?;
 
         let _ = env_logger::try_init();
         atomic_data::cache::init_partition_cache();
@@ -343,36 +348,32 @@ impl Context {
     /// Send a graceful-shutdown signal to every registered worker.
     ///
     /// Not called automatically — reserved for an explicit `atomic stop` command.
-    /// Send a graceful-shutdown signal to every registered worker.
-    ///
-    /// Not called automatically — reserved for an explicit `atomic stop` command.
     #[allow(dead_code)]
-    pub fn drop_executors(address_map: &[SocketAddrV4]) {
-        if address_map.is_empty() {
-            return;
-        }
-
+    pub(crate) fn drop_executors(address_map: &[SocketAddrV4]) {
         for socket_addr in address_map {
             log::debug!(
-                "dropping executor in {:?}:{:?}",
+                "dropping executor {}:{}",
                 socket_addr.ip(),
                 socket_addr.port()
             );
-            if let Ok(mut stream) =
-                TcpStream::connect(format!("{}:{}", socket_addr.ip(), socket_addr.port() + 10))
-            {
-                let json = serde_json::to_vec(&Signal::ShutDownGracefully).unwrap();
-                let mut signal = (json.len() as u32).to_le_bytes().to_vec();
-                signal.extend_from_slice(&json);
-                if let Err(e) = stream.write_all(&signal) {
-                    error!("Failed to send shutdown signal: {}", e);
+            match serde_json::to_vec(&Signal::ShutDownGracefully) {
+                Err(e) => error!("Failed to serialise shutdown signal: {}", e),
+                Ok(json) => {
+                    let addr = format!("{}:{}", socket_addr.ip(), socket_addr.port() + 10);
+                    match TcpStream::connect(&addr) {
+                        Err(_) => error!(
+                            "Failed to connect to {} to stop its executor",
+                            addr
+                        ),
+                        Ok(mut stream) => {
+                            let mut signal = (json.len() as u32).to_le_bytes().to_vec();
+                            signal.extend_from_slice(&json);
+                            if let Err(e) = stream.write_all(&signal) {
+                                error!("Failed to send shutdown signal to {}: {}", addr, e);
+                            }
+                        }
+                    }
                 }
-            } else {
-                error!(
-                    "Failed to connect to {}:{} in order to stop its executor",
-                    socket_addr.ip(),
-                    socket_addr.port()
-                );
             }
         }
     }
@@ -422,11 +423,11 @@ impl Context {
             .map_err(Error::from)
     }
 
-    pub fn new_rdd_id(self: &Arc<Self>) -> usize {
+    pub fn new_rdd_id(&self) -> usize {
         self.next_rdd_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    pub fn new_shuffle_id(self: &Arc<Self>) -> usize {
+    pub fn new_shuffle_id(&self) -> usize {
         self.next_shuffle_id.fetch_add(1, Ordering::SeqCst)
     }
 
@@ -480,11 +481,15 @@ impl Context {
     where
         T: atomic_data::distributed::WireDecode,
     {
-        let entry = self
-            .accumulator_store
-            .get(&acc.id)
-            .unwrap_or_else(|| panic!("accumulator {}: not registered on this context", acc.id));
-        T::decode_wire(&entry.value().0).expect("accumulator_value: decode failed")
+        let entry = self.accumulator_store.get(&acc.id).unwrap_or_else(|| {
+            panic!(
+                "accumulator id={} is not registered on this context; \
+                 ensure the accumulator was created from the same Context",
+                acc.id
+            )
+        });
+        T::decode_wire(&entry.value().0)
+            .unwrap_or_else(|e| panic!("accumulator id={}: failed to decode current value: {}", acc.id, e))
     }
 
     /// Merge incoming accumulator deltas from a completed task result into driver-side values.
@@ -501,7 +506,7 @@ impl Context {
 
     /// Default number of output partitions for wide transformations (reduce_by_key, group_by_key).
     /// Uses the number of CPUs, clamped to a sensible range.
-    pub fn default_parallelism(self: &Arc<Self>) -> usize {
+    pub fn default_parallelism(&self) -> usize {
         num_cpus::get().clamp(1, 64)
     }
 
@@ -778,7 +783,7 @@ impl Context {
             reduce_ops,
             combined_data,
         );
-        let result = NativeBackend.execute("local-driver", &task)?;
+        let result = NativeBackend::default().execute("local-driver", &task)?;
         match result.status {
             ResultStatus::Success => T::decode_wire(&result.data).map_err(Error::from),
             _ => Err(Error::InvalidPayload(
@@ -801,7 +806,7 @@ impl Context {
         let broadcasts = self.broadcast_snapshot();
         match &self.scheduler {
             Schedulers::Local(_) => {
-                let backend = NativeBackend;
+                let backend = NativeBackend::default();
                 source_partitions
                     .into_iter()
                     .enumerate()
@@ -953,22 +958,22 @@ pub fn start_worker(config: Config) -> ! {
     }
 
     // Spawn the Python subprocess worker pool (one process per CPU, each with its own GIL).
-    #[cfg(feature = "python-udf")]
+    #[cfg(feature = "python")]
     {
         let pool_size = num_cpus::get().max(1);
-        crate::backend::python_pool::init_python_worker_pool(pool_size);
+        crate::backend::python_executor::init_python_worker_pool(pool_size);
         log::info!("Python worker pool started ({pool_size} subprocesses)");
     }
 
     // Eagerly warm up the JS V8 runtime on N blocking threads so the first UDF task
     // does not pay the cold-start cost.  spawn_blocking is used because JsRuntime is
     // !Send and must be initialized on the thread that will use it.
-    #[cfg(feature = "js-v8")]
+    #[cfg(feature = "js")]
     {
         let n = num_cpus::get().max(1);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let handles: Vec<_> = (0..n)
-                .map(|_| handle.spawn_blocking(crate::backend::js_runtime::warmup_js_runtime))
+                .map(|_| handle.spawn_blocking(crate::backend::js_executor::warmup_js_runtime))
                 .collect();
             for h in handles {
                 let _ = tokio::task::block_in_place(|| handle.block_on(h));

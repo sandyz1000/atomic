@@ -156,7 +156,7 @@ Workers now execute the compiled Rust `#[task]` function instead of deserializin
 | Streaming (`StreamingContext`) | yes | yes | yes |
 | Graph (`Graph`, 6 algorithms) | yes | yes | yes |
 | Broadcast variables / accumulators | yes | yes | yes |
-| `join`, `sort_by`, `glom`, `cache`, `checkpoint` on RDD | yes | yes | yes |
+| `join`, `cogroup`, `sort_by`, `glom`, `cache`, `checkpoint` on RDD | yes | yes | yes |
 | S3 `text_file` / `save_as_text_file` | yes | yes (`s3` feature) | yes (`s3` feature) |
 | Pregel custom vertex programs | yes | yes (`run_pregel`) | yes (`runPregelF64`) |
 
@@ -285,7 +285,11 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 | | Speculative execution | yes |
 | | Job cancellation | yes |
 | **RDD API** | `map`, `filter`, `flat_map`, `reduce_by_key`, `group_by_key` | yes |
-| | `join`, `left_outer_join`, `right_outer_join`, `full_outer_join` | yes |
+| | `join`, `left_outer_join`, `right_outer_join`, `full_outer_join` (shuffle-based) | yes |
+| | `cogroup`, `cogroup_shuffle` — distributed, no driver collect | yes |
+| | `flat_map_values`, `map_partitions_to_pair` | yes |
+| | `repartition_shuffle(n)` — element-level redistribution | yes |
+| | `sort_by_key` — distributed (sample → range partition → local sort) | yes |
 | | `fold_by_key`, `aggregate_by_key`, `subtract_by_key` | yes |
 | | `tree_reduce`, `tree_aggregate` | yes |
 | | `to_local_iterator`, `collect_as_map`, `count_approx` | yes |

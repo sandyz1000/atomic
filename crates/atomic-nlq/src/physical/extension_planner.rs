@@ -9,20 +9,18 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 
-use crate::anthropic::client::AnthropicClient;
-use crate::anthropic::embed_client::EmbedClient;
 use crate::config::NlqConfig;
 use crate::nodes::embed::{EmbedExec, EmbedNode};
 use crate::nodes::llm_filter::{LlmFilterExec, LlmFilterNode};
 use crate::nodes::llm_map::{LlmMapExec, LlmMapNode};
 use crate::nodes::vector_search::{VectorSearchExec, VectorSearchNode};
+use crate::openai::OpenAiClient;
 use crate::vector::provider::VectorIndexProvider;
 
 // ── Extension planner ─────────────────────────────────────────────────────────
 
 pub struct NlqExtensionPlanner {
-    client: Arc<AnthropicClient>,
-    embed_client: Arc<EmbedClient>,
+    client: Arc<OpenAiClient>,
     config: Arc<NlqConfig>,
     vector_indexes: Arc<DashMap<String, Arc<dyn VectorIndexProvider>>>,
 }
@@ -35,12 +33,11 @@ impl fmt::Debug for NlqExtensionPlanner {
 
 impl NlqExtensionPlanner {
     pub fn new(
-        client: Arc<AnthropicClient>,
-        embed_client: Arc<EmbedClient>,
+        client: Arc<OpenAiClient>,
         config: Arc<NlqConfig>,
         vector_indexes: Arc<DashMap<String, Arc<dyn VectorIndexProvider>>>,
     ) -> Self {
-        Self { client, embed_client, config, vector_indexes }
+        Self { client, config, vector_indexes }
     }
 }
 
@@ -55,38 +52,38 @@ impl ExtensionPlanner for NlqExtensionPlanner {
         _session_state: &SessionState,
     ) -> DFResult<Option<Arc<dyn ExecutionPlan>>> {
         if let Some(n) = node.as_any().downcast_ref::<LlmFilterNode>() {
-            let exec = LlmFilterExec::new(
+            return Ok(Some(Arc::new(LlmFilterExec::new(
                 n,
                 physical_inputs[0].clone(),
                 self.client.clone(),
                 self.config.clone(),
-            );
-            return Ok(Some(Arc::new(exec)));
+            ))));
         }
 
         if let Some(n) = node.as_any().downcast_ref::<LlmMapNode>() {
-            let exec = LlmMapExec::new(
+            return Ok(Some(Arc::new(LlmMapExec::new(
                 n,
                 physical_inputs[0].clone(),
                 self.client.clone(),
                 self.config.clone(),
-            );
-            return Ok(Some(Arc::new(exec)));
+            ))));
         }
 
         if let Some(n) = node.as_any().downcast_ref::<EmbedNode>() {
-            let exec = EmbedExec::new(
+            return Ok(Some(Arc::new(EmbedExec::new(
                 n,
                 physical_inputs[0].clone(),
-                self.embed_client.clone(),
+                self.client.clone(),
                 self.config.clone(),
-            );
-            return Ok(Some(Arc::new(exec)));
+            ))));
         }
 
         if let Some(n) = node.as_any().downcast_ref::<VectorSearchNode>() {
-            let exec = VectorSearchExec::new(n, physical_inputs[0].clone(), self.vector_indexes.clone());
-            return Ok(Some(Arc::new(exec)));
+            return Ok(Some(Arc::new(VectorSearchExec::new(
+                n,
+                physical_inputs[0].clone(),
+                self.vector_indexes.clone(),
+            ))));
         }
 
         Ok(None)
