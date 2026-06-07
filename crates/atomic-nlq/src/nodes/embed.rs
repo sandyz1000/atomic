@@ -266,14 +266,12 @@ impl ExecutionPlan for EmbedExec {
                 };
 
                 if batch.num_rows() == 0 {
-                    // Append empty embedding column
                     match append_empty_embed_col(&batch, &output_col, dim, schema.clone()) {
                         Ok(b) => { yield Ok(b); continue; }
                         Err(e) => { yield Err(e); return; }
                     }
                 }
 
-                // Extract the input string column.
                 let col_idx = match batch.schema().index_of(&input_col) {
                     Ok(i) => i,
                     Err(e) => {
@@ -303,7 +301,6 @@ impl ExecutionPlan for EmbedExec {
                     .map(|i| if str_col.is_null(i) { String::new() } else { str_col.value(i).to_string() })
                     .collect();
 
-                // Call embed API in chunks.
                 let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
                 let mut offset = 0;
                 while offset < texts.len() {
@@ -312,7 +309,6 @@ impl ExecutionPlan for EmbedExec {
                     log::debug!("EmbedExec: embedding {} texts", chunk.len());
                     match client.embed(&model, chunk.to_vec()).await {
                         Ok(mut vecs) => {
-                            // Validate dimension
                             for v in &vecs {
                                 if v.len() != dim as usize {
                                     yield Err(datafusion::error::DataFusionError::External(Box::new(

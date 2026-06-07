@@ -11,18 +11,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Rate estimation (stub — Phase 4)
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub trait RateEstimator: Send + Sync {
     fn compute(&self, time_ms: u64, elements: u64, work_delay_ms: u64, wait_delay_ms: u64)
         -> Option<f64>;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Common state for input DStreams
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct InputDStreamState {
     pub stream_id: usize,
@@ -37,9 +33,7 @@ impl InputDStreamState {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // QueueInputDStream<T>
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// An input DStream backed by an in-memory queue of pre-built RDDs.
 /// Primarily used for testing.
@@ -115,9 +109,7 @@ impl<T: Data + Clone> DStream<T> for QueueInputDStream<T> {
 
 impl<T: Data + Clone> InputStreamBase for QueueInputDStream<T> {}
 
-// ─────────────────────────────────────────────────────────────────────────────
 // FileInputDStream
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// An input DStream that watches a local directory for new text files.
 pub struct FileInputDStream {
@@ -240,9 +232,7 @@ impl DStream<String> for FileInputDStream {
 
 impl InputStreamBase for FileInputDStream {}
 
-// ─────────────────────────────────────────────────────────────────────────────
 // SocketInputDStream
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// An input DStream that reads text lines from a TCP socket.
 pub struct SocketInputDStream {

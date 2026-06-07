@@ -23,7 +23,7 @@ async fn test_inner_join() {
 }
 
 #[tokio::test]
-async fn test_left_join_preserves_all_left_rows() {
+async fn test_left_join_preserve() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("emp", vec![make_employees_batch()]).unwrap();
     ctx.register_batches("sal", vec![make_salaries_batch()]).unwrap();
@@ -37,7 +37,7 @@ async fn test_left_join_preserves_all_left_rows() {
 }
 
 #[tokio::test]
-async fn test_left_join_nulls_on_no_match() {
+async fn test_left_join_nulls() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("emp", vec![make_employees_batch()]).unwrap();
     ctx.register_batches("sal", vec![make_salaries_batch()]).unwrap();
@@ -55,7 +55,7 @@ async fn test_left_join_nulls_on_no_match() {
 }
 
 #[tokio::test]
-async fn test_right_join_preserves_all_right_rows() {
+async fn test_right_join_preserve() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("emp", vec![make_employees_batch()]).unwrap();
     ctx.register_batches("sal", vec![make_salaries_batch()]).unwrap();

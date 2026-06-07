@@ -39,7 +39,7 @@ fn ctx() -> Arc<Context> {
 /// This test documents the current (silent) behaviour.
 /// After the fix, a `Result::Err` or at least a logged warning should appear.
 #[tokio::test]
-async fn test_partition_store_type_mismatch_returns_none_silently() {
+async fn test_type_mismatch_silent() {
     init_partition_cache();
     let store = PartitionStore::new();
 
@@ -60,7 +60,7 @@ async fn test_partition_store_type_mismatch_returns_none_silently() {
 
 /// Round-trip: write and read with the SAME type must succeed.
 #[tokio::test]
-async fn test_partition_store_same_type_roundtrip() {
+async fn test_roundtrip_same_type() {
     let store = PartitionStore::new();
     let data = Arc::new(vec![10i32, 20, 30]);
     store.put::<i32>(100, 0, data.clone());
@@ -73,7 +73,7 @@ async fn test_partition_store_same_type_roundtrip() {
 
 /// LRU eviction: inserting more than `cap` partitions must keep the map ≤ cap.
 #[tokio::test]
-async fn test_partition_store_grows_without_eviction() {
+async fn test_unbounded_growth() {
     let cap = 100usize;
     let n = 500usize;
     let store = PartitionStore::with_cap(cap);
@@ -113,7 +113,7 @@ fn count_and_add_one(x: i32) -> i32 {
 ///
 /// This test exercises `CachedRdd::compute()` and the `PARTITION_CACHE` hit path.
 #[tokio::test]
-async fn test_cache_prevents_recomputation_of_partitions() {
+async fn test_no_recompute() {
     let _g = counter_guard();
     COMPUTE_COUNT.store(0, Ordering::Relaxed);
 
@@ -148,7 +148,7 @@ async fn test_cache_prevents_recomputation_of_partitions() {
 
 /// `rdd.cache()` followed by two different actions both return the same data.
 #[tokio::test]
-async fn test_cache_count_and_collect_agree() {
+async fn test_count_collect_agree() {
     let ctx = ctx();
     let data: Vec<i32> = (1..=10).collect();
     let rdd = ctx.parallelize_typed(data.clone(), 3).cache();
@@ -162,7 +162,7 @@ async fn test_cache_count_and_collect_agree() {
 
 /// Cached RDD with map_task in the chain: verifies the whole pipeline is cached.
 #[tokio::test]
-async fn test_cache_after_transform_is_consistent() {
+async fn test_transform_consistency() {
     let _g = counter_guard();
     let ctx = ctx();
     let data = vec![1i32, 2, 3];
@@ -182,7 +182,7 @@ async fn test_cache_after_transform_is_consistent() {
 
 /// `remove_rdd()` must delete all partitions for that rdd_id.
 #[tokio::test]
-async fn test_partition_store_remove_rdd_clears_partitions() {
+async fn test_remove_clears() {
     let store = PartitionStore::new();
     for p in 0..4 {
         store.put::<i32>(77, p, Arc::new(vec![p as i32]));
@@ -219,7 +219,7 @@ async fn test_unpersist_clears_cache() {
 }
 
 #[tokio::test]
-async fn test_is_cached_false_before_action() {
+async fn test_uncached_before_action() {
     let ctx = ctx();
     let rdd = ctx.parallelize_typed(vec![1i32, 2, 3], 2).cache();
     assert!(!rdd.is_cached(), "RDD should not be cached before any action");
@@ -239,7 +239,7 @@ async fn test_unpersist_then_recompute() {
 /// `persist(StorageLevel::MemoryOnly)` is the default and must work identically
 /// to `cache()`. All other levels fall back to MemoryOnly per the docs.
 #[tokio::test]
-async fn test_persist_memory_only_works_like_cache() {
+async fn test_persist_like_cache() {
     use atomic_data::cache::StorageLevel;
     let ctx = ctx();
     let data = vec![10i32, 20, 30];
@@ -256,7 +256,7 @@ async fn test_persist_memory_only_works_like_cache() {
 }
 
 #[tokio::test]
-async fn test_persist_memory_and_disk_produces_correct_results() {
+async fn test_persist_disk_correct() {
     use atomic_data::cache::StorageLevel;
     let ctx = ctx();
     let data: Vec<i32> = (1..=6).collect();
@@ -272,7 +272,7 @@ async fn test_persist_memory_and_disk_produces_correct_results() {
 }
 
 #[tokio::test]
-async fn test_persist_disk_only_produces_correct_results() {
+async fn test_diskonly_correct() {
     use atomic_data::cache::StorageLevel;
     let ctx = ctx();
     let data: Vec<i32> = (1..=4).collect();

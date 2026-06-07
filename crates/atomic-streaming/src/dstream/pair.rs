@@ -10,9 +10,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // StateSpec and StateSpecImpl (stubs for mapWithState)
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub trait StateSpec<K, V, S, M>: Sized + Send + Sync + 'static {
     fn initial_state(self, rdd: Arc<dyn Rdd<Item = (K, S)>>) -> Self;
@@ -61,9 +59,7 @@ where
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // PairDStreamFunctions
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct PairDStreamFunctions<K, V>
 where
@@ -156,9 +152,7 @@ where
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // ReduceByKeyDStream
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct ReduceByKeyDStream<K, V, F>
 where
@@ -251,9 +245,7 @@ where
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // GroupByKeyDStream
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct GroupByKeyDStream<K, V>
 where
@@ -330,9 +322,7 @@ where
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // JoinDStream / LeftOuterJoinDStream (driver-side hash join per batch)
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub struct JoinDStream<K, V, W>
 where
@@ -480,9 +470,7 @@ where
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // StateDStream — updateStateByKey
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Stateful streaming: maintains a `(K, S)` state RDD across batches.
 ///

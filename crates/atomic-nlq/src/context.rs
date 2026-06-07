@@ -115,6 +115,16 @@ impl NlqContext {
         &self.sql_ctx
     }
 
+    /// Dry-run: return the `WorkflowPlan` the LLM would produce for `nl` without executing it.
+    ///
+    /// Useful for debugging and inspecting which tools / SQL steps would be chosen.
+    /// Pretty-print the result with `serde_json::to_string_pretty(&plan)`.
+    pub async fn plan(&self, nl: &str) -> Result<crate::workflow::WorkflowPlan> {
+        log::info!("NlqContext::plan (dry-run) — {nl:?}");
+        let table_schemas = self.list_table_schemas().await?;
+        self.agent_loop.plan_only(nl, &self.registry, &table_schemas).await
+    }
+
     /// Streaming variant: emits `AgentEvent` through `tx` as the query executes.
     /// Use this from the dashboard SSE endpoint instead of `query()`.
     pub async fn query_streaming(

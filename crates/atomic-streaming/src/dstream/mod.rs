@@ -11,9 +11,7 @@ use atomic_data::rdd::Rdd;
 use std::sync::Arc;
 use std::time::Duration;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Core trait hierarchy
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Untyped, object-safe base for all DStreams.
 pub trait DStreamBase: Send + Sync + 'static {
@@ -51,9 +49,7 @@ pub trait DStream<T: Data + Clone>: DStreamBase {
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = T>>>;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Output operation — type-erased so the graph can hold mixed output ops
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// A single runnable batch job produced by an output operation.
 pub struct StreamingJob {
@@ -96,9 +92,7 @@ pub trait OutputOperation: Send + Sync + 'static {
 /// Marker trait for the untyped input stream side of the graph.
 pub trait InputStreamBase: DStreamBase {}
 
-// ─────────────────────────────────────────────────────────────────────────────
 // DStreamGraph
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// The DAG of DStreams for a single streaming application.
 pub struct DStreamGraph {

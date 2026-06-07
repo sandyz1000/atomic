@@ -24,8 +24,6 @@ use crate::config::NlqConfig;
 use crate::openai::OpenAiClient;
 use crate::nodes::llm_filter::record_batch_to_json_rows;
 
-// ── Logical node ──────────────────────────────────────────────────────────────
-
 /// LLM-based row transformer. Adds a new column to each row.
 #[derive(Debug, Clone)]
 pub struct LlmMapNode {
@@ -35,7 +33,6 @@ pub struct LlmMapNode {
     pub output_type: DataType,
     pub batch_size: usize,
     pub input: LogicalPlan,
-    /// Cached output schema (input fields + new output column).
     output_schema: DFSchemaRef,
 }
 

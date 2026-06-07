@@ -6,9 +6,7 @@ use crate::receiver::ReceivedBlockInfo;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // ReceiverState
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReceiverState {
@@ -38,13 +36,10 @@ impl ReceiverInfo {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // ReceiverTracker
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Tracks the state of receivers.
 ///
-/// TODO Phase 4 (distributed): schedule receivers on workers, handle failures.
 pub struct ReceiverTracker {
     infos: Mutex<HashMap<usize, ReceiverInfo>>,
     allocated_blocks: Mutex<HashMap<usize, Vec<ReceivedBlockInfo>>>,
@@ -87,7 +82,6 @@ impl ReceiverTracker {
             .unwrap_or_default()
     }
 
-    /// TODO Phase 4: distribute receivers across workers.
     pub fn start(&self) {
         log::info!("ReceiverTracker started (local mode — receivers managed by input DStreams)");
     }

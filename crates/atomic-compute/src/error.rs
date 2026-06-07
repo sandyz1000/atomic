@@ -112,6 +112,9 @@ pub enum Error {
     #[error("no files for the given path")]
     NoFilesFound,
 
+    #[error(transparent)]
+    SchedulerError(#[from] atomic_scheduler::error::SchedulerError),
+
     #[error("internal error: {0}")]
     Other(String),
 }
@@ -119,12 +122,6 @@ pub enum Error {
 impl Error {
     pub fn executor_shutdown(&self) -> bool {
         matches!(self, Error::ExecutorShutdown)
-    }
-}
-
-impl From<atomic_scheduler::error::SchedulerError> for Error {
-    fn from(err: atomic_scheduler::error::SchedulerError) -> Self {
-        Error::InvalidPayload(err.to_string())
     }
 }
 

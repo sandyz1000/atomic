@@ -398,6 +398,11 @@ pub struct WorkerCapabilities {
     /// Port of the worker's ShuffleManager HTTP server. Used by the driver heartbeat
     /// to probe `GET /health`. `None` if the shuffle server is not yet started.
     pub shuffle_server_port: Option<u16>,
+    /// FNV-1a fingerprint of all `(op_id, body_hash)` pairs in the worker's
+    /// `TASK_REGISTRY`, sorted by op_id. The driver checks this against its own
+    /// fingerprint at registration time; a mismatch means the binaries diverged.
+    /// Zero means "unknown" (old worker) — driver logs a warning but allows it.
+    pub registry_fingerprint: u64,
 }
 
 impl WorkerCapabilities {
@@ -408,11 +413,17 @@ impl WorkerCapabilities {
             max_tasks,
             registered_ops,
             shuffle_server_port: None,
+            registry_fingerprint: 0,
         }
     }
 
     pub fn with_shuffle_port(mut self, port: u16) -> Self {
         self.shuffle_server_port = Some(port);
+        self
+    }
+
+    pub fn with_registry_fingerprint(mut self, fingerprint: u64) -> Self {
+        self.registry_fingerprint = fingerprint;
         self
     }
 }

@@ -62,44 +62,23 @@ pub enum NetworkError {
     #[error("failed to find free port {0}, tried {1} times")]
     FreePortNotFound(u16, usize),
 
-    #[error("bincode serialization error: {0}")]
-    BincodeError(String),
+    #[error("bincode encode error: {0}")]
+    BincodeEncode(#[from] bincode::error::EncodeError),
+
+    #[error("bincode decode error: {0}")]
+    BincodeDecode(#[from] bincode::error::DecodeError),
 
     #[error("HTTP error: {0}")]
     HttpError(String),
 
+    #[error("hyper error: {0}")]
+    Hyper(#[from] hyper::Error),
+
+    #[error("HTTP client error: {0}")]
+    Http(#[from] http::Error),
+
     #[error("invalid URI: {0}")]
-    InvalidUri(String),
-}
-
-impl From<hyper::Error> for NetworkError {
-    fn from(e: hyper::Error) -> Self {
-        NetworkError::HttpError(e.to_string())
-    }
-}
-
-impl From<http::Error> for NetworkError {
-    fn from(e: http::Error) -> Self {
-        NetworkError::HttpError(e.to_string())
-    }
-}
-
-impl From<http::uri::InvalidUri> for NetworkError {
-    fn from(e: http::uri::InvalidUri) -> Self {
-        NetworkError::InvalidUri(e.to_string())
-    }
-}
-
-impl From<bincode::error::EncodeError> for NetworkError {
-    fn from(e: bincode::error::EncodeError) -> Self {
-        NetworkError::BincodeError(e.to_string())
-    }
-}
-
-impl From<bincode::error::DecodeError> for NetworkError {
-    fn from(e: bincode::error::DecodeError) -> Self {
-        NetworkError::BincodeError(e.to_string())
-    }
+    InvalidUri(#[from] http::uri::InvalidUri),
 }
 
 impl From<ShuffleError> for Response<Body> {
@@ -123,7 +102,10 @@ impl From<ShuffleError> for Response<Body> {
 
 impl ShuffleError {
     pub fn no_port(&self) -> bool {
-        matches!(self, ShuffleError::NetworkError(NetworkError::FreePortNotFound(_, _)))
+        matches!(
+            self,
+            ShuffleError::NetworkError(NetworkError::FreePortNotFound(_, _))
+        )
     }
 }
 

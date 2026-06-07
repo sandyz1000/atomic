@@ -114,7 +114,6 @@ impl ToolRegistry {
         self.tools.get(name).map(|e| e.value().clone())
     }
 
-    /// Return all tool definitions (used to build the LLM system prompt).
     pub fn all_tools(&self) -> Vec<ToolDefinition> {
         self.tools.iter().map(|e| e.value().clone()).collect()
     }

@@ -152,6 +152,11 @@ registered via `inventory::submit!` — identical to `#[task]` at the dispatch l
 derived from the closure's normalized token text, so it is stable across line-number shifts and
 reformatting. It changes only when the closure body changes, which is the correct behavior.
 
+Both `#[task]` and `task_fn!` emit a `body_hash: u64` field in their `TaskEntry`. The
+`REGISTRY_FINGERPRINT` static folds all `(op_id, body_hash)` pairs into a single `u64` that
+represents the entire compiled-in task set. Workers advertise this fingerprint on the TCP handshake;
+the driver rejects (with a clear log error) any worker whose fingerprint does not match.
+
 ### How the staged pipeline works
 
 ```text
@@ -220,14 +225,21 @@ Distributed tasks use types from `atomic_data::distributed`.
 
 - `TaskEnvelope`: rkyv-encoded metadata + `Vec<PipelineOp>` pipeline + input partition bytes.
 - `TaskResultEnvelope`: rkyv-encoded result or failure, with `partition_id` for ordering.
-- `WorkerCapabilities`: advertised per-worker limits (`max_tasks`); scheduler skips workers at capacity.
+- `WorkerCapabilities`: advertised per-worker limits (`max_tasks`, `registry_fingerprint`); scheduler skips workers at capacity and logs a mismatch error when fingerprints differ.
+
+### Binary version safety
+
+The `#[task]` op_id format is `"crate::module::fn_name::body_hash_short"` — the last segment is a short FNV-1a hash of the function body tokens. Changing the function body changes the op_id, so stale workers fail loudly at dispatch instead of silently executing old code.
+
+`REGISTRY_FINGERPRINT` (`atomic_compute::task_registry`) is a `Lazy<u64>` computed at startup by FNV-1a-folding all sorted `(op_id, body_hash)` pairs. `DistributedScheduler` stores this as `driver_fingerprint` (set via `Context::new_with_config` → `.with_driver_fingerprint()`). Workers advertise their fingerprint in `WorkerCapabilities.registry_fingerprint`; `register_worker` compares and logs a clear error on mismatch before any tasks are dispatched.
 
 ## Current Implementation State
 
 ### Done
 
-- `#[task]` proc-macro + `TASK_REGISTRY` compile-time dispatch.
+- `#[task]` proc-macro + `TASK_REGISTRY` compile-time dispatch. Op_id format: `"crate::module::fn::body_hash_short"` — body hash suffix catches stale workers at dispatch.
 - `task_fn!` macro for inline task lambdas — identical to `#[task]` at dispatch level.
+- **Binary version safety**: `TaskEntry.body_hash: u64` (FNV-1a of body tokens); `REGISTRY_FINGERPRINT: Lazy<u64>` folds all `(op_id, body_hash)` pairs; `WorkerCapabilities.registry_fingerprint` carries the value; `DistributedScheduler::register_worker` compares driver vs worker fingerprint and logs an error on mismatch — prevents silent wrong results when binaries diverge.
 - `NativeBackend` — `HashMap<TaskRuntime, Box<dyn OpDispatcher>>` registry; `execute()` is pure orchestration, runtime routing is in each `OpDispatcher` impl (`native_executor.rs`, `python_executor.rs`, `js_executor.rs`).
 - **`OpDispatcher` trait + backend file renames**: `native.rs` → `native_executor.rs`, `python_pool.rs` → `python_executor.rs`, `js_runtime.rs` → `js_executor.rs`. Adding a runtime = one new impl + one `HashMap::insert` in `Default`.
 - **`RddCore<T>` struct** (`rdd/core.rs`): shared fields + `RddBase` delegation helpers for narrow-dependency RDDs; applied to `mapper.rs`, `flatmapper.rs`, `map_partitions.rs`.

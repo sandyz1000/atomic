@@ -10,7 +10,6 @@ use prometheus::{
 };
 use std::sync::OnceLock;
 
-// ── Registry ──────────────────────────────────────────────────────────────────
 
 static METRICS: OnceLock<SchedulerMetrics> = OnceLock::new();
 
@@ -24,7 +23,6 @@ pub fn get_metrics() -> Option<&'static SchedulerMetrics> {
     METRICS.get()
 }
 
-// ── Metrics struct ────────────────────────────────────────────────────────────
 
 /// All Prometheus metrics exposed by the Atomic scheduler.
 pub struct SchedulerMetrics {
@@ -106,8 +104,6 @@ impl SchedulerMetrics {
         let _ = r.register(Box::new(self.broadcast_bytes_total.clone()));
     }
 
-    // ── Convenience helpers ───────────────────────────────────────────────────
-
     pub fn record_task_success(&self, duration_secs: f64) {
         self.tasks_total.with_label_values(&["success"]).inc();
         self.task_duration_seconds.observe(duration_secs);
@@ -131,7 +127,6 @@ impl SchedulerMetrics {
     }
 }
 
-// ── HTTP server ───────────────────────────────────────────────────────────────
 
 /// Spawn a Prometheus `/metrics` HTTP server on `port`.
 ///

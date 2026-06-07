@@ -103,6 +103,7 @@ Worker
 | `TaskResultEnvelope` | `atomic-data` | Wire type: result or failure, carries `partition_id` |
 | `NativeBackend` | `atomic-compute` | Worker-side op executor; looks up and runs handlers |
 | `TASK_REGISTRY` | `atomic-compute` | Compile-time `HashMap<op_id, fn>` built via `inventory` |
+| `REGISTRY_FINGERPRINT` | `atomic-compute` | `Lazy<u64>` — FNV-1a fold of all `(op_id, body_hash)` pairs; compared against workers at registration |
 | `LocalScheduler` | `atomic-scheduler` | In-process thread-pool scheduler with full DAG/shuffle |
 | `DistributedScheduler` | `atomic-scheduler` | TCP dispatcher with capacity-aware placement |
 | `ShuffleDependency` | `atomic-data` | Typed shuffle edge in the RDD DAG |
@@ -133,16 +134,37 @@ Worker
 #[task]
 fn double(x: i32) -> i32 { x * 2 }
 // expands to:
-inventory::submit!(TaskEntry { op_id: "myapp::double", handler: __double_dispatch });
+inventory::submit!(TaskEntry {
+    op_id: "myapp::double::a1b2c3d4",   // module::fn::body-hash suffix
+    body_hash: 0xa1b2c3d4_..._u64,      // FNV-1a of function body tokens
+    handler: __double_dispatch,
+});
 
 // At startup:
 TASK_REGISTRY = inventory::iter::<TaskEntry>.map(|e| (e.op_id, e.handler)).collect()
 
 // At dispatch:
-TASK_REGISTRY.get("myapp::double")(action, payload, data)
+TASK_REGISTRY.get("myapp::double::a1b2c3d4")(action, payload, data)
 ```
 
 No nightly features. No unsafe transmutes. The function pointer is a plain `fn` item.
+
+### Binary version safety
+
+Two complementary mechanisms prevent silent wrong results when driver and worker binaries diverge:
+
+**1. Body hash in op_id** — the last segment of every op_id is a short FNV-1a hash of the function body tokens (e.g. `"myapp::double::a1b2c3d4"`). If the function body changes, the op_id changes, and workers will log a clear "task not found" error rather than silently executing the old implementation.
+
+**2. Registry fingerprint at handshake** — `REGISTRY_FINGERPRINT` is a single `u64` computed at startup by sorting all `(op_id, body_hash)` pairs and folding them with FNV-1a. Workers advertise this in `WorkerCapabilities.registry_fingerprint` during the TCP handshake. `DistributedScheduler::register_worker` compares it against `self.driver_fingerprint` (set via `.with_driver_fingerprint(*REGISTRY_FINGERPRINT)` at `Context` construction):
+
+```
+driver fingerprint = 0xdeadbeef...
+worker advertises  = 0xdeadbeef...  → OK, proceed
+worker advertises  = 0xbadcafe0...  → log::error!("fingerprint mismatch — redeploy workers")
+worker advertises  = 0x0000...      → log::warn!("old binary — fingerprint not advertised")
+```
+
+The fingerprint check fires at registration time, before any tasks are dispatched, giving early failure rather than silent divergence.
 
 ### Captured state via task struct fields
 

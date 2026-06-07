@@ -1,6 +1,5 @@
 /// TransformedDStream — applies an arbitrary RDD→RDD function over multiple parent DStreams.
 ///
-/// TODO Phase 4: implement `compute`.
 use crate::dstream::{DStream, DStreamBase};
 use atomic_data::data::Data;
 use atomic_data::rdd::Rdd;

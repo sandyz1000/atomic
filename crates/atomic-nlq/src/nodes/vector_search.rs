@@ -251,10 +251,8 @@ impl ExecutionPlan for VectorSearchExec {
                     }
                 };
 
-                // Each input row → top_k result rows.
                 let mut all_ids: Vec<u64> = Vec::new();
                 let mut all_scores: Vec<f32> = Vec::new();
-                // Track which input row each result came from (for column replication).
                 let mut row_indices: Vec<usize> = Vec::new();
 
                 let col = batch.column(col_idx);
@@ -294,7 +292,6 @@ impl ExecutionPlan for VectorSearchExec {
                     }
                 }
 
-                // Replicate input rows according to row_indices, append __vs_id and __vs_score.
                 match expand_batch(&batch, &row_indices, all_ids, all_scores, schema.clone()) {
                     Ok(b) => yield Ok(b),
                     Err(e) => { yield Err(e); return; }
@@ -314,7 +311,6 @@ fn build_vs_batch(
 ) -> DFResult<RecordBatch> {
     let n = ids.len();
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(input.num_columns() + 2);
-    // Empty slices for each input column
     for col in input.columns() {
         columns.push(col.slice(0, 0));
     }

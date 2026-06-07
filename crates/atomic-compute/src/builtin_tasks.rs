@@ -19,8 +19,6 @@ use atomic_data::distributed::WireDecode;
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 
-// ── Shuffle-map handler ────────────────────────────────────────────────────────
-
 /// Generic shuffle-write function for `(K, V)` pairs.
 ///
 /// Called by `NativeBackend` when it sees `TaskAction::ShuffleMap`.
@@ -40,14 +38,11 @@ where
     V: atomic_data::data::Data + Clone + bincode::Encode + bincode::Decode<()> + WireDecode,
     Vec<(K, V)>: WireDecode,
 {
-    // 1. Decode input as Vec<(K, V)> from rkyv bytes.
     let pairs: Vec<(K, V)> = Vec::<(K, V)>::decode_wire(data)
         .map_err(|e| format!("shuffle_map_handler: decode input: {e}"))?;
 
-    // 2. Partition by FxHash(key) % num_reduce_partitions.
-    //    FxHasher is deterministic across processes (no random seed).
-    let mut buckets: Vec<Vec<(K, V)>> =
-        (0..num_reduce_partitions).map(|_| vec![]).collect();
+    // FxHasher is deterministic across processes (no random seed).
+    let mut buckets: Vec<Vec<(K, V)>> = (0..num_reduce_partitions).map(|_| vec![]).collect();
 
     for (k, v) in pairs {
         let mut hasher = FxHasher::default();
@@ -56,7 +51,6 @@ where
         buckets[bucket].push((k, v));
     }
 
-    // 3. Write each bucket as bincode bytes to SHUFFLE_CACHE.
     let cache = atomic_data::env::get_shuffle_cache()
         .ok_or_else(|| "shuffle_map_handler: SHUFFLE_CACHE not initialized".to_string())?;
 
@@ -68,12 +62,12 @@ where
 
     log::debug!(
         "shuffle_map_handler: wrote {} buckets for shuffle_id={} partition={}",
-        num_reduce_partitions, shuffle_id, map_partition_id
+        num_reduce_partitions,
+        shuffle_id,
+        map_partition_id
     );
     Ok(())
 }
-
-// ── MaxTask ───────────────────────────────────────────────────────────────────
 
 /// Built-in: return the greater of two `Ord` values.
 ///
@@ -108,7 +102,8 @@ macro_rules! impl_max_task {
         inventory::submit! {
             TaskEntry {
                 op_id: concat!("atomic::builtin::max::", stringify!($ty)),
-                handler: |action, payload, data| {
+                body_hash: 0,
+handler: |action, payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
                     let _ = payload;
                     match action {
@@ -128,8 +123,6 @@ macro_rules! impl_max_task {
         }
     };
 }
-
-// ── MinTask ───────────────────────────────────────────────────────────────────
 
 /// Built-in: return the lesser of two `Ord` values.
 pub struct MinTask<T>(std::marker::PhantomData<T>);
@@ -158,7 +151,8 @@ macro_rules! impl_min_task {
         inventory::submit! {
             TaskEntry {
                 op_id: concat!("atomic::builtin::min::", stringify!($ty)),
-                handler: |action, payload, data| {
+                body_hash: 0,
+handler: |action, payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
                     let _ = payload;
                     match action {
@@ -178,8 +172,6 @@ macro_rules! impl_min_task {
         }
     };
 }
-
-// ── SumTask ───────────────────────────────────────────────────────────────────
 
 /// Built-in: add two values.
 ///
@@ -210,7 +202,8 @@ macro_rules! impl_sum_task {
         inventory::submit! {
             TaskEntry {
                 op_id: concat!("atomic::builtin::sum::", stringify!($ty)),
-                handler: |action, payload, data| {
+                body_hash: 0,
+handler: |action, payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
                     match action {
                         TaskAction::Fold | TaskAction::Aggregate => {
@@ -234,7 +227,6 @@ macro_rules! impl_sum_task {
     };
 }
 
-// Instantiate built-in tasks for common primitive types.
 impl_max_task!(i32);
 impl_max_task!(i64);
 impl_max_task!(u32);
@@ -256,8 +248,6 @@ impl_sum_task!(u64);
 impl_sum_task!(f32);
 impl_sum_task!(f64);
 
-// ── CountTask ─────────────────────────────────────────────────────────────────
-
 /// Built-in: map partition to its element count (as `u64`).
 ///
 /// Used by `TypedRdd::count()` to count elements per partition.
@@ -273,7 +263,8 @@ impl CountTask {
 inventory::submit! {
     TaskEntry {
         op_id: CountTask::OP_ID,
-        handler: |action, _payload, data| {
+        body_hash: 0,
+handler: |action, _payload, data| {
             use atomic_data::distributed::{TaskAction, WireEncode};
             match action {
                 TaskAction::Map | TaskAction::Collect => {
@@ -295,8 +286,6 @@ inventory::submit! {
     }
 }
 
-// ── TopKTask ──────────────────────────────────────────────────────────────────
-
 /// Built-in: return the top K elements in descending order from a partition.
 ///
 /// Used by `TypedRdd::top(k)` in distributed mode. Each partition produces its
@@ -316,7 +305,8 @@ macro_rules! impl_top_k_task {
         inventory::submit! {
             TaskEntry {
                 op_id: concat!("atomic::builtin::top_k::", stringify!($ty)),
-                handler: |action, payload, data| {
+                body_hash: 0,
+handler: |action, payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
                     match action {
                         TaskAction::Collect => {
@@ -335,8 +325,6 @@ macro_rules! impl_top_k_task {
         }
     };
 }
-
-// ── TakeOrderedTask ───────────────────────────────────────────────────────────
 
 /// Built-in: return the first K elements in ascending order from a partition.
 ///
@@ -357,7 +345,8 @@ macro_rules! impl_take_ordered_task {
         inventory::submit! {
             TaskEntry {
                 op_id: concat!("atomic::builtin::take_ordered::", stringify!($ty)),
-                handler: |action, payload, data| {
+                body_hash: 0,
+handler: |action, payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
                     match action {
                         TaskAction::Collect => {
@@ -377,8 +366,6 @@ macro_rules! impl_take_ordered_task {
     };
 }
 
-// ── DistinctTask ──────────────────────────────────────────────────────────────
-
 /// Built-in: remove duplicate elements within a partition.
 ///
 /// Used as the local combine step in `TypedRdd::distinct()`. After each
@@ -397,7 +384,8 @@ macro_rules! impl_distinct_task {
         inventory::submit! {
             TaskEntry {
                 op_id: concat!("atomic::builtin::distinct::", stringify!($ty)),
-                handler: |action, _payload, data| {
+                body_hash: 0,
+handler: |action, _payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
                     use ::std::collections::HashSet;
                     match action {
@@ -419,8 +407,6 @@ macro_rules! impl_distinct_task {
     };
 }
 
-// ── MeanTask ──────────────────────────────────────────────────────────────────
-
 /// Built-in: compute per-partition `(f64_sum, u64_count)` for mean calculation.
 ///
 /// Used by `TypedRdd::mean()`. Each worker returns `(sum, count)` for its
@@ -441,7 +427,8 @@ macro_rules! impl_mean_task {
         inventory::submit! {
             TaskEntry {
                 op_id: concat!("atomic::builtin::mean::", stringify!($ty)),
-                handler: |action, _payload, data| {
+                body_hash: 0,
+handler: |action, _payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
                     match action {
                         TaskAction::Aggregate | TaskAction::Collect => {
@@ -458,8 +445,6 @@ macro_rules! impl_mean_task {
         }
     };
 }
-
-// ── SortTask ──────────────────────────────────────────────────────────────────
 
 /// Built-in: sort all elements within a partition in ascending order.
 ///
@@ -478,7 +463,8 @@ macro_rules! impl_sort_task {
         inventory::submit! {
             TaskEntry {
                 op_id: concat!("atomic::builtin::sort::", stringify!($ty)),
-                handler: |action, _payload, data| {
+                body_hash: 0,
+handler: |action, _payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
                     match action {
                         TaskAction::Map | TaskAction::Collect => {

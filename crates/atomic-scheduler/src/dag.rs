@@ -14,8 +14,6 @@ pub struct FetchFailedVals {
     pub reduce_id: usize,
 }
 
-/// Completion event for a task - now uses concrete TaskOption enum
-/// This eliminates the need for downcasting!
 pub struct CompletionEvent {
     pub task: TaskOption,
     pub reason: TastEndReason,

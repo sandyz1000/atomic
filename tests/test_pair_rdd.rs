@@ -49,7 +49,7 @@ async fn test_word_count_flat_map_task() {
 }
 
 #[tokio::test]
-async fn test_map_to_pairs_then_fold_task() {
+async fn test_pairs_fold() {
     let ctx = ctx();
     let data = vec![1i32, 2, 3, 4, 5];
 

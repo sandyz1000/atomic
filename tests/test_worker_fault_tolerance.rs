@@ -39,7 +39,7 @@ fn capabilities(ops: &[&str]) -> WorkerCapabilities {
 
 /// `register_worker()` must make the endpoint available for task dispatch.
 #[test]
-fn test_register_worker_makes_it_selectable() {
+fn test_worker_selectable() {
     let sched = DistributedScheduler::new(3, true);
     let addr = worker_addr(29100);
     sched.register_worker(addr, capabilities(&[]));
@@ -98,7 +98,7 @@ fn test_worker_with_empty_ops_accepts_all() {
 /// **Current behaviour:** worker is gone permanently — this test shows that
 /// after the 3rd failure `next_executor` errors.
 #[tokio::test]
-async fn test_worker_removed_after_three_tcp_failures() {
+async fn test_worker_tcp_removal() {
     use atomic_data::distributed::{TaskAction, TaskEnvelope, TaskRuntime, PipelineOp};
 
     // Bind an ephemeral port — the listener immediately drops each connection
@@ -177,7 +177,7 @@ async fn test_worker_removed_after_three_tcp_failures() {
 /// This is a lower-bound check — the actual time may be longer due to TCP
 /// setup overhead.
 #[tokio::test]
-async fn test_exponential_backoff_applied_between_retries() {
+async fn test_exponential_backoff() {
     use atomic_data::distributed::{TaskAction, TaskEnvelope, TaskRuntime, PipelineOp};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -228,7 +228,7 @@ async fn test_exponential_backoff_applied_between_retries() {
 /// With one worker and `max_tasks = 0`, the scheduler should return
 /// `NoCompatibleWorker`.
 #[test]
-fn test_capacity_zero_worker_not_selected() {
+fn test_zero_capacity() {
     let sched = DistributedScheduler::new(3, true);
     let addr = worker_addr(29103);
     sched.register_worker(addr, WorkerCapabilities::new("test-worker".to_string(), 0, vec![]));

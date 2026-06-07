@@ -181,11 +181,19 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         _ => false,
     };
 
-    // op_id expression resolved at compile time in the user crate.
+    // Body hash — FNV-1a of the function block tokens. Stable across line-number
+    // changes and reformatting; changes only when the body logic changes.
+    let body_hash_val: u64 = fnv1a_hash(&quote! { #fn_block }.to_string());
+    let body_hash_short = format!("{:08x}", body_hash_val as u32);
+    let body_hash_lit = proc_macro2::Literal::u64_suffixed(body_hash_val);
+
+    // op_id: custom names are left as-is (user owns stability); generated names
+    // include the body hash so a body change produces a new op_id and workers fail
+    // loudly instead of silently executing stale logic.
     let op_id_expr: proc_macro2::TokenStream = if let Some(ref name) = custom_name {
         quote! { #name }
     } else {
-        quote! { concat!(module_path!(), "::", #fn_name_str) }
+        quote! { concat!(module_path!(), "::", #fn_name_str, "::", #body_hash_short) }
     };
 
     // ── Generate dispatch arms based on function signature ────────────────────
@@ -347,6 +355,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         ::atomic_compute::__macro_support::inventory::submit! {
             ::atomic_compute::__macro_support::TaskEntry {
                 op_id: #op_id_expr,
+                body_hash: #body_hash_lit,
                 handler: #dispatch_fn_name,
             }
         }
@@ -438,8 +447,9 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
     // Hash only the body, not the full closure, so argument names (x vs item) and
     // argument patterns don't affect the id — only the actual logic does.
     let body_token_str = quote! { #body }.to_string();
-    let body_hash = fnv1a_hash(&body_token_str);
-    let short_hash = format!("{:08x}", body_hash as u32);
+    let body_hash_val = fnv1a_hash(&body_token_str);
+    let short_hash = format!("{:08x}", body_hash_val as u32);
+    let body_hash = proc_macro2::Literal::u64_suffixed(body_hash_val);
 
     // Normalise a type token stream to a compact string: remove whitespace.
     let normalise_ty = |ts: &proc_macro2::TokenStream| -> String {
@@ -552,6 +562,7 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
                 ::atomic_compute::__macro_support::inventory::submit! {
                     ::atomic_compute::__macro_support::TaskEntry {
                         op_id: #op_id_expr,
+                        body_hash: #body_hash,
                         handler: #dispatch_fn_ident,
                     }
                 }
@@ -678,6 +689,7 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
                 ::atomic_compute::__macro_support::inventory::submit! {
                     ::atomic_compute::__macro_support::TaskEntry {
                         op_id: #op_id_expr,
+                        body_hash: #body_hash,
                         handler: #dispatch_fn_ident,
                     }
                 }

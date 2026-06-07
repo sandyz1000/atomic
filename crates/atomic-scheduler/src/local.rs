@@ -90,7 +90,6 @@ impl LocalScheduler {
                     .await
                     .map_err(|_| SchedulerError::Other)?;
             if final_rdd.number_of_splits() == 0 {
-                // Return immediately if the job is running 0 tasks
                 let time = Instant::now();
                 self.live_listener_bus.post(Box::new(JobStartListener {
                     job_id: jt.run_id,
@@ -167,8 +166,6 @@ impl LocalScheduler {
 
         let mut results: Vec<Option<U>> = (0..jt.num_output_parts).map(|_| None).collect();
         let mut fetch_failure_duration = Duration::new(0, 0);
-        // Per-task failure counter: key = (stage_id, task_id).
-        // Prevents a repeatedly-failing task from being retried indefinitely.
         let mut task_failure_counts: HashMap<(usize, usize), usize> = HashMap::new();
 
         self.submit_stage(jt.final_stage.clone(), jt.clone())
@@ -295,7 +292,6 @@ impl LocalScheduler {
         let result = task.run(attempt_id);
         match result {
             Ok(task_result) => {
-                // Extract Box<dyn Data> from TaskResult enum
                 let result_data = match task_result {
                     TaskResult::ResultTask(data) => data,
                     TaskResult::ShuffleTask(data) => data,
@@ -308,7 +304,6 @@ impl LocalScheduler {
                 );
             }
             Err(err) => {
-                // Convert error to String to make it Send + Sync
                 let err_msg = format!("Task execution failed: {}", err);
                 LocalScheduler::handle_completion_event(
                     event_queues,
@@ -385,14 +380,10 @@ impl NativeScheduler for LocalScheduler {
     }
 
     fn next_executor_server(&self, _task: &TaskOption) -> SocketAddrV4 {
-        // Just point to the localhost
         SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)
     }
 
     async fn update_cache_locs(&self) -> LibResult<()> {
-        // For local scheduler, cache locations are managed locally
-        // No external cache tracker needed - data is in same process
-        // This is just a no-op to satisfy the trait
         Ok(())
     }
 
@@ -459,7 +450,6 @@ impl Drop for LocalScheduler {
     }
 }
 
-// Implement JobListener for ApproxListener
 #[async_trait::async_trait]
 impl<U, R, E> JobListener for ApproxListener<U, R, E>
 where

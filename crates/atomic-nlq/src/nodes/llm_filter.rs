@@ -4,7 +4,6 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use datafusion::arrow::array::BooleanArray;
 use datafusion::arrow::compute::filter_record_batch;
 use datafusion::arrow::datatypes::SchemaRef;
@@ -24,8 +23,6 @@ use serde_json::json;
 
 use crate::config::NlqConfig;
 use crate::openai::OpenAiClient;
-
-// ── Logical node ──────────────────────────────────────────────────────────────
 
 /// LLM-based row filter. Schema is identical to the input's schema.
 #[derive(Debug, Clone)]
@@ -102,8 +99,6 @@ impl UserDefinedLogicalNodeCore for LlmFilterNode {
         Ok(Self { input: inputs.swap_remove(0), ..self.clone() })
     }
 }
-
-// ── Physical exec ─────────────────────────────────────────────────────────────
 
 pub struct LlmFilterExec {
     prompt: String,
@@ -226,7 +221,6 @@ impl ExecutionPlan for LlmFilterExec {
                     let chunk = batch.slice(row_offset, end - row_offset);
                     match llm_filter_chunk(&client, &prompt, &model, max_chunk_bytes, &chunk).await {
                         Ok(mask) => {
-                            // P1c: validate response length
                             if mask.len() != chunk.num_rows() {
                                 yield Err(datafusion::error::DataFusionError::External(Box::new(
                                     crate::errors::NlqError::PlanParse(format!(

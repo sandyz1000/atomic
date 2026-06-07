@@ -28,6 +28,14 @@ Registered ops (12 total): [my_crate::transform::normalize, my_crate::transform:
 
 This is a structural guarantee, not a coding convention.
 
+A second safety layer catches the subtler case — where the task name stays the same but the **body changes**. Every `#[task]` function embeds a short FNV-1a hash of its body tokens in its op_id (`"my_crate::transform::normalize::a1b2c3d4"`). The entire registry is hashed into a single `REGISTRY_FINGERPRINT`. Workers advertise their fingerprint on the TCP handshake; the driver compares it before accepting the worker. A mismatched fingerprint means the worker was compiled from different code and is logged as an error before any task is dispatched:
+
+```text
+worker 10.0.0.5:10001 registry fingerprint mismatch:
+  driver=0xdeadbeef12345678, worker=0xbadcafe087654321.
+Task implementations diverged — redeploy workers with the same binary.
+```
+
 ---
 
 ## Quick Start

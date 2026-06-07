@@ -18,25 +18,16 @@ use tokio::sync::Mutex;
 
 #[derive(Clone, Debug)]
 pub struct Job {
-    run_id: usize,
-    job_id: usize,
+    pub run_id: usize,
+    pub job_id: usize,
 }
 
 impl Job {
     pub fn new(run_id: usize, job_id: usize) -> Self {
         Job { run_id, job_id }
     }
-
-    pub fn run_id(&self) -> usize {
-        self.run_id
-    }
-
-    pub fn job_id(&self) -> usize {
-        self.job_id
-    }
 }
 
-// Manual ordering implemented because we want the jobs to be sorted in reverse order.
 impl PartialOrd for Job {
     fn partial_cmp(&self, other: &Job) -> Option<Ordering> {
         Some(other.job_id.cmp(&self.job_id))
@@ -57,10 +48,8 @@ impl Ord for Job {
     }
 }
 
-/// Simplified: now uses concrete TaskOption enum instead of Box<dyn TaskBase>
 type PendingTasks = BTreeMap<Stage, BTreeSet<TaskOption>>;
 
-/// Contains all the necessary types to run and track a job progress
 pub struct JobTracker<F, U: Data, T: Data, L>
 where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync,

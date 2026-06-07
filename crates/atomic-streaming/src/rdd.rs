@@ -4,9 +4,7 @@
 /// This module holds streaming-specific state management types.
 use std::collections::HashMap;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // StateMap — per-key state storage for updateStateByKey / mapWithState
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// A map from key to optional state, used in stateful stream transformations.
 pub struct StateMap<K, S>
@@ -71,9 +69,7 @@ where
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // MapWithStateRDDRecord — per-key record for mapWithState
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// A single record held by the `MapWithStateRDD`.
 #[derive(Debug, Clone)]

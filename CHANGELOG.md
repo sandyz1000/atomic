@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] — Binary Version Safety + Code Quality
+
+### New features
+
+- **`TaskEntry.body_hash: u64`** — every `#[task]` and `task_fn!` entry now carries an FNV-1a hash
+  of the function body tokens, computed at compile time by the proc-macro.
+- **Op_id body-hash suffix** — `#[task]` op_ids are now `"crate::module::fn::body_hash_short"`
+  (e.g. `"myapp::transform::normalize::a1b2c3d4"`). Changing the function body changes the op_id,
+  so stale workers fail at dispatch with a clear "task not registered" error rather than silently
+  executing old code.
+- **`REGISTRY_FINGERPRINT: Lazy<u64>`** (`atomic_compute::task_registry`) — FNV-1a fold of all
+  sorted `(op_id, body_hash)` pairs; represents the entire compiled-in task set as a single value.
+  Two independently compiled binaries with identical task implementations produce the same fingerprint.
+- **`WorkerCapabilities.registry_fingerprint: u64`** — workers advertise their fingerprint during
+  the TCP handshake (default `0` for old workers that have not been redeployed).
+- **`DistributedScheduler::with_driver_fingerprint(u64)`** builder — stores the driver fingerprint
+  without introducing a dependency from `atomic-scheduler` onto `atomic-compute`.
+  `Context::new_with_config` chains `.with_driver_fingerprint(*REGISTRY_FINGERPRINT)` automatically.
+- **`DistributedScheduler::register_worker` mismatch detection** — compares driver vs worker
+  fingerprints on registration. Logs `warn!` for old workers (fingerprint = 0) and `error!` for
+  active mismatches. Check fires before any task is dispatched.
+
+### Internal improvements
+
+- `Job::run_id` and `Job::job_id` are now `pub` fields; getter methods `run_id()` / `job_id()` removed.
+- `TypedRdd::get_context()` removed; internal callers use `self.context.clone()` directly.
+- 57 test functions with 4–7-word names shortened to 2–3 words across 10 test files.
+
+---
+
 ## [Unreleased] — QOL Refactor
 
 ### Changed

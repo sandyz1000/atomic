@@ -77,7 +77,7 @@ fn single_op(op_id: &str, action: TaskAction) -> PipelineOp {
 /// This test documents and pins that behaviour. If it breaks, someone removed
 /// the guard — a regression.
 #[test]
-fn test_empty_pipeline_returns_error_not_panic() {
+fn test_empty_pipeline() {
     let backend = NativeBackend::default();
     let task = make_envelope_with_ops(vec![], vec![]);
     let result = backend.execute("worker-0", &task);
@@ -99,7 +99,7 @@ fn test_empty_pipeline_returns_error_not_panic() {
 ///
 /// This complements the inline test in `native_executor.rs` with an external call.
 #[test]
-fn test_unknown_op_id_produces_fatal_failure_with_op_name() {
+fn test_unknown_op_fatal() {
     let backend = NativeBackend::default();
     let task = make_envelope_with_ops(
         vec![single_op("no.such.handler.xyz", TaskAction::Map)],
@@ -124,7 +124,7 @@ fn test_unknown_op_id_produces_fatal_failure_with_op_name() {
 ///
 /// Validates the data-threading loop in `native_executor.rs`.
 #[test]
-fn test_two_op_pipeline_threads_data_correctly() {
+fn test_2op_thread() {
     let backend = NativeBackend::default();
     let input: Vec<i32> = vec![1, 2, 3];
     let ops = vec![
@@ -145,7 +145,7 @@ fn test_two_op_pipeline_threads_data_correctly() {
 ///   op2: add_ten   → [25, 17, 28]
 ///   op3: double_val → [50, 34, 56]
 #[test]
-fn test_three_op_pipeline_threads_data_correctly() {
+fn test_3op_thread() {
     let backend = NativeBackend::default();
     let input: Vec<i32> = vec![5, -3, 8];
     let ops = vec![
@@ -163,7 +163,7 @@ fn test_three_op_pipeline_threads_data_correctly() {
 /// A failing op mid-pipeline must produce `FatalFailure` and NOT execute
 /// subsequent ops (the pipeline stops at the first error).
 #[test]
-fn test_failed_mid_pipeline_op_short_circuits() {
+fn test_mid_op_shortcircuit() {
     let backend = NativeBackend::default();
     let ops = vec![
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
@@ -202,7 +202,7 @@ fn test_fold_op_sums_partition() {
 /// Full Context pipeline smoke test: map_task + collect in local mode.
 /// Exercises the entire dispatch path (Context → LocalScheduler → NativeBackend).
 #[tokio::test]
-async fn test_context_pipeline_map_and_collect() {
+async fn test_context_map_collect() {
     let ctx = Arc::new(Context::new_with_config(Config::local()).unwrap());
     let result = ctx
         .parallelize_typed(vec![1i32, 2, 3, 4], 2)
@@ -216,7 +216,7 @@ async fn test_context_pipeline_map_and_collect() {
 
 /// Two chained `map_task` calls exercise multi-op dispatch from Context.
 #[tokio::test]
-async fn test_context_pipeline_two_map_tasks_chained() {
+async fn test_context_chained_maps() {
     let ctx = Arc::new(Context::new_with_config(Config::local()).unwrap());
     let result = ctx
         .parallelize_typed(vec![1i32, 2, 3], 1)

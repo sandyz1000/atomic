@@ -29,7 +29,7 @@ async fn test_coalesce_reduces_partitions() {
 }
 
 #[tokio::test]
-async fn test_coalesce_noop_when_target_larger() {
+async fn test_coalesce_noop() {
     let ctx = ctx();
     // CoalescedRdd clamps to the existing partition count when target > num_partitions
     let rdd = ctx
@@ -67,7 +67,7 @@ async fn test_num_partitions_getter() {
 // ── map_partitions() ──────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_map_partitions_preserves_elements() {
+async fn test_map_partitions() {
     let ctx = ctx();
     let mut result = ctx
         .parallelize_typed(vec![1i32, 2, 3, 4, 5], 3)
@@ -79,7 +79,7 @@ async fn test_map_partitions_preserves_elements() {
 }
 
 #[tokio::test]
-async fn test_map_partitions_with_index_covers_all() {
+async fn test_map_partitions_idx() {
     let ctx = ctx();
     let num_partitions = 3usize;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -195,7 +195,7 @@ async fn test_sort_by_ascending() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_map_partitions_to_pair_reduce() {
+async fn test_partitions_pair_reduce() {
     let _g = shuffle_guard();
     let ctx = ctx();
     // Each partition emits word-count pairs; reduce_by_key sums them up.

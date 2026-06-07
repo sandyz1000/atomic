@@ -16,9 +16,7 @@ fn next_rdd_id() -> usize {
     NEXT_RDD_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // WindowedDStream
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// A DStream that produces an RDD covering a sliding window of batches.
 pub struct WindowedDStream<T: Data + Clone> {
@@ -108,9 +106,6 @@ impl<T: Data + Clone> DStream<T> for WindowedDStream<T> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ReducedWindowedDStream — TODO Phase 4
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// A DStream that reduces all elements across a sliding window.
 ///

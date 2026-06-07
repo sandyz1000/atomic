@@ -13,9 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // StreamingContextState
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamingContextState {
@@ -27,9 +25,7 @@ pub enum StreamingContextState {
     Stopped,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // StreamingContext
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// The entry point for a streaming application.
 ///
@@ -43,21 +39,15 @@ pub enum StreamingContextState {
 /// ssc.await_termination()?;
 /// ```
 pub struct StreamingContext {
-    /// Underlying compute context.
     pub sc: Arc<Context>,
-    /// How often a new batch is generated.
     pub batch_duration: Duration,
-    /// The DAG of DStreams.
     pub graph: Mutex<DStreamGraph>,
-    /// Optional checkpoint directory (interior-mutable so it can be set before start()).
     pub checkpoint_dir: Mutex<Option<PathBuf>>,
-    /// How often to write checkpoints (must be a multiple of batch_duration).
+    /// Must be a multiple of `batch_duration`.
     pub checkpoint_duration: Option<Duration>,
-    /// Lifecycle state.
     state: Mutex<StreamingContextState>,
-    /// The batch-loop scheduler (set when started).
+    /// Set when `start()` is called.
     scheduler: Mutex<Option<Arc<JobScheduler>>>,
-    /// ID counter for streams.
     next_stream_id: AtomicUsize,
 }
 
@@ -82,9 +72,7 @@ impl StreamingContext {
         self.next_stream_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     // Input stream factories
-    // ─────────────────────────────────────────────────────────────────────────
 
     /// Create a DStream from a queue of pre-built RDDs.
     pub fn queue_stream<T: Data + Clone>(
@@ -132,9 +120,7 @@ impl StreamingContext {
         stream
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     // Output operation registration
-    // ─────────────────────────────────────────────────────────────────────────
 
     /// Register a `foreach_rdd` output operation on `stream`.
     ///
@@ -222,9 +208,7 @@ impl StreamingContext {
         });
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     // Recovery
-    // ─────────────────────────────────────────────────────────────────────────
 
     /// Create a new `StreamingContext` by restoring from the latest checkpoint in `dir`.
     ///
@@ -261,9 +245,7 @@ impl StreamingContext {
         Ok(Some(ssc))
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     // Lifecycle
-    // ─────────────────────────────────────────────────────────────────────────
 
     /// Enable checkpointing. `dir` is created if it does not exist.
     pub fn checkpoint(self: &Arc<Self>, dir: impl Into<PathBuf>) {

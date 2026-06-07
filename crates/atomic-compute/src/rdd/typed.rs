@@ -75,10 +75,6 @@ impl<T: Clone> TypedRdd<T> {
         &self.rdd
     }
 
-    pub fn get_context(&self) -> Arc<Context> {
-        self.context.clone()
-    }
-
     pub fn into_rdd(self) -> RddRef<T> {
         self.rdd
     }
@@ -137,7 +133,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
     ///   implements `bincode::Encode + bincode::Decode<()>`. For actual disk spill, call
     ///   `persist_with_disk(level)` instead.
     pub fn persist(self, level: StorageLevel) -> Self {
-        let ctx = self.get_context();
+        let ctx = self.context.clone();
         let cached = Arc::new(CachedRdd::new_with_level(self.into_rdd(), level));
         TypedRdd::new(cached as RddRef<T>, ctx)
     }
@@ -159,7 +155,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
 
         match level {
             StorageLevel::MemoryAndDisk | StorageLevel::DiskOnly => {
-                let ctx = self.get_context();
+                let ctx = self.context.clone();
                 let rdd_id = self.rdd.get_rdd_id();
                 let num_parts = self.rdd.number_of_splits();
 
@@ -232,7 +228,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
         use crate::rdd::checkpoint::{CheckpointRdd, CheckpointStore};
 
         let store = CheckpointStore::from_uri(dir.as_ref());
-        let ctx = self.get_context();
+        let ctx = self.context.clone();
         let rdd_id = self.rdd.get_rdd_id();
         let partitions = self.collect_partitions()?;
         let num_partitions = partitions.len();

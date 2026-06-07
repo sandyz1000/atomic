@@ -53,6 +53,20 @@ impl AgentLoop {
         Self { planner, executor, config }
     }
 
+    /// Translate a natural language query into a `WorkflowPlan` without executing it.
+    ///
+    /// Use this for dry-run / debugging: inspect which tools and SQL steps the planner
+    /// would choose before committing to an actual execution.
+    pub async fn plan_only(
+        &self,
+        nl_query: &str,
+        tool_registry: &ToolRegistry,
+        table_schemas: &HashMap<String, SchemaRef>,
+    ) -> Result<crate::workflow::WorkflowPlan> {
+        let ctx = AgentContext::default();
+        self.planner.plan(nl_query, table_schemas, tool_registry, &ctx).await
+    }
+
     /// Run the agentic query loop.
     ///
     /// Each round:
@@ -69,7 +83,6 @@ impl AgentLoop {
         let mut ctx = AgentContext::default();
 
         loop {
-            // 1. Plan
             let plan = self
                 .planner
                 .plan(nl_query, table_schemas, tool_registry, &ctx)
@@ -81,14 +94,12 @@ impl AgentLoop {
                 plan.steps.len()
             );
 
-            // 2. Execute
             let results: HashMap<String, StepResult> =
                 self.executor.execute(plan).await?;
             let step_results: Vec<StepResult> = results.into_values().collect();
             ctx.previous_results.extend(step_results);
             ctx.rounds += 1;
 
-            // 3. Evaluate
             let eval = self.evaluate(nl_query, &ctx).await?;
 
             if eval.is_done || ctx.rounds >= self.config.max_rounds {

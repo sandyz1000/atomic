@@ -197,7 +197,7 @@ async fn test_left_outer_join() {
 // ── Range partitioner ─────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_range_partitioner_assigns_to_correct_partition() {
+async fn test_partitioner_assign() {
     use atomic_data::partitioner::Partitioner;
     use std::any::Any;
     // bounds = [3, 7]: partition 0 = keys < 3, partition 1 = 3..7, partition 2 = >= 7
@@ -211,7 +211,7 @@ async fn test_range_partitioner_assigns_to_correct_partition() {
 }
 
 #[tokio::test]
-async fn test_sort_by_key_range_globally_sorted() {
+async fn test_range_sort_global() {
     let ctx = ctx();
     let data: Vec<(i32, i32)> = vec![(5, 50), (1, 10), (3, 30), (7, 70), (2, 20), (6, 60), (4, 40)];
     let sorted = ctx
@@ -324,7 +324,7 @@ fn bucket_by_parity(x: i32) -> (String, i32) {
 /// Classic word-count pipeline: tokenize → pair → reduce_by_key.
 /// This is the canonical correctness benchmark for the local shuffle path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_word_count_pipeline_local() {
+async fn test_word_count() {
     let _g = shuffle_guard();
     let ctx = ctx();
 
@@ -355,7 +355,7 @@ async fn test_word_count_pipeline_local() {
 
 /// `reduce_by_key` after a `map` transformation (chained pipeline → shuffle).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_reduce_by_key_with_chained_map() {
+async fn test_reduce_chained() {
     let _g = shuffle_guard();
     let ctx = ctx();
 
@@ -376,7 +376,7 @@ async fn test_reduce_by_key_with_chained_map() {
 
 /// `group_by_key` across 4 partitions — all partitions must contribute.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_group_by_key_multiple_partitions() {
+async fn test_group_many_partitions() {
     let _g = shuffle_guard();
     let ctx = ctx();
 
@@ -412,7 +412,7 @@ async fn test_group_by_key_multiple_partitions() {
 
 /// Partitions that contribute no keys for a given bucket must not produce output.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_reduce_by_key_empty_partitions() {
+async fn test_reduce_empty() {
     let _g = shuffle_guard();
     let ctx = ctx();
 

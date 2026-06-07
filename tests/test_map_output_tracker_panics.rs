@@ -33,7 +33,7 @@ fn tracker() -> MapOutputTracker {
 
 /// Bug B2 (fixed): `register_map_output()` returns `Err` when `register_shuffle()` was never called.
 #[test]
-fn test_register_map_output_without_register_shuffle_panics() {
+fn test_unregistered_shuffle() {
     let t = tracker();
     let result = t.register_map_output(99, 0, "http://127.0.0.1:9000".to_string());
     assert!(
@@ -44,7 +44,7 @@ fn test_register_map_output_without_register_shuffle_panics() {
 
 /// Complementary to B2: verify the correct path succeeds.
 #[test]
-fn test_register_map_output_happy_path_no_panic() {
+fn test_register_map_ok() {
     let t = tracker();
     t.register_shuffle(1, 3);
     t.register_map_output(1, 0, "http://host1:9000".to_string()).unwrap();
@@ -58,7 +58,7 @@ fn test_register_map_output_happy_path_no_panic() {
 
 /// Bug B3 (fixed): `register_map_output()` returns `Err` when `map_id >= num_maps`.
 #[test]
-fn test_register_map_output_out_of_bounds_map_id_panics() {
+fn test_oob_map_id() {
     let t = tracker();
     t.register_shuffle(42, 2); // two map slots: index 0 and 1
     let result = t.register_map_output(42, 5, "http://127.0.0.1:9000".to_string());
@@ -70,7 +70,7 @@ fn test_register_map_output_out_of_bounds_map_id_panics() {
 
 /// Sanity: map_id within bounds succeeds.
 #[test]
-fn test_register_map_output_in_bounds_no_panic() {
+fn test_inbounds_map_id() {
     let t = tracker();
     t.register_shuffle(5, 3);
     t.register_map_output(5, 0, "http://a:9000".to_string()).unwrap();
@@ -89,7 +89,7 @@ fn test_register_map_output_in_bounds_no_panic() {
 /// However, the `get_mut` inside the `if let` block (line 302) can still panic
 /// if called on an empty entry — this is tested by B2.
 #[test]
-fn test_unregister_unknown_shuffle_id_is_noop() {
+fn test_unregister_unknown() {
     let t = tracker();
     // shuffle_id 999 was never registered — should be a silent no-op.
     t.unregister_map_output(999, 0, "http://127.0.0.1:9000".to_string());
@@ -98,7 +98,7 @@ fn test_unregister_unknown_shuffle_id_is_noop() {
 
 /// Bug B4 (fixed): `unregister_map_output()` with an out-of-bounds `map_id` is a no-op.
 #[test]
-fn test_unregister_out_of_bounds_map_id_panics() {
+fn test_unregister_oob() {
     let t = tracker();
     t.register_shuffle(7, 2); // two slots
     // Out-of-bounds map_id must be a silent no-op, not a panic.

@@ -84,7 +84,7 @@ fn words_to_pairs(line: String) -> Vec<(String, i32)> {
 ///   map_task(negate)     → [-3,-5,-7,-9,-11]
 ///   fold_task(0, add)    → -35
 #[tokio::test]
-async fn test_five_op_pipeline_correctness() {
+async fn test_5op_pipeline() {
     let ctx = ctx();
     let result = ctx
         .parallelize_typed(vec![1i32, 2, 3, 4, 5], 2)
@@ -116,7 +116,7 @@ async fn test_chained_maps_single_partition() {
 
 /// 1,000 elements in 100 partitions — count and sum must be exact.
 #[tokio::test]
-async fn test_large_partition_count_count_and_sum() {
+async fn test_many_partitions() {
     let ctx = ctx();
     let data: Vec<i32> = (1..=1000).collect();
     let expected_sum: i32 = data.iter().sum();
@@ -131,7 +131,7 @@ async fn test_large_partition_count_count_and_sum() {
 
 /// More partitions than elements — sparse partitioning must not lose data.
 #[tokio::test]
-async fn test_more_partitions_than_elements_no_data_loss() {
+async fn test_sparse_partitions() {
     let ctx = ctx();
     let data = vec![10i32, 20, 30];
     let rdd = ctx.parallelize_typed(data.clone(), 20);
@@ -144,7 +144,7 @@ async fn test_more_partitions_than_elements_no_data_loss() {
 
 /// One partition has 900 elements, others have 1 each — reduce must still be correct.
 #[tokio::test]
-async fn test_skewed_partition_data_reduce_still_correct() {
+async fn test_skewed_reduce() {
     let ctx = ctx();
     // Build 900 + 3 = 903 elements, parallelize into 4 partitions.
     // Spark-style: partition 0 gets ceil(903/4)=226, etc. — skew via pre-split.
@@ -161,7 +161,7 @@ async fn test_skewed_partition_data_reduce_still_correct() {
 
 /// `collect()` and `count()` on the same cached RDD must agree.
 #[tokio::test]
-async fn test_cache_then_collect_and_count_agree() {
+async fn test_cache_actions_agree() {
     let ctx = ctx();
     let data: Vec<i32> = (1..=12).collect();
     let rdd = ctx.parallelize_typed(data.clone(), 3).cache();
@@ -179,7 +179,7 @@ async fn test_cache_then_collect_and_count_agree() {
 
 /// A cached RDD yields the same results across repeated `collect()` calls.
 #[tokio::test]
-async fn test_cache_stable_across_three_collects() {
+async fn test_cache_stability() {
     let ctx = ctx();
     let data: Vec<i32> = (0..20).map(|x| x * 3).collect();
     let rdd = ctx.parallelize_typed(data.clone(), 4).cache();

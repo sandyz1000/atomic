@@ -32,7 +32,7 @@ fn compute_ctx() -> Arc<Context> {
 
 /// Starting a fresh `StreamingContext` succeeds (state: Initialized → Active).
 #[test]
-fn test_start_transitions_to_active() {
+fn test_start_active() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(sc, Duration::from_millis(100));
 
@@ -51,7 +51,7 @@ fn test_start_transitions_to_active() {
 ///
 /// This verifies the state-machine guard at context.rs:241-242.
 #[test]
-fn test_start_twice_returns_already_started_error() {
+fn test_double_start() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(sc, Duration::from_millis(100));
 
@@ -75,7 +75,7 @@ fn test_start_twice_returns_already_started_error() {
 /// Documents the state machine: Stopped is a terminal state — restart is not
 /// possible without creating a new `StreamingContext`.
 #[test]
-fn test_start_after_stop_returns_already_stopped_error() {
+fn test_start_post_stop() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(sc, Duration::from_millis(100));
 
@@ -115,7 +115,7 @@ fn test_stop_is_idempotent() {
 
 /// B9: `stop(stop_sc=true, gracefully=false)` also shuts down the underlying `Context`.
 #[test]
-fn test_stop_with_stop_sc_true_shuts_down_context() {
+fn test_stop_sc_shutdown() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(100));
 
@@ -138,7 +138,7 @@ fn test_stop_with_stop_sc_true_shuts_down_context() {
 
 /// B10: Verifies that `checkpoint-<ms>` files are written after each batch.
 #[test]
-fn test_checkpoint_files_written_after_batches() {
+fn test_checkpoint_written() {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     let sc = compute_ctx();
@@ -189,7 +189,7 @@ fn test_checkpoint_files_written_after_batches() {
 
 /// Verify that `from_checkpoint` restores batch duration from a written checkpoint.
 #[test]
-fn test_from_checkpoint_restores_batch_duration() {
+fn test_checkpoint_restore() {
     use atomic_streaming::checkpoint::Checkpoint;
 
     let dir = tempfile::tempdir().unwrap();
@@ -210,7 +210,7 @@ fn test_from_checkpoint_restores_batch_duration() {
 ///
 /// We push 3 RDDs into the queue and verify the closure is called at least 3 times.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_foreach_rdd_processes_all_batches() {
+async fn test_foreach_rdd() {
     use std::sync::atomic::{AtomicI32, Ordering};
 
     let sc = compute_ctx();
@@ -263,7 +263,7 @@ async fn test_foreach_rdd_processes_all_batches() {
 atomic_compute::register_shuffle_map!(String, i32);
 
 #[test]
-fn test_streaming_reduce_by_key() {
+fn test_stream_reduce() {
     use atomic_streaming::dstream::pair::PairDStreamFunctions;
     let sc = compute_ctx();
     let ssc = StreamingContext::new(sc, Duration::from_millis(50));
@@ -316,7 +316,7 @@ fn test_streaming_reduce_by_key() {
 
 /// `await_termination_or_timeout()` must return within the given deadline.
 #[test]
-fn test_await_termination_or_timeout_respects_deadline() {
+fn test_timeout_deadline() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(sc, Duration::from_millis(1000));
 

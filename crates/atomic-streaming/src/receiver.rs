@@ -1,7 +1,6 @@
 /// Receiver infrastructure for streaming data ingestion.
 ///
 /// `BlockGenerator` buffers incoming items and periodically emits blocks.
-/// Receivers are started/stopped by the `ReceiverTracker` (TODO Phase 4 — distributed).
 use crate::utils::fileutils::StorageLevel;
 use parking_lot::Mutex;
 use std::any::Any;
@@ -9,9 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Block identifier
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StreamBlockId {
@@ -29,9 +26,7 @@ impl StreamBlockId {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // ReceivedBlock — what a receiver hands to the block generator
-// ─────────────────────────────────────────────────────────────────────────────
 
 pub enum ReceivedBlock {
     /// A batch of items as boxed Any values.
@@ -40,9 +35,7 @@ pub enum ReceivedBlock {
     DataBlock { block_id: StreamBlockId, data: Vec<Box<dyn Any + Send>> },
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Receiver trait
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Implemented by each input source to provide data to the streaming engine.
 pub trait Receiver: Send + Sync + 'static {
@@ -59,9 +52,7 @@ pub trait Receiver: Send + Sync + 'static {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // BlockGeneratorListener
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Callbacks fired by BlockGenerator on block lifecycle events.
 pub trait BlockGeneratorListener: Send + Sync + 'static {
@@ -73,9 +64,7 @@ pub trait BlockGeneratorListener: Send + Sync + 'static {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // GeneratorState
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GeneratorState {
@@ -86,9 +75,7 @@ pub enum GeneratorState {
     Stopped,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // BlockGenerator
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Buffers incoming items and periodically pushes them as blocks.
 pub struct BlockGenerator {
@@ -194,22 +181,17 @@ impl BlockGenerator {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // RateLimiter (stub)
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Controls the rate at which a receiver ingests data.
 ///
-/// TODO Phase 4: implement PID-based back-pressure controller.
 pub trait RateLimiter: Send + Sync {
     fn wait_to_push(&self);
     fn get_current_limit(&self) -> f64;
     fn update_rate(&self, new_rate: f64);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // ReceivedBlockInfo (used by scheduler/info.rs)
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct ReceivedBlockInfo {

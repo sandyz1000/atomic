@@ -2,9 +2,7 @@ use crate::receiver::ReceivedBlockInfo;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // StreamInputInfo
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Input information for a single stream at a given batch time.
 #[derive(Debug, Clone)]
@@ -37,9 +35,7 @@ impl StreamInputInfo {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // OutputOperationInfo
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct OutputOperationInfo {
@@ -72,9 +68,7 @@ impl OutputOperationInfo {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // BatchInfo
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct BatchInfo {
@@ -115,9 +109,7 @@ impl BatchInfo {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // InputInfoTracker
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Tracks input info per batch for reporting and back-pressure.
 pub struct InputInfoTracker {

@@ -8,9 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // JobSet — groups jobs for a single batch time
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub struct JobSet {
@@ -36,9 +34,7 @@ impl JobSet {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // JobScheduler — the batch loop
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Drives the streaming batch loop.
 ///

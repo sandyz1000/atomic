@@ -20,7 +20,6 @@ pub struct Graph<VD, ED> {
     pub(crate) id_to_node: HashMap<VertexId, NodeIndex>,
 }
 
-// ── Construction ──────────────────────────────────────────────────────────────
 
 impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     /// Build a graph from a vertex list and an edge list.
@@ -115,7 +114,6 @@ impl Graph<(), ()> {
     }
 }
 
-// ── Accessors ─────────────────────────────────────────────────────────────────
 
 impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     pub fn num_vertices(&self) -> usize {
@@ -209,7 +207,6 @@ impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     }
 }
 
-// ── Transformations ───────────────────────────────────────────────────────────
 
 impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     /// Apply `f` to each vertex attribute, returning a new graph with the same structure.
@@ -411,7 +408,6 @@ impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

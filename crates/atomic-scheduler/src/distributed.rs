@@ -74,6 +74,10 @@ pub struct DistributedScheduler {
     /// Per-job cancellation tokens — cancelled when `cancel_job()` is called.
     job_cancel_tokens: Arc<DashMap<usize, tokio_util::sync::CancellationToken>>,
 
+    /// Fingerprint of the driver's compiled task registry — set by `with_driver_fingerprint`.
+    /// Workers that advertise a different fingerprint are logged as mismatched at registration.
+    driver_fingerprint: u64,
+
     /// Registered worker endpoints, round-robined for task dispatch.
     server_uris: Arc<Mutex<VecDeque<SocketAddrV4>>>,
 
@@ -107,6 +111,7 @@ impl DistributedScheduler {
             scheduler_lock: Arc::new(Mutex::new(false)),
             live_listener_bus,
             job_cancel_tokens: Arc::new(DashMap::new()),
+            driver_fingerprint: 0,
         }
     }
 
@@ -124,6 +129,12 @@ impl DistributedScheduler {
                 "job {run_id} not found or already completed"
             )))
         }
+    }
+
+    /// Set the driver's registry fingerprint for worker mismatch detection at registration.
+    pub fn with_driver_fingerprint(mut self, fp: u64) -> Self {
+        self.driver_fingerprint = fp;
+        self
     }
 
     /// Enable speculative execution with the given multiplier.
@@ -246,6 +257,24 @@ impl DistributedScheduler {
     }
 
     pub fn register_worker(&self, endpoint: SocketAddrV4, capabilities: WorkerCapabilities) {
+        let driver_fp = self.driver_fingerprint;
+        let worker_fp = capabilities.registry_fingerprint;
+        if driver_fp != 0 {
+            if worker_fp == 0 {
+                log::warn!(
+                    "worker {endpoint} (id={}) did not advertise a registry fingerprint — \
+                     running an old binary? Proceeding, but task correctness is not guaranteed.",
+                    capabilities.worker_id
+                );
+            } else if worker_fp != driver_fp {
+                log::error!(
+                    "worker {endpoint} (id={}) registry fingerprint mismatch: \
+                     driver={driver_fp:#018x}, worker={worker_fp:#018x}. \
+                     Task implementations diverged — redeploy workers with the same binary.",
+                    capabilities.worker_id
+                );
+            }
+        }
         self.worker_capabilities.insert(endpoint, capabilities);
         let mut servers = self.server_uris.lock();
         if !servers.contains(&endpoint) {
@@ -720,7 +749,7 @@ impl DistributedScheduler {
         self.active_jobs.remove(&run_id);
         self.active_job_queue
             .lock()
-            .retain(|j| j.run_id() != run_id);
+            .retain(|j| j.run_id != run_id);
         if let Some((_, task_keys)) = self.job_tasks.remove(&run_id) {
             for key in &task_keys {
                 self.taskid_to_slaveid.remove(key);

@@ -30,19 +30,13 @@ pub enum SchedulerError {
     MaxTaskFailures(String),
 
     #[error(transparent)]
-    PartialJobError(#[from] PartialJobError)
+    PartialJobError(#[from] PartialJobError),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Base(#[from] BaseError),
 }
 
 pub type LibResult<T> = Result<T, SchedulerError>;
-
-impl From<std::io::Error> for SchedulerError {
-    fn from(e: std::io::Error) -> Self {
-        SchedulerError::Transport(e.to_string())
-    }
-}
-
-impl From<BaseError> for SchedulerError {
-    fn from(e: BaseError) -> Self {
-        SchedulerError::Transport(e.to_string())
-    }
-}

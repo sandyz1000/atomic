@@ -24,7 +24,6 @@ rand.workspace = true
 parking_lot.workspace = true
 log.workspace = true
 env_logger = "0.11"
-anyhow.workspace = true
 uuid.workspace = true
 async-trait.workspace = true
 statrs.workspace = true
@@ -62,7 +61,7 @@ js = ["deno_core", "atomic-data/javascript"]
 # Enable both UDF runtimes (used by atomic-worker).
 udf = ["python", "js"]
 # Enable S3 object store support via the official AWS SDK.
-s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types"]
+s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types", "base64"]
 # Enable TLS (mutual TLS) for driver↔worker TCP communication.
 # Requires cert/key/CA paths set in Config::tls_cert/tls_key/tls_ca_cert.
 tls = ["tokio-rustls", "rustls", "rustls-pemfile", "atomic-data/tls"]

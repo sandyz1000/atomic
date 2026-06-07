@@ -86,6 +86,7 @@ impl Executor {
             crate::task_registry::SHUFFLE_MAP_REGISTRY.len(),
         );
         WorkerCapabilities::new(self.worker_id.to_string(), self.max_concurrent_tasks, registered_ops)
+            .with_registry_fingerprint(*crate::task_registry::REGISTRY_FINGERPRINT)
     }
 
     /// Worker loop: binds TCP port, reads transport frames, dispatches via NativeBackend.
@@ -114,7 +115,6 @@ impl Executor {
         let mut tasks: JoinSet<Result<Signal>> = JoinSet::new();
 
         loop {
-            // Check for a shutdown signal before accepting the next connection.
             match rcv_main.try_recv() {
                 Ok(Signal::ShutDownGracefully) => {
                     log::info!("shutting down executor @{} gracefully", self.port);
@@ -129,7 +129,6 @@ impl Executor {
                 _ => {}
             }
 
-            // When at full capacity, drain one completed task before accepting more.
             if tasks.len() >= self.max_concurrent_tasks as usize {
                 if let Some(result) = tasks.join_next().await {
                     propagate_task_result(result, self.port)?;
@@ -137,7 +136,6 @@ impl Executor {
                 continue;
             }
 
-            // Below capacity: race a new connection against a completed task.
             tokio::select! {
                 accepted = listener.accept() => {
                     match accepted {

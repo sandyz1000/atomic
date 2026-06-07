@@ -222,7 +222,6 @@ pub trait NativeScheduler: Send + Sync {
         // TODO: logging
         // TODO: add to Accumulator
 
-        // Use pattern matching on TaskOption - no downcasting needed!
         match &completed_event.task {
             TaskOption::ResultTask(rt) => {
                 let result = completed_event
@@ -232,8 +231,6 @@ pub trait NativeScheduler: Send + Sync {
 
                 jt.listener.task_succeeded(rt.output_id, &*result).await?;
 
-                // Downcast Box<dyn Data> to U
-                // We use the as_any method to get &dyn Any, then downcast and clone
                 let typed_result = result
                     .as_any()
                     .downcast_ref::<U>()
@@ -422,7 +419,6 @@ pub trait NativeScheduler: Send + Sync {
                 .enumerate()
             {
                 let locs = self.get_preferred_locs(jt.final_rdd.get_rdd_base(), *part);
-                // Create ResultTask and convert to TaskOption directly
                 let result_task = ResultTask::new(
                     m.get_next_task_id(),
                     jt.run_id,
@@ -433,7 +429,6 @@ pub trait NativeScheduler: Send + Sync {
                     locs.clone(),
                     id,
                 );
-                // Convert to TaskOption which handles type erasure
                 let task_option = TaskOption::ResultTask(result_task.into());
                 let executor = self.next_executor_server(&task_option);
                 my_pending.insert(task_option.clone());
@@ -445,7 +440,6 @@ pub trait NativeScheduler: Send + Sync {
                 if stage.output_locs[p].is_empty() {
                     let locs = self.get_preferred_locs(stage.get_rdd(), p);
                     log::debug!("creating task for stage #{} partition #{}", stage.id, p);
-                    // Wrap ShuffleDependencyBox in Dependency::Shuffle
                     let shuffle_dep = Arc::new(Dependency::Shuffle(
                         stage
                             .shuffle_dependency
@@ -467,7 +461,6 @@ pub trait NativeScheduler: Send + Sync {
                         p,
                         shuffle_map_task.dep.get_shuffle_id()
                     );
-                    // TaskOption directly holds concrete types, no boxing needed
                     let task_option = TaskOption::ShuffleMapTask(shuffle_map_task);
                     let executor = self.next_executor_server(&task_option);
                     my_pending.insert(task_option.clone());

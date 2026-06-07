@@ -209,7 +209,8 @@ impl Context {
             log::warn!("shuffle service could not start: {e}");
         }
 
-        let mut dist_sched = DistributedScheduler::new(20, true);
+        let mut dist_sched = DistributedScheduler::new(20, true)
+            .with_driver_fingerprint(*crate::task_registry::REGISTRY_FINGERPRINT);
         if let Some(m) = config.speculation_multiplier {
             dist_sched = dist_sched.with_speculation(m);
         }
@@ -385,7 +386,7 @@ impl Context {
     pub fn cancel_job(&self, run_id: usize) -> Result<(), Error> {
         match &self.scheduler {
             atomic_scheduler::Schedulers::Distributed(sched) => {
-                sched.cancel_job(run_id).map_err(Error::from)
+                Ok(sched.cancel_job(run_id)?)
             }
             atomic_scheduler::Schedulers::Local(_) => Ok(()),
         }
@@ -418,9 +419,8 @@ impl Context {
         Vec<T>: WireDecode,
     {
         use crate::rdd::TypedRdd;
-        TypedRdd::new(rdd, self.clone())
-            .collect()
-            .map_err(Error::from)
+        Ok(TypedRdd::new(rdd, self.clone())
+            .collect()?)
     }
 
     pub fn new_rdd_id(&self) -> usize {
@@ -645,10 +645,9 @@ impl Context {
         let cl = move |(_task_context, iter)| (func)(iter);
         let sched = self.driver_scheduler.clone();
         let partitions = (0..rdd.number_of_splits()).collect();
-        env::Env::run_in_async_rt(|| {
+        Ok(env::Env::run_in_async_rt(|| {
             sched.run_job(Arc::new(cl), rdd, partitions, false)
-        })
-        .map_err(Error::from)
+        })?)
     }
 
     pub fn run_job_with_partitions<T: Data, U: Data + Clone, F, P>(
@@ -664,10 +663,9 @@ impl Context {
         let cl = move |(_task_context, iter)| (func)(iter);
         let sched = self.driver_scheduler.clone();
         let partitions: Vec<usize> = partitions.into_iter().collect();
-        env::Env::run_in_async_rt(|| {
+        Ok(env::Env::run_in_async_rt(|| {
             sched.run_job(Arc::new(cl), rdd, partitions, false)
-        })
-        .map_err(Error::from)
+        })?)
     }
 
     pub fn run_job_with_context<T: Data, U: Data + Clone, F>(
@@ -682,10 +680,9 @@ impl Context {
         let func = Arc::new(func);
         let sched = self.driver_scheduler.clone();
         let partitions = (0..rdd.number_of_splits()).collect();
-        env::Env::run_in_async_rt(|| {
+        Ok(env::Env::run_in_async_rt(|| {
             sched.run_job(func, rdd, partitions, false)
-        })
-        .map_err(Error::from)
+        })?)
     }
 
     pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
@@ -700,9 +697,8 @@ impl Context {
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + Debug + Send + Sync + 'static,
     {
-        self.scheduler
-            .run_approximate_job(Arc::new(func), rdd, evaluator, timeout)
-            .map_err(Error::from)
+        Ok(self.scheduler
+            .run_approximate_job(Arc::new(func), rdd, evaluator, timeout)?)
     }
 
     pub fn union<T: Data + Clone>(
@@ -785,7 +781,7 @@ impl Context {
         );
         let result = NativeBackend::default().execute("local-driver", &task)?;
         match result.status {
-            ResultStatus::Success => T::decode_wire(&result.data).map_err(Error::from),
+            ResultStatus::Success => Ok(T::decode_wire(&result.data)?),
             _ => Err(Error::InvalidPayload(
                 result.error.unwrap_or_else(|| "reduce failed".to_string()),
             )),
@@ -833,12 +829,11 @@ impl Context {
                     .collect()
             }
             Schedulers::Distributed(sched) => {
-                env::Env::run_in_async_rt(|| {
+                Ok(env::Env::run_in_async_rt(|| {
                     futures::executor::block_on(
                         sched.run_native_job_with_broadcasts(ops, source_partitions, broadcasts)
                     )
-                })
-                .map_err(Error::from)
+                })?)
             }
         }
     }
@@ -853,7 +848,7 @@ impl Context {
             .iter()
             .map(|split| {
                 let items: Vec<T> = rdd.compute(split.clone())?.collect();
-                items.encode_wire().map_err(Error::from)
+                Ok(items.encode_wire()?)
             })
             .collect()
     }
@@ -914,8 +909,7 @@ impl Context {
                         ops,
                         parent_partitions,
                     ))
-                })
-                .map_err(Error::from)?;
+                }).map_err(Error::from)?;
 
                 log::info!(
                     "shuffle map stage complete: shuffle_id={} num_reduce_partitions={}",
