@@ -447,7 +447,8 @@ impl PySqlContext {
     pub fn sql(&self, query: &str) -> PyResult<PyDataFrame> {
         let session = self.session.clone();
         let query = query.to_string();
-        let df = run_sql_async(async move { session.sql(&query).await })?;
+        let df = run_sql_async(async move { session.sql(&query).await })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -603,9 +604,6 @@ impl PySqlContext {
         }
 
         impl ScalarUDFImpl for PyUdf {
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
             fn name(&self) -> &str {
                 &self.name
             }
@@ -791,6 +789,7 @@ fn python_dicts_to_batches(
         col_arrays.push(array);
     }
 
-    let batch = RecordBatch::try_new(arrow_schema, col_arrays)?;
+    let batch = RecordBatch::try_new(arrow_schema, col_arrays)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     Ok(vec![batch])
 }

@@ -2,32 +2,34 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use parking_lot::Mutex;
 use serde_json::Value as JV;
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 // Stored JS merge function `(current, delta) -> new_value`.
 // Lifetime is stripped via transmute — safe because Accumulator is always
 // used synchronously on the JS main thread (never sent across threads).
-pub(crate) struct MergeFn(*const ());
+pub(crate) struct MergeFn(ManuallyDrop<Function<'static, (JV, JV), JV>>);
 
+// SAFETY: MergeFn is only used synchronously on the JS main thread.
 unsafe impl Send for MergeFn {}
 unsafe impl Sync for MergeFn {}
 
 impl MergeFn {
     pub(crate) fn new(f: Function<(JV, JV), JV>) -> Self {
-        let ptr =
-            unsafe { std::mem::transmute::<Function<(JV, JV), JV>, Function<'static, (JV, JV), JV>>(f) };
-        Self(Box::into_raw(Box::new(ptr)) as *const ())
+        let f_static = unsafe {
+            std::mem::transmute::<Function<(JV, JV), JV>, Function<'static, (JV, JV), JV>>(f)
+        };
+        Self(ManuallyDrop::new(f_static))
     }
 
     fn call(&self, current: JV, delta: JV) -> Result<JV> {
-        let f = unsafe { &*(self.0 as *const Function<'static, (JV, JV), JV>) };
-        f.call((current, delta))
+        self.0.call((current, delta))
     }
 }
 
 impl Drop for MergeFn {
     fn drop(&mut self) {
-        unsafe { drop(Box::from_raw(self.0 as *mut Function<'static, (JV, JV), JV>)) }
+        unsafe { ManuallyDrop::drop(&mut self.0) }
     }
 }
 

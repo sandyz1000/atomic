@@ -132,12 +132,9 @@ pub fn eval_partition(
         // ContextScope layers a context on top; &**cs gives PinnedRef<HandleScope<()>>
         // for Local::new, and &*cs gives PinnedRef<HandleScope<Context>> for to_rust_string_lossy.
         let context = rt.main_context();
-        let mut hs = deno_core::v8::HandleScope::new(rt.v8_isolate());
-        // SAFETY: hs (ScopeStorage) is immediately shadowed; it stays on the stack, no moves.
-        let mut hs = {
-            let pinned = unsafe { std::pin::Pin::new_unchecked(&mut hs) };
-            pinned.init()
-        };
+        let hs_storage = deno_core::v8::HandleScope::new(rt.v8_isolate());
+        // std::pin::pin! safely pins a stack-local value without unsafe.
+        let mut hs = std::pin::pin!(hs_storage).init();
         let hs = &mut hs;
         let ctx_local = deno_core::v8::Local::new(&*hs, context);
         let mut cs = deno_core::v8::ContextScope::new(hs, ctx_local);

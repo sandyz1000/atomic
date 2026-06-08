@@ -83,7 +83,7 @@ pub struct BlockGenerator {
     block_interval: Duration,
     current_buffer: Arc<Mutex<Vec<Box<dyn Any + Send>>>>,
     state: Mutex<GeneratorState>,
-    next_block_id: AtomicUsize,
+    next_block_id: Arc<AtomicUsize>,
     stopped: Arc<AtomicBool>,
     /// Optional ReceiverTracker to notify when a block is generated.
     receiver_tracker: Option<Arc<crate::scheduler::receiver::ReceiverTracker>>,
@@ -96,7 +96,7 @@ impl BlockGenerator {
             block_interval,
             current_buffer: Arc::new(Mutex::new(Vec::new())),
             state: Mutex::new(GeneratorState::Initialised),
-            next_block_id: AtomicUsize::new(0),
+            next_block_id: Arc::new(AtomicUsize::new(0)),
             stopped: Arc::new(AtomicBool::new(false)),
             receiver_tracker: None,
         }
@@ -131,14 +131,11 @@ impl BlockGenerator {
         let stopped = self.stopped.clone();
         let stream_id = self.stream_id;
         let tracker = self.receiver_tracker.clone();
-        let next_id = &self.next_block_id as *const AtomicUsize as usize;
+        let next_block_id = Arc::clone(&self.next_block_id);
 
         std::thread::Builder::new()
             .name(format!("block-generator-{}", stream_id))
             .spawn(move || {
-                // Safety: next_id points to self.next_block_id which lives as long as
-                // BlockGenerator. In practice, stop() is called before drop.
-                let next_block_id = unsafe { &*(next_id as *const AtomicUsize) };
                 while !stopped.load(Ordering::SeqCst) {
                     std::thread::sleep(interval);
                     let block: Vec<_> = buffer.lock().drain(..).collect();

@@ -12,6 +12,7 @@
 /// Elements are `serde_json::Value`. Pair elements are `[key, value]` JSON arrays.
 /// State for `updateStateByKey` is stored as `serde_json::Value` per key.
 use std::collections::{HashMap, VecDeque};
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,26 +21,19 @@ use napi_derive::napi;
 use parking_lot::Mutex;
 use serde_json::Value as JV;
 
-//
-// We store NAPI functions by stripping their env lifetime. This is only safe
-// because all operations are synchronous and run on the JS main thread.
-// We use a newtype wrapper to make the unsafe code explicit.
+// We store NAPI functions by stripping their env lifetime via transmute. This is
+// only safe because all operations are synchronous and run on the JS main thread.
+// Each variant holds its own ManuallyDrop<Function<'static, ...>> to avoid type
+// erasure and raw-pointer dereferences — Deref is used for all call sites.
 
-struct StoredFn(
-    // SAFETY: the Function is valid for as long as this struct is alive,
-    // because it's only used in run_one_batch() on the JS main thread.
-    *const (),
-    FnKind,
-);
-
-#[derive(Clone, Copy)]
-enum FnKind {
-    MapJv,       // Function<JV, JV>
-    FilterBool,  // Function<JV, bool>
-    FlatMapVec,  // Function<JV, Vec<JV>>
-    ReduceJvJv,  // Function<(JV, JV), JV>
-    StateUpdate, // Function<(Vec<JV>, Option<JV>), Option<JV>>
-    OutputCb,    // Function<Vec<JV>, ()>
+// SAFETY: StoredFn is only constructed and called from the JS main thread.
+enum StoredFn {
+    Map(ManuallyDrop<Function<'static, JV, JV>>),
+    Filter(ManuallyDrop<Function<'static, JV, bool>>),
+    FlatMap(ManuallyDrop<Function<'static, JV, Vec<JV>>>),
+    Reduce(ManuallyDrop<Function<'static, (JV, JV), JV>>),
+    StateUpdate(ManuallyDrop<Function<'static, (Vec<JV>, Option<JV>), Option<JV>>>),
+    OutputCb(ManuallyDrop<Function<'static, Vec<JV>, ()>>),
 }
 
 // SAFETY: We only use StoredFn from the JS main thread.
@@ -49,117 +43,102 @@ unsafe impl Sync for StoredFn {}
 impl StoredFn {
     fn from_map(f: Function<JV, JV>) -> Self {
         // SAFETY: strip lifetime; only called from JS main thread
-        let ptr = unsafe {
-            std::mem::transmute::<Function<JV, JV>, Function<'static, JV, JV>>(f)
-        };
-        let boxed = Box::new(ptr);
-        StoredFn(Box::into_raw(boxed) as *const (), FnKind::MapJv)
+        let s = unsafe { std::mem::transmute::<Function<JV, JV>, Function<'static, JV, JV>>(f) };
+        StoredFn::Map(ManuallyDrop::new(s))
     }
 
     fn from_filter(f: Function<JV, bool>) -> Self {
-        let ptr = unsafe {
-            std::mem::transmute::<Function<JV, bool>, Function<'static, JV, bool>>(f)
-        };
-        let boxed = Box::new(ptr);
-        StoredFn(Box::into_raw(boxed) as *const (), FnKind::FilterBool)
+        let s =
+            unsafe { std::mem::transmute::<Function<JV, bool>, Function<'static, JV, bool>>(f) };
+        StoredFn::Filter(ManuallyDrop::new(s))
     }
 
     fn from_flat_map(f: Function<JV, Vec<JV>>) -> Self {
-        let ptr = unsafe {
+        let s = unsafe {
             std::mem::transmute::<Function<JV, Vec<JV>>, Function<'static, JV, Vec<JV>>>(f)
         };
-        let boxed = Box::new(ptr);
-        StoredFn(Box::into_raw(boxed) as *const (), FnKind::FlatMapVec)
+        StoredFn::FlatMap(ManuallyDrop::new(s))
     }
 
     fn from_reduce(f: Function<(JV, JV), JV>) -> Self {
-        let ptr = unsafe {
+        let s = unsafe {
             std::mem::transmute::<Function<(JV, JV), JV>, Function<'static, (JV, JV), JV>>(f)
         };
-        let boxed = Box::new(ptr);
-        StoredFn(Box::into_raw(boxed) as *const (), FnKind::ReduceJvJv)
+        StoredFn::Reduce(ManuallyDrop::new(s))
     }
 
     fn from_state_update(f: Function<(Vec<JV>, Option<JV>), Option<JV>>) -> Self {
-        let ptr = unsafe {
+        let s = unsafe {
             std::mem::transmute::<
                 Function<(Vec<JV>, Option<JV>), Option<JV>>,
                 Function<'static, (Vec<JV>, Option<JV>), Option<JV>>,
             >(f)
         };
-        let boxed = Box::new(ptr);
-        StoredFn(Box::into_raw(boxed) as *const (), FnKind::StateUpdate)
+        StoredFn::StateUpdate(ManuallyDrop::new(s))
     }
 
     fn from_output_cb(f: Function<Vec<JV>, ()>) -> Self {
-        let ptr = unsafe {
+        let s = unsafe {
             std::mem::transmute::<Function<Vec<JV>, ()>, Function<'static, Vec<JV>, ()>>(f)
         };
-        let boxed = Box::new(ptr);
-        StoredFn(Box::into_raw(boxed) as *const (), FnKind::OutputCb)
+        StoredFn::OutputCb(ManuallyDrop::new(s))
     }
 
     fn call_map(&self, x: JV) -> Result<JV> {
-        // SAFETY: Only called from the JS main thread in run_one_batch().
-        let f = unsafe { &*(self.0 as *const Function<'static, JV, JV>) };
+        let StoredFn::Map(f) = self else {
+            unreachable!()
+        };
         f.call(x)
     }
 
     fn call_filter(&self, x: JV) -> Result<bool> {
-        let f = unsafe { &*(self.0 as *const Function<'static, JV, bool>) };
+        let StoredFn::Filter(f) = self else {
+            unreachable!()
+        };
         f.call(x)
     }
 
     fn call_flat_map(&self, x: JV) -> Result<Vec<JV>> {
-        let f = unsafe { &*(self.0 as *const Function<'static, JV, Vec<JV>>) };
+        let StoredFn::FlatMap(f) = self else {
+            unreachable!()
+        };
         f.call(x)
     }
 
     fn call_reduce(&self, a: JV, b: JV) -> Result<JV> {
-        let f = unsafe { &*(self.0 as *const Function<'static, (JV, JV), JV>) };
+        let StoredFn::Reduce(f) = self else {
+            unreachable!()
+        };
         f.call((a, b))
     }
 
     fn call_state_update(&self, new_vals: Vec<JV>, old: Option<JV>) -> Result<Option<JV>> {
-        let f = unsafe {
-            &*(self.0 as *const Function<'static, (Vec<JV>, Option<JV>), Option<JV>>)
+        let StoredFn::StateUpdate(f) = self else {
+            unreachable!()
         };
         f.call((new_vals, old))
     }
 
     fn call_output_cb(&self, batch: Vec<JV>) -> Result<()> {
-        let f = unsafe { &*(self.0 as *const Function<'static, Vec<JV>, ()>) };
+        let StoredFn::OutputCb(f) = self else {
+            unreachable!()
+        };
         f.call(batch)
     }
 }
 
 impl Drop for StoredFn {
     fn drop(&mut self) {
-        match self.1 {
-            FnKind::MapJv => unsafe {
-                drop(Box::from_raw(self.0 as *mut Function<'static, JV, JV>))
-            },
-            FnKind::FilterBool => unsafe {
-                drop(Box::from_raw(self.0 as *mut Function<'static, JV, bool>))
-            },
-            FnKind::FlatMapVec => unsafe {
-                drop(Box::from_raw(self.0 as *mut Function<'static, JV, Vec<JV>>))
-            },
-            FnKind::ReduceJvJv => unsafe {
-                drop(Box::from_raw(self.0 as *mut Function<'static, (JV, JV), JV>))
-            },
-            FnKind::StateUpdate => unsafe {
-                drop(Box::from_raw(
-                    self.0 as *mut Function<'static, (Vec<JV>, Option<JV>), Option<JV>>,
-                ))
-            },
-            FnKind::OutputCb => unsafe {
-                drop(Box::from_raw(self.0 as *mut Function<'static, Vec<JV>, ()>))
-            },
+        match self {
+            StoredFn::Map(f) => unsafe { ManuallyDrop::drop(f) },
+            StoredFn::Filter(f) => unsafe { ManuallyDrop::drop(f) },
+            StoredFn::FlatMap(f) => unsafe { ManuallyDrop::drop(f) },
+            StoredFn::Reduce(f) => unsafe { ManuallyDrop::drop(f) },
+            StoredFn::StateUpdate(f) => unsafe { ManuallyDrop::drop(f) },
+            StoredFn::OutputCb(f) => unsafe { ManuallyDrop::drop(f) },
         }
     }
 }
-
 
 enum JsStreamTransform {
     Map(StoredFn),
@@ -172,7 +151,6 @@ enum JsStreamTransform {
     UpdateStateByKey(StoredFn),
     MapValues(StoredFn),
 }
-
 
 enum JsDStreamInner {
     Queue {
@@ -188,7 +166,6 @@ enum JsDStreamInner {
         buffer: Mutex<VecDeque<(Instant, Vec<JV>)>>,
     },
 }
-
 
 /// A lazy handle to a DStream transform chain (Node.js).
 #[napi]
@@ -340,7 +317,6 @@ impl JsDStream {
     }
 }
 
-
 /// Queue handle for injecting test batches into a `testQueueStream`.
 #[napi]
 pub struct JsBatchQueue {
@@ -357,17 +333,12 @@ impl JsBatchQueue {
     }
 }
 
-
 struct OutputOp {
     stream: Arc<JsDStreamInner>,
     callback: StoredFn,
 }
 
-
-fn compute_batch(
-    inner: &JsDStreamInner,
-    state_store: &mut HashMap<String, JV>,
-) -> Result<Vec<JV>> {
+fn compute_batch(inner: &JsDStreamInner, state_store: &mut HashMap<String, JV>) -> Result<Vec<JV>> {
     match inner {
         JsDStreamInner::Queue { queue } => {
             let mut q = queue.lock();
@@ -377,14 +348,21 @@ fn compute_batch(
             let parent_elems = compute_batch(parent, state_store)?;
             apply_transform(parent_elems, op, state_store)
         }
-        JsDStreamInner::Windowed { parent, window_ms, buffer } => {
+        JsDStreamInner::Windowed {
+            parent,
+            window_ms,
+            buffer,
+        } => {
             let batch = compute_batch(parent, state_store)?;
             let now = Instant::now();
             let cutoff = Duration::from_millis(*window_ms);
             let mut buf = buffer.lock();
             buf.push_back((now, batch));
             buf.retain(|(ts, _)| now.duration_since(*ts) < cutoff);
-            Ok(buf.iter().flat_map(|(_, elems)| elems.iter().cloned()).collect())
+            Ok(buf
+                .iter()
+                .flat_map(|(_, elems)| elems.iter().cloned())
+                .collect())
         }
     }
 }
@@ -512,9 +490,9 @@ fn apply_transform(
                 let lk_str = key_str(lk)?;
                 let mut matched = false;
                 for re in &right_elems {
-                    let rp = re.as_array().ok_or_else(|| {
-                        Error::from_reason("leftOuterJoin: right must be [k,v]")
-                    })?;
+                    let rp = re
+                        .as_array()
+                        .ok_or_else(|| Error::from_reason("leftOuterJoin: right must be [k,v]"))?;
                     let rk = &rp[0];
                     let rv = &rp[1];
                     if key_str(rk)? == lk_str {
@@ -607,7 +585,6 @@ fn key_str(val: &JV) -> Result<String> {
         other => Ok(other.to_string()),
     }
 }
-
 
 /// Streaming context for Node.js.
 ///
@@ -757,8 +734,8 @@ pub fn streaming_context_from_checkpoint(dir: String) -> Result<Option<JsStreami
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = std::fs::read(&path)
-        .map_err(|e| Error::from_reason(format!("read checkpoint: {e}")))?;
+    let bytes =
+        std::fs::read(&path).map_err(|e| Error::from_reason(format!("read checkpoint: {e}")))?;
     let data: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| Error::from_reason(format!("parse checkpoint: {e}")))?;
     let batch_secs = data["batch_secs"].as_f64().unwrap_or(1.0);
