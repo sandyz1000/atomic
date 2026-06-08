@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::{ComputeError, ComputeResult};
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -15,22 +15,22 @@ pub struct Hosts {
 }
 
 impl Hosts {
-    pub fn get() -> Result<&'static Hosts> {
+    pub fn get() -> ComputeResult<&'static Hosts> {
         HOSTS.get_or_try_init(Self::load)
     }
 
-    fn load() -> Result<Self> {
-        let home = std::env::home_dir().ok_or(Error::NoHome)?;
+    fn load() -> ComputeResult<Self> {
+        let home = std::env::home_dir().ok_or(ComputeError::NoHome)?;
         Hosts::load_from(home.join("hosts.conf"))
     }
 
-    fn load_from<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let s = std::fs::read_to_string(&path).map_err(|e| Error::LoadHosts {
+    fn load_from<P: AsRef<Path>>(path: P) -> ComputeResult<Self> {
+        let s = std::fs::read_to_string(&path).map_err(|e| ComputeError::LoadHosts {
             source: e,
             path: path.as_ref().into(),
         })?;
 
-        toml::from_str(&s).map_err(|e| Error::ParseHosts {
+        toml::from_str(&s).map_err(|e| ComputeError::ParseHosts {
             source: e,
             path: path.as_ref().into(),
         })
@@ -45,8 +45,8 @@ mod tests {
     #[test]
     fn test_missing_hosts_file() {
         match Hosts::load_from("/does_not_exist").unwrap_err() {
-            Error::LoadHosts { .. } => {}
-            _ => panic!("Expected Error::LoadHosts"),
+            ComputeError::LoadHosts { .. } => {}
+            _ => panic!("Expected ComputeError::LoadHosts"),
         }
     }
 
@@ -56,8 +56,8 @@ mod tests {
         file.write_all("invalid data".as_ref()).unwrap();
 
         match Hosts::load_from(&path).unwrap_err() {
-            Error::ParseHosts { .. } => {}
-            _ => panic!("Expected Error::ParseHosts"),
+            ComputeError::ParseHosts { .. } => {}
+            _ => panic!("Expected ComputeError::ParseHosts"),
         }
     }
 }

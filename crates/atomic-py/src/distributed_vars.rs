@@ -4,8 +4,6 @@ use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-// ── BroadcastVar ──────────────────────────────────────────────────────────────
-
 /// A read-only value broadcast to all tasks.
 ///
 /// Created by `Context.broadcast(value)`.  The value is serialized with
@@ -45,8 +43,6 @@ impl PyBroadcastVar {
     }
 }
 
-// ── Accumulator ───────────────────────────────────────────────────────────────
-
 /// A mutable accumulator that can be updated from tasks.
 ///
 /// Created by `Context.accumulator(zero)`.  Supports numeric (`int`, `float`),
@@ -70,8 +66,8 @@ impl PyAccumulator {
     pub fn add(&self, py: Python<'_>, delta: Py<PyAny>) -> PyResult<()> {
         let delta_val = pythonobj_to_json(py, &delta)?;
         let mut guard = self.inner.lock();
-        *guard = json_add(guard.clone(), delta_val)
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        *guard =
+            json_add(guard.clone(), delta_val).map_err(pyo3::exceptions::PyValueError::new_err)?;
         Ok(())
     }
 
@@ -99,8 +95,6 @@ impl PyAccumulator {
         }
     }
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub(crate) fn pythonobj_to_json(py: Python<'_>, obj: &Py<PyAny>) -> PyResult<serde_json::Value> {
     let bound = obj.bind(py);
@@ -142,7 +136,9 @@ fn json_to_python(py: Python<'_>, val: serde_json::Value) -> PyResult<Py<PyAny>>
             } else if let Some(f) = n.as_f64() {
                 Ok(f.into_pyobject(py)?.into_any().unbind())
             } else {
-                Err(pyo3::exceptions::PyValueError::new_err("number out of range"))
+                Err(pyo3::exceptions::PyValueError::new_err(
+                    "number out of range",
+                ))
             }
         }
         serde_json::Value::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
@@ -159,10 +155,7 @@ fn json_to_python(py: Python<'_>, val: serde_json::Value) -> PyResult<Py<PyAny>>
     }
 }
 
-fn json_add(
-    a: serde_json::Value,
-    b: serde_json::Value,
-) -> Result<serde_json::Value, String> {
+fn json_add(a: serde_json::Value, b: serde_json::Value) -> Result<serde_json::Value, String> {
     match (a, b) {
         (serde_json::Value::Number(x), serde_json::Value::Number(y)) => {
             // Prefer integer; fall back to float.
@@ -171,8 +164,8 @@ fn json_add(
             } else {
                 let xf = x.as_f64().unwrap_or(0.0);
                 let yf = y.as_f64().unwrap_or(0.0);
-                let n = serde_json::Number::from_f64(xf + yf)
-                    .ok_or("non-finite float after add")?;
+                let n =
+                    serde_json::Number::from_f64(xf + yf).ok_or("non-finite float after add")?;
                 Ok(serde_json::Value::Number(n))
             }
         }

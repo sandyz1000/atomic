@@ -7,7 +7,6 @@ use datafusion::logical_expr::{
     ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
 
-// ── Minimal ScalarUDF impl for tests ─────────────────────────────────────────
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct IsLuxury;
@@ -73,7 +72,6 @@ impl ScalarUDFImpl for EstimateLtv {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 fn make_registry() -> ToolRegistry {
     let ctx = Arc::new(SessionContext::new());
@@ -81,7 +79,7 @@ fn make_registry() -> ToolRegistry {
 }
 
 #[test]
-fn test_register_scalar_appears_in_descriptions() {
+fn test_register_scalar() {
     let reg = make_registry();
     let udf = ScalarUDF::from(IsLuxury);
     reg.register_scalar(udf, "Returns true if the category is a luxury item").unwrap();
@@ -117,7 +115,7 @@ fn test_register_multiple_udfs() {
 }
 
 #[test]
-fn test_udf_description_has_signature() {
+fn test_udf_signature() {
     let reg = make_registry();
     reg.register_scalar(ScalarUDF::from(IsLuxury), "Returns true if luxury").unwrap();
 
@@ -129,7 +127,7 @@ fn test_udf_description_has_signature() {
 }
 
 #[test]
-fn test_empty_registry_returns_empty_descriptions() {
+fn test_empty_registry() {
     let reg = make_registry();
     assert!(reg.udf_descriptions().is_empty());
 }

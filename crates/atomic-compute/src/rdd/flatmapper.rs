@@ -89,9 +89,7 @@ where
     }
 }
 
-// ============================================================================
 // FlatMapperPairRdd — flat_map to (K, V)
-// ============================================================================
 
 pub struct FlatMapperPairRdd<T: Data, K: Data + Clone, V: Data + Clone, F>
 where

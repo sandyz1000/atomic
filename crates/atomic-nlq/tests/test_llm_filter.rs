@@ -15,7 +15,7 @@ fn make_orders_schema() -> Arc<Schema> {
 }
 
 #[test]
-fn test_llm_filter_node_schema_passthrough() {
+fn test_filter_schema_passthrough() {
     let session = SessionContext::new();
     let empty_plan = LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
         produce_one_row: false,
@@ -29,13 +29,13 @@ fn test_llm_filter_node_schema_passthrough() {
 }
 
 #[test]
-fn test_llm_batching_rule_sets_batch_size() {
+fn test_batching_rule_size() {
     let rule = LlmBatchingRule::new(25);
     assert_eq!(rule.batch_size(), 25);
 }
 
 #[test]
-fn test_record_batch_to_json_rows() {
+fn test_batch_to_json() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("name", DataType::Utf8, false),
         Field::new("score", DataType::Int64, false),

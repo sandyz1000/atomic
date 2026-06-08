@@ -5,7 +5,6 @@ use datafusion::arrow::array::{Int32Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 /// Build a RecordBatch with columns `(key: i32, value: i32)`.
 fn make_kv_batch(keys: &[i32], values: &[i32]) -> RecordBatch {
@@ -78,7 +77,6 @@ fn total_rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(|b| b.num_rows()).sum()
 }
 
-// ── basic SELECT tests ────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_select_all() {
@@ -102,7 +100,6 @@ async fn test_select_columns() {
     assert_eq!(total_rows(&result), 2);
 }
 
-// ── WHERE filter tests ────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_where_filter() {
@@ -121,7 +118,7 @@ async fn test_where_filter() {
 }
 
 #[tokio::test]
-async fn test_where_filter_no_results() {
+async fn test_filter_no_results() {
     let ctx = AtomicSqlContext::new();
     let batch = make_kv_batch(&[1, 2], &[10, 20]);
     ctx.register_batches("t", vec![batch]).unwrap();
@@ -136,7 +133,6 @@ async fn test_where_filter_no_results() {
     assert_eq!(total_rows(&result), 0);
 }
 
-// ── aggregation tests ─────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_count() {
@@ -212,7 +208,6 @@ async fn test_group_by_sum() {
     assert_eq!(totals, vec![30, 20]);
 }
 
-// ── ORDER BY tests ────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_order_by_asc() {
@@ -248,7 +243,6 @@ async fn test_order_by_desc() {
     assert_eq!(keys, vec![3, 2, 1]);
 }
 
-// ── LIMIT tests ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_limit() {
@@ -266,7 +260,6 @@ async fn test_limit() {
     assert_eq!(total_rows(&result), 2);
 }
 
-// ── JOIN tests ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_inner_join() {
@@ -301,7 +294,6 @@ async fn test_inner_join() {
     assert_eq!(names, vec!["Alice", "Bob"]);
 }
 
-// ── multi-partition tests ─────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_partitioned_batches() {
@@ -322,7 +314,6 @@ async fn test_partitioned_batches() {
     assert_eq!(col_as_i64(&result[0], 0), vec![100]);
 }
 
-// ── DISTINCT test ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_distinct() {
@@ -341,7 +332,6 @@ async fn test_distinct() {
     assert_eq!(col_as_i32(&result[0], 0), vec![1, 2, 3]);
 }
 
-// ── EXPLAIN test (smoke test — just ensure it doesn't panic) ──────────────────
 
 #[tokio::test]
 async fn test_explain() {

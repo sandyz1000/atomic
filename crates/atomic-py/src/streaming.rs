@@ -18,7 +18,6 @@ use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyIterator, PyList, PyTuple};
 
-// ── Pickle helpers ─────────────────────────────────────────────────────────────
 
 fn pickle_fn(py: Python<'_>, func: &Py<PyAny>) -> PyResult<Vec<u8>> {
     let pickle = PyModule::import(py, "cloudpickle").or_else(|_| PyModule::import(py, "pickle"))?;
@@ -34,7 +33,6 @@ fn unpickle_fn(py: Python<'_>, bytes: &[u8]) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
-// ── Transform op enum ─────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 enum PyStreamTransform {
@@ -49,7 +47,6 @@ enum PyStreamTransform {
     MapValues(Vec<u8>),
 }
 
-// ── DStream inner ─────────────────────────────────────────────────────────────
 
 enum PyDStreamInner {
     Queue {
@@ -70,7 +67,6 @@ enum PyDStreamInner {
     },
 }
 
-// ── PyDStream ────────────────────────────────────────────────────────────────
 
 #[pyclass(name = "DStream")]
 pub struct PyDStream {
@@ -201,7 +197,6 @@ impl PyDStream {
     }
 }
 
-// ── PyBatchQueue ──────────────────────────────────────────────────────────────
 
 #[pyclass(name = "BatchQueue")]
 pub struct PyBatchQueue {
@@ -218,14 +213,12 @@ impl PyBatchQueue {
     }
 }
 
-// ── OutputOp ──────────────────────────────────────────────────────────────────
 
 struct OutputOp {
     stream: Arc<PyDStreamInner>,
     func_bytes: Vec<u8>,
 }
 
-// ── Batch computation ─────────────────────────────────────────────────────────
 
 fn compute_batch(
     py: Python<'_>,
@@ -272,7 +265,6 @@ fn apply_transform(
     state_store: &mut HashMap<String, Vec<u8>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
     match op {
-        // ── Map ─────────────────────────────────────────────────────────────
         PyStreamTransform::Map(func_bytes) => {
             let f = unpickle_fn(py, func_bytes)?;
             elements
@@ -281,7 +273,6 @@ fn apply_transform(
                 .collect()
         }
 
-        // ── Filter ──────────────────────────────────────────────────────────
         PyStreamTransform::Filter(func_bytes) => {
             let f = unpickle_fn(py, func_bytes)?;
             elements
@@ -296,7 +287,6 @@ fn apply_transform(
                 .collect()
         }
 
-        // ── FlatMap ─────────────────────────────────────────────────────────
         PyStreamTransform::FlatMap(func_bytes) => {
             let f = unpickle_fn(py, func_bytes)?;
             let mut result = Vec::new();
@@ -310,7 +300,6 @@ fn apply_transform(
             Ok(result)
         }
 
-        // ── ReduceByKey ─────────────────────────────────────────────────────
         PyStreamTransform::ReduceByKey(func_bytes) => {
             let f = unpickle_fn(py, func_bytes)?;
             let mut groups: Vec<(Py<PyAny>, Py<PyAny>)> = Vec::new();
@@ -333,7 +322,6 @@ fn apply_transform(
             groups.iter().map(|(k, v)| py_tuple2(py, k, v)).collect()
         }
 
-        // ── GroupByKey ──────────────────────────────────────────────────────
         PyStreamTransform::GroupByKey => {
             let mut groups: Vec<(Py<PyAny>, Vec<Py<PyAny>>)> = Vec::new();
             for e in &elements {
@@ -363,7 +351,6 @@ fn apply_transform(
                 .collect()
         }
 
-        // ── Join ────────────────────────────────────────────────────────────
         PyStreamTransform::Join(right_inner) => {
             let mut dummy: HashMap<String, Vec<u8>> = HashMap::new();
             let right_elems = compute_batch(py, right_inner, &mut dummy)?;
@@ -385,7 +372,6 @@ fn apply_transform(
             Ok(result)
         }
 
-        // ── LeftOuterJoin ───────────────────────────────────────────────────
         PyStreamTransform::LeftOuterJoin(right_inner) => {
             let mut dummy: HashMap<String, Vec<u8>> = HashMap::new();
             let right_elems = compute_batch(py, right_inner, &mut dummy)?;
@@ -414,7 +400,6 @@ fn apply_transform(
             Ok(result)
         }
 
-        // ── UpdateStateByKey ────────────────────────────────────────────────
         PyStreamTransform::UpdateStateByKey(func_bytes) => {
             let f = unpickle_fn(py, func_bytes)?;
             let pickle = PyModule::import(py, "pickle")?;
@@ -481,7 +466,6 @@ fn apply_transform(
             Ok(result)
         }
 
-        // ── MapValues ───────────────────────────────────────────────────────
         PyStreamTransform::MapValues(func_bytes) => {
             let f = unpickle_fn(py, func_bytes)?;
             elements
@@ -504,7 +488,6 @@ fn call_output_fn(py: Python<'_>, func_bytes: &[u8], elements: Vec<Py<PyAny>>) -
     Ok(())
 }
 
-// ── PyStreamingContext ────────────────────────────────────────────────────────
 
 #[pyclass(name = "StreamingContext")]
 pub struct PyStreamingContext {

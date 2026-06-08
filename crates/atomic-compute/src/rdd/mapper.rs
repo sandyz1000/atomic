@@ -94,9 +94,7 @@ where
     }
 }
 
-// ============================================================================
 // MapperPairRdd — map to (K, V) with correct cogroup_iterator_any boxing
-// ============================================================================
 
 pub struct MapperPairRdd<T: Data, K: Data + Clone, V: Data + Clone, F>
 where

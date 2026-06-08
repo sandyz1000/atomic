@@ -5,7 +5,7 @@ use std::io::{self, BufRead, BufReader};
 use petgraph::Direction;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
-use crate::types::{Edge, EdgeContext, EdgeTriplet, VertexId, VertexMap};
+use crate::topology::{Edge, EdgeContext, EdgeTriplet, VertexId, VertexMap};
 
 /// An in-process directed graph with vertex data `VD` and edge data `ED`.
 ///
@@ -19,7 +19,6 @@ pub struct Graph<VD, ED> {
     pub(crate) inner: StableGraph<(VertexId, VD), ED>,
     pub(crate) id_to_node: HashMap<VertexId, NodeIndex>,
 }
-
 
 impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     /// Build a graph from a vertex list and an edge list.
@@ -114,7 +113,6 @@ impl Graph<(), ()> {
     }
 }
 
-
 impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     pub fn num_vertices(&self) -> usize {
         self.inner.node_count()
@@ -206,7 +204,6 @@ impl<VD: Clone, ED: Clone> Graph<VD, ED> {
         }
     }
 }
-
 
 impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     /// Apply `f` to each vertex attribute, returning a new graph with the same structure.
@@ -356,8 +353,6 @@ impl<VD: Clone, ED: Clone> Graph<VD, ED> {
         self.map_vertices(|vid, vd| map_func(vid, vd, other.get(&vid)))
     }
 
-    // ── Core primitive ────────────────────────────────────────────────────────
-
     /// Aggregate messages from edges into per-vertex values.
     ///
     /// `send_msg` is called once per edge triplet; it may call
@@ -407,7 +402,6 @@ impl<VD: Clone, ED: Clone> Graph<VD, ED> {
         Graph::from_vertices_edges(vertices, edges)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -503,7 +497,11 @@ mod tests {
     fn from_vertices_edges_isolated_vertex_is_present() {
         let g: Graph<i32, ()> = Graph::from_vertices_edges(
             vec![(0, 10), (1, 20), (99, 99)],
-            vec![Edge { src: 0, dst: 1, attr: () }],
+            vec![Edge {
+                src: 0,
+                dst: 1,
+                attr: (),
+            }],
         );
         assert_eq!(g.num_vertices(), 3);
         assert_eq!(g.num_edges(), 1);
@@ -517,8 +515,16 @@ mod tests {
         let g: Graph<(), ()> = Graph::from_vertices_edges(
             vec![(0, ()), (1, ())],
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 0, dst: 99, attr: () }, // 99 not in vertex list
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 0,
+                    dst: 99,
+                    attr: (),
+                }, // 99 not in vertex list
             ],
         );
         assert_eq!(g.num_edges(), 1, "edge to unknown vertex should be dropped");
@@ -567,8 +573,16 @@ mod tests {
         let g: Graph<(), f64> = Graph::from_vertices_edges(
             vec![(0, ()), (1, ())],
             vec![
-                Edge { src: 0, dst: 1, attr: 1.0 },
-                Edge { src: 0, dst: 1, attr: 3.0 },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: 1.0,
+                },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: 3.0,
+                },
             ],
         );
         let merged = g.group_edges(|a, b| a + b);
@@ -580,11 +594,13 @@ mod tests {
     #[test]
     fn outer_join_vertices_updates_matching() {
         let g = triangle_graph();
-        let extra: std::collections::HashMap<i64, f64> = vec![(0_i64, 100.0), (2, 200.0)].into_iter().collect();
+        let extra: std::collections::HashMap<i64, f64> =
+            vec![(0_i64, 100.0), (2, 200.0)].into_iter().collect();
         let joined = g.outer_join_vertices(&extra, |_vid, _old, v| v.cloned().unwrap_or(0.0));
-        let vmap: std::collections::HashMap<_, _> = joined.vertices().map(|(id, v)| (id, *v)).collect();
+        let vmap: std::collections::HashMap<_, _> =
+            joined.vertices().map(|(id, v)| (id, *v)).collect();
         assert!((vmap[&0] - 100.0).abs() < 1e-9);
-        assert!((vmap[&1] - 0.0).abs() < 1e-9);  // no entry → default 0
+        assert!((vmap[&1] - 0.0).abs() < 1e-9); // no entry → default 0
         assert!((vmap[&2] - 200.0).abs() < 1e-9);
     }
 }

@@ -32,7 +32,6 @@ use tokio::sync::{Mutex, mpsc};
 
 use atomic_data::distributed::PythonUdfPayload;
 
-// ── Embedded Python worker script ─────────────────────────────────────────────
 
 const WORKER_SCRIPT: &str = r#"
 import sys, json, base64, struct
@@ -76,7 +75,6 @@ while True:
         write_frame({"ok": False, "data_json": None, "error": str(e)})
 "#;
 
-// ── IPC types ─────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 struct TaskFrame<'a> {
@@ -91,7 +89,6 @@ struct ResultFrame {
     error: Option<String>,
 }
 
-// ── Worker handle ─────────────────────────────────────────────────────────────
 
 struct PythonWorkerHandle {
     stdin: BufWriter<ChildStdin>,
@@ -150,7 +147,6 @@ impl PythonWorkerHandle {
     }
 }
 
-// ── Pool ──────────────────────────────────────────────────────────────────────
 
 /// Process-wide pool of persistent Python worker subprocesses.
 pub struct PythonWorkerPool {
@@ -303,7 +299,6 @@ pub fn init_python_worker_pool(pool_size: usize) {
     });
 }
 
-// ── Dispatcher ───────────────────────────────────────────────────────────────
 
 /// [`OpDispatcher`] for `TaskRuntime::Python` ops.
 ///
@@ -329,7 +324,6 @@ impl crate::backend::OpDispatcher for PythonDispatcher {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

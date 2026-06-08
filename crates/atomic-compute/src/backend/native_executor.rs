@@ -7,10 +7,9 @@ use atomic_data::distributed::{
 };
 
 use crate::backend::{Backend, OpDispatcher};
-use crate::error::{Error, Result};
+use crate::error::{ComputeError, ComputeResult};
 use crate::task_registry::{SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
 
-// ── NativeDispatcher ─────────────────────────────────────────────────────────
 
 /// Handles `TaskRuntime::Native` ops — both compile-time `#[task]` registry
 /// lookups and shuffle-map writes.
@@ -22,7 +21,7 @@ impl OpDispatcher for NativeDispatcher {
         op: &PipelineOp,
         partition_id: usize,
         data: &[u8],
-    ) -> std::result::Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, String> {
         match &op.action {
             TaskAction::ShuffleMap {
                 shuffle_id,
@@ -61,7 +60,6 @@ impl OpDispatcher for NativeDispatcher {
     }
 }
 
-// ── NativeBackend ─────────────────────────────────────────────────────────────
 
 /// Native in-process task executor.
 ///
@@ -96,9 +94,9 @@ impl Default for NativeBackend {
 }
 
 impl Backend for NativeBackend {
-    fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> Result<TaskResultEnvelope> {
+    fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> ComputeResult<TaskResultEnvelope> {
         if task.ops.is_empty() {
-            return Err(Error::UnknownOperation("empty pipeline".to_string()));
+            return Err(ComputeError::UnknownOperation("empty pipeline".to_string()));
         }
 
         if !task.broadcast_values.is_empty() {
@@ -117,7 +115,7 @@ impl Backend for NativeBackend {
             );
 
             let dispatcher = self.dispatchers.get(&op.runtime).ok_or_else(|| {
-                Error::UnknownOperation(format!("unknown TaskRuntime: {:?}", op.runtime))
+                ComputeError::UnknownOperation(format!("unknown TaskRuntime: {:?}", op.runtime))
             })?;
 
             match dispatcher.dispatch(op, task.partition_id, &data) {

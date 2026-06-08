@@ -11,7 +11,6 @@ use datafusion::parquet::file::properties::WriterProperties;
 use std::fs::File;
 use std::sync::Arc;
 
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 fn write_parquet(path: &std::path::Path, batch: RecordBatch) {
     let file = File::create(path).unwrap();
@@ -21,10 +20,9 @@ fn write_parquet(path: &std::path::Path, batch: RecordBatch) {
     writer.close().unwrap();
 }
 
-// ── tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_register_csv_and_query() {
+async fn test_csv_query() {
     let td = tempfile::tempdir().unwrap();
     let csv_path = td.path().join("data.csv");
     std::fs::write(&csv_path, "key,value\n1,10\n2,20\n3,30\n").unwrap();
@@ -42,7 +40,7 @@ async fn test_register_csv_and_query() {
 }
 
 #[tokio::test]
-async fn test_register_csv_with_filter() {
+async fn test_csv_filter() {
     let td = tempfile::tempdir().unwrap();
     let csv_path = td.path().join("data.csv");
     std::fs::write(&csv_path, "key,value\n1,10\n2,20\n3,30\n4,40\n5,50\n").unwrap();
@@ -60,7 +58,7 @@ async fn test_register_csv_with_filter() {
 }
 
 #[tokio::test]
-async fn test_register_parquet_and_query() {
+async fn test_parquet_query() {
     let td = tempfile::tempdir().unwrap();
     let pq_path = td.path().join("data.parquet");
     write_parquet(&pq_path, make_kv_batch(&[1, 2, 3], &[10, 20, 30]));
@@ -81,7 +79,7 @@ async fn test_register_parquet_and_query() {
 }
 
 #[tokio::test]
-async fn test_register_parquet_with_projection() {
+async fn test_parquet_projection() {
     let td = tempfile::tempdir().unwrap();
     let pq_path = td.path().join("data.parquet");
     write_parquet(&pq_path, make_kv_batch(&[1, 2], &[10, 20]));
@@ -101,7 +99,7 @@ async fn test_register_parquet_with_projection() {
 }
 
 #[tokio::test]
-async fn test_deregister_table_makes_query_fail() {
+async fn test_deregister_query_fails() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("t", vec![make_kv_batch(&[1], &[10])]).unwrap();
     ctx.deregister_table("t").unwrap();
@@ -111,7 +109,7 @@ async fn test_deregister_table_makes_query_fail() {
 }
 
 #[tokio::test]
-async fn test_register_partitioned_batches_aggregate() {
+async fn test_partitioned_aggregate() {
     let ctx = AtomicSqlContext::new();
     let p1 = make_kv_batch(&[1, 2], &[10, 20]);
     let p2 = make_kv_batch(&[3, 4], &[30, 40]);
@@ -128,7 +126,7 @@ async fn test_register_partitioned_batches_aggregate() {
 }
 
 #[tokio::test]
-async fn test_write_and_read_back_parquet() {
+async fn test_parquet_roundtrip() {
     let td = tempfile::tempdir().unwrap();
     let out_dir = td.path().join("output");
 
@@ -154,7 +152,7 @@ async fn test_write_and_read_back_parquet() {
 }
 
 #[tokio::test]
-async fn test_register_json_and_query() {
+async fn test_json_query() {
     let td = tempfile::tempdir().unwrap();
     let json_path = td.path().join("data.json");
     std::fs::write(

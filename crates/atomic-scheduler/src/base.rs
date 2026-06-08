@@ -328,7 +328,6 @@ pub trait NativeScheduler: Send + Sync {
                         m.register_map_outputs(shuffle_id, locs);
                         log::debug!("finished registering map outputs");
 
-                        // ── Adaptive coalescing ───────────────────────────────
                         // After the map stage completes, compute the optimal number
                         // of reduce partitions based on actual bucket byte sizes.
                         if m.coalesce_threshold_bytes > 0 {

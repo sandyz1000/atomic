@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use parking_lot::Mutex;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 #[napi]
 pub struct BroadcastVar {
@@ -13,14 +13,15 @@ impl BroadcastVar {
     /// Deserialize and return the broadcast value.
     #[napi]
     pub fn value(&self) -> Result<serde_json::Value> {
-        serde_json::from_slice(&self.data)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+        serde_json::from_slice(&self.data).map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 }
 
 impl BroadcastVar {
     pub fn new(data: Vec<u8>) -> Self {
-        Self { data: Arc::new(data) }
+        Self {
+            data: Arc::new(data),
+        }
     }
 }
 
@@ -36,8 +37,7 @@ impl Accumulator {
     #[napi]
     pub fn add(&self, delta: serde_json::Value) -> Result<()> {
         let mut guard = self.inner.lock();
-        *guard = json_add(guard.clone(), delta)
-            .map_err(|e| napi::Error::from_reason(e))?;
+        *guard = json_add(guard.clone(), delta).map_err(|e| napi::Error::from_reason(e))?;
         Ok(())
     }
 
@@ -74,8 +74,7 @@ fn json_add(
             } else {
                 let xf = x.as_f64().unwrap_or(0.0);
                 let yf = y.as_f64().unwrap_or(0.0);
-                let n = serde_json::Number::from_f64(xf + yf)
-                    .ok_or("non-finite float")?;
+                let n = serde_json::Number::from_f64(xf + yf).ok_or("non-finite float")?;
                 Ok(serde_json::Value::Number(n))
             }
         }

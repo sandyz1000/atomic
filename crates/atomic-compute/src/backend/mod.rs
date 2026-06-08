@@ -9,7 +9,7 @@ pub mod js_executor;
 pub use native_executor::NativeBackend;
 
 use atomic_data::distributed::{PipelineOp, TaskEnvelope, TaskResultEnvelope};
-use crate::error::Result;
+use crate::error::ComputeResult;
 
 /// Full-task execution backend.
 ///
@@ -22,7 +22,7 @@ use crate::error::Result;
 /// instantiated with no configuration, making it usable as a type parameter
 /// (e.g. `fn run<B: Backend>(env: &Env) { let b = B::default(); ... }`).
 pub trait Backend: Default + Send + Sync {
-    fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> Result<TaskResultEnvelope>;
+    fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> ComputeResult<TaskResultEnvelope>;
 }
 
 /// Dispatches a single pipeline operation for one specific runtime.

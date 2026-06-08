@@ -158,7 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_server_starts_and_accepts_connections() {
-        use atomic_utils::common::get_dynamic_port;
+        use atomic_utils::get_dynamic_port;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let port = get_dynamic_port();

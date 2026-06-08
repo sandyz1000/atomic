@@ -108,7 +108,7 @@ fn test_flat_map_tokenizes() {
 }
 
 #[test]
-fn test_flat_map_empty_result_filters_element() {
+fn test_flat_map_filter() {
     let sc = local_sc();
     let rdd = make_rdd(&sc, vec![1, 2, 3]);
     // Only keep elements > 1, expand them to [x, x*10].
@@ -122,7 +122,7 @@ fn test_flat_map_empty_result_filters_element() {
 }
 
 #[test]
-fn test_chained_map_then_filter() {
+fn test_map_then_filter() {
     let sc = local_sc();
     let rdd = make_rdd(&sc, vec![1, 2, 3, 4]);
     let mut got = run_with_transform(sc, 50, rdd, |stream| {
@@ -138,7 +138,7 @@ fn test_chained_map_then_filter() {
 }
 
 #[test]
-fn test_map_on_empty_rdd_produces_empty() {
+fn test_map_empty_rdd() {
     let sc = local_sc();
     let rdd = make_rdd(&sc, vec![]);
     let got = run_with_transform(sc, 50, rdd, |stream| {

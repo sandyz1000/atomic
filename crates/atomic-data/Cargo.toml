@@ -4,15 +4,15 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default    = []
-python     = []   # enables TaskRuntime::Python
-javascript = []   # enables TaskRuntime::JavaScript
-udf        = ["python", "javascript"]
-tls        = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile"]
+default = []
+python = []                                                    # enables TaskRuntime::Python
+javascript = []                                                # enables TaskRuntime::JavaScript
+udf = ["python", "javascript"]
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile"]
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-rustc-hash ={ workspace = true }
+rustc-hash = { workspace = true }
 rkyv = { workspace = true }
 log = { workspace = true }
 atomic-utils = { path = "../atomic-utils" }

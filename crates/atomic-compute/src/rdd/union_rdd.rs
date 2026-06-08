@@ -1,7 +1,8 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use crate::error::Error;
+use crate::error::ComputeError;
+use atomic_data::error::BaseResult;
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::union_rdd::UnionVariants::{NonUniquePartitioner, PartitionerAware};
 use crate::rdd::*;
@@ -16,7 +17,7 @@ impl<T> UnionRdd<T>
 where
     T: Data,
 {
-    pub fn new(id: usize, rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self, Error> {
+    pub fn new(id: usize, rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self, ComputeError> {
         Ok(UnionRdd(UnionVariants::new(id, rdds)?))
     }
 }
@@ -55,7 +56,7 @@ impl<T: Data> Clone for UnionVariants<T> {
 }
 
 impl<T: Data> UnionVariants<T> {
-    fn new(id: usize, rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self, Error> {
+    fn new(id: usize, rdds: &[Arc<dyn Rdd<Item = T>>]) -> Result<Self, ComputeError> {
         let mut vals = RddVals::new(id);
 
         let mut pos = 0;
@@ -80,7 +81,7 @@ impl<T: Data> UnionVariants<T> {
                 vals,
             })
         } else {
-            let part = rdds[0].partitioner().ok_or(Error::LackingPartitioner)?;
+            let part = rdds[0].partitioner().ok_or(ComputeError::LackingPartitioner)?;
             log::debug!("inside partition aware constructor");
             let deps = rdds
                 .iter()
@@ -202,7 +203,7 @@ impl<T: Data + Clone> RddBase for UnionRdd<T> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         log::debug!("inside iterator_any union_rdd",);
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
@@ -228,13 +229,13 @@ impl<T: Data + Clone> Rdd for UnionRdd<T> {
         Arc::new(UnionRdd(self.0.clone())) as Arc<dyn Rdd<Item = T>>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = T>>, BaseError> {
+    fn compute(&self, split: Box<dyn Split>) -> BaseResult<Box<dyn Iterator<Item = T>>> {
         match &self.0 {
             NonUniquePartitioner { rdds, .. } => {
                 let part = split
                     .as_any()
                     .downcast_ref::<UnionSplit<T>>()
-                    .ok_or(Error::DowncastFailure("UnionSplit"))?;
+                    .ok_or(ComputeError::DowncastFailure("UnionSplit"))?;
                 let parent = &rdds[part.parent_rdd_index];
                 parent.iterator(part.parent_partition())
             }
@@ -242,8 +243,8 @@ impl<T: Data + Clone> Rdd for UnionRdd<T> {
                 let split = split
                     .as_any()
                     .downcast_ref::<PartitionerAwareUnionSplit>()
-                    .ok_or(Error::DowncastFailure("PartitionerAwareUnionSplit"))?;
-                let iter: Result<Vec<_>, BaseError> = rdds
+                    .ok_or(ComputeError::DowncastFailure("PartitionerAwareUnionSplit"))?;
+                let iter: BaseResult<Vec<_>> = rdds
                     .iter()
                     .zip(split.parents(rdds))
                     .map(|(rdd, p)| rdd.iterator(p.clone()))

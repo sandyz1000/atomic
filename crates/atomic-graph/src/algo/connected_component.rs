@@ -1,6 +1,6 @@
 use crate::graph::Graph;
 use crate::pregel;
-use crate::types::{EdgeDirection, VertexId, VertexMap};
+use crate::topology::{EdgeDirection, VertexId, VertexMap};
 
 /// Compute the connected component for each vertex using Pregel.
 ///
@@ -43,16 +43,17 @@ pub fn run<VD: Clone, ED: Clone>(
         |a, b| a.min(b),
     );
 
-    result.vertices().map(|(vid, label)| (vid, *label)).collect()
+    result
+        .vertices()
+        .map(|(vid, label)| (vid, *label))
+        .collect()
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::Graph;
-    use crate::types::Edge;
+    use crate::topology::Edge;
 
     #[test]
     fn two_disconnected_components() {
@@ -60,9 +61,21 @@ mod tests {
         // Component B: 10 — 11
         let g: Graph<(), ()> = Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 2, attr: () },
-                Edge { src: 10, dst: 11, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: (),
+                },
+                Edge {
+                    src: 10,
+                    dst: 11,
+                    attr: (),
+                },
             ],
             (),
         );
@@ -86,9 +99,21 @@ mod tests {
     fn single_component_cycle() {
         let g: Graph<(), ()> = Graph::from_edges(
             vec![
-                Edge { src: 3, dst: 4, attr: () },
-                Edge { src: 4, dst: 5, attr: () },
-                Edge { src: 5, dst: 3, attr: () },
+                Edge {
+                    src: 3,
+                    dst: 4,
+                    attr: (),
+                },
+                Edge {
+                    src: 4,
+                    dst: 5,
+                    attr: (),
+                },
+                Edge {
+                    src: 5,
+                    dst: 3,
+                    attr: (),
+                },
             ],
             (),
         );
@@ -107,10 +132,8 @@ mod tests {
 
     #[test]
     fn isolated_vertices_each_in_own_component() {
-        let g: Graph<(), ()> = Graph::from_vertices_edges(
-            vec![(10, ()), (20, ()), (30, ())],
-            vec![],
-        );
+        let g: Graph<(), ()> =
+            Graph::from_vertices_edges(vec![(10, ()), (20, ()), (30, ())], vec![]);
         let labels = run(&g, 10);
         assert_eq!(labels[&10], 10);
         assert_eq!(labels[&20], 20);

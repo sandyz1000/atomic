@@ -41,7 +41,7 @@ fn collect_results(
 }
 
 #[test]
-fn test_empty_queue_produces_no_results() {
+fn test_empty_queue_none() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
@@ -51,7 +51,7 @@ fn test_empty_queue_produces_no_results() {
 }
 
 #[test]
-fn test_one_at_a_time_processes_one_rdd_per_batch() {
+fn test_single_rdd_batch() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
@@ -67,7 +67,7 @@ fn test_one_at_a_time_processes_one_rdd_per_batch() {
 }
 
 #[test]
-fn test_drain_all_pops_all_rdds_in_one_batch() {
+fn test_drain_all_batch() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
@@ -83,7 +83,7 @@ fn test_drain_all_pops_all_rdds_in_one_batch() {
 }
 
 #[test]
-fn test_single_rdd_data_is_collected() {
+fn test_rdd_collected() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
@@ -96,7 +96,7 @@ fn test_single_rdd_data_is_collected() {
 }
 
 #[test]
-fn test_queue_pushed_after_start_is_processed() {
+fn test_late_push_processed() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =

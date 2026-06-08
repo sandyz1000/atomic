@@ -19,7 +19,6 @@ use napi_derive::napi;
 use parking_lot::Mutex;
 use serde_json::Value as JV;
 
-// ── Function storage ──────────────────────────────────────────────────────────
 //
 // We store NAPI functions by stripping their env lifetime. This is only safe
 // because all operations are synchronous and run on the JS main thread.
@@ -160,7 +159,6 @@ impl Drop for StoredFn {
     }
 }
 
-// ── Transform description ─────────────────────────────────────────────────────
 
 enum JsStreamTransform {
     Map(StoredFn),
@@ -174,7 +172,6 @@ enum JsStreamTransform {
     MapValues(StoredFn),
 }
 
-// ── DStream inner ─────────────────────────────────────────────────────────────
 
 enum JsDStreamInner {
     Queue {
@@ -186,7 +183,6 @@ enum JsDStreamInner {
     },
 }
 
-// ── JsDStream ────────────────────────────────────────────────────────────────
 
 /// A lazy handle to a DStream transform chain (Node.js).
 #[napi]
@@ -321,7 +317,6 @@ impl JsDStream {
     }
 }
 
-// ── JsBatchQueue ─────────────────────────────────────────────────────────────
 
 /// Queue handle for injecting test batches into a `testQueueStream`.
 #[napi]
@@ -339,14 +334,12 @@ impl JsBatchQueue {
     }
 }
 
-// ── Registered output operation ───────────────────────────────────────────────
 
 struct OutputOp {
     stream: Arc<JsDStreamInner>,
     callback: StoredFn,
 }
 
-// ── Batch computation ─────────────────────────────────────────────────────────
 
 fn compute_batch(
     inner: &JsDStreamInner,
@@ -583,7 +576,6 @@ fn key_str(val: &JV) -> Result<String> {
     }
 }
 
-// ── JsStreamingContext ────────────────────────────────────────────────────────
 
 /// Streaming context for Node.js.
 ///

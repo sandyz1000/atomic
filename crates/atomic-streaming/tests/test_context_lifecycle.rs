@@ -35,14 +35,14 @@ fn ssc_with_queue(
 }
 
 #[test]
-fn test_initial_state_is_initialized() {
+fn test_initial_state() {
     let sc = local_sc();
     let ssc = StreamingContext::new(sc, Duration::from_millis(50));
     assert_eq!(ssc.state(), StreamingContextState::Initialized);
 }
 
 #[test]
-fn test_start_transitions_to_active() {
+fn test_start_active() {
     let sc = local_sc();
     let (ssc, _q) = ssc_with_queue(sc, 50);
     ssc.start().unwrap();
@@ -51,7 +51,7 @@ fn test_start_transitions_to_active() {
 }
 
 #[test]
-fn test_stop_transitions_to_stopped() {
+fn test_stop_transitions() {
     let sc = local_sc();
     let (ssc, _q) = ssc_with_queue(sc, 50);
     ssc.start().unwrap();
@@ -60,7 +60,7 @@ fn test_stop_transitions_to_stopped() {
 }
 
 #[test]
-fn test_double_start_returns_error() {
+fn test_double_start_err() {
     let sc = local_sc();
     let (ssc, _q) = ssc_with_queue(sc, 50);
     ssc.start().unwrap();
@@ -70,7 +70,7 @@ fn test_double_start_returns_error() {
 }
 
 #[test]
-fn test_start_after_stop_returns_error() {
+fn test_restart_err() {
     let sc = local_sc();
     let (ssc, _q) = ssc_with_queue(sc, 50);
     ssc.start().unwrap();
@@ -80,7 +80,7 @@ fn test_start_after_stop_returns_error() {
 }
 
 #[test]
-fn test_stop_on_unstarted_is_noop() {
+fn test_stop_unstarted_noop() {
     let sc = local_sc();
     let ssc = StreamingContext::new(sc, Duration::from_millis(50));
     // Just needs to not panic — no output operations, so validate() would fail.
@@ -90,7 +90,7 @@ fn test_stop_on_unstarted_is_noop() {
 }
 
 #[test]
-fn test_await_termination_or_timeout_returns_false_on_timeout() {
+fn test_await_timeout_false() {
     let sc = local_sc();
     let (ssc, _q) = ssc_with_queue(sc, 50);
     ssc.start().unwrap();
@@ -102,7 +102,7 @@ fn test_await_termination_or_timeout_returns_false_on_timeout() {
 }
 
 #[test]
-fn test_await_termination_or_timeout_returns_true_when_stopped() {
+fn test_await_stopped_true() {
     let sc = local_sc();
     let (ssc, _q) = ssc_with_queue(sc, 50);
     ssc.start().unwrap();
@@ -119,7 +119,7 @@ fn test_await_termination_or_timeout_returns_true_when_stopped() {
 }
 
 #[test]
-fn test_validate_no_output_op_returns_error() {
+fn test_validate_no_output() {
     let sc = local_sc();
     // No output operations registered — start() must fail validation.
     let ssc = StreamingContext::new(sc, Duration::from_millis(50));
@@ -128,7 +128,7 @@ fn test_validate_no_output_op_returns_error() {
 }
 
 #[test]
-fn test_checkpoint_dir_set_before_start() {
+fn test_checkpoint_before_start() {
     let sc = local_sc();
     let td = tempfile::tempdir().unwrap();
     let (ssc, _q) = ssc_with_queue(sc, 50);
@@ -139,7 +139,7 @@ fn test_checkpoint_dir_set_before_start() {
 }
 
 #[test]
-fn test_checkpoint_after_start_is_ignored() {
+fn test_checkpoint_after_start() {
     let sc = local_sc();
     let td = tempfile::tempdir().unwrap();
     let (ssc, _q) = ssc_with_queue(sc, 50);

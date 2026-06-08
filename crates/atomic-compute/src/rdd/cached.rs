@@ -21,9 +21,7 @@ use atomic_data::split::Split;
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 
-// ─────────────────────────────────────────────────────────────────────────────
 // CachedRdd<T>
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// An RDD wrapper that memoises each partition's output in the global
 /// [`PARTITION_CACHE`] (memory) and optionally spills to disk.
@@ -89,7 +87,6 @@ impl<T: Data + Clone> Clone for CachedRdd<T> {
     }
 }
 
-// ── RddBase ───────────────────────────────────────────────────────────────────
 
 impl<T: Data + Clone> RddBase for CachedRdd<T> {
     fn get_rdd_id(&self) -> usize {
@@ -126,7 +123,6 @@ impl<T: Data + Clone> RddBase for CachedRdd<T> {
     }
 }
 
-// ── Rdd (memory-only path) ────────────────────────────────────────────────────
 
 impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
     type Item = T;
@@ -145,7 +141,6 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
 
         match self.storage_level {
             StorageLevel::MemoryOnly | StorageLevel::MemoryOnlySer => {
-                // ── Memory-only path ──────────────────────────────────────────
                 if let Some(store) = PARTITION_CACHE.get() {
                     if let Some(cached) = store.get::<T>(rdd_id, idx) {
                         return Ok(Box::new(ArcVecIter { data: cached, pos: 0 }));
@@ -160,7 +155,7 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
             }
 
             StorageLevel::MemoryAndDisk => {
-                // ── Memory-first; disk spill is handled by `persist_with_disk()`
+                // Memory-first; disk spill is handled by `persist_with_disk()`
                 // on TypedRdd<T: bincode::Encode + Decode<()>>.  The generic
                 // `Rdd::compute` path cannot call bincode without adding `Decode`
                 // bounds, so it falls back to MemoryOnly semantics here and
@@ -180,7 +175,7 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
             }
 
             StorageLevel::DiskOnly => {
-                // ── Disk path requires bincode bounds; without them, recompute each time.
+                // Disk path requires bincode bounds; without them, recompute each time.
                 // For true disk-only persistence use `persist_with_disk(DiskOnly)`.
                 let items: Vec<T> = self.inner.iterator(split)?.collect();
                 Ok(Box::new(items.into_iter()))
@@ -189,9 +184,7 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Disk helpers — only for T: bincode::Encode + Decode
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Write a partition to disk atomically (.tmp → rename).
 pub fn disk_write_partition<T>(path: &std::path::Path, items: &[T]) -> std::io::Result<()>
@@ -220,9 +213,7 @@ where
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // ArcVecIter — iterator over Arc<Vec<T>> that clones each item
-// ─────────────────────────────────────────────────────────────────────────────
 
 struct ArcVecIter<T> {
     data: Arc<Vec<T>>,
@@ -248,9 +239,7 @@ impl<T: Clone> Iterator for ArcVecIter<T> {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Tests
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

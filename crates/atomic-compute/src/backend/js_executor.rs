@@ -28,7 +28,6 @@ use std::collections::HashMap;
 #[cfg(feature = "js")]
 
 
-// ── Thread-local state ────────────────────────────────────────────────────────
 
 #[cfg(feature = "js")]
 thread_local! {
@@ -61,7 +60,6 @@ pub fn warmup_js_runtime() {
     with_js_runtime(|_| {});
 }
 
-// ── Function compilation cache ────────────────────────────────────────────────
 
 /// Compile `fn_source` into `globalThis.__f<hash>` on first call per thread.
 ///
@@ -95,7 +93,6 @@ fn ensure_fn_compiled(
     Ok(js_name)
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
 
 /// Evaluate a UDF partition operation using the thread-local V8 runtime.
 ///
@@ -149,7 +146,6 @@ pub fn eval_partition(
     })
 }
 
-// ── Dispatcher ───────────────────────────────────────────────────────────────
 
 /// [`OpDispatcher`] for `TaskRuntime::JavaScript` ops.
 ///
@@ -174,7 +170,6 @@ impl crate::backend::OpDispatcher for JsDispatcher {
     }
 }
 
-// ── Script builder ────────────────────────────────────────────────────────────
 
 /// Build the evaluation script for `action`, referencing the pre-compiled
 /// function via `fn_var` (a `globalThis.__f…` identifier) rather than
@@ -187,7 +182,6 @@ impl crate::backend::OpDispatcher for JsDispatcher {
 /// For binary operations (Reduce, Fold) the standard `(acc, x)` callback
 /// convention applies and no ctx wrapper is needed.
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(all(test, feature = "js"))]
 mod tests {

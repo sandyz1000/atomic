@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use petgraph::algo::tarjan_scc;
 
 use crate::graph::Graph;
-use crate::types::{VertexId, VertexMap};
+use crate::topology::{VertexId, VertexMap};
 
 /// Compute Strongly Connected Components using Tarjan's algorithm.
 ///
@@ -16,10 +16,7 @@ use crate::types::{VertexId, VertexMap};
 ///
 /// Returns `VertexMap<VertexId>` mapping each vertex to the representative
 /// (lowest ID) of its SCC.
-pub fn run<VD: Clone, ED: Clone>(
-    graph: &Graph<VD, ED>,
-    _num_iter: usize,
-) -> VertexMap<VertexId> {
+pub fn run<VD: Clone, ED: Clone>(graph: &Graph<VD, ED>, _num_iter: usize) -> VertexMap<VertexId> {
     // Run Tarjan's SCC on the petgraph inner representation.
     // tarjan_scc returns a Vec<Vec<NodeIndex>> — each inner Vec is one SCC.
     let sccs = tarjan_scc(&graph.inner);
@@ -44,22 +41,32 @@ pub fn run<VD: Clone, ED: Clone>(
     labels
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::Graph;
-    use crate::types::Edge;
+    use crate::topology::Edge;
 
     #[test]
     fn simple_cycle_is_one_scc() {
         // 0 → 1 → 2 → 0 — all three form one SCC.
         let g: Graph<(), ()> = Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 2, attr: () },
-                Edge { src: 2, dst: 0, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: (),
+                },
+                Edge {
+                    src: 2,
+                    dst: 0,
+                    attr: (),
+                },
             ],
             (),
         );
@@ -74,15 +81,28 @@ mod tests {
         // 0 → 1 → 2  (no back-edges → three singleton SCCs)
         let g: Graph<(), ()> = Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 2, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: (),
+                },
             ],
             (),
         );
         let labels = run(&g, 5);
         // All labels must be distinct in a DAG.
         let unique: std::collections::HashSet<_> = labels.values().collect();
-        assert_eq!(unique.len(), 3, "three singleton SCCs expected, got {:?}", labels);
+        assert_eq!(
+            unique.len(),
+            3,
+            "three singleton SCCs expected, got {:?}",
+            labels
+        );
     }
 
     #[test]
@@ -90,12 +110,36 @@ mod tests {
         // Cycle A: 0→1→2→0, Cycle B: 3→4→3, bridge: 2→3
         let g: Graph<(), ()> = Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 2, attr: () },
-                Edge { src: 2, dst: 0, attr: () },
-                Edge { src: 2, dst: 3, attr: () },
-                Edge { src: 3, dst: 4, attr: () },
-                Edge { src: 4, dst: 3, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: (),
+                },
+                Edge {
+                    src: 2,
+                    dst: 0,
+                    attr: (),
+                },
+                Edge {
+                    src: 2,
+                    dst: 3,
+                    attr: (),
+                },
+                Edge {
+                    src: 3,
+                    dst: 4,
+                    attr: (),
+                },
+                Edge {
+                    src: 4,
+                    dst: 3,
+                    attr: (),
+                },
             ],
             (),
         );
@@ -120,7 +164,11 @@ mod tests {
     fn self_loop_vertex_is_own_scc() {
         let g: Graph<(), ()> = Graph::from_vertices_edges(
             vec![(0, ())],
-            vec![Edge { src: 0, dst: 0, attr: () }],
+            vec![Edge {
+                src: 0,
+                dst: 0,
+                attr: (),
+            }],
         );
         let labels = run(&g, 5);
         assert!(labels.contains_key(&0));

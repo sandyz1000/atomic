@@ -17,7 +17,6 @@ use pyo3::types::{PyDict, PyList};
 
 use atomic_sql::context::AtomicSqlContext;
 
-// ── Async helper ──────────────────────────────────────────────────────────────
 
 fn run_sql_async<F, T>(fut: F) -> T
 where
@@ -33,7 +32,6 @@ where
     }
 }
 
-// ── Temp-view counter ─────────────────────────────────────────────────────────
 
 static TMP_VIEW_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -42,7 +40,6 @@ fn tmp_view_name() -> String {
     format!("__atomic_tmp_{n}")
 }
 
-// ── RecordBatch → Python row conversion ───────────────────────────────────────
 
 fn arrow_scalar_to_py(py: Python<'_>, col: &dyn Array, row: usize) -> Py<PyAny> {
     if col.is_null(row) {
@@ -137,7 +134,6 @@ fn batches_to_py_list(py: Python<'_>, batches: &[RecordBatch]) -> PyResult<Py<Py
     Ok(rows.into_any().unbind())
 }
 
-// ── PyDataFrame ───────────────────────────────────────────────────────────────
 
 /// A lazy structured dataset produced by `SqlContext.sql()` or registered tables.
 ///
@@ -160,7 +156,6 @@ pub struct PyDataFrame {
 
 #[pymethods]
 impl PyDataFrame {
-    // ── Actions ───────────────────────────────────────────────────────────────
 
     /// Execute the plan and return all rows as a list of dicts.
     ///
@@ -189,7 +184,6 @@ impl PyDataFrame {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-    // ── Transformations ───────────────────────────────────────────────────────
 
     /// Filter rows using a SQL WHERE-clause expression (e.g. `"amount > 100"`).
     ///
@@ -238,7 +232,6 @@ impl PyDataFrame {
         Ok(PyDataFrame { inner: df, session: self.session.clone() })
     }
 
-    // ── Introspection ─────────────────────────────────────────────────────────
 
     /// Return a dict mapping column name → Arrow type string.
     ///
@@ -347,7 +340,6 @@ impl PyDataFrame {
     }
 }
 
-// ── PySqlContext ──────────────────────────────────────────────────────────────
 
 /// SQL execution context backed by DataFusion.
 ///
@@ -382,7 +374,6 @@ impl PySqlContext {
         Ok(Self { inner, session })
     }
 
-    // ── SQL execution ─────────────────────────────────────────────────────────
 
     /// Parse and execute a SQL query. Returns a lazy `DataFrame`.
     ///
@@ -403,7 +394,6 @@ impl PySqlContext {
         Ok(PyDataFrame { inner: df, session: self.session.clone() })
     }
 
-    // ── Table registration ────────────────────────────────────────────────────
 
     /// Register a CSV file (or directory of CSV files) as a named table.
     ///

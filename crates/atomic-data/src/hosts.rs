@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 #[derive(thiserror::Error, Debug)]
-pub enum Error {
+pub enum HostError {
     #[error("unable to determine home directory")]
     NoHome,
     #[error("failed to load hosts file {path}: {source}")]
@@ -11,7 +11,7 @@ pub enum Error {
     ParseHosts { source: toml::de::Error, path: PathBuf },
 }
 
-type Result<T> = std::result::Result<T, Error>;
+type Result<T> = std::result::Result<T, HostError>;
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 
@@ -31,17 +31,17 @@ impl Hosts {
     }
 
     fn load() -> Result<Self> {
-        let home = std::env::home_dir().ok_or(Error::NoHome)?;
+        let home = std::env::home_dir().ok_or(HostError::NoHome)?;
         Hosts::load_from(home.join("hosts.conf"))
     }
 
     fn load_from<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let s = std::fs::read_to_string(&path).map_err(|e| Error::LoadHosts {
+        let s = std::fs::read_to_string(&path).map_err(|e| HostError::LoadHosts {
             source: e,
             path: path.as_ref().into(),
         })?;
 
-        toml::from_str(&s).map_err(|e| Error::ParseHosts {
+        toml::from_str(&s).map_err(|e| HostError::ParseHosts {
             source: e,
             path: path.as_ref().into(),
         })
@@ -56,8 +56,8 @@ mod tests {
     #[test]
     fn test_missing_hosts_file() {
         match Hosts::load_from("/does_not_exist").unwrap_err() {
-            Error::LoadHosts { .. } => {}
-            _ => panic!("Expected Error::LoadHosts"),
+            HostError::LoadHosts { .. } => {}
+            _ => panic!("Expected HostError::LoadHosts"),
         }
     }
 
@@ -67,8 +67,8 @@ mod tests {
         file.write_all("invalid data".as_ref()).unwrap();
 
         match Hosts::load_from(&path).unwrap_err() {
-            Error::ParseHosts { .. } => {}
-            _ => panic!("Expected Error::ParseHosts"),
+            HostError::ParseHosts { .. } => {}
+            _ => panic!("Expected HostError::ParseHosts"),
         }
     }
 }

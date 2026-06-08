@@ -52,7 +52,6 @@ impl PyRdd {
         }
     }
 
-    // ── Internal helpers ─────────────────────────────────────────────────────
 
     /// Pickle a callable using cloudpickle (if available) or stdlib pickle.
     ///
@@ -174,7 +173,6 @@ impl PyRdd {
 
 #[pymethods]
 impl PyRdd {
-    // ── Transformations ──────────────────────────────────────────────────────
 
     /// Apply `f` to each element, returning a new RDD.
     pub fn map(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
@@ -541,7 +539,6 @@ impl PyRdd {
         self.coalesce(py, num_partitions)
     }
 
-    // ── Actions ──────────────────────────────────────────────────────────────
 
     /// Return all elements as a Python list.
     ///

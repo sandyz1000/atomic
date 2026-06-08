@@ -3,7 +3,7 @@ pub mod api;
 pub mod receiver;
 pub mod rdd;
 pub mod dstream;
-pub mod utils;
+pub mod streaming_support;
 pub mod context;
 pub mod checkpoint;
 pub mod errors;

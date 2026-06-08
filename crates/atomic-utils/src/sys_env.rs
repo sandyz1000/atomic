@@ -3,7 +3,6 @@ use std::path::Path;
 
 use rand::{Rng, RngExt};
 
-
 /// Shuffle the elements of a vec into a random order in place, modifying it.
 pub fn randomize_in_place<T, R>(iter: &mut [T], rand: &mut R)
 where
@@ -31,20 +30,21 @@ pub fn clean_up_work_dir(work_dir: &Path, log_cleanup: bool) {
     } else if let Ok(dir) = fs::read_dir(work_dir) {
         for e in dir {
             if let Ok(p) = e
-                && let Ok(m) = p.metadata() {
-                    if m.is_dir() {
-                        fs::remove_dir_all(p.path());
-                    } else {
-                        let file = p.path();
-                        if let Some(ext) = file.extension() {
-                            if ext.to_str() != "log".into() {
-                                fs::remove_file(file);
-                            }
-                        } else {
+                && let Ok(m) = p.metadata()
+            {
+                if m.is_dir() {
+                    fs::remove_dir_all(p.path());
+                } else {
+                    let file = p.path();
+                    if let Some(ext) = file.extension() {
+                        if ext.to_str() != "log".into() {
                             fs::remove_file(file);
                         }
+                    } else {
+                        fs::remove_file(file);
                     }
                 }
+            }
         }
     }
 }

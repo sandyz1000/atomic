@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::graph::Graph;
 use crate::pregel;
-use crate::types::{EdgeContext, EdgeDirection, VertexId, VertexMap};
+use crate::topology::{EdgeContext, EdgeDirection, VertexId, VertexMap};
 
 /// Community detection via label propagation (matching GraphX's `LabelPropagation.run`).
 ///
@@ -22,10 +22,7 @@ use crate::types::{EdgeContext, EdgeDirection, VertexId, VertexMap};
 /// * `max_steps` — number of supersteps.
 ///
 /// Returns `VertexMap<VertexId>` mapping each vertex to its community label.
-pub fn run<VD: Clone, ED: Clone>(
-    graph: &Graph<VD, ED>,
-    max_steps: usize,
-) -> VertexMap<VertexId> {
+pub fn run<VD: Clone, ED: Clone>(graph: &Graph<VD, ED>, max_steps: usize) -> VertexMap<VertexId> {
     // Vertex attr = current community label (initially own ID).
     let g: Graph<VertexId, ED> = graph.map_vertices(|vid, _| vid);
 
@@ -72,31 +69,60 @@ pub fn run<VD: Clone, ED: Clone>(
         },
     );
 
-    result.vertices().map(|(vid, label)| (vid, *label)).collect()
+    result
+        .vertices()
+        .map(|(vid, label)| (vid, *label))
+        .collect()
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::Graph;
-    use crate::types::Edge;
+    use crate::topology::Edge;
 
     /// Two cliques (0-1-2 and 10-11-12) connected by a bridge 2→10.
     fn two_cliques_bridge() -> Graph<(), ()> {
         Graph::from_edges(
             vec![
                 // Clique A
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 2, attr: () },
-                Edge { src: 2, dst: 0, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: (),
+                },
+                Edge {
+                    src: 2,
+                    dst: 0,
+                    attr: (),
+                },
                 // Bridge
-                Edge { src: 2, dst: 10, attr: () },
+                Edge {
+                    src: 2,
+                    dst: 10,
+                    attr: (),
+                },
                 // Clique B
-                Edge { src: 10, dst: 11, attr: () },
-                Edge { src: 11, dst: 12, attr: () },
-                Edge { src: 12, dst: 10, attr: () },
+                Edge {
+                    src: 10,
+                    dst: 11,
+                    attr: (),
+                },
+                Edge {
+                    src: 11,
+                    dst: 12,
+                    attr: (),
+                },
+                Edge {
+                    src: 12,
+                    dst: 10,
+                    attr: (),
+                },
             ],
             (),
         )
@@ -113,7 +139,11 @@ mod tests {
     fn isolated_vertex_keeps_own_label() {
         let g = Graph::from_vertices_edges(
             vec![(0, ()), (1, ()), (99, ())],
-            vec![Edge { src: 0, dst: 1, attr: () }],
+            vec![Edge {
+                src: 0,
+                dst: 1,
+                attr: (),
+            }],
         );
         let labels = run(&g, 5);
         assert_eq!(labels[&99], 99, "isolated vertex keeps its own label");
@@ -123,7 +153,11 @@ mod tests {
     fn all_vertices_receive_a_label() {
         let g = two_cliques_bridge();
         let labels = run(&g, 20);
-        assert_eq!(labels.len(), g.num_vertices(), "every vertex must have a label");
+        assert_eq!(
+            labels.len(),
+            g.num_vertices(),
+            "every vertex must have a label"
+        );
     }
 
     #[test]
@@ -138,14 +172,25 @@ mod tests {
         // Labels can only ever be original vertex IDs — verify that invariant.
         let g: Graph<(), ()> = Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 2, attr: () },
-                Edge { src: 2, dst: 0, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: (),
+                },
+                Edge {
+                    src: 2,
+                    dst: 0,
+                    attr: (),
+                },
             ],
             (),
         );
-        let valid_ids: std::collections::HashSet<VertexId> =
-            g.vertices().map(|(v, _)| v).collect();
+        let valid_ids: std::collections::HashSet<VertexId> = g.vertices().map(|(v, _)| v).collect();
         let labels = run(&g, 10);
         for (_, &label) in &labels {
             assert!(

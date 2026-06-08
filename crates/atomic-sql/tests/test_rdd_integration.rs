@@ -11,7 +11,6 @@ use datafusion::arrow::array::{Int32Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 fn make_people_batch(ids: &[i32], names: &[&str], ages: &[i32]) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
@@ -34,10 +33,9 @@ fn local_context() -> Arc<Context> {
     Context::local().expect("failed to create local atomic context")
 }
 
-// ── tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_register_rdd_and_select_all() {
+async fn test_rdd_select_all() {
     let sc = local_context();
     let batch = make_people_batch(&[1, 2, 3], &["Alice", "Bob", "Carol"], &[30, 25, 35]);
 
@@ -64,7 +62,7 @@ async fn test_register_rdd_and_select_all() {
 }
 
 #[tokio::test]
-async fn test_register_rdd_with_filter() {
+async fn test_rdd_filter() {
     let sc = local_context();
     let batch = make_people_batch(&[1, 2, 3, 4], &["Alice", "Bob", "Carol", "Dave"], &[30, 25, 35, 20]);
 
@@ -116,7 +114,7 @@ async fn test_register_rdd_multipartition() {
 }
 
 #[tokio::test]
-async fn test_register_rdd_requires_compute_context() {
+async fn test_rdd_needs_context() {
     // AtomicSqlContext::new() has no compute context — register_rdd must fail gracefully.
     let sc = local_context();
     let batch = make_people_batch(&[1], &["Alice"], &[30]);

@@ -56,8 +56,8 @@ impl FileBasedWriteAheadLog {
     }
 
     fn ensure_file(inner: &mut WalInner, time_ms: u64) -> io::Result<()> {
-        let needs_roll = inner.current_file.is_none()
-            || time_ms >= inner.file_start_ms + inner.roll_interval_ms;
+        let needs_roll =
+            inner.current_file.is_none() || time_ms >= inner.file_start_ms + inner.roll_interval_ms;
         if needs_roll {
             if let Some(ref mut f) = inner.current_file {
                 f.flush()?;
@@ -107,7 +107,10 @@ impl WriteAheadLog for FileBasedWriteAheadLog {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if let Some(stripped) = name.strip_prefix("wal-").and_then(|s| s.strip_suffix(".log")) {
+            if let Some(stripped) = name
+                .strip_prefix("wal-")
+                .and_then(|s| s.strip_suffix(".log"))
+            {
                 if let Ok(ts) = stripped.parse::<u64>() {
                     if ts < threshold_ms {
                         let _ = fs::remove_file(entry.path());

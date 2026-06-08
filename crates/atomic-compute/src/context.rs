@@ -1,5 +1,5 @@
 use crate::env::{Config, DeploymentMode};
-use crate::error::Error;
+use crate::error::{ComputeError, ComputeResult};
 use crate::executor::{Executor, Signal};
 use crate::io::ReaderConfiguration;
 use crate::backend::{Backend, NativeBackend};
@@ -72,16 +72,16 @@ pub fn save<R: Data>(
     ctx: TaskContext,
     iter: Box<dyn Iterator<Item = R>>,
     path: String,
-) -> crate::error::Result<()> {
-    std::fs::create_dir_all(&path).map_err(crate::error::Error::OutputWrite)?;
+) -> crate::error::ComputeResult<()> {
+    std::fs::create_dir_all(&path).map_err(crate::error::ComputeError::OutputWrite)?;
     let id = ctx.split_id;
     let file_path = std::path::Path::new(&path).join(format!("part-{}", id));
-    let f = std::fs::File::create(file_path).map_err(crate::error::Error::OutputWrite)?;
+    let f = std::fs::File::create(file_path).map_err(crate::error::ComputeError::OutputWrite)?;
     let mut f = std::io::BufWriter::new(f);
     for item in iter {
         let line = format!("{:?}", item);
         f.write_all(line.as_bytes())
-            .map_err(crate::error::Error::OutputWrite)?;
+            .map_err(crate::error::ComputeError::OutputWrite)?;
     }
     Ok(())
 }
@@ -95,7 +95,7 @@ impl Context {
     ///
     /// For a worker process, use [`start_worker`] instead — it takes a `Config`
     /// and never returns.
-    pub fn new_with_config(config: Config) -> Result<Arc<Self>, Error> {
+    pub fn new_with_config(config: Config) -> ComputeResult<Arc<Self>> {
         match config.mode {
             DeploymentMode::Distributed => {
                 let ctx = Context::init_distributed_driver(config)?;
@@ -111,7 +111,7 @@ impl Context {
     /// Reads `ATOMIC_DEPLOYMENT_MODE`, `ATOMIC_LOCAL_IP`, `ATOMIC_SLAVE_PORT`, etc.
     /// Prefer [`Context::new_with_config`] for new Rust programs; this exists for
     /// Python/JS bindings and legacy code where explicit config is not practical.
-    pub fn new() -> Result<Arc<Self>, Error> {
+    pub fn new() -> ComputeResult<Arc<Self>> {
         let mut config = Config::from_env();
         // In env-var mode, load workers from hosts.conf for distributed drivers.
         if config.mode == DeploymentMode::Distributed && config.workers.is_empty()
@@ -128,7 +128,7 @@ impl Context {
     }
 
     /// Create a local-only context.
-    pub fn local() -> Result<Arc<Self>, Error> {
+    pub fn local() -> ComputeResult<Arc<Self>> {
         Context::new_with_config(Config::local())
     }
 
@@ -150,10 +150,10 @@ impl Context {
         })
     }
 
-    fn init_local_scheduler(config: Config) -> Result<Arc<Self>, Error> {
+    fn init_local_scheduler(config: Config) -> ComputeResult<Arc<Self>> {
         let job_id = Uuid::new_v4().to_string();
         let job_work_dir = config.work_dir.join(format!("ns-session-{}", job_id));
-        fs::create_dir_all(&job_work_dir).map_err(Error::OutputWrite)?;
+        fs::create_dir_all(&job_work_dir).map_err(ComputeError::OutputWrite)?;
 
         let _ = env_logger::try_init();
         atomic_data::cache::init_partition_cache();
@@ -194,7 +194,7 @@ impl Context {
     }
 
     /// Connect to all registered workers and return a distributed driver context.
-    fn init_distributed_driver(config: Config) -> Result<Arc<Self>, Error> {
+    fn init_distributed_driver(config: Config) -> ComputeResult<Arc<Self>> {
         let job_id = Uuid::new_v4().to_string();
         let job_work_dir = config.work_dir.join(format!("ns-session-{}", job_id));
 
@@ -236,7 +236,7 @@ impl Context {
         }
 
         if address_map.is_empty() {
-            return Err(Error::WorkerHandshake(
+            return Err(ComputeError::WorkerHandshake(
                 "no reachable workers found".to_string(),
             ));
         }
@@ -270,7 +270,7 @@ impl Context {
         }))
     }
 
-    fn worker_clean_up_directives(run_result: Result<Signal, Error>, work_dir: PathBuf) -> ! {
+    fn worker_clean_up_directives(run_result: ComputeResult<Signal>, work_dir: PathBuf) -> ! {
         clean_up_work_dir(&work_dir, true);
         match run_result {
             Err(err) => {
@@ -299,7 +299,7 @@ impl Context {
         clean_up_work_dir(work_dir, true);
     }
 
-    fn request_worker_capabilities(endpoint: SocketAddrV4) -> Result<WorkerCapabilities, Error> {
+    fn request_worker_capabilities(endpoint: SocketAddrV4) -> ComputeResult<WorkerCapabilities> {
         let frame = encode_transport_frame(TransportFrameKind::WorkerCapabilities, &[]);
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut last_err = None;
@@ -307,28 +307,28 @@ impl Context {
         while Instant::now() < deadline {
             match TcpStream::connect(endpoint) {
                 Ok(mut stream) => {
-                    stream.write_all(&frame).map_err(Error::OutputWrite)?;
+                    stream.write_all(&frame).map_err(ComputeError::OutputWrite)?;
 
                     let mut header = [0_u8; TRANSPORT_HEADER_LEN];
-                    stream.read_exact(&mut header).map_err(Error::InputRead)?;
+                    stream.read_exact(&mut header).map_err(ComputeError::InputRead)?;
                     let (kind, payload_len) = parse_transport_header(&header)
-                        .map_err(|err| Error::InvalidTransportFrame(err.to_string()))?;
+                        .map_err(|err| ComputeError::InvalidTransportFrame(err.to_string()))?;
                     if kind != TransportFrameKind::WorkerCapabilities {
-                        return Err(Error::WorkerHandshake(format!(
+                        return Err(ComputeError::WorkerHandshake(format!(
                             "unexpected worker response frame: {:?}",
                             kind
                         )));
                     }
 
                     let mut payload = vec![0_u8; payload_len];
-                    stream.read_exact(&mut payload).map_err(Error::InputRead)?;
+                    stream.read_exact(&mut payload).map_err(ComputeError::InputRead)?;
                     return WorkerCapabilities::decode_wire(&payload)
-                        .map_err(|err| Error::WorkerHandshake(err.to_string()));
+                        .map_err(|err| ComputeError::WorkerHandshake(err.to_string()));
                 }
                 Err(err) => {
                     if err.kind() == std::io::ErrorKind::ConnectionRefused {
                         // Worker is actively refusing — it is not starting up; it is dead.
-                        return Err(Error::WorkerHandshake(format!(
+                        return Err(ComputeError::WorkerHandshake(format!(
                             "worker {} refused connection ({})",
                             endpoint, err
                         )));
@@ -339,7 +339,7 @@ impl Context {
             }
         }
 
-        Err(Error::WorkerHandshake(format!(
+        Err(ComputeError::WorkerHandshake(format!(
             "timed out waiting for worker {} ({})",
             endpoint,
             last_err.unwrap_or_else(|| "no response".to_string())
@@ -383,7 +383,7 @@ impl Context {
     ///
     /// The cancellation is best-effort: tasks that have already received their results
     /// from a worker are not rolled back.  In local mode this is a no-op.
-    pub fn cancel_job(&self, run_id: usize) -> Result<(), Error> {
+    pub fn cancel_job(&self, run_id: usize) -> ComputeResult<()> {
         match &self.scheduler {
             atomic_scheduler::Schedulers::Distributed(sched) => {
                 Ok(sched.cancel_job(run_id)?)
@@ -413,7 +413,7 @@ impl Context {
     ///
     /// This is the preferred method for streaming output operations that receive
     /// an `Arc<dyn Rdd>` from the DStream graph and want to materialise it.
-    pub fn collect_rdd<T>(self: &Arc<Self>, rdd: Arc<dyn Rdd<Item = T>>) -> Result<Vec<T>, Error>
+    pub fn collect_rdd<T>(self: &Arc<Self>, rdd: Arc<dyn Rdd<Item = T>>) -> ComputeResult<Vec<T>>
     where
         T: Data + Clone + WireDecode,
         Vec<T>: WireDecode,
@@ -634,7 +634,7 @@ impl Context {
         self: &Arc<Self>,
         rdd: Arc<dyn Rdd<Item = T>>,
         func: F,
-    ) -> Result<Vec<U>, Error>
+    ) -> ComputeResult<Vec<U>>
     where
         F: Fn(Box<dyn Iterator<Item = T>>) -> U + Send + Sync + 'static,
     {
@@ -655,7 +655,7 @@ impl Context {
         rdd: Arc<dyn Rdd<Item = T>>,
         func: F,
         partitions: P,
-    ) -> Result<Vec<U>, Error>
+    ) -> ComputeResult<Vec<U>>
     where
         F: Fn(Box<dyn Iterator<Item = T>>) -> U + Send + Sync + 'static,
         P: IntoIterator<Item = usize>,
@@ -672,7 +672,7 @@ impl Context {
         self: &Arc<Self>,
         rdd: Arc<dyn Rdd<Item = T>>,
         func: F,
-    ) -> Result<Vec<U>, Error>
+    ) -> ComputeResult<Vec<U>>
     where
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
     {
@@ -691,7 +691,7 @@ impl Context {
         rdd: Arc<dyn Rdd<Item = T>>,
         evaluator: E,
         timeout: Duration,
-    ) -> Result<PartialResult<R>, Error>
+    ) -> ComputeResult<PartialResult<R>>
     where
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
@@ -704,7 +704,7 @@ impl Context {
     pub fn union<T: Data + Clone>(
         self: &Arc<Self>,
         rdds: &[Arc<dyn Rdd<Item = T>>],
-    ) -> std::result::Result<UnionRdd<T>, Error> {
+    ) -> ComputeResult<UnionRdd<T>> {
         UnionRdd::new(self.new_rdd_id(), rdds)
     }
 
@@ -718,7 +718,7 @@ impl Context {
         action: TaskAction,
         payload: Vec<u8>,
         rdd: Arc<dyn Rdd<Item = T>>,
-    ) -> Result<Vec<Vec<U>>, Error>
+    ) -> ComputeResult<Vec<Vec<U>>>
     where
         T: Data + Clone + WireEncode,
         Vec<T>: WireEncode,
@@ -730,7 +730,7 @@ impl Context {
         let result_bytes = self.dispatch_pipeline(encoded, ops)?;
         result_bytes
             .into_iter()
-            .map(|bytes| Vec::<U>::decode_wire(&bytes).map_err(Error::from))
+            .map(|bytes| Vec::<U>::decode_wire(&bytes).map_err(ComputeError::from))
             .collect()
     }
 
@@ -743,7 +743,7 @@ impl Context {
         op_id: &str,
         zero: T,
         rdd: Arc<dyn Rdd<Item = T>>,
-    ) -> Result<T, Error>
+    ) -> ComputeResult<T>
     where
         T: Data + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -755,8 +755,8 @@ impl Context {
 
         let mut partition_values: Vec<T> = partition_results_raw
             .into_iter()
-            .map(|bytes| T::decode_wire(&bytes).map_err(Error::from))
-            .collect::<Result<_, _>>()?;
+            .map(|bytes| T::decode_wire(&bytes).map_err(ComputeError::from))
+            .collect::<ComputeResult<_, _>>()?;
 
         if partition_values.is_empty() {
             return Ok(zero);
@@ -782,7 +782,7 @@ impl Context {
         let result = NativeBackend::default().execute("local-driver", &task)?;
         match result.status {
             ResultStatus::Success => Ok(T::decode_wire(&result.data)?),
-            _ => Err(Error::InvalidPayload(
+            _ => Err(ComputeError::InvalidPayload(
                 result.error.unwrap_or_else(|| "reduce failed".to_string()),
             )),
         }
@@ -798,7 +798,7 @@ impl Context {
         &self,
         source_partitions: Vec<Vec<u8>>,
         ops: Vec<PipelineOp>,
-    ) -> Result<Vec<Vec<u8>>, Error> {
+    ) -> ComputeResult<Vec<Vec<u8>>> {
         let broadcasts = self.broadcast_snapshot();
         match &self.scheduler {
             Schedulers::Local(_) => {
@@ -821,7 +821,7 @@ impl Context {
                                 }
                                 Ok(result.data)
                             }
-                            _ => Err(Error::InvalidPayload(
+                            _ => Err(ComputeError::InvalidPayload(
                                 result.error.unwrap_or_else(|| "task failed".to_string()),
                             )),
                         }
@@ -839,7 +839,7 @@ impl Context {
     }
 
     /// Encode every partition of an RDD into rkyv bytes.
-    pub(crate) fn encode_rdd_partitions<T>(rdd: Arc<dyn Rdd<Item = T>>) -> Result<Vec<Vec<u8>>, Error>
+    pub(crate) fn encode_rdd_partitions<T>(rdd: Arc<dyn Rdd<Item = T>>) -> ComputeResult<Vec<Vec<u8>>>
     where
         T: Data + Clone + WireEncode,
         Vec<T>: WireEncode,
@@ -869,7 +869,7 @@ impl Context {
         self: &Arc<Self>,
         rdd: &Arc<dyn RddBase>,
         preceding_ops: Vec<PipelineOp>,
-    ) -> Result<(), Error> {
+    ) -> ComputeResult<()> {
         use atomic_data::dependency::Dependency;
 
         let sched = match &self.scheduler {
@@ -882,7 +882,7 @@ impl Context {
                 // Encode the parent RDD partitions (the shuffle map input).
                 // The typed closure on ShuffleDependencyBox rkyv-encodes Vec<(K,V)> per partition.
                 let parent_partitions = (shuffle_dep.encode_partitions)()
-                    .map_err(Error::InvalidPayload)?;
+                    .map_err(ComputeError::InvalidPayload)?;
 
                 // Build the shuffle-map op. The payload carries the type_id string so
                 // the worker can look up the correct SHUFFLE_MAP_REGISTRY handler.
@@ -909,7 +909,7 @@ impl Context {
                         ops,
                         parent_partitions,
                     ))
-                }).map_err(Error::from)?;
+                }).map_err(ComputeError::from)?;
 
                 log::info!(
                     "shuffle map stage complete: shuffle_id={} num_reduce_partitions={}",
@@ -983,7 +983,7 @@ pub fn start_worker(config: Config) -> ! {
         .worker
         .as_ref()
         .map(|w| (w.port, w.max_concurrent_tasks))
-        .ok_or(Error::GetOrCreateConfig(
+        .ok_or(ComputeError::GetOrCreateConfig(
             "start_worker called without a WorkerConfig — use Config::worker(ip, port)",
         ))
         .and_then(|(port, max_tasks)| {
@@ -999,7 +999,7 @@ pub fn start_worker(config: Config) -> ! {
                     config.tls_cert.as_ref().unwrap(),
                     config.tls_key.as_ref().unwrap(),
                     config.tls_ca_cert.as_ref().unwrap(),
-                ).map_err(|e| Error::GetOrCreateConfig(Box::leak(format!("TLS init: {e}").into_boxed_str())))?;
+                ).map_err(|e| ComputeError::GetOrCreateConfig(Box::leak(format!("TLS init: {e}").into_boxed_str())))?;
             }
             let executor = Arc::new(executor);
             executor.worker()

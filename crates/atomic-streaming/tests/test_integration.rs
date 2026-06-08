@@ -23,7 +23,7 @@ fn make_rdd(sc: &Arc<Context>, data: Vec<i32>) -> Arc<dyn Rdd<Item = i32>> {
 }
 
 #[test]
-fn test_map_then_collect_full_pipeline() {
+fn test_map_pipeline() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
@@ -53,7 +53,7 @@ fn test_map_then_collect_full_pipeline() {
 }
 
 #[test]
-fn test_filter_then_map_full_pipeline() {
+fn test_filter_map_pipeline() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
@@ -92,7 +92,7 @@ fn test_filter_then_map_full_pipeline() {
 }
 
 #[test]
-fn test_multiple_batches_all_processed() {
+fn test_multiple_batches() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
@@ -123,7 +123,7 @@ fn test_multiple_batches_all_processed() {
 }
 
 #[test]
-fn test_stop_sc_true_shuts_down_compute_context() {
+fn test_stop_shuts_compute() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
@@ -137,7 +137,7 @@ fn test_stop_sc_true_shuts_down_compute_context() {
 }
 
 #[test]
-fn test_foreach_rdd_receives_batch_time() {
+fn test_foreach_batch_time() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
@@ -162,7 +162,7 @@ fn test_foreach_rdd_receives_batch_time() {
 }
 
 #[test]
-fn test_pipeline_with_checkpoint_dir() {
+fn test_pipeline_checkpoint() {
     let td = tempfile::tempdir().unwrap();
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));

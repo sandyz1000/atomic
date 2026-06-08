@@ -1,7 +1,6 @@
 use std::convert::From;
 use std::fmt::{Display, Error as FmtError, Formatter};
 
-
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub struct BoundedDouble {
     pub mean: f64,

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::graph::Graph;
-use crate::types::{EdgeContext, EdgeDirection, VertexId};
+use crate::topology::{EdgeContext, EdgeDirection, VertexId};
 
 /// Run the Pregel vertex-centric computation model on `graph`.
 ///
@@ -83,12 +83,11 @@ where
     current
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::Graph;
-    use crate::types::Edge;
+    use crate::topology::Edge;
 
     #[test]
     fn pregel_min_id_propagation() {
@@ -157,8 +156,16 @@ mod tests {
         // Dense clique that would converge in many iterations.
         let g: Graph<VertexId, ()> = Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 0, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 0,
+                    attr: (),
+                },
             ],
             100_i64,
         )
@@ -174,8 +181,12 @@ mod tests {
             |mut ctx| {
                 let s = ctx.triplet.src_attr;
                 let d = ctx.triplet.dst_attr;
-                if s < d { ctx.send_to_dst(s); }
-                if d < s { ctx.send_to_src(d); }
+                if s < d {
+                    ctx.send_to_dst(s);
+                }
+                if d < s {
+                    ctx.send_to_src(d);
+                }
             },
             |a, b| a.min(b),
         );
@@ -187,7 +198,11 @@ mod tests {
     fn converges_early_when_no_messages_sent() {
         // A path that converges in exactly 1 superstep.
         let g: Graph<VertexId, ()> = Graph::from_edges(
-            vec![Edge { src: 0, dst: 1, attr: () }],
+            vec![Edge {
+                src: 0,
+                dst: 1,
+                attr: (),
+            }],
             VertexId::MAX,
         )
         .map_vertices(|vid, _| vid);

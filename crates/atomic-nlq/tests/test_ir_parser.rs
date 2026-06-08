@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use atomic_nlq::workflow::{WorkflowPlan, WorkflowStep};
 
 #[test]
-fn test_workflow_plan_deserialize_single_step() {
+fn test_plan_single_step() {
     let json = r#"{
         "steps": [
             {
@@ -22,7 +22,7 @@ fn test_workflow_plan_deserialize_single_step() {
 }
 
 #[test]
-fn test_workflow_plan_deserialize_parallel_steps() {
+fn test_plan_parallel_steps() {
     let json = r#"{
         "steps": [
             {"id": "A", "tool": "sql_query", "args": {"query": "SELECT 1"}, "depends_on": []},
@@ -38,7 +38,7 @@ fn test_workflow_plan_deserialize_parallel_steps() {
 }
 
 #[test]
-fn test_workflow_plan_serialize_roundtrip() {
+fn test_plan_roundtrip() {
     let plan = WorkflowPlan {
         steps: vec![
             WorkflowStep {
@@ -63,14 +63,14 @@ fn test_workflow_plan_serialize_roundtrip() {
 }
 
 #[test]
-fn test_workflow_plan_empty_steps() {
+fn test_plan_empty() {
     let json = r#"{"steps": []}"#;
     let plan: WorkflowPlan = serde_json::from_str(json).unwrap();
     assert!(plan.steps.is_empty());
 }
 
 #[test]
-fn test_workflow_plan_invalid_json_fails() {
+fn test_plan_invalid_json() {
     let result = serde_json::from_str::<WorkflowPlan>("not json");
     assert!(result.is_err());
 }

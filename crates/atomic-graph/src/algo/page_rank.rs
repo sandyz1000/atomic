@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::graph::Graph;
-use crate::types::{Edge, VertexId, VertexMap};
+use crate::topology::{Edge, VertexId, VertexMap};
 
 /// Fixed-iteration PageRank (matches GraphX's `PageRank.run`).
 ///
@@ -122,8 +122,6 @@ pub fn run_until_convergence<VD: Clone, ED: Clone>(
     current.vertices().map(|(vid, rank)| (vid, *rank)).collect()
 }
 
-// ── Internal helper ───────────────────────────────────────────────────────────
-
 impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     /// Build a graph with f64 vertex attr = `initial_rank` and f64 edge attr
     /// = `1 / out_degree[src]`.  Used internally by PageRank.
@@ -132,35 +130,51 @@ impl<VD: Clone, ED: Clone> Graph<VD, ED> {
         out_degrees: &HashMap<VertexId, usize>,
         initial_rank: f64,
     ) -> Graph<f64, f64> {
-        let vertices: Vec<(VertexId, f64)> =
-            self.vertices().map(|(vid, _)| (vid, initial_rank)).collect();
+        let vertices: Vec<(VertexId, f64)> = self
+            .vertices()
+            .map(|(vid, _)| (vid, initial_rank))
+            .collect();
         let edges: Vec<Edge<f64>> = self
             .edges()
             .map(|e| {
                 let deg = *out_degrees.get(&e.src).unwrap_or(&1);
                 let w = 1.0 / deg.max(1) as f64;
-                Edge { src: e.src, dst: e.dst, attr: w }
+                Edge {
+                    src: e.src,
+                    dst: e.dst,
+                    attr: w,
+                }
             })
             .collect();
         Graph::from_vertices_edges(vertices, edges)
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::Graph;
-    use crate::types::Edge;
+    use crate::topology::Edge;
 
     fn star_graph() -> Graph<(), ()> {
         // Hub = 0, spokes = 1,2,3 all pointing at hub.
         Graph::from_edges(
             vec![
-                Edge { src: 1, dst: 0, attr: () },
-                Edge { src: 2, dst: 0, attr: () },
-                Edge { src: 3, dst: 0, attr: () },
+                Edge {
+                    src: 1,
+                    dst: 0,
+                    attr: (),
+                },
+                Edge {
+                    src: 2,
+                    dst: 0,
+                    attr: (),
+                },
+                Edge {
+                    src: 3,
+                    dst: 0,
+                    attr: (),
+                },
             ],
             (),
         )
@@ -194,10 +208,26 @@ mod tests {
         // so rank doesn't sink at dangling nodes.
         let cycle = Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 2, attr: () },
-                Edge { src: 2, dst: 3, attr: () },
-                Edge { src: 3, dst: 0, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: (),
+                },
+                Edge {
+                    src: 2,
+                    dst: 3,
+                    attr: (),
+                },
+                Edge {
+                    src: 3,
+                    dst: 0,
+                    attr: (),
+                },
             ],
             (),
         );
@@ -211,8 +241,16 @@ mod tests {
     fn two_node_cycle_equal_ranks() {
         let g: Graph<(), ()> = Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 0, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 0,
+                    attr: (),
+                },
             ],
             (),
         );

@@ -11,7 +11,6 @@ use atomic_graph::{
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
-// ── VertexId alias (atomic_graph uses i64) ────────────────────────────────────
 type VId = i64;
 
 /// An in-process directed graph exposed to Python.

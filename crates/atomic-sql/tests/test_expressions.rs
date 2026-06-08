@@ -98,7 +98,7 @@ async fn test_is_null_filter() {
 }
 
 #[tokio::test]
-async fn test_is_not_null_filter() {
+async fn test_not_null_filter() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("t", vec![make_nullable_batch()]).unwrap();
 
@@ -182,7 +182,7 @@ async fn test_cte() {
 }
 
 #[tokio::test]
-async fn test_window_function_row_number() {
+async fn test_window_row_number() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])]).unwrap();
 
@@ -196,7 +196,7 @@ async fn test_window_function_row_number() {
 }
 
 #[tokio::test]
-async fn test_window_function_running_sum() {
+async fn test_window_running_sum() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])]).unwrap();
 
@@ -225,7 +225,7 @@ async fn test_window_function_rank() {
 }
 
 #[tokio::test]
-async fn test_cast_int_to_string() {
+async fn test_cast_int_str() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("t", vec![make_kv_batch(&[42], &[0])]).unwrap();
 

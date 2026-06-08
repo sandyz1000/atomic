@@ -1,10 +1,10 @@
 use crate::checkpoint::Checkpoint;
 use crate::context::StreamingContext;
 use crate::errors::{StreamingError, StreamingResult};
-use crate::utils::timer::{next_tick_ms, now_ms};
+use crate::streaming_support::batch_timer::{next_tick_ms, now_ms};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -120,11 +120,7 @@ impl JobScheduler {
                     break;
                 }
                 if let Err(e) = job.run() {
-                    log::error!(
-                        "Streaming job (batch={}ms) failed: {}",
-                        batch_time_ms,
-                        e
-                    );
+                    log::error!("Streaming job (batch={}ms) failed: {}", batch_time_ms, e);
                     all_succeeded = false;
                 }
             }
@@ -133,7 +129,11 @@ impl JobScheduler {
                 last_completed_batch_ms = Some(batch_time_ms);
             }
 
-            log::debug!("Completed {} jobs for batch time {}ms", num_jobs, batch_time_ms);
+            log::debug!(
+                "Completed {} jobs for batch time {}ms",
+                num_jobs,
+                batch_time_ms
+            );
 
             // Write checkpoint if a directory was configured.
             if let Some(dir) = ssc.checkpoint_dir.lock().clone() {
@@ -144,7 +144,11 @@ impl JobScheduler {
                     last_completed_batch_ms,
                 );
                 if let Err(e) = cp.write(&dir) {
-                    log::warn!("checkpoint write failed for batch {}ms: {}", batch_time_ms, e);
+                    log::warn!(
+                        "checkpoint write failed for batch {}ms: {}",
+                        batch_time_ms,
+                        e
+                    );
                 }
             }
         }

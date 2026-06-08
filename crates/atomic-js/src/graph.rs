@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use atomic_graph::{
     graph::Graph,
     pregel,
-    types::{Edge, EdgeDirection},
+    topology::{Edge, EdgeDirection},
     algo::{
         connected_component,
         label_propagation,
@@ -257,7 +257,6 @@ impl JsGraph {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn i64map_f64_to_json(map: HashMap<VertexId, f64>) -> serde_json::Value {
     let m: serde_json::Map<String, serde_json::Value> = map

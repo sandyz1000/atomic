@@ -2,7 +2,7 @@ use atomic_streaming::checkpoint::Checkpoint;
 use std::time::Duration;
 
 #[test]
-fn test_write_and_read_latest_round_trip() {
+fn test_roundtrip() {
     let td = tempfile::tempdir().unwrap();
     let cp = Checkpoint::new(1_000, 50, td.path().to_string_lossy().as_ref(), None);
     cp.write(td.path()).unwrap();
@@ -13,21 +13,21 @@ fn test_write_and_read_latest_round_trip() {
 }
 
 #[test]
-fn test_read_latest_returns_none_for_empty_dir() {
+fn test_empty_dir_none() {
     let td = tempfile::tempdir().unwrap();
     let result = Checkpoint::read_latest(td.path()).unwrap();
     assert!(result.is_none());
 }
 
 #[test]
-fn test_read_latest_returns_none_for_nonexistent_dir() {
+fn test_missing_dir_none() {
     let path = std::path::Path::new("/tmp/atomic_streaming_test_nonexistent_9999");
     let result = Checkpoint::read_latest(path).unwrap();
     assert!(result.is_none());
 }
 
 #[test]
-fn test_multiple_checkpoints_latest_wins() {
+fn test_latest_wins() {
     let td = tempfile::tempdir().unwrap();
     Checkpoint::new(1_000, 50, td.path().to_string_lossy().as_ref(), None)
         .write(td.path())
@@ -44,7 +44,7 @@ fn test_multiple_checkpoints_latest_wins() {
 }
 
 #[test]
-fn test_clean_removes_files_below_threshold() {
+fn test_clean_threshold() {
     let td = tempfile::tempdir().unwrap();
     for &t in &[1_000u64, 2_000, 3_000, 4_000] {
         Checkpoint::new(t, 50, td.path().to_string_lossy().as_ref(), None)
@@ -66,7 +66,7 @@ fn test_clean_removes_files_below_threshold() {
 }
 
 #[test]
-fn test_clean_on_empty_dir_is_noop() {
+fn test_clean_empty_noop() {
     let td = tempfile::tempdir().unwrap();
     Checkpoint::clean(td.path(), 5_000).unwrap();
     // No error; directory still exists.
@@ -74,7 +74,7 @@ fn test_clean_on_empty_dir_is_noop() {
 }
 
 #[test]
-fn test_checkpoint_written_by_batch_loop() {
+fn test_batch_loop_checkpoint() {
     use atomic_compute::context::Context;
     use atomic_streaming::context::StreamingContext;
     use parking_lot::Mutex;

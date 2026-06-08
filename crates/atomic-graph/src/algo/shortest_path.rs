@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::graph::Graph;
 use crate::pregel;
-use crate::types::{EdgeDirection, VertexId, VertexMap};
+use crate::topology::{EdgeDirection, VertexId, VertexMap};
 
 /// Distance map: landmark vertex ID → distance from this vertex.
 type SpMap = HashMap<VertexId, f64>;
@@ -21,7 +21,10 @@ type SpMap = HashMap<VertexId, f64>;
 /// the shortest distance.  Unreachable landmarks are absent from the inner map.
 pub fn run(graph: &Graph<(), f64>, landmarks: &[VertexId]) -> VertexMap<SpMap> {
     if landmarks.is_empty() || graph.num_vertices() == 0 {
-        return graph.vertices().map(|(vid, _)| (vid, HashMap::new())).collect();
+        return graph
+            .vertices()
+            .map(|(vid, _)| (vid, HashMap::new()))
+            .collect();
     }
 
     // Vertex attr = SpMap (distances to landmarks known so far).
@@ -57,10 +60,11 @@ pub fn run(graph: &Graph<(), f64>, landmarks: &[VertexId]) -> VertexMap<SpMap> {
         |a, b| add_maps(&a, &b),
     );
 
-    result.vertices().map(|(vid, sp)| (vid, sp.clone())).collect()
+    result
+        .vertices()
+        .map(|(vid, sp)| (vid, sp.clone()))
+        .collect()
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn increment_map(m: &SpMap, weight: f64) -> SpMap {
     m.iter().map(|(&k, &d)| (k, d + weight)).collect()
@@ -69,30 +73,43 @@ fn increment_map(m: &SpMap, weight: f64) -> SpMap {
 fn add_maps(m1: &SpMap, m2: &SpMap) -> SpMap {
     let mut result = m1.clone();
     for (&k, &d) in m2 {
-        result.entry(k).and_modify(|existing| {
-            if d < *existing {
-                *existing = d;
-            }
-        }).or_insert(d);
+        result
+            .entry(k)
+            .and_modify(|existing| {
+                if d < *existing {
+                    *existing = d;
+                }
+            })
+            .or_insert(d);
     }
     result
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::Graph;
-    use crate::types::Edge;
+    use crate::topology::Edge;
 
     fn weighted_triangle() -> Graph<(), f64> {
         // 0 →(1.0)→ 1 →(2.0)→ 2 →(3.0)→ 0
         Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: 1.0 },
-                Edge { src: 1, dst: 2, attr: 2.0 },
-                Edge { src: 2, dst: 0, attr: 3.0 },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: 1.0,
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: 2.0,
+                },
+                Edge {
+                    src: 2,
+                    dst: 0,
+                    attr: 3.0,
+                },
             ],
             (),
         )
@@ -139,12 +156,18 @@ mod tests {
         // Vertex 99 cannot reach 0, so it should have no entry for landmark 0.
         let g = Graph::from_vertices_edges(
             vec![(0, ()), (1, ()), (99, ())],
-            vec![Edge { src: 0, dst: 1, attr: 1.0 }],
+            vec![Edge {
+                src: 0,
+                dst: 1,
+                attr: 1.0,
+            }],
         );
         let result = run(&g, &[0]);
         // Vertex 99 is isolated and can't reach landmark 0.
-        assert!(!result[&99].contains_key(&0),
-            "unreachable vertex should have no entry for landmark 0");
+        assert!(
+            !result[&99].contains_key(&0),
+            "unreachable vertex should have no entry for landmark 0"
+        );
     }
 
     #[test]
@@ -155,9 +178,21 @@ mod tests {
         let g = Graph::from_vertices_edges(
             vec![(0, ()), (1, ()), (3, ())],
             vec![
-                Edge { src: 0, dst: 1, attr: 1.0 },
-                Edge { src: 1, dst: 3, attr: 1.0 },
-                Edge { src: 0, dst: 3, attr: 5.0 },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: 1.0,
+                },
+                Edge {
+                    src: 1,
+                    dst: 3,
+                    attr: 1.0,
+                },
+                Edge {
+                    src: 0,
+                    dst: 3,
+                    attr: 5.0,
+                },
             ],
         );
         let result = run(&g, &[3]);

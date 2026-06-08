@@ -9,10 +9,10 @@ use atomic_data::shuffle::{
 };
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type ComputeResult<T, E = ComputeError> = std::result::Result<T, E>;
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum ComputeError {
     #[error(transparent)]
     AsyncJoinError(#[from] tokio::task::JoinError),
 
@@ -119,20 +119,20 @@ pub enum Error {
     Other(String),
 }
 
-impl Error {
+impl ComputeError {
     pub fn executor_shutdown(&self) -> bool {
-        matches!(self, Error::ExecutorShutdown)
+        matches!(self, ComputeError::ExecutorShutdown)
     }
 }
 
-impl From<Error> for BaseError {
-    fn from(err: Error) -> Self {
+impl From<ComputeError> for BaseError {
+    fn from(err: ComputeError) -> Self {
         BaseError::Other(format!("{}", err))
     }
 }
 
-impl From<BaseError> for Error {
+impl From<BaseError> for ComputeError {
     fn from(e: BaseError) -> Self {
-        Error::InvalidPayload(e.to_string())
+        ComputeError::InvalidPayload(e.to_string())
     }
 }

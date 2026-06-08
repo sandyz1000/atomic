@@ -159,13 +159,13 @@ impl PyContext {
         &self,
         py: Python<'_>,
         value: Py<PyAny>,
-    ) -> PyResult<crate::shared::PyBroadcastVar> {
+    ) -> PyResult<crate::distributed_vars::PyBroadcastVar> {
         // Try cloudpickle first (supports lambdas); fall back to stdlib pickle.
         let pickle = py
             .import("cloudpickle")
             .or_else(|_| py.import("pickle"))?;
         let bytes: Vec<u8> = pickle.call_method1("dumps", (value,))?.extract()?;
-        Ok(crate::shared::PyBroadcastVar::new(bytes))
+        Ok(crate::distributed_vars::PyBroadcastVar::new(bytes))
     }
 
     /// Create a mutable accumulator with an initial (zero) value.
@@ -184,9 +184,9 @@ impl PyContext {
         &self,
         py: Python<'_>,
         zero: Py<PyAny>,
-    ) -> PyResult<crate::shared::PyAccumulator> {
-        let initial = crate::shared::pythonobj_to_json(py, &zero)?;
-        Ok(crate::shared::PyAccumulator::new(initial))
+    ) -> PyResult<crate::distributed_vars::PyAccumulator> {
+        let initial = crate::distributed_vars::pythonobj_to_json(py, &zero)?;
+        Ok(crate::distributed_vars::PyAccumulator::new(initial))
     }
 
     /// Stop the context and release resources.

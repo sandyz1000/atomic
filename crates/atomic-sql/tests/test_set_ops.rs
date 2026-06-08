@@ -4,7 +4,7 @@ use common::{col_as_i32, make_kv_batch, total_rows};
 use atomic_sql::AtomicSqlContext;
 
 #[tokio::test]
-async fn test_union_all_includes_duplicates() {
+async fn test_union_duplicates() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("a", vec![make_kv_batch(&[1, 2], &[10, 20])]).unwrap();
     ctx.register_batches("b", vec![make_kv_batch(&[1, 3], &[10, 30])]).unwrap();

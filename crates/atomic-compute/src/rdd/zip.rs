@@ -1,9 +1,9 @@
-use crate::error::Error;
+use crate::error::ComputeError;
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::BaseResult;
 use atomic_data::split::{Split, ZippedPartitionsSplit};
 use std::cmp::min;
 use std::marker::PhantomData;
@@ -97,7 +97,7 @@ where
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
@@ -106,7 +106,7 @@ where
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         self.iterator_any(split)
     }
 }
@@ -129,11 +129,11 @@ where
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>> {
         let current_split = split
             .as_any()
             .downcast_ref::<ZippedPartitionsSplit>()
-            .ok_or(Error::DowncastFailure("ZippedPartitionsSplit"))?;
+            .ok_or(ComputeError::DowncastFailure("ZippedPartitionsSplit"))?;
 
         let fst_iter = self.first.iterator(current_split.fst_split.clone())?;
         let sec_iter = self.second.iterator(current_split.sec_split.clone())?;
@@ -143,7 +143,7 @@ where
     fn iterator(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>> {
         self.compute(split.clone())
     }
 }

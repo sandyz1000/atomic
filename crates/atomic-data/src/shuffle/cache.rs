@@ -58,7 +58,6 @@ impl ShuffleCache for DashMapShuffleCache {
     }
 }
 
-// ── SpillableShuffleCache ─────────────────────────────────────────────────────
 
 /// Shuffle cache that spills buckets to disk when the in-memory byte total would exceed
 /// `threshold_bytes`.  Buckets that fit within the threshold stay in memory; those that

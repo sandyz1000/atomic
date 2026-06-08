@@ -115,7 +115,6 @@ impl<T> Clone for TypedRdd<T> {
     }
 }
 
-// ── Persist / Cache ───────────────────────────────────────────────────────────
 
 impl<T: Data + Clone + 'static> TypedRdd<T> {
     /// Persist this RDD's partitions in memory so they are not recomputed
@@ -2253,9 +2252,7 @@ where
     }
 }
 
-// ============================================================================
 // CONVERSION TRAIT - For easy Arc<dyn Rdd> -> TypedRdd conversion
-// ============================================================================
 
 /// Extension trait: `rdd.typed(ctx)` wraps any `Arc<dyn Rdd<Item=T>>` in a `TypedRdd<T>`.
 pub trait RddExt<T: Data>: Rdd<Item = T> {
@@ -2577,7 +2574,7 @@ where
         staged: Option<StagedPipeline>,
         rdd: &RddRef<T>,
         op: PipelineOp,
-    ) -> Result<StagedPipeline, crate::error::Error> {
+    ) -> Result<StagedPipeline, crate::error::ComputeError> {
         match staged {
             Some(mut s) => {
                 s.ops.push(op);

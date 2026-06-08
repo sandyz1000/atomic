@@ -23,7 +23,7 @@ fn make_rdd(sc: &Arc<Context>, data: Vec<i32>) -> Arc<dyn Rdd<Item = i32>> {
 }
 
 #[test]
-fn test_windowed_collects_data_from_multiple_batches() {
+fn test_windowed_multi_batch() {
     let sc = local_sc();
     let batch_ms = 60u64;
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(batch_ms));
@@ -67,7 +67,7 @@ fn test_windowed_collects_data_from_multiple_batches() {
 }
 
 #[test]
-fn test_windowed_with_empty_queue_produces_no_data() {
+fn test_windowed_empty_queue() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
 
@@ -101,7 +101,7 @@ fn test_windowed_with_empty_queue_produces_no_data() {
 
 #[test]
 #[should_panic]
-fn test_window_duration_not_multiple_of_batch_panics() {
+fn test_window_duration_panic() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(100));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
@@ -118,7 +118,7 @@ fn test_window_duration_not_multiple_of_batch_panics() {
 
 #[test]
 #[should_panic]
-fn test_slide_duration_not_multiple_of_batch_panics() {
+fn test_slide_duration_panic() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(100));
     let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =

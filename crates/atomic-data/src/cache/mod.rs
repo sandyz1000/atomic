@@ -11,9 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use dashmap::DashMap;
 use lru::LruCache;
 
-// ─────────────────────────────────────────────────────────────────────────────
 // StorageLevel
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Hints for how an RDD's partitions should be persisted.
 ///
@@ -31,9 +29,7 @@ pub enum StorageLevel {
     DiskOnly,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // PartitionStore — typed in-memory cache for CachedRdd
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Default maximum number of partitions the global `PARTITION_CACHE` will hold
 /// before evicting least-recently-used entries.

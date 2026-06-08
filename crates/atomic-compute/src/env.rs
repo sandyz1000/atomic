@@ -48,7 +48,6 @@ impl Env {
     }
 }
 
-// ── Types ──────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -106,7 +105,6 @@ impl Default for LogConfig {
     }
 }
 
-// ── WorkerConfig ───────────────────────────────────────────────────────────────
 
 /// Configuration for a worker process.
 #[derive(Clone, Debug)]
@@ -124,7 +122,6 @@ impl WorkerConfig {
     }
 }
 
-// ── Config ─────────────────────────────────────────────────────────────────────
 
 /// Runtime configuration for a driver or worker process.
 ///
@@ -481,7 +478,6 @@ impl ConfigBuilder {
     }
 }
 
-// ── Shuffle initialisation ─────────────────────────────────────────────────────
 
 /// Initialise the shuffle infrastructure: starts the `ShuffleManager` HTTP server and
 /// populates the `SHUFFLE_CACHE` and `SHUFFLE_SERVER_URI` statics in `atomic_data::env`.

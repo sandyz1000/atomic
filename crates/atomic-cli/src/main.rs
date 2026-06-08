@@ -22,7 +22,6 @@ const CLUSTER_CONFIG_PATH: &str = ".atomic/cluster.toml";
 /// Change with --remote-path if /opt is not writable on your workers.
 const DEFAULT_REMOTE_PATH: &str = "/opt/atomic/worker";
 
-// ── CLI skeleton ──────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(name = "atomic")]
@@ -44,7 +43,6 @@ enum Commands {
     Stop(StopArgs),
 }
 
-// ── Build ─────────────────────────────────────────────────────────────────────
 
 #[derive(Args)]
 struct BuildArgs {
@@ -59,7 +57,6 @@ struct BuildArgs {
     cargo_args: Vec<String>,
 }
 
-// ── Ship (formerly Deploy) ────────────────────────────────────────────────────
 
 #[derive(Args)]
 struct ShipArgs {
@@ -83,7 +80,6 @@ struct ShipArgs {
     user: String,
 }
 
-// ── Submit ────────────────────────────────────────────────────────────────────
 
 #[derive(Args)]
 struct SubmitArgs {
@@ -104,7 +100,6 @@ struct SubmitArgs {
     driver_args: Vec<String>,
 }
 
-// ── Stop ──────────────────────────────────────────────────────────────────────
 
 #[derive(Args)]
 struct StopArgs {
@@ -114,7 +109,6 @@ struct StopArgs {
     workers: Vec<String>,
 }
 
-// ── Cluster config ────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Default)]
 struct ClusterConfig {
@@ -126,7 +120,6 @@ struct WorkerEntry {
     address: String,
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -139,7 +132,6 @@ async fn main() -> Result<()> {
     }
 }
 
-// ── Build ─────────────────────────────────────────────────────────────────────
 
 fn cmd_build(args: BuildArgs) -> Result<()> {
     ensure_zigbuild()?;
@@ -190,7 +182,6 @@ fn ensure_zigbuild() -> Result<()> {
     )
 }
 
-// ── Ship ──────────────────────────────────────────────────────────────────────
 
 async fn cmd_ship(args: ShipArgs) -> Result<()> {
     if !args.binary.exists() {
@@ -239,7 +230,6 @@ async fn ship_to_host(
     expected_sha256: &str,
     remote_path: &str,
 ) -> Result<()> {
-    // ── 1. Connect with host-key verification ─────────────────────────────────
     //
     // Refuses unknown hosts (no StrictHostKeyChecking=no).
     // The caller must have already run `ssh-keyscan -H <host> >> ~/.ssh/known_hosts`.
@@ -249,17 +239,14 @@ async fn ship_to_host(
         .await
         .with_context(|| format!("SSH connect to {} failed", host))?;
 
-    // ── 2. Authenticate ───────────────────────────────────────────────────────
     authenticate(&mut session, user, key_path).await?;
 
-    // ── 3. Create remote directory (exec) ─────────────────────────────────────
     let remote_dir = Path::new(remote_path)
         .parent()
         .and_then(|p| p.to_str())
         .unwrap_or("/opt/atomic");
     exec_checked(&mut session, &format!("mkdir -p {}", shell_quote(remote_dir))).await?;
 
-    // ── 4. Upload to a temp path via SFTP ────────────────────────────────────
     //
     // Writing to `<path>.tmp` means the final destination always contains a
     // complete binary — the rename in step 6 is atomic on POSIX systems.
@@ -278,7 +265,6 @@ async fn ship_to_host(
         // remote_file dropped — SFTP channel closes here.
     }
 
-    // ── 5. Verify SHA-256 on the remote ──────────────────────────────────────
     //
     // Catches bit-rot, truncated transfers, and any tampering between our
     // SCP upload and the rename.
@@ -297,7 +283,6 @@ async fn ship_to_host(
         );
     }
 
-    // ── 6. Atomic rename + set permissions ────────────────────────────────────
     //
     // chmod before mv: the binary is only visible at the final path once it is
     // both complete and executable.
@@ -316,7 +301,6 @@ async fn ship_to_host(
     Ok(())
 }
 
-// ── SSH host-key verification ─────────────────────────────────────────────────
 
 struct KnownHostsChecker {
     host: String,
@@ -373,7 +357,6 @@ impl client::Handler for KnownHostsChecker {
     }
 }
 
-// ── SSH authentication ────────────────────────────────────────────────────────
 
 async fn authenticate(
     session: &mut Handle<KnownHostsChecker>,
@@ -419,7 +402,6 @@ async fn authenticate(
     )
 }
 
-// ── Remote exec helpers ───────────────────────────────────────────────────────
 
 /// Run a remote command; bail if it exits non-zero.
 async fn exec_checked(session: &mut Handle<KnownHostsChecker>, cmd: &str) -> Result<()> {
@@ -458,7 +440,6 @@ async fn exec_output(
     Ok((String::from_utf8_lossy(&stdout).into_owned(), exit_code))
 }
 
-// ── Submit ────────────────────────────────────────────────────────────────────
 
 async fn cmd_submit(args: SubmitArgs) -> Result<()> {
     // 1. Build
@@ -518,7 +499,6 @@ async fn cmd_submit(args: SubmitArgs) -> Result<()> {
     Ok(())
 }
 
-// ── Stop ──────────────────────────────────────────────────────────────────────
 
 fn cmd_stop(args: StopArgs) -> Result<()> {
     let addresses: Vec<String> = if args.workers.is_empty() {
@@ -557,7 +537,6 @@ fn stop_worker(address: &str) -> Result<()> {
     Ok(())
 }
 
-// ── Utilities ─────────────────────────────────────────────────────────────────
 
 fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
@@ -611,7 +590,6 @@ fn find_binary(dir: &Path) -> Result<PathBuf> {
     bail!("no executable binary found in {}", dir.display())
 }
 
-// ── Cluster config ────────────────────────────────────────────────────────────
 
 fn save_cluster_config(workers: &[WorkerEntry]) -> Result<()> {
     let config_path = PathBuf::from(CLUSTER_CONFIG_PATH);

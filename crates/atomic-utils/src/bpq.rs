@@ -45,9 +45,10 @@ impl<T: Ord> BoundedPriorityQueue<T> {
 
     fn maybe_replace_lowest(&mut self, elem: T) {
         if let Some(head) = self.underlying.peek()
-            && elem.lt(head) {
-                self.underlying.pop();
-                self.underlying.push(elem);
-            }
+            && elem.lt(head)
+        {
+            self.underlying.pop();
+            self.underlying.push(elem);
+        }
     }
 }

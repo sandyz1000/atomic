@@ -63,7 +63,6 @@ impl<T: Data> RddCore<T> {
         }
     }
 
-    // ── RddBase delegation helpers ──────────────────────────────────────────
 
     pub fn rdd_id(&self) -> usize {
         self.vals.id

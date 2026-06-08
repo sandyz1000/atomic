@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::graph::Graph;
-use crate::types::{VertexId, VertexMap};
+use crate::topology::{VertexId, VertexMap};
 
 /// Count the number of triangles each vertex participates in.
 ///
@@ -49,7 +49,10 @@ pub fn run<VD: Clone, ED: Clone>(graph: &Graph<VD, ED>) -> VertexMap<usize> {
     }
 
     // Each triangle is counted twice (once per edge direction between u and v).
-    raw_counts.into_iter().map(|(vid, c)| (vid, c / 2)).collect()
+    raw_counts
+        .into_iter()
+        .map(|(vid, c)| (vid, c / 2))
+        .collect()
 }
 
 /// Count the total number of triangles in the graph (each triangle counted once).
@@ -58,24 +61,46 @@ pub fn total<VD: Clone, ED: Clone>(graph: &Graph<VD, ED>) -> usize {
     run(graph).values().sum::<usize>() / 3
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::Graph;
-    use crate::types::Edge;
+    use crate::topology::Edge;
 
     /// K4: complete graph on 4 vertices — each vertex in 3 triangles, 4 total.
     fn k4() -> Graph<(), ()> {
         Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 0, dst: 2, attr: () },
-                Edge { src: 0, dst: 3, attr: () },
-                Edge { src: 1, dst: 2, attr: () },
-                Edge { src: 1, dst: 3, attr: () },
-                Edge { src: 2, dst: 3, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 0,
+                    dst: 2,
+                    attr: (),
+                },
+                Edge {
+                    src: 0,
+                    dst: 3,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 3,
+                    attr: (),
+                },
+                Edge {
+                    src: 2,
+                    dst: 3,
+                    attr: (),
+                },
             ],
             (),
         )
@@ -98,9 +123,21 @@ mod tests {
     fn triangle_graph() {
         let g = Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 2, attr: () },
-                Edge { src: 2, dst: 0, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: (),
+                },
+                Edge {
+                    src: 2,
+                    dst: 0,
+                    attr: (),
+                },
             ],
             (),
         );
@@ -115,8 +152,16 @@ mod tests {
     fn no_triangles_in_path() {
         let g = Graph::from_edges(
             vec![
-                Edge { src: 0, dst: 1, attr: () },
-                Edge { src: 1, dst: 2, attr: () },
+                Edge {
+                    src: 0,
+                    dst: 1,
+                    attr: (),
+                },
+                Edge {
+                    src: 1,
+                    dst: 2,
+                    attr: (),
+                },
             ],
             (),
         );
@@ -140,7 +185,11 @@ mod tests {
     #[test]
     fn two_vertices_no_triangle() {
         let g: Graph<(), ()> = Graph::from_edges(
-            vec![Edge { src: 0, dst: 1, attr: () }],
+            vec![Edge {
+                src: 0,
+                dst: 1,
+                attr: (),
+            }],
             (),
         );
         assert_eq!(total(&g), 0);

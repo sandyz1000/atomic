@@ -9,7 +9,6 @@ use datafusion::logical_expr::{
 };
 use std::sync::Arc;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// A UDF that multiplies every Int32 value by `factor`.
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -51,10 +50,9 @@ fn register_double_udf(ctx: &AtomicSqlContext) {
     ctx.inner().register_udf(udf);
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_scalar_udf_in_select() {
+async fn test_udf_select() {
     let ctx = AtomicSqlContext::new();
     register_double_udf(&ctx);
     ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])]).unwrap();
@@ -69,7 +67,7 @@ async fn test_scalar_udf_in_select() {
 }
 
 #[tokio::test]
-async fn test_scalar_udf_in_where() {
+async fn test_udf_where() {
     let ctx = AtomicSqlContext::new();
     register_double_udf(&ctx);
     ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])]).unwrap();
@@ -85,7 +83,7 @@ async fn test_scalar_udf_in_where() {
 }
 
 #[tokio::test]
-async fn test_scalar_udf_applied_to_constant() {
+async fn test_udf_constant() {
     let ctx = AtomicSqlContext::new();
     register_double_udf(&ctx);
     ctx.register_batches("t", vec![make_kv_batch(&[1], &[5])]).unwrap();
@@ -138,7 +136,7 @@ async fn test_two_udfs_composed() {
 }
 
 #[tokio::test]
-async fn test_udf_with_group_by() {
+async fn test_udf_group_by() {
     let ctx = AtomicSqlContext::new();
     register_double_udf(&ctx);
     ctx.register_batches("t", vec![make_kv_batch(&[1, 1, 2, 2], &[10, 20, 5, 5])]).unwrap();

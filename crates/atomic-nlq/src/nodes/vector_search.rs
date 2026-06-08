@@ -22,7 +22,6 @@ use futures::StreamExt;
 
 use crate::vector::provider::VectorIndexProvider;
 
-// ── Logical node ──────────────────────────────────────────────────────────────
 
 /// ANN similarity search against a registered vector index.
 /// Adds `__vs_id: UInt64` and `__vs_score: Float32` columns.
@@ -113,7 +112,6 @@ impl UserDefinedLogicalNodeCore for VectorSearchNode {
     }
 }
 
-// ── Physical exec ─────────────────────────────────────────────────────────────
 
 pub struct VectorSearchExec {
     query_col: String,

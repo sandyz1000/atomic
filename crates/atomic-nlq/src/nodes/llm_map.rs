@@ -136,7 +136,6 @@ impl UserDefinedLogicalNodeCore for LlmMapNode {
     }
 }
 
-// ── Physical exec ─────────────────────────────────────────────────────────────
 
 pub struct LlmMapExec {
     prompt: String,

@@ -17,7 +17,6 @@ use crate::nodes::vector_search::{VectorSearchExec, VectorSearchNode};
 use crate::openai::OpenAiClient;
 use crate::vector::provider::VectorIndexProvider;
 
-// ── Extension planner ─────────────────────────────────────────────────────────
 
 pub struct NlqExtensionPlanner {
     client: Arc<OpenAiClient>,
@@ -90,7 +89,6 @@ impl ExtensionPlanner for NlqExtensionPlanner {
     }
 }
 
-// ── QueryPlanner wrapper ──────────────────────────────────────────────────────
 
 pub struct NlqQueryPlanner {
     planner: DefaultPhysicalPlanner,

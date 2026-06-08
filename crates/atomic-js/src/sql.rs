@@ -17,7 +17,6 @@ use napi_derive::napi;
 
 use atomic_sql::context::AtomicSqlContext;
 
-// ── Async helper ──────────────────────────────────────────────────────────────
 
 fn run_sql_async<F, T>(fut: F) -> T
 where
@@ -33,7 +32,6 @@ where
     }
 }
 
-// ── Temp-view counter ─────────────────────────────────────────────────────────
 
 static TMP_VIEW_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -42,7 +40,6 @@ fn tmp_view_name() -> String {
     format!("__atomic_tmp_{n}")
 }
 
-// ── RecordBatch → JSON conversion ─────────────────────────────────────────────
 
 fn arrow_scalar_to_json(col: &dyn Array, row: usize) -> serde_json::Value {
     if col.is_null(row) {
@@ -130,7 +127,6 @@ fn batches_to_json_rows(batches: &[RecordBatch]) -> Vec<serde_json::Value> {
     rows
 }
 
-// ── JsDataFrame ───────────────────────────────────────────────────────────────
 
 /// A lazy structured dataset produced by `SqlContext.sql()`.
 ///
@@ -149,7 +145,6 @@ pub struct JsDataFrame {
 
 #[napi]
 impl JsDataFrame {
-    // ── Actions ───────────────────────────────────────────────────────────────
 
     /// Execute the query and return all rows as an array of objects.
     ///
@@ -183,7 +178,6 @@ impl JsDataFrame {
         Ok(n as u32)
     }
 
-    // ── Transformations ───────────────────────────────────────────────────────
 
     /// Filter rows using a SQL WHERE-clause expression.
     ///
@@ -244,7 +238,6 @@ impl JsDataFrame {
         Ok(JsDataFrame { inner: df, session: self.session.clone() })
     }
 
-    // ── Introspection ─────────────────────────────────────────────────────────
 
     /// Return a JSON object mapping column name → Arrow type string.
     ///
@@ -261,7 +254,6 @@ impl JsDataFrame {
         Ok(serde_json::Value::Object(obj))
     }
 
-    // ── Write ─────────────────────────────────────────────────────────────────
 
     /// Write all rows to a Parquet file or directory.
     ///
@@ -296,7 +288,6 @@ impl JsDataFrame {
     }
 }
 
-// ── JsSqlContext ──────────────────────────────────────────────────────────────
 
 /// SQL execution context backed by DataFusion.
 ///
@@ -327,7 +318,6 @@ impl JsSqlContext {
         Ok(Self { inner, session })
     }
 
-    // ── SQL execution ─────────────────────────────────────────────────────────
 
     /// Parse and execute a SQL query. Returns a lazy `DataFrame`.
     ///
@@ -342,7 +332,6 @@ impl JsSqlContext {
         Ok(JsDataFrame { inner: df, session: self.session.clone() })
     }
 
-    // ── Table registration ────────────────────────────────────────────────────
 
     /// Register a CSV file or directory as a named table.
     ///

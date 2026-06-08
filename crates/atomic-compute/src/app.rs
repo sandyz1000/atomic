@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::context::{Context, start_worker};
 use crate::env::Config;
-use crate::error::Error;
+use crate::error::{ComputeError, ComputeResult};
 
 /// The role this binary plays at runtime.
 #[derive(Debug, Clone)]
@@ -57,7 +57,7 @@ impl AtomicApp {
     ///     AppRole::Driver       => { /* job logic */ }
     /// }
     /// ```
-    pub async fn build() -> Result<Self, Error> {
+    pub async fn build() -> ComputeResult<Self> {
         let args: Vec<String> = std::env::args().collect();
 
         let _ = env_logger::try_init();
@@ -123,8 +123,8 @@ impl AtomicApp {
     ///
     /// Returns an error if called on a Worker-role app — use [`run_worker`](AtomicApp::run_worker)
     /// in the `AppRole::Worker` match arm instead.
-    pub fn driver_context(&self) -> Result<Arc<Context>, Error> {
-        self.ctx.clone().ok_or(Error::UnsupportedOperation(
+    pub fn driver_context(&self) -> ComputeResult<Arc<Context>> {
+        self.ctx.clone().ok_or(ComputeError::UnsupportedOperation(
             "driver_context() called on a Worker-role AtomicApp — use run_worker() instead",
         ))
     }

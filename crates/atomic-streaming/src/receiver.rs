@@ -1,7 +1,7 @@
 /// Receiver infrastructure for streaming data ingestion.
 ///
 /// `BlockGenerator` buffers incoming items and periodically emits blocks.
-use crate::utils::fileutils::StorageLevel;
+use crate::streaming_support::file_sink::StorageLevel;
 use parking_lot::Mutex;
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

@@ -38,7 +38,6 @@ pub struct JsRdd {
     staged: Option<StagedJsPipeline>,
 }
 
-// ── Internal constructors and helpers ────────────────────────────────────────
 
 impl JsRdd {
     pub fn from_data(
@@ -156,11 +155,9 @@ impl JsRdd {
     }
 }
 
-// ── napi methods ─────────────────────────────────────────────────────────────
 
 #[napi]
 impl JsRdd {
-    // ── Transformations ──────────────────────────────────────────────────────
 
     /// Apply `f` to each element, returning a new RDD.
     #[napi]
@@ -739,7 +736,6 @@ impl JsRdd {
         self.coalesce(n)
     }
 
-    // ── Actions ──────────────────────────────────────────────────────────────
 
     /// Return all elements as a JavaScript array.
     #[napi]
@@ -1119,7 +1115,6 @@ impl JsRdd {
         Ok(result)
     }
 
-    // ── Join operations ───────────────────────────────────────────────────────
 
     /// Inner join two pair RDDs on their first element (key).
     ///
@@ -1222,7 +1217,6 @@ impl JsRdd {
         ))
     }
 
-    // ── Sorting ───────────────────────────────────────────────────────────────
 
     /// Sort elements by a key extracted via `key_fn(element)`.
     ///
@@ -1302,7 +1296,6 @@ impl JsRdd {
         ))
     }
 
-    // ── Partition access ──────────────────────────────────────────────────────
 
     /// Return elements divided into `num_partitions` logical partition arrays.
     ///
@@ -1324,7 +1317,6 @@ impl JsRdd {
         result
     }
 
-    // ── Persistence / caching ─────────────────────────────────────────────────
 
     /// Mark this RDD to be cached in memory on first action.
     ///

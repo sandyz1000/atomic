@@ -1,7 +1,7 @@
 mod context;
 mod graph;
 mod rdd;
-mod shared;
+mod distributed_vars;
 mod sql;
 mod streaming;
 
@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use context::PyContext;
 use graph::PyGraph;
 use rdd::PyRdd;
-use shared::{PyAccumulator, PyBroadcastVar};
+use distributed_vars::{PyAccumulator, PyBroadcastVar};
 use sql::{PyDataFrame, PySqlContext};
 use streaming::{PyBatchQueue, PyDStream, PyStreamingContext};
 

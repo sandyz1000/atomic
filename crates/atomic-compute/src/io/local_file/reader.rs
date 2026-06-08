@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::context::Context;
-use crate::error::{Error, Result};
+use crate::error::{ComputeError, ComputeResult};
 use crate::io::*;
 use crate::rdd::{Rdd, RddBase, map_partitions::MapPartitionsRdd, mapper::MapperRdd};
 use atomic_data::data::Data;
@@ -142,7 +142,7 @@ impl<T> LocalFsReader<T> {
 
     /// This function should be called once per host to come with the paralel workload.
     /// Is safe to recompute on failure though.
-    pub(super) fn load_local_files(&self) -> Result<Vec<Vec<PathBuf>>> {
+    pub(super) fn load_local_files(&self) -> ComputeResult<Vec<Vec<PathBuf>>> {
         let mut total_size = 0_u64;
         if self.is_single_file {
             let files = vec![vec![self.path.clone()]];
@@ -159,10 +159,10 @@ impl<T> LocalFsReader<T> {
         let mut ex2 = 0.0;
 
         for (i, entry) in fs::read_dir(&self.path)
-            .map_err(Error::InputRead)?
+            .map_err(ComputeError::InputRead)?
             .enumerate()
         {
-            let path = entry.map_err(Error::InputRead)?.path();
+            let path = entry.map_err(ComputeError::InputRead)?.path();
             if path.is_file() {
                 let is_proper_file = {
                     self.filter_ext.is_none()
@@ -171,7 +171,7 @@ impl<T> LocalFsReader<T> {
                 if !is_proper_file {
                     continue;
                 }
-                let size = fs::metadata(&path).map_err(Error::InputRead)?.len();
+                let size = fs::metadata(&path).map_err(ComputeError::InputRead)?.len();
                 if i == 0 {
                     // assign first file size as reference sample
                     k = size;
@@ -188,7 +188,7 @@ impl<T> LocalFsReader<T> {
         }
 
         if total_files == 0 {
-            return Err(Error::NoFilesFound);
+            return Err(ComputeError::NoFilesFound);
         }
 
         let file_size_mean = total_size / total_files;

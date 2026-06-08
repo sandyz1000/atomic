@@ -95,7 +95,6 @@ where
     }
 }
 
-// ── Pair variant ──────────────────────────────────────────────────────────────
 
 /// An RDD that applies a function to every partition of the parent RDD, producing pair `(K, V)` items.
 ///

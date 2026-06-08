@@ -539,7 +539,6 @@ impl DistributedScheduler {
             })
             .collect();
 
-        // ── Shared result slots ───────────────────────────────────────────────
         // First successful result (original or speculative) fills the slot; all
         // subsequent arrivals for the same partition are discarded.
         let slots: Vec<Arc<Mutex<Option<TaskResultEnvelope>>>> = (0..num_partitions)
@@ -553,7 +552,6 @@ impl DistributedScheduler {
         // Durations of completed tasks — used to compute the median for straggler detection.
         let completed_durations: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // ── Primary task handles ──────────────────────────────────────────────
         // `DistributedScheduler` is `Clone` and all fields are `Arc<...>`, so cloning
         // is cheap and gives a fully functional scheduler for `tokio::spawn` futures.
         let handles: Vec<tokio::task::JoinHandle<LibResult<()>>> = tasks
@@ -630,7 +628,6 @@ impl DistributedScheduler {
             })
             .collect();
 
-        // ── Speculation monitor ───────────────────────────────────────────────
         // Polls every 500 ms. Once ≥50% of partitions complete, computes the median
         // task duration and speculatively re-runs partitions that exceed the threshold.
         if let Some(multiplier) = speculation_multiplier {

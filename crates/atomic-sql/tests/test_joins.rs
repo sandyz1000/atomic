@@ -69,7 +69,7 @@ async fn test_right_join_preserve() {
 }
 
 #[tokio::test]
-async fn test_cross_join_produces_cartesian_product() {
+async fn test_cross_join() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("a", vec![make_kv_batch(&[1, 2], &[10, 20])]).unwrap();
     ctx.register_batches("b", vec![make_kv_batch(&[3, 4], &[30, 40])]).unwrap();
@@ -83,7 +83,7 @@ async fn test_cross_join_produces_cartesian_product() {
 }
 
 #[tokio::test]
-async fn test_join_with_where_filter() {
+async fn test_join_filter() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("emp", vec![make_employees_batch()]).unwrap();
     ctx.register_batches("sal", vec![make_salaries_batch()]).unwrap();
@@ -126,7 +126,7 @@ async fn test_self_join() {
 }
 
 #[tokio::test]
-async fn test_join_no_matches_returns_empty_inner() {
+async fn test_join_no_matches() {
     let ctx = AtomicSqlContext::new();
     ctx.register_batches("a", vec![make_kv_batch(&[1, 2], &[10, 20])]).unwrap();
     ctx.register_batches("b", vec![make_kv_batch(&[99, 100], &[90, 100])]).unwrap();

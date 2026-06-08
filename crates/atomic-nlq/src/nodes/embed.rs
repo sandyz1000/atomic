@@ -23,7 +23,6 @@ use futures::StreamExt;
 use crate::config::NlqConfig;
 use crate::openai::OpenAiClient;
 
-// ── Known model dimensions ─────────────────────────────────────────────────────
 fn model_dim(model: &str, config_override: Option<usize>) -> i32 {
     if let Some(d) = config_override {
         return d as i32;
@@ -39,7 +38,6 @@ fn model_dim(model: &str, config_override: Option<usize>) -> i32 {
     }
 }
 
-// ── Logical node ──────────────────────────────────────────────────────────────
 
 /// Adds a `FixedSizeList<Float32>` embedding column to each row.
 #[derive(Debug, Clone)]
@@ -144,7 +142,6 @@ impl UserDefinedLogicalNodeCore for EmbedNode {
     }
 }
 
-// ── Physical exec ─────────────────────────────────────────────────────────────
 
 pub struct EmbedExec {
     input_col: String,

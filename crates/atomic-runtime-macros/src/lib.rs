@@ -196,7 +196,6 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { concat!(module_path!(), "::", #fn_name_str, "::", #body_hash_short) }
     };
 
-    // ── Generate dispatch arms based on function signature ────────────────────
     let dispatch_body = if num_args == 2 {
         quote! {
             use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
@@ -291,7 +290,6 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    // ── Generate the task struct + trait impl ─────────────────────────────────
     //
     // Binary fn(T, T) -> T  →  BinaryTask<T>
     // Unary fn(T) -> U      →  UnaryTask<T, U>
@@ -421,7 +419,6 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
     let struct_ident = syn::Ident::new("__TaskFnStruct", Span::call_site());
     let dispatch_fn_ident = syn::Ident::new("__task_fn_dispatch", Span::call_site());
 
-    // ── Intelligent op_id scheme ──────────────────────────────────────────────
     //
     // Format: "task_fn::{module_path}::{Action}<{types}>::{short_hash}"
     //

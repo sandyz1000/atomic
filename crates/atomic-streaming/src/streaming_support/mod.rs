@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-pub mod fileutils;
-pub mod timer;
+pub mod batch_timer;
+pub mod file_sink;
 
 /// A simple single-threaded event loop that processes events from a queue.
 pub struct EventLoop<E: Send + 'static> {

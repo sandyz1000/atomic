@@ -20,7 +20,6 @@ use atomic_data::split::Split;
 
 use crate::rdd::rdd_val::RddVals;
 
-// ── CheckpointSplit ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 struct CheckpointSplit {
@@ -36,7 +35,6 @@ impl Split for CheckpointSplit {
     }
 }
 
-// ── CheckpointStore ────────────────────────────────────────────────────────────
 
 /// Where checkpoint data lives — local directory or S3 prefix.
 #[derive(Debug, Clone)]
@@ -87,7 +85,6 @@ impl CheckpointStore {
     }
 }
 
-// ── CheckpointRdd ──────────────────────────────────────────────────────────────
 
 /// Leaf RDD that reads pre-checkpointed partitions from a `CheckpointStore`.
 ///

@@ -76,7 +76,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match ctx.query(nl).await {
                 Ok(result) => {
                     println!("Answer: {}", result.answer);
-                    println!("  ({} rounds, {} steps executed)", result.rounds, result.steps.len());
+                    println!(
+                        "  ({} rounds, {} steps executed)",
+                        result.rounds,
+                        result.steps.len()
+                    );
                 }
                 Err(e) => {
                     eprintln!("  Error: {e}");
@@ -85,10 +89,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!();
         }
     } else {
-        println!("OPENAI_API_KEY not set — running direct SQL queries to demonstrate DataFusion integration.\n");
+        println!(
+            "OPENAI_API_KEY not set — running direct SQL queries to demonstrate DataFusion integration.\n"
+        );
 
         let queries = [
-            ("Total order count", "SELECT COUNT(*) AS total_orders FROM orders"),
+            (
+                "Total order count",
+                "SELECT COUNT(*) AS total_orders FROM orders",
+            ),
             (
                 "Revenue by category",
                 "SELECT category, SUM(amount) AS revenue FROM orders GROUP BY category ORDER BY revenue DESC",

@@ -151,10 +151,13 @@ impl JsContext {
     /// The returned `BroadcastVar` holds a serialized copy of the value that
     /// any task can read via `.value()`.
     #[napi]
-    pub fn broadcast(&self, value: serde_json::Value) -> Result<crate::shared::BroadcastVar> {
+    pub fn broadcast(
+        &self,
+        value: serde_json::Value,
+    ) -> Result<crate::distributed_vars::BroadcastVar> {
         let data =
             serde_json::to_vec(&value).map_err(|e| napi::Error::from_reason(e.to_string()))?;
-        Ok(crate::shared::BroadcastVar::new(data))
+        Ok(crate::distributed_vars::BroadcastVar::new(data))
     }
 
     /// Create an accumulator with an initial numeric, array, or string value.
@@ -162,7 +165,7 @@ impl JsContext {
     /// Call `.add(delta)` from within `forEach` / `map` etc. to accumulate
     /// values.  The accumulator is not automatically reset between actions.
     #[napi]
-    pub fn accumulator(&self, zero: serde_json::Value) -> crate::shared::Accumulator {
-        crate::shared::Accumulator::new(zero)
+    pub fn accumulator(&self, zero: serde_json::Value) -> crate::distributed_vars::Accumulator {
+        crate::distributed_vars::Accumulator::new(zero)
     }
 }
