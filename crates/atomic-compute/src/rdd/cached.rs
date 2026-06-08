@@ -155,12 +155,11 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
             }
 
             StorageLevel::MemoryAndDisk => {
-                // Memory-first; disk spill is handled by `persist_with_disk()`
-                // on TypedRdd<T: bincode::Encode + Decode<()>>.  The generic
-                // `Rdd::compute` path cannot call bincode without adding `Decode`
-                // bounds, so it falls back to MemoryOnly semantics here and
-                // recomputes on LRU eviction. For true disk spill use
-                // `TypedRdd::persist_with_disk(StorageLevel::MemoryAndDisk)`.
+                // Memory-first. `PartitionStore::get` transparently reads from disk
+                // if the partition was previously spilled by LRU eviction (provided
+                // the caller registered a spill path via `persist_with_disk`).
+                // `PartitionStore::put` writes the evicted entry to disk if a spill
+                // path was registered.  No extra code needed here.
                 if let Some(store) = PARTITION_CACHE.get() {
                     if let Some(cached) = store.get::<T>(rdd_id, idx) {
                         return Ok(Box::new(ArcVecIter { data: cached, pos: 0 }));
@@ -184,34 +183,8 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
     }
 }
 
-// Disk helpers — only for T: bincode::Encode + Decode
-
-/// Write a partition to disk atomically (.tmp → rename).
-pub fn disk_write_partition<T>(path: &std::path::Path, items: &[T]) -> std::io::Result<()>
-where
-    T: bincode::Encode,
-{
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("bin.tmp");
-    let bytes = bincode::encode_to_vec(items, bincode::config::standard())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    std::fs::write(&tmp, &bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-/// Read a partition from disk.
-pub fn disk_read_partition<T>(path: &std::path::Path) -> std::io::Result<Vec<T>>
-where
-    T: bincode::Decode<()>,
-{
-    let bytes = std::fs::read(path)?;
-    bincode::decode_from_slice::<Vec<T>, _>(&bytes, bincode::config::standard())
-        .map(|(v, _)| v)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
-}
+// Re-export disk helpers from atomic-data so existing callers don't break.
+pub use atomic_data::cache::{disk_read_partition, disk_write_partition};
 
 // ArcVecIter — iterator over Arc<Vec<T>> that clones each item
 

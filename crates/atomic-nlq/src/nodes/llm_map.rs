@@ -21,8 +21,8 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 
 use crate::config::NlqConfig;
-use crate::openai::OpenAiClient;
 use crate::nodes::llm_filter::record_batch_to_json_rows;
+use crate::openai::OpenAiClient;
 
 /// LLM-based row transformer. Adds a new column to each row.
 #[derive(Debug, Clone)]
@@ -60,8 +60,11 @@ impl Hash for LlmMapNode {
 
 impl PartialOrd for LlmMapNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        (&self.prompt, &self.model, &self.output_col)
-            .partial_cmp(&(&other.prompt, &other.model, &other.output_col))
+        (&self.prompt, &self.model, &self.output_col).partial_cmp(&(
+            &other.prompt,
+            &other.model,
+            &other.output_col,
+        ))
     }
 }
 
@@ -75,7 +78,15 @@ impl LlmMapNode {
         batch_size: usize,
     ) -> Self {
         let output_schema = build_output_df_schema(&input, &output_col, &output_type);
-        Self { prompt, model, output_col, output_type, batch_size, input, output_schema }
+        Self {
+            prompt,
+            model,
+            output_col,
+            output_type,
+            batch_size,
+            input,
+            output_schema,
+        }
     }
 }
 
@@ -136,7 +147,6 @@ impl UserDefinedLogicalNodeCore for LlmMapNode {
     }
 }
 
-
 pub struct LlmMapExec {
     prompt: String,
     model: String,
@@ -165,9 +175,12 @@ impl LlmMapExec {
         client: Arc<OpenAiClient>,
         config: Arc<NlqConfig>,
     ) -> Self {
-        let mut fields: Vec<Arc<Field>> =
-            input.schema().fields().iter().cloned().collect();
-        fields.push(Arc::new(Field::new(&node.output_col, node.output_type.clone(), true)));
+        let mut fields: Vec<Arc<Field>> = input.schema().fields().iter().cloned().collect();
+        fields.push(Arc::new(Field::new(
+            &node.output_col,
+            node.output_type.clone(),
+            true,
+        )));
         let schema = Arc::new(Schema::new(fields));
         let n = input.output_partitioning().partition_count();
         let properties = Arc::new(PlanProperties::new(
@@ -200,10 +213,6 @@ impl DisplayAs for LlmMapExec {
 impl ExecutionPlan for LlmMapExec {
     fn name(&self) -> &str {
         "LlmMapExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -299,7 +308,10 @@ impl ExecutionPlan for LlmMapExec {
             }
         };
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema_for_adapter, out)))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema_for_adapter,
+            out,
+        )))
     }
 }
 
@@ -341,9 +353,7 @@ async fn llm_map_chunk(
     let text = client.chat_with_retry(model, &system, &user, 2048).await?;
 
     let vals: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| {
-        crate::errors::NlqError::PlanParse(format!(
-            "LlmMap response parse error: {e}; got: {text}"
-        ))
+        crate::errors::NlqError::PlanParse(format!("LlmMap response parse error: {e}; got: {text}"))
     })?;
     Ok(vals)
 }
@@ -408,6 +418,5 @@ fn build_output_batch(
     let mut columns: Vec<ArrayRef> = input.columns().to_vec();
     columns.push(new_col);
 
-    RecordBatch::try_new(schema, columns)
-        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+    Ok(RecordBatch::try_new(schema, columns)?)
 }

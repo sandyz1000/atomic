@@ -1047,6 +1047,123 @@ impl Drop for DistributedScheduler {
     }
 }
 
+/// JSON body sent by a worker to `POST /register`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct RegisterRequest {
+    /// The worker's own task-listener endpoint (IP:port) as a string, e.g. `"10.0.0.1:10001"`.
+    pub endpoint: String,
+    /// The worker's capability declaration.
+    pub capabilities: atomic_data::distributed::WorkerCapabilities,
+}
+
+/// Start an HTTP listener that accepts worker self-registration on `POST /register`.
+///
+/// Workers POST a JSON [`RegisterRequest`] body; the driver calls
+/// [`DistributedScheduler::dynamically_add_worker`] on receipt and returns HTTP 200.
+/// Invalid bodies return HTTP 400. Any other path returns HTTP 404.
+///
+/// This mirrors the `start_metrics_server` pattern: a detached tokio task that loops
+/// forever accepting connections; errors on individual connections are logged and skipped.
+pub fn start_register_server(port: u16, scheduler: Arc<DistributedScheduler>) {
+    tokio::spawn(async move {
+        use http_body_util::{BodyExt, Full};
+        use hyper::body::Bytes;
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Method, Request, Response, StatusCode};
+
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("register server: failed to bind on port {port}: {e}");
+                return;
+            }
+        };
+
+        log::info!("worker registration endpoint listening on http://0.0.0.0:{port}/register");
+
+        loop {
+            let Ok((stream, _peer)) = listener.accept().await else {
+                continue;
+            };
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let sched = Arc::clone(&scheduler);
+
+            tokio::spawn(async move {
+                let _ = http1::Builder::new()
+                    .serve_connection(
+                        io,
+                        service_fn(move |req: Request<hyper::body::Incoming>| {
+                            let sched = Arc::clone(&sched);
+                            async move {
+                                let resp = if req.method() == Method::POST
+                                    && req.uri().path() == "/register"
+                                {
+                                    let body_bytes = match req.collect().await {
+                                        Ok(collected) => collected.to_bytes(),
+                                        Err(e) => {
+                                            log::warn!("register: failed to read body: {e}");
+                                            return Ok::<_, std::convert::Infallible>(
+                                                Response::builder()
+                                                    .status(StatusCode::BAD_REQUEST)
+                                                    .body(Full::new(Bytes::from("bad request")))
+                                                    .unwrap(),
+                                            );
+                                        }
+                                    };
+
+                                    match serde_json::from_slice::<RegisterRequest>(&body_bytes) {
+                                        Ok(reg) => {
+                                            match reg.endpoint.parse::<SocketAddrV4>() {
+                                                Ok(endpoint) => {
+                                                    sched.dynamically_add_worker(
+                                                        endpoint,
+                                                        reg.capabilities,
+                                                    );
+                                                    Response::builder()
+                                                        .status(StatusCode::OK)
+                                                        .body(Full::new(Bytes::from("registered")))
+                                                        .unwrap()
+                                                }
+                                                Err(e) => {
+                                                    log::warn!(
+                                                        "register: invalid endpoint '{}': {e}",
+                                                        reg.endpoint
+                                                    );
+                                                    Response::builder()
+                                                        .status(StatusCode::BAD_REQUEST)
+                                                        .body(Full::new(Bytes::from(
+                                                            "invalid endpoint",
+                                                        )))
+                                                        .unwrap()
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::warn!("register: JSON parse error: {e}");
+                                            Response::builder()
+                                                .status(StatusCode::BAD_REQUEST)
+                                                .body(Full::new(Bytes::from("invalid JSON")))
+                                                .unwrap()
+                                        }
+                                    }
+                                } else {
+                                    Response::builder()
+                                        .status(StatusCode::NOT_FOUND)
+                                        .body(Full::new(Bytes::from("not found")))
+                                        .unwrap()
+                                };
+                                Ok::<_, std::convert::Infallible>(resp)
+                            }
+                        }),
+                    )
+                    .await;
+            });
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

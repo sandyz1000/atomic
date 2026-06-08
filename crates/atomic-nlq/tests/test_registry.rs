@@ -12,9 +12,6 @@ use datafusion::logical_expr::{
 struct IsLuxury;
 
 impl ScalarUDFImpl for IsLuxury {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn name(&self) -> &str {
         "is_luxury"
     }
@@ -44,9 +41,6 @@ impl ScalarUDFImpl for IsLuxury {
 struct EstimateLtv;
 
 impl ScalarUDFImpl for EstimateLtv {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn name(&self) -> &str {
         "estimate_ltv"
     }

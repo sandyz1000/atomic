@@ -106,10 +106,7 @@ impl LocalScheduler {
                 return Ok(res);
             }
             tokio::spawn(self.event_process_loop(false, jt.clone()));
-            jt.listener
-                .get_result()
-                .await
-                .map_err(SchedulerError::PartialJobError)
+            Ok(jt.listener.get_result().await?)
         })
     }
 

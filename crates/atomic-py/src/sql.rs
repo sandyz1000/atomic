@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 use datafusion::arrow::array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    Int8Array, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -16,7 +16,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use atomic_sql::context::AtomicSqlContext;
-
 
 fn run_sql_async<F, T>(fut: F) -> T
 where
@@ -32,14 +31,12 @@ where
     }
 }
 
-
 static TMP_VIEW_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn tmp_view_name() -> String {
     let n = TMP_VIEW_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("__atomic_tmp_{n}")
 }
-
 
 fn arrow_scalar_to_py(py: Python<'_>, col: &dyn Array, row: usize) -> Py<PyAny> {
     if col.is_null(row) {
@@ -49,22 +46,47 @@ fn arrow_scalar_to_py(py: Python<'_>, col: &dyn Array, row: usize) -> Py<PyAny> 
         DataType::Boolean => col
             .as_any()
             .downcast_ref::<BooleanArray>()
-            .map(|a| a.value(row).into_pyobject(py).unwrap().to_owned().into_any().unbind())
+            .map(|a| {
+                a.value(row)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .to_owned()
+                    .into_any()
+                    .unbind()
+            })
             .unwrap_or_else(|| py.None()),
         DataType::Int8 => col
             .as_any()
             .downcast_ref::<Int8Array>()
-            .map(|a| (a.value(row) as i64).into_pyobject(py).unwrap().into_any().unbind())
+            .map(|a| {
+                (a.value(row) as i64)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind()
+            })
             .unwrap_or_else(|| py.None()),
         DataType::Int16 => col
             .as_any()
             .downcast_ref::<Int16Array>()
-            .map(|a| (a.value(row) as i64).into_pyobject(py).unwrap().into_any().unbind())
+            .map(|a| {
+                (a.value(row) as i64)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind()
+            })
             .unwrap_or_else(|| py.None()),
         DataType::Int32 => col
             .as_any()
             .downcast_ref::<Int32Array>()
-            .map(|a| (a.value(row) as i64).into_pyobject(py).unwrap().into_any().unbind())
+            .map(|a| {
+                (a.value(row) as i64)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind()
+            })
             .unwrap_or_else(|| py.None()),
         DataType::Int64 => col
             .as_any()
@@ -74,17 +96,35 @@ fn arrow_scalar_to_py(py: Python<'_>, col: &dyn Array, row: usize) -> Py<PyAny> 
         DataType::UInt8 => col
             .as_any()
             .downcast_ref::<UInt8Array>()
-            .map(|a| (a.value(row) as i64).into_pyobject(py).unwrap().into_any().unbind())
+            .map(|a| {
+                (a.value(row) as i64)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind()
+            })
             .unwrap_or_else(|| py.None()),
         DataType::UInt16 => col
             .as_any()
             .downcast_ref::<UInt16Array>()
-            .map(|a| (a.value(row) as i64).into_pyobject(py).unwrap().into_any().unbind())
+            .map(|a| {
+                (a.value(row) as i64)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind()
+            })
             .unwrap_or_else(|| py.None()),
         DataType::UInt32 => col
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .map(|a| (a.value(row) as u64).into_pyobject(py).unwrap().into_any().unbind())
+            .map(|a| {
+                (a.value(row) as u64)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind()
+            })
             .unwrap_or_else(|| py.None()),
         DataType::UInt64 => col
             .as_any()
@@ -94,7 +134,13 @@ fn arrow_scalar_to_py(py: Python<'_>, col: &dyn Array, row: usize) -> Py<PyAny> 
         DataType::Float32 => col
             .as_any()
             .downcast_ref::<Float32Array>()
-            .map(|a| (a.value(row) as f64).into_pyobject(py).unwrap().into_any().unbind())
+            .map(|a| {
+                (a.value(row) as f64)
+                    .into_pyobject(py)
+                    .unwrap()
+                    .into_any()
+                    .unbind()
+            })
             .unwrap_or_else(|| py.None()),
         DataType::Float64 => col
             .as_any()
@@ -134,7 +180,6 @@ fn batches_to_py_list(py: Python<'_>, batches: &[RecordBatch]) -> PyResult<Py<Py
     Ok(rows.into_any().unbind())
 }
 
-
 /// A lazy structured dataset produced by `SqlContext.sql()` or registered tables.
 ///
 /// Most methods return a new `DataFrame` (lazy); calling `collect()`, `count()`, or
@@ -156,7 +201,6 @@ pub struct PyDataFrame {
 
 #[pymethods]
 impl PyDataFrame {
-
     /// Execute the plan and return all rows as a list of dicts.
     ///
     /// Each dict maps column name → Python value (int, float, str, bool, or None).
@@ -184,7 +228,6 @@ impl PyDataFrame {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
-
     /// Filter rows using a SQL WHERE-clause expression (e.g. `"amount > 100"`).
     ///
     /// Internally registers a temp view and executes `SELECT * FROM … WHERE expr`.
@@ -195,14 +238,19 @@ impl PyDataFrame {
         let expr = expr.to_string();
         let result_df = run_sql_async(async move {
             session.register_table(&view, df.into_view())?;
-            let result = session.sql(&format!("SELECT * FROM {view} WHERE {expr}")).await;
+            let result = session
+                .sql(&format!("SELECT * FROM {view} WHERE {expr}"))
+                .await;
             let _ = session.deregister_table(&view);
             result
         })
         .map_err(|e: datafusion::error::DataFusionError| {
             pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
         })?;
-        Ok(PyDataFrame { inner: result_df, session: self.session.clone() })
+        Ok(PyDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
     }
 
     /// Keep only the specified columns.
@@ -212,26 +260,43 @@ impl PyDataFrame {
     /// ```
     pub fn select(&self, columns: Vec<String>) -> PyResult<Self> {
         let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
-        let df = self.inner.clone().select_columns(&refs)
+        let df = self
+            .inner
+            .clone()
+            .select_columns(&refs)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(PyDataFrame { inner: df, session: self.session.clone() })
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
     }
 
     /// Limit the result to the first `n` rows.
     pub fn limit(&self, n: usize) -> PyResult<Self> {
-        let df = self.inner.clone().limit(0, Some(n))
+        let df = self
+            .inner
+            .clone()
+            .limit(0, Some(n))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(PyDataFrame { inner: df, session: self.session.clone() })
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
     }
 
     /// Sort by a column name. `ascending=True` (default) for ascending order.
     pub fn sort(&self, col: &str, ascending: Option<bool>) -> PyResult<Self> {
         let asc = ascending.unwrap_or(true);
-        let df = self.inner.clone().sort(vec![df_col(col).sort(asc, true)])
+        let df = self
+            .inner
+            .clone()
+            .sort(vec![df_col(col).sort(asc, true)])
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(PyDataFrame { inner: df, session: self.session.clone() })
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
     }
-
 
     /// Return a dict mapping column name → Arrow type string.
     ///
@@ -254,13 +319,11 @@ impl PyDataFrame {
     pub fn write_parquet(&self, path: &str) -> PyResult<()> {
         let df = self.inner.clone();
         let path = path.to_string();
-        run_sql_async(async move {
-            df.write_parquet(&path, Default::default(), None).await
-        })
-        .map(|_| ())
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })
+        run_sql_async(async move { df.write_parquet(&path, Default::default(), None).await })
+            .map(|_| ())
+            .map_err(|e: datafusion::error::DataFusionError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })
     }
 
     /// Write all rows to CSV files in a directory.
@@ -271,13 +334,11 @@ impl PyDataFrame {
     pub fn write_csv(&self, path: &str) -> PyResult<()> {
         let df = self.inner.clone();
         let path = path.to_string();
-        run_sql_async(async move {
-            df.write_csv(&path, Default::default(), None).await
-        })
-        .map(|_| ())
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })
+        run_sql_async(async move { df.write_csv(&path, Default::default(), None).await })
+            .map(|_| ())
+            .map_err(|e: datafusion::error::DataFusionError| {
+                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+            })
     }
 
     /// Convert the DataFrame to a PyArrow `Table`.
@@ -294,10 +355,11 @@ impl PyDataFrame {
         use std::io::Cursor;
 
         let df = self.inner.clone();
-        let batches: Vec<RecordBatch> = run_sql_async(async move { df.collect().await })
-            .map_err(|e: datafusion::error::DataFusionError| {
+        let batches: Vec<RecordBatch> = run_sql_async(async move { df.collect().await }).map_err(
+            |e: datafusion::error::DataFusionError| {
                 pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-            })?;
+            },
+        )?;
 
         if batches.is_empty() {
             let pa = py.import("pyarrow")?;
@@ -340,7 +402,6 @@ impl PyDataFrame {
     }
 }
 
-
 /// SQL execution context backed by DataFusion.
 ///
 /// Register data sources (CSV, Parquet, JSON) and execute SQL queries. Works
@@ -374,7 +435,6 @@ impl PySqlContext {
         Ok(Self { inner, session })
     }
 
-
     /// Parse and execute a SQL query. Returns a lazy `DataFrame`.
     ///
     /// The DataFrame is not executed until an action (`collect`, `show`, `count`)
@@ -387,13 +447,12 @@ impl PySqlContext {
     pub fn sql(&self, query: &str) -> PyResult<PyDataFrame> {
         let session = self.session.clone();
         let query = query.to_string();
-        let df = run_sql_async(async move { session.sql(&query).await })
-            .map_err(|e: datafusion::error::DataFusionError| {
-                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-            })?;
-        Ok(PyDataFrame { inner: df, session: self.session.clone() })
+        let df = run_sql_async(async move { session.sql(&query).await })?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
     }
-
 
     /// Register a CSV file (or directory of CSV files) as a named table.
     ///
@@ -509,7 +568,9 @@ impl PySqlContext {
         return_type: String,
     ) -> PyResult<()> {
         use datafusion::arrow::datatypes::DataType as ArrowDataType;
-        use datafusion::logical_expr::{ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, Volatility};
+        use datafusion::logical_expr::{
+            ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+        };
         use std::sync::Arc;
 
         let input_dts: Vec<ArrowDataType> = input_types
@@ -542,43 +603,68 @@ impl PySqlContext {
         }
 
         impl ScalarUDFImpl for PyUdf {
-            fn as_any(&self) -> &dyn std::any::Any { self }
-            fn name(&self) -> &str { &self.name }
-            fn signature(&self) -> &Signature { &self.signature }
-            fn return_type(&self, _: &[ArrowDataType]) -> datafusion::common::Result<ArrowDataType> {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+            fn return_type(
+                &self,
+                _: &[ArrowDataType],
+            ) -> datafusion::common::Result<ArrowDataType> {
                 Ok(self.return_type.clone())
             }
-            fn invoke_with_args(&self, args: datafusion::logical_expr::ScalarFunctionArgs) -> datafusion::common::Result<ColumnarValue> {
-                use datafusion::arrow::array::{ArrayRef, Int64Array, Float64Array, StringArray, BooleanArray};
+            fn invoke_with_args(
+                &self,
+                args: datafusion::logical_expr::ScalarFunctionArgs,
+            ) -> datafusion::common::Result<ColumnarValue> {
+                use datafusion::arrow::array::{
+                    ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray,
+                };
                 // For each row, call the Python function and collect results.
-                let first_arg = args.args.first()
-                    .ok_or_else(|| datafusion::common::DataFusionError::Execution("UDF requires at least one arg".into()))?;
+                let first_arg = args.args.first().ok_or_else(|| {
+                    datafusion::common::DataFusionError::Execution(
+                        "UDF requires at least one arg".into(),
+                    )
+                })?;
                 let len = match first_arg {
                     ColumnarValue::Array(a) => a.len(),
                     ColumnarValue::Scalar(_) => 1,
                 };
                 let results: Vec<Option<f64>> = Python::attach(|py| {
                     let func = self.func.clone_ref(py);
-                    (0..len).map(|i| {
-                        let arg_val: Py<PyAny> = match first_arg {
-                            ColumnarValue::Array(arr) => {
-                                // Extract element i as Python object
-                                if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
-                                    (a.value(i) as f64).into_pyobject(py).ok()?.into_any().unbind()
-                                } else if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
-                                    a.value(i).into_pyobject(py).ok()?.into_any().unbind()
-                                } else {
+                    (0..len)
+                        .map(|i| {
+                            let arg_val: Py<PyAny> = match first_arg {
+                                ColumnarValue::Array(arr) => {
+                                    // Extract element i as Python object
+                                    if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+                                        (a.value(i) as f64)
+                                            .into_pyobject(py)
+                                            .ok()?
+                                            .into_any()
+                                            .unbind()
+                                    } else if let Some(a) =
+                                        arr.as_any().downcast_ref::<Float64Array>()
+                                    {
+                                        a.value(i).into_pyobject(py).ok()?.into_any().unbind()
+                                    } else {
+                                        return None;
+                                    }
+                                }
+                                ColumnarValue::Scalar(s) => {
+                                    s.to_array().ok()?.len();
                                     return None;
                                 }
-                            }
-                            ColumnarValue::Scalar(s) => {
-                                s.to_array().ok()?.len();
-                                return None;
-                            }
-                        };
-                        let result = func.call1(py, (arg_val,)).ok()?;
-                        result.extract::<f64>(py).ok()
-                    }).collect()
+                            };
+                            let result = func.call1(py, (arg_val,)).ok()?;
+                            result.extract::<f64>(py).ok()
+                        })
+                        .collect()
                 });
                 let arr: ArrayRef = Arc::new(Float64Array::from(results));
                 Ok(ColumnarValue::Array(arr))
@@ -616,9 +702,11 @@ fn parse_arrow_type(s: &str) -> PyResult<datafusion::arrow::datatypes::DataType>
         "float64" | "double" => DataType::Float64,
         "bool" | "boolean" => DataType::Boolean,
         "utf8" | "string" | "str" => DataType::Utf8,
-        other => return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("unsupported Arrow type: {other}. Supported: int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8")
-        )),
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported Arrow type: {other}. Supported: int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8"
+            )));
+        }
     })
 }
 
@@ -629,9 +717,8 @@ fn python_dicts_to_batches(
     schema: &std::collections::HashMap<String, String>,
 ) -> PyResult<Vec<RecordBatch>> {
     use datafusion::arrow::array::{
-        BooleanBuilder, Float32Builder, Float64Builder, Int16Builder, Int32Builder,
-        Int64Builder, Int8Builder, StringBuilder, UInt16Builder, UInt32Builder,
-        UInt64Builder, UInt8Builder,
+        BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder,
+        Int64Builder, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
     };
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -704,7 +791,6 @@ fn python_dicts_to_batches(
         col_arrays.push(array);
     }
 
-    let batch = RecordBatch::try_new(arrow_schema, col_arrays)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let batch = RecordBatch::try_new(arrow_schema, col_arrays)?;
     Ok(vec![batch])
 }

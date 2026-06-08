@@ -9,5 +9,5 @@ path = "src/main.rs"
 
 [dependencies]
 atomic-nlq = { workspace = true }
-datafusion = "53"
+datafusion = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

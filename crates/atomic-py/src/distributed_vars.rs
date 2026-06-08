@@ -46,28 +46,41 @@ impl PyBroadcastVar {
 /// A mutable accumulator that can be updated from tasks.
 ///
 /// Created by `Context.accumulator(zero)`.  Supports numeric (`int`, `float`),
-/// string concatenation, and list-append semantics.
+/// string concatenation, and list-append semantics.  An optional `merge_fn`
+/// callable `(current, delta) -> new_value` overrides the default add logic.
 ///
 /// # Example
 /// ```python
 /// acc = ctx.accumulator(0)
 /// ctx.parallelize([1, 2, 3]).for_each(lambda x: acc.add(x))
 /// assert acc.value() == 6
+///
+/// max_acc = ctx.accumulator(0, merge_fn=lambda a, b: max(a, b))
+/// ctx.parallelize([3, 1, 4, 1, 5]).for_each(lambda x: max_acc.add(x))
+/// assert max_acc.value() == 5
 /// ```
 #[pyclass(name = "Accumulator")]
 pub struct PyAccumulator {
     inner: Arc<Mutex<serde_json::Value>>,
     initial: serde_json::Value,
+    merge_fn: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl PyAccumulator {
-    /// Add a numeric or list delta to the accumulator.
+    /// Add a delta to the accumulator using the merge function (if set) or default add logic.
     pub fn add(&self, py: Python<'_>, delta: Py<PyAny>) -> PyResult<()> {
         let delta_val = pythonobj_to_json(py, &delta)?;
         let mut guard = self.inner.lock();
-        *guard =
-            json_add(guard.clone(), delta_val).map_err(pyo3::exceptions::PyValueError::new_err)?;
+        if let Some(f) = &self.merge_fn {
+            let current_py = json_to_python(py, guard.clone())?;
+            let delta_py = json_to_python(py, delta_val)?;
+            let result = f.call1(py, (current_py, delta_py))?;
+            *guard = pythonobj_to_json(py, &result)?;
+        } else {
+            *guard = json_add(guard.clone(), delta_val)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        }
         Ok(())
     }
 
@@ -88,10 +101,11 @@ impl PyAccumulator {
 }
 
 impl PyAccumulator {
-    pub fn new(initial: serde_json::Value) -> Self {
+    pub fn new(initial: serde_json::Value, merge_fn: Option<Py<PyAny>>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(initial.clone())),
             initial,
+            merge_fn,
         }
     }
 }

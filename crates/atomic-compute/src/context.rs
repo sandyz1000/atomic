@@ -249,6 +249,14 @@ impl Context {
             );
         });
 
+        // Start self-registration endpoint so workers can join dynamically.
+        if let Some(port) = config.register_port {
+            env::Env::run_in_async_rt(|| {
+                atomic_scheduler::start_register_server(port, Arc::clone(&scheduler));
+            });
+            log::info!("worker registration endpoint started on port {port}");
+        }
+
         let scheduler = Schedulers::Distributed(scheduler);
         let driver_scheduler = Arc::new(LocalScheduler::new_with_coalesce(
             20,
@@ -909,7 +917,7 @@ impl Context {
                         ops,
                         parent_partitions,
                     ))
-                }).map_err(ComputeError::from)?;
+                })?;
 
                 log::info!(
                     "shuffle map stage complete: shuffle_id={} num_reduce_partitions={}",

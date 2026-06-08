@@ -60,4 +60,24 @@ pub fn clear_shuffle_infrastructure() {
     *SHUFFLE_SERVER_URI.write().unwrap() = None;
     *SHUFFLE_CACHE.write().unwrap() = None;
     *MAP_OUTPUT_TRACKER.write().unwrap() = None;
+    #[cfg(feature = "tls")]
+    {
+        *SHUFFLE_TLS_CONNECTOR.write().unwrap() = None;
+    }
+}
+
+/// Global TLS connector used by `ShuffleFetcher` when the shuffle server URI is `https://`.
+/// Set by `atomic_compute::env::init_shuffle()` when TLS is configured.
+#[cfg(feature = "tls")]
+pub static SHUFFLE_TLS_CONNECTOR: RwLock<Option<std::sync::Arc<tokio_rustls::TlsConnector>>> =
+    RwLock::new(None);
+
+#[cfg(feature = "tls")]
+pub fn set_shuffle_tls_connector(c: std::sync::Arc<tokio_rustls::TlsConnector>) {
+    *SHUFFLE_TLS_CONNECTOR.write().unwrap() = Some(c);
+}
+
+#[cfg(feature = "tls")]
+pub fn get_shuffle_tls_connector() -> Option<std::sync::Arc<tokio_rustls::TlsConnector>> {
+    SHUFFLE_TLS_CONNECTOR.read().unwrap().clone()
 }

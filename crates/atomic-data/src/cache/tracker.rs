@@ -129,7 +129,7 @@ impl CacheTracker {
         tokio::spawn(async move {
             let listener = TcpListener::bind(self.master_addr)
                 .await
-                .map_err(|e| CacheError::Io(e))?;
+                .map_err(CacheError::Io)?;
             log::debug!("cache tracker server started at {:?}", self.master_addr);
 
             loop {

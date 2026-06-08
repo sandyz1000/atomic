@@ -211,10 +211,6 @@ impl ExecutionPlan for EmbedExec {
         "EmbedExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
@@ -360,13 +356,10 @@ fn build_embed_batch(
     let values = Arc::new(Float32Array::from(flat));
     let item_field = Arc::new(Field::new("item", DataType::Float32, true));
     let embed_col: ArrayRef =
-        Arc::new(FixedSizeListArray::try_new(item_field, dim, values, None).map_err(|e| {
-            datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
-        })?);
+        Arc::new(FixedSizeListArray::try_new(item_field, dim, values, None)?);
 
     let mut columns: Vec<ArrayRef> = input.columns().to_vec();
     columns.push(embed_col);
 
-    RecordBatch::try_new(schema, columns)
-        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+    Ok(RecordBatch::try_new(schema, columns)?)
 }

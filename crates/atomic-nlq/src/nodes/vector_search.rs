@@ -4,6 +4,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use datafusion::arrow::array::{ArrayRef, Float32Array, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -17,11 +18,9 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
     PlanProperties,
 };
-use dashmap::DashMap;
 use futures::StreamExt;
 
 use crate::vector::provider::VectorIndexProvider;
-
 
 /// ANN similarity search against a registered vector index.
 /// Adds `__vs_id: UInt64` and `__vs_score: Float32` columns.
@@ -54,15 +53,24 @@ impl Hash for VectorSearchNode {
 
 impl PartialOrd for VectorSearchNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        (&self.query_col, &self.index_name, self.top_k)
-            .partial_cmp(&(&other.query_col, &other.index_name, other.top_k))
+        (&self.query_col, &self.index_name, self.top_k).partial_cmp(&(
+            &other.query_col,
+            &other.index_name,
+            other.top_k,
+        ))
     }
 }
 
 impl VectorSearchNode {
     pub fn new(query_col: String, index_name: String, top_k: usize, input: LogicalPlan) -> Self {
         let output_schema = build_output_df_schema(&input);
-        Self { query_col, index_name, top_k, input, output_schema }
+        Self {
+            query_col,
+            index_name,
+            top_k,
+            input,
+            output_schema,
+        }
     }
 }
 
@@ -99,7 +107,11 @@ impl UserDefinedLogicalNodeCore for VectorSearchNode {
         )
     }
 
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, mut inputs: Vec<LogicalPlan>) -> DFResult<Self> {
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> DFResult<Self> {
         let new_input = inputs.swap_remove(0);
         let output_schema = build_output_df_schema(&new_input);
         Ok(Self {
@@ -111,7 +123,6 @@ impl UserDefinedLogicalNodeCore for VectorSearchNode {
         })
     }
 }
-
 
 pub struct VectorSearchExec {
     query_col: String,
@@ -163,17 +174,17 @@ impl VectorSearchExec {
 
 impl DisplayAs for VectorSearchExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "VectorSearchExec: index={}, top_k={}", self.index_name, self.top_k)
+        write!(
+            f,
+            "VectorSearchExec: index={}, top_k={}",
+            self.index_name, self.top_k
+        )
     }
 }
 
 impl ExecutionPlan for VectorSearchExec {
     fn name(&self) -> &str {
         "VectorSearchExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -204,7 +215,10 @@ impl ExecutionPlan for VectorSearchExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
-        let index = self.indexes.get(&self.index_name).map(|e| e.value().clone());
+        let index = self
+            .indexes
+            .get(&self.index_name)
+            .map(|e| e.value().clone());
         let index = match index {
             Some(i) => i,
             None => {
@@ -297,7 +311,10 @@ impl ExecutionPlan for VectorSearchExec {
             }
         };
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema_for_adapter, out)))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema_for_adapter,
+            out,
+        )))
     }
 }
 
@@ -314,8 +331,7 @@ fn build_vs_batch(
     }
     columns.push(Arc::new(UInt64Array::from(ids)) as ArrayRef);
     columns.push(Arc::new(Float32Array::from(scores)) as ArrayRef);
-    RecordBatch::try_new(schema, columns)
-        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+    Ok(RecordBatch::try_new(schema, columns)?)
 }
 
 /// Expand input rows: for each result (row_idx, id, score), replicate the input row.
@@ -326,19 +342,17 @@ fn expand_batch(
     scores: Vec<f32>,
     schema: SchemaRef,
 ) -> DFResult<RecordBatch> {
-    use datafusion::arrow::compute::take;
     use datafusion::arrow::array::UInt32Array;
+    use datafusion::arrow::compute::take;
 
     let take_indices = UInt32Array::from(row_indices.iter().map(|&i| i as u32).collect::<Vec<_>>());
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(input.num_columns() + 2);
     for col in input.columns() {
-        let taken = take(col.as_ref(), &take_indices, None)
-            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+        let taken = take(col.as_ref(), &take_indices, None)?;
         columns.push(taken);
     }
     columns.push(Arc::new(UInt64Array::from(ids)) as ArrayRef);
     columns.push(Arc::new(Float32Array::from(scores)) as ArrayRef);
 
-    RecordBatch::try_new(schema, columns)
-        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))
+    Ok(RecordBatch::try_new(schema, columns)?)
 }

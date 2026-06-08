@@ -19,6 +19,18 @@ pub struct ShuffleConfig {
     /// Directory for spill files when `spill_threshold` is set.
     /// Defaults to `local_dir/shuffle-spill` when `None`.
     pub spill_dir: Option<PathBuf>,
+
+    /// PEM file containing this node's TLS certificate chain.
+    /// When set (together with `tls_key` and `tls_ca`), the shuffle HTTP server
+    /// is wrapped with mutual TLS.  Requires the `tls` feature flag.
+    #[cfg(feature = "tls")]
+    pub tls_cert: Option<PathBuf>,
+    /// PEM file containing this node's PKCS#8 private key.
+    #[cfg(feature = "tls")]
+    pub tls_key: Option<PathBuf>,
+    /// PEM file containing the cluster CA certificate used to verify peer certificates.
+    #[cfg(feature = "tls")]
+    pub tls_ca: Option<PathBuf>,
 }
 
 impl ShuffleConfig {
@@ -35,6 +47,12 @@ impl ShuffleConfig {
             log_cleanup,
             spill_threshold: None,
             spill_dir: None,
+            #[cfg(feature = "tls")]
+            tls_cert: None,
+            #[cfg(feature = "tls")]
+            tls_key: None,
+            #[cfg(feature = "tls")]
+            tls_ca: None,
         }
     }
 
@@ -43,5 +61,17 @@ impl ShuffleConfig {
         self.spill_dir
             .clone()
             .unwrap_or_else(|| self.local_dir.join("shuffle-spill"))
+    }
+
+    /// Returns `true` when all three TLS fields are set and the `tls` feature is active.
+    pub fn tls_enabled(&self) -> bool {
+        #[cfg(feature = "tls")]
+        {
+            self.tls_cert.is_some() && self.tls_key.is_some() && self.tls_ca.is_some()
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            false
+        }
     }
 }

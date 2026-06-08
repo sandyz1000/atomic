@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 pub use crate::{base::NativeScheduler, error::LibResult};
 pub use crate::{distributed::DistributedScheduler, local::LocalScheduler};
+pub use crate::distributed::{RegisterRequest, start_register_server};
 
 pub trait Scheduler {
     fn start(&self);

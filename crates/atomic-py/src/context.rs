@@ -180,13 +180,15 @@ impl PyContext {
     /// ctx.parallelize([1, 2, 3]).for_each(lambda x: acc.add(x))
     /// assert acc.value() == 6
     /// ```
+    #[pyo3(signature = (zero, merge_fn=None))]
     pub fn accumulator(
         &self,
         py: Python<'_>,
         zero: Py<PyAny>,
+        merge_fn: Option<Py<PyAny>>,
     ) -> PyResult<crate::distributed_vars::PyAccumulator> {
         let initial = crate::distributed_vars::pythonobj_to_json(py, &zero)?;
-        Ok(crate::distributed_vars::PyAccumulator::new(initial))
+        Ok(crate::distributed_vars::PyAccumulator::new(initial, merge_fn))
     }
 
     /// Stop the context and release resources.

@@ -9,21 +9,19 @@
 
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
-
-// Tests must run sequentially: each one binds a fixed port and spawns
-// real OS processes. Parallel execution causes port-reuse races that
-// produce flaky "Connection refused" failures.
-static SEQ: Mutex<()> = Mutex::new(());
 
 // ── Binary helpers ────────────────────────────────────────────────────────────
 
-const WORKER_PORT: u16 = 19201;
-const SHUFFLE_WORKER_PORT: u16 = 19210;
-const MULTI_STAGE_WORKER_PORT: u16 = 19220;
-const FAULT_WORKER_1_PORT: u16 = 19230;
-const FAULT_WORKER_2_PORT: u16 = 19231;
+fn free_port() -> u16 {
+    // Bind to port 0 to get an OS-assigned free port, then release it.
+    // The worker process will bind the same port immediately after.
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("failed to bind to free port")
+        .local_addr()
+        .expect("failed to get local addr")
+        .port()
+}
 
 fn integration_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration"))
@@ -82,19 +80,19 @@ fn run_driver(bin: &std::path::Path, workers: &[u16]) -> std::process::Output {
 
 // ── Test 1: baseline map + fold ───────────────────────────────────────────────
 
-// Distributed tests spawn real child processes and bind fixed TCP ports.
+// Distributed tests spawn real child processes over TCP.
 // They are marked #[ignore] so `cargo test` skips them by default.
-// Run them explicitly with: cargo test -p atomic -- --ignored --test-threads=1
+// Run them explicitly with: cargo test -p atomic -- --ignored
 // CI runs them in a dedicated job after pre-building the integration binaries.
 
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_map_and_fold() {
-    let _guard = SEQ.lock().unwrap();
-    let mut worker = spawn_worker(&integration_bin(), WORKER_PORT);
-    wait_for_port(WORKER_PORT, Duration::from_secs(10));
+    let port = free_port();
+    let mut worker = spawn_worker(&integration_bin(), port);
+    wait_for_port(port, Duration::from_secs(10));
 
-    let driver_out = run_driver(&integration_bin(), &[WORKER_PORT]);
+    let driver_out = run_driver(&integration_bin(), &[port]);
     worker.kill().ok();
     worker.wait().ok();
 
@@ -124,12 +122,12 @@ fn distributed_map_and_fold() {
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_shuffle_wordcount() {
-    let _guard = SEQ.lock().unwrap();
+    let port = free_port();
     let bin = shuffle_wordcount_bin();
-    let mut worker = spawn_worker(&bin, SHUFFLE_WORKER_PORT);
-    wait_for_port(SHUFFLE_WORKER_PORT, Duration::from_secs(10));
+    let mut worker = spawn_worker(&bin, port);
+    wait_for_port(port, Duration::from_secs(10));
 
-    let driver_out = run_driver(&bin, &[SHUFFLE_WORKER_PORT]);
+    let driver_out = run_driver(&bin, &[port]);
     worker.kill().ok();
     worker.wait().ok();
 
@@ -159,12 +157,12 @@ fn distributed_shuffle_wordcount() {
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_multi_stage_pipeline() {
-    let _guard = SEQ.lock().unwrap();
+    let port = free_port();
     let bin = multi_stage_bin();
-    let mut worker = spawn_worker(&bin, MULTI_STAGE_WORKER_PORT);
-    wait_for_port(MULTI_STAGE_WORKER_PORT, Duration::from_secs(10));
+    let mut worker = spawn_worker(&bin, port);
+    wait_for_port(port, Duration::from_secs(10));
 
-    let driver_out = run_driver(&bin, &[MULTI_STAGE_WORKER_PORT]);
+    let driver_out = run_driver(&bin, &[port]);
     worker.kill().ok();
     worker.wait().ok();
 
@@ -208,14 +206,15 @@ fn distributed_multi_stage_pipeline() {
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_fault_tolerance_one_dead_worker() {
-    let _guard = SEQ.lock().unwrap();
     let bin = fault_tolerance_bin();
+    let healthy_port = free_port();
+    let dead_port = free_port();
     // Worker 1: healthy
-    let mut worker1 = spawn_worker(&bin, FAULT_WORKER_1_PORT);
-    wait_for_port(FAULT_WORKER_1_PORT, Duration::from_secs(10));
-    // Worker 2: NOT started — simulates a dead/unreachable worker.
+    let mut worker1 = spawn_worker(&bin, healthy_port);
+    wait_for_port(healthy_port, Duration::from_secs(10));
+    // Worker 2 (dead_port): NOT started — simulates a dead/unreachable worker.
 
-    let driver_out = run_driver(&bin, &[FAULT_WORKER_1_PORT, FAULT_WORKER_2_PORT]);
+    let driver_out = run_driver(&bin, &[healthy_port, dead_port]);
     worker1.kill().ok();
     worker1.wait().ok();
 

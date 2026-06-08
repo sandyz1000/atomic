@@ -59,10 +59,6 @@ impl fmt::Debug for RddTableProvider {
 
 #[async_trait]
 impl TableProvider for RddTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -149,10 +145,6 @@ impl DisplayAs for RddScanExec {
 impl ExecutionPlan for RddScanExec {
     fn name(&self) -> &str {
         "RddScanExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

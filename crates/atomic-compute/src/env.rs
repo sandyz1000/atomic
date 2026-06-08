@@ -179,6 +179,12 @@ pub struct Config {
     pub tls_cert: Option<std::path::PathBuf>,
     /// Path to this process's TLS private key (PEM). Required when `tls_ca_cert` is set.
     pub tls_key: Option<std::path::PathBuf>,
+    /// TCP port for the worker self-registration HTTP endpoint (`POST /register`).
+    /// When set, the driver starts an HTTP listener; workers can POST a
+    /// `RegisterRequest` JSON body to dynamically join the cluster at runtime.
+    /// `None` (default) disables the registration endpoint.
+    /// Env var: `ATOMIC_REGISTER_PORT`.
+    pub register_port: Option<u16>,
 }
 
 impl Config {
@@ -201,6 +207,7 @@ impl Config {
             tls_ca_cert: None,
             tls_cert: None,
             tls_key: None,
+            register_port: None,
         }
     }
 
@@ -223,6 +230,7 @@ impl Config {
             tls_ca_cert: None,
             tls_cert: None,
             tls_key: None,
+            register_port: None,
         }
     }
 
@@ -245,6 +253,7 @@ impl Config {
             tls_ca_cert: None,
             tls_cert: None,
             tls_key: None,
+            register_port: None,
         }
     }
 
@@ -354,6 +363,10 @@ impl Config {
             .ok()
             .map(std::path::PathBuf::from);
 
+        let register_port = std::env::var(format!("{PREFIX}REGISTER_PORT"))
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok());
+
         // In env-var mode, workers come from hosts.conf — resolved by the caller.
         Config {
             local_ip,
@@ -372,6 +385,7 @@ impl Config {
             tls_ca_cert,
             tls_cert,
             tls_key,
+            register_port,
         }
     }
 
@@ -430,6 +444,7 @@ impl ConfigBuilder {
             "heartbeat_timeout_ms" => {
                 self.inner.heartbeat_timeout_ms = value.parse().unwrap_or(2000)
             }
+            "register_port" => self.inner.register_port = value.parse().ok(),
             _ => {}
         }
         self
@@ -472,6 +487,12 @@ impl ConfigBuilder {
         self
     }
 
+    /// Enable the worker self-registration endpoint on the given port.
+    pub fn register_port(mut self, port: u16) -> Self {
+        self.inner.register_port = Some(port);
+        self
+    }
+
     /// Consume the builder and return the final `Config`.
     pub fn build(self) -> Config {
         self.inner
@@ -493,12 +514,18 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
         return Ok(());
     }
 
-    let shuffle_config = ShuffleConfig::new(
+    let mut shuffle_config = ShuffleConfig::new(
         config.local_ip,
         config.work_dir.clone(),
         config.shuffle_port,
         config.log.log_cleanup,
     );
+    #[cfg(feature = "tls")]
+    {
+        shuffle_config.tls_cert = config.tls_cert.clone();
+        shuffle_config.tls_key  = config.tls_key.clone();
+        shuffle_config.tls_ca   = config.tls_ca_cert.clone();
+    }
 
     let cache: Arc<dyn atomic_data::shuffle::cache::ShuffleCache> =
         if let Some(threshold) = config.shuffle_spill_threshold {
@@ -514,11 +541,30 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
     let tracker = Arc::new(atomic_data::shuffle::MapOutputTracker::default());
     atomic_data::env::set_map_output_tracker(tracker);
 
-    let mgr = ShuffleManager::new(shuffle_config, cache)
+    let mgr = ShuffleManager::new(shuffle_config.clone(), cache)
         .map_err(|e| format!("failed to start ShuffleManager: {e}"))?;
 
     let uri = mgr.get_server_uri();
     atomic_data::env::set_shuffle_server_uri(uri.clone());
     log::info!("shuffle service started at {uri}");
+
+    // When TLS is active, build and store a client-side TLS connector so that
+    // ShuffleFetcher can fetch from https:// shuffle server URIs.
+    #[cfg(feature = "tls")]
+    if shuffle_config.tls_enabled() {
+        if let (Some(cert), Some(key), Some(ca)) =
+            (&config.tls_cert, &config.tls_key, &config.tls_ca_cert)
+        {
+            use crate::tls::tls_impl::{TlsConnector, make_client_config};
+            match make_client_config(cert, key, ca) {
+                Ok(client_cfg) => {
+                    let connector = Arc::new(TlsConnector::from(Arc::new(client_cfg)));
+                    atomic_data::env::set_shuffle_tls_connector(connector);
+                }
+                Err(e) => log::warn!("Failed to build shuffle TLS connector: {e}"),
+            }
+        }
+    }
+
     Ok(())
 }

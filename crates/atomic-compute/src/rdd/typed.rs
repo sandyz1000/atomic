@@ -149,39 +149,51 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
     where
         T: bincode::Encode + bincode::Decode<()>,
     {
-        use crate::rdd::cached::disk_write_partition;
-        use atomic_data::cache::PARTITION_CACHE;
+        use atomic_data::cache::{disk_write_partition, PARTITION_CACHE};
 
         match level {
-            StorageLevel::MemoryAndDisk | StorageLevel::DiskOnly => {
+            StorageLevel::MemoryAndDisk => {
                 let ctx = self.context.clone();
-                let rdd_id = self.rdd.get_rdd_id();
                 let num_parts = self.rdd.number_of_splits();
+                // Wrap lazily — spill registration replaces eager materialisation.
+                let cached = Arc::new(CachedRdd::new_with_level(
+                    self.rdd.clone(),
+                    StorageLevel::MemoryAndDisk,
+                ));
+                let rdd_id = cached.rdd_id();
+                // Pre-register per-partition spill handlers so that:
+                //   * put() writes to disk on LRU eviction
+                //   * get() reads from disk on a memory miss
+                if let Some(store) = PARTITION_CACHE.get() {
+                    for part_idx in 0..num_parts {
+                        if let Some(path) = cached.spill_path(part_idx) {
+                            store.register_spill_path::<T>(rdd_id, part_idx, path);
+                        }
+                    }
+                }
+                TypedRdd::new(cached as RddRef<T>, ctx)
+            }
 
-                // Eagerly materialise all partitions — write memory + disk.
+            StorageLevel::DiskOnly => {
+                let ctx = self.context.clone();
+                let num_parts = self.rdd.number_of_splits();
+                let cached = Arc::new(CachedRdd::new_with_level(
+                    self.rdd.clone(),
+                    StorageLevel::DiskOnly,
+                ));
+                // Eagerly write all partitions to disk (DiskOnly skips memory cache).
                 for part_idx in 0..num_parts {
                     let splits = self.rdd.splits();
                     if let Ok(items) = self.rdd.compute(splits[part_idx].clone()) {
                         let data: Vec<T> = items.collect();
-                        let arc = Arc::new(data.clone());
-
-                        if level == StorageLevel::MemoryAndDisk {
-                            if let Some(store) = PARTITION_CACHE.get() {
-                                store.put::<T>(rdd_id, part_idx, arc);
-                            }
-                        }
-                        if let Some(path) =
-                            CachedRdd::new_with_level(self.rdd.clone(), level).spill_path(part_idx)
-                        {
+                        if let Some(path) = cached.spill_path(part_idx) {
                             let _ = disk_write_partition(&path, &data);
                         }
                     }
                 }
-
-                // Return a CachedRdd that reads from disk on miss.
-                let cached = Arc::new(CachedRdd::new_with_level(self.rdd.clone(), level));
                 TypedRdd::new(cached as RddRef<T>, ctx)
             }
+
             other => self.persist(other),
         }
     }
@@ -223,7 +235,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
     where
         T: bincode::Encode + bincode::Decode<()>,
     {
-        use crate::rdd::cached::disk_write_partition;
+        use atomic_data::cache::disk_write_partition;
         use crate::rdd::checkpoint::{CheckpointRdd, CheckpointStore};
 
         let store = CheckpointStore::from_uri(dir.as_ref());
@@ -388,9 +400,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Useful for `save_as_text_file` and `checkpoint` which write one file per partition.
     pub fn collect_partitions(&self) -> Result<Vec<Vec<T>>, BaseError> {
         let cl = |iter: Box<dyn Iterator<Item = T>>| iter.collect::<Vec<T>>();
-        self.context
-            .run_job(self.rdd.clone(), cl)
-            .map_err(Into::into)
+        Ok(self.context.run_job(self.rdd.clone(), cl)?)
     }
 
     /// Stream elements partition-by-partition to the driver without holding all partitions
@@ -406,8 +416,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         for i in 0..n {
             let partition_data = self
                 .context
-                .run_job_with_partitions(self.rdd.clone(), |iter| iter.collect::<Vec<T>>(), [i])
-                .map_err(BaseError::from)?;
+                .run_job_with_partitions(self.rdd.clone(), |iter| iter.collect::<Vec<T>>(), [i])?;
             result.extend(partition_data.into_iter().flatten());
         }
         Ok(result.into_iter())

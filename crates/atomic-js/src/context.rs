@@ -162,10 +162,20 @@ impl JsContext {
 
     /// Create an accumulator with an initial numeric, array, or string value.
     ///
+    /// An optional `mergeFn(current, delta) -> newValue` overrides the default
+    /// add logic (numeric sum, string concat, array append).
+    ///
     /// Call `.add(delta)` from within `forEach` / `map` etc. to accumulate
     /// values.  The accumulator is not automatically reset between actions.
     #[napi]
-    pub fn accumulator(&self, zero: serde_json::Value) -> crate::distributed_vars::Accumulator {
-        crate::distributed_vars::Accumulator::new(zero)
+    pub fn accumulator(
+        &self,
+        zero: serde_json::Value,
+        merge_fn: Option<napi::bindgen_prelude::Function<(serde_json::Value, serde_json::Value), serde_json::Value>>,
+    ) -> crate::distributed_vars::Accumulator {
+        crate::distributed_vars::Accumulator::new(
+            zero,
+            merge_fn.map(crate::distributed_vars::MergeFn::new),
+        )
     }
 }

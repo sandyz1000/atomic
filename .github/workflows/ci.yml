@@ -73,14 +73,13 @@ jobs:
 
       # Distributed tests spawn real worker + driver processes over TCP.
       # They are marked #[ignore] so they don't run in the local job above.
-      # Sequential execution (--test-threads=1) is required: each test binds a
-      # fixed port and spawning multiple simultaneously causes port-reuse races.
+      # Each test uses dynamically assigned ports so they can run in parallel.
       - name: Run distributed integration tests
         run: |
           cargo test \
             -p atomic-engine \
             -- \
-            --test-threads=1 \
+            --test-threads=4 \
             --ignored
 
   # ── Job 3: Dependency audit ────────────────────────────────────────────────────

@@ -159,10 +159,6 @@ impl ExecutionPlan for LlmFilterExec {
         "LlmFilterExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }

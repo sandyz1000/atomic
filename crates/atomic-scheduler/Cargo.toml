@@ -16,6 +16,8 @@ bincode = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 prometheus = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }

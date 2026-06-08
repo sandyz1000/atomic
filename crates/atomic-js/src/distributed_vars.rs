@@ -1,7 +1,35 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use parking_lot::Mutex;
+use serde_json::Value as JV;
 use std::sync::Arc;
+
+// Stored JS merge function `(current, delta) -> new_value`.
+// Lifetime is stripped via transmute — safe because Accumulator is always
+// used synchronously on the JS main thread (never sent across threads).
+pub(crate) struct MergeFn(*const ());
+
+unsafe impl Send for MergeFn {}
+unsafe impl Sync for MergeFn {}
+
+impl MergeFn {
+    pub(crate) fn new(f: Function<(JV, JV), JV>) -> Self {
+        let ptr =
+            unsafe { std::mem::transmute::<Function<(JV, JV), JV>, Function<'static, (JV, JV), JV>>(f) };
+        Self(Box::into_raw(Box::new(ptr)) as *const ())
+    }
+
+    fn call(&self, current: JV, delta: JV) -> Result<JV> {
+        let f = unsafe { &*(self.0 as *const Function<'static, (JV, JV), JV>) };
+        f.call((current, delta))
+    }
+}
+
+impl Drop for MergeFn {
+    fn drop(&mut self) {
+        unsafe { drop(Box::from_raw(self.0 as *mut Function<'static, (JV, JV), JV>)) }
+    }
+}
 
 #[napi]
 pub struct BroadcastVar {
@@ -27,23 +55,28 @@ impl BroadcastVar {
 
 #[napi]
 pub struct Accumulator {
-    inner: Arc<Mutex<serde_json::Value>>,
-    initial: serde_json::Value,
+    inner: Arc<Mutex<JV>>,
+    initial: JV,
+    merge_fn: Option<MergeFn>,
 }
 
 #[napi]
 impl Accumulator {
-    /// Add a numeric, array, or string delta.
+    /// Add a delta using the merge function (if set) or default add logic.
     #[napi]
-    pub fn add(&self, delta: serde_json::Value) -> Result<()> {
+    pub fn add(&self, delta: JV) -> Result<()> {
         let mut guard = self.inner.lock();
-        *guard = json_add(guard.clone(), delta).map_err(|e| napi::Error::from_reason(e))?;
+        if let Some(f) = &self.merge_fn {
+            *guard = f.call(guard.clone(), delta)?;
+        } else {
+            *guard = json_add(guard.clone(), delta).map_err(napi::Error::from_reason)?;
+        }
         Ok(())
     }
 
     /// Return the current accumulated value.
     #[napi]
-    pub fn value(&self) -> serde_json::Value {
+    pub fn value(&self) -> JV {
         self.inner.lock().clone()
     }
 
@@ -55,40 +88,38 @@ impl Accumulator {
 }
 
 impl Accumulator {
-    pub fn new(initial: serde_json::Value) -> Self {
+    pub fn new(initial: JV, merge_fn: Option<MergeFn>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(initial.clone())),
             initial,
+            merge_fn,
         }
     }
 }
 
-fn json_add(
-    a: serde_json::Value,
-    b: serde_json::Value,
-) -> std::result::Result<serde_json::Value, String> {
+fn json_add(a: JV, b: JV) -> std::result::Result<JV, String> {
     match (a, b) {
-        (serde_json::Value::Number(x), serde_json::Value::Number(y)) => {
+        (JV::Number(x), JV::Number(y)) => {
             if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
-                Ok(serde_json::Value::Number((xi + yi).into()))
+                Ok(JV::Number((xi + yi).into()))
             } else {
                 let xf = x.as_f64().unwrap_or(0.0);
                 let yf = y.as_f64().unwrap_or(0.0);
                 let n = serde_json::Number::from_f64(xf + yf).ok_or("non-finite float")?;
-                Ok(serde_json::Value::Number(n))
+                Ok(JV::Number(n))
             }
         }
-        (serde_json::Value::Array(mut av), serde_json::Value::Array(bv)) => {
+        (JV::Array(mut av), JV::Array(bv)) => {
             av.extend(bv);
-            Ok(serde_json::Value::Array(av))
+            Ok(JV::Array(av))
         }
-        (serde_json::Value::Array(mut av), single) => {
+        (JV::Array(mut av), single) => {
             av.push(single);
-            Ok(serde_json::Value::Array(av))
+            Ok(JV::Array(av))
         }
-        (serde_json::Value::String(mut s), serde_json::Value::String(t)) => {
+        (JV::String(mut s), JV::String(t)) => {
             s.push_str(&t);
-            Ok(serde_json::Value::String(s))
+            Ok(JV::String(s))
         }
         _ => Err("incompatible accumulator types".to_string()),
     }

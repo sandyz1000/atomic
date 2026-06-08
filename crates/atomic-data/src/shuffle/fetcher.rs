@@ -192,7 +192,8 @@ impl ShuffleFetcher {
 
     async fn fetch_chunk(uri: Uri) -> LibResult<Vec<u8>> {
         let host = uri.host().ok_or(ShuffleError::FailedFetchOp)?;
-        let port = uri.port_u16().unwrap_or(80);
+        let is_https = uri.scheme_str() == Some("https");
+        let port = uri.port_u16().unwrap_or(if is_https { 443 } else { 80 });
 
         let stream = tokio::time::timeout(
             Duration::from_secs(CONNECT_TIMEOUT_SECS),
@@ -201,7 +202,29 @@ impl ShuffleFetcher {
         .await
         .map_err(|_| ShuffleError::FailedFetchOp)? // elapsed → FailedFetchOp
         .map_err(|_| ShuffleError::FailedFetchOp)?; // connect error → FailedFetchOp
-        let io = TokioIo::new(stream);
+
+        // When TLS is compiled in and the URI scheme is https, use the global
+        // TLS connector (set by init_shuffle when TLS is configured).
+        #[cfg(feature = "tls")]
+        if is_https {
+            if let Some(connector) = crate::env::get_shuffle_tls_connector() {
+                let domain = rustls::pki_types::ServerName::try_from(host.to_owned())
+                    .map_err(|_| ShuffleError::FailedFetchOp)?;
+                let tls_stream = connector
+                    .connect(domain, stream)
+                    .await
+                    .map_err(|_| ShuffleError::FailedFetchOp)?;
+                return Self::do_http_request(TokioIo::new(tls_stream), uri).await;
+            }
+        }
+
+        Self::do_http_request(TokioIo::new(stream), uri).await
+    }
+
+    async fn do_http_request<IO>(io: TokioIo<IO>, uri: Uri) -> LibResult<Vec<u8>>
+    where
+        IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
 
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await

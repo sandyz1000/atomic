@@ -387,7 +387,7 @@ impl TaskResultEnvelope {
 }
 
 /// Worker capabilities reported to the driver on handshake.
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize)]
 pub struct WorkerCapabilities {
     pub version: u16,
     pub worker_id: String,

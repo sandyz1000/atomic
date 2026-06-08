@@ -30,7 +30,6 @@ impl MultiplyUdf {
 }
 
 impl ScalarUDFImpl for MultiplyUdf {
-    fn as_any(&self) -> &dyn std::any::Any { self }
     fn name(&self) -> &str { "multiply" }
     fn signature(&self) -> &Signature { &self.signature }
     fn return_type(&self, _: &[DataType]) -> datafusion::error::Result<DataType> {
@@ -106,7 +105,6 @@ async fn test_two_udfs_composed() {
     #[derive(Debug, PartialEq, Eq, Hash)]
     struct TripleUdf(Signature);
     impl ScalarUDFImpl for TripleUdf {
-        fn as_any(&self) -> &dyn std::any::Any { self }
         fn name(&self) -> &str { "triple" }
         fn signature(&self) -> &Signature { &self.0 }
         fn return_type(&self, _: &[DataType]) -> datafusion::error::Result<DataType> {

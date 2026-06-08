@@ -5,11 +5,9 @@ use atomic_graph::{
         connected_component, label_propagation, page_rank, shortest_path,
         strongly_connected_component, triangle_count,
     },
-    graph::Graph,
-    types::Edge,
+    graph::Graph, topology::Edge,
 };
 use pyo3::prelude::*;
-use pyo3::types::PyList;
 
 type VId = i64;
 

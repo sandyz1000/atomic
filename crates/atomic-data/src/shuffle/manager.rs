@@ -56,7 +56,7 @@ impl ShuffleManager {
         fs::create_dir_all(&shuffle_dir).map_err(|_| ShuffleError::CouldNotCreateShuffleDir)?;
 
         let (server_uri, server_port) =
-            Self::start_server(config.local_ip, config.shuffle_port, cache.clone())?;
+            Self::start_server(config.local_ip, config.shuffle_port, cache.clone(), &config)?;
         let (send_main, rcv_main) = Self::init_status_checker(&server_uri)?;
 
         let manager = ShuffleManager {
@@ -119,25 +119,150 @@ impl ShuffleManager {
         bind_ip: Ipv4Addr,
         port: Option<u16>,
         cache: Arc<dyn ShuffleCache>,
+        shuffle_config: &ShuffleConfig,
     ) -> LibResult<(String, u16)> {
-        let port = if let Some(bind_port) = port {
-            let conn = TcpListener::bind(SocketAddr::from((bind_ip, bind_port))).map_err(|_| {
-                let err: ShuffleError = NetworkError::FreePortNotFound(bind_port, 0).into();
+        #[cfg(feature = "tls")]
+        let tls_acceptor = if shuffle_config.tls_enabled() {
+            Some(Self::make_tls_acceptor(shuffle_config)?)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "tls"))]
+        let tls_acceptor: Option<std::convert::Infallible> = None;
+
+        let bind_port = if let Some(p) = port {
+            let conn = TcpListener::bind(SocketAddr::from((bind_ip, p))).map_err(|_| {
+                let err: ShuffleError = NetworkError::FreePortNotFound(p, 0).into();
                 err
             })?;
-            Self::launch_async_server(conn, cache)?;
-            bind_port
+            Self::launch_async_server(conn, cache, tls_acceptor)?;
+            p
         } else {
-            let (conn, bind_port) = get_free_connection(bind_ip)?;
-            Self::launch_async_server(conn, cache)?;
-            bind_port
+            let (conn, p) = get_free_connection(bind_ip)?;
+            Self::launch_async_server(conn, cache, tls_acceptor)?;
+            p
         };
-        let server_uri = format!("http://{}:{}", bind_ip, port);
+
+        let scheme = if shuffle_config.tls_enabled() { "https" } else { "http" };
+        let server_uri = format!("{}://{}:{}", scheme, bind_ip, bind_port);
         log::debug!("server_uri {:?}", server_uri);
-        Ok((server_uri, port))
+        Ok((server_uri, bind_port))
     }
 
-    fn launch_async_server(conn: TcpListener, cache: Arc<dyn ShuffleCache>) -> LibResult<()> {
+    #[cfg(feature = "tls")]
+    fn make_tls_acceptor(config: &ShuffleConfig) -> LibResult<tokio_rustls::TlsAcceptor> {
+        use std::io::BufReader;
+        use std::sync::Arc as StdArc;
+        use rustls::{RootCertStore, ServerConfig};
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use rustls_pemfile::{certs, pkcs8_private_keys};
+
+        let cert_path = config.tls_cert.as_ref().ok_or(ShuffleError::Other)?;
+        let key_path  = config.tls_key.as_ref().ok_or(ShuffleError::Other)?;
+        let ca_path   = config.tls_ca.as_ref().ok_or(ShuffleError::Other)?;
+
+        let chain: Vec<CertificateDer<'static>> = {
+            let f = fs::File::open(cert_path).map_err(|_| ShuffleError::Other)?;
+            certs(&mut BufReader::new(f))
+                .collect::<Result<_, _>>()
+                .map_err(|_| ShuffleError::Other)?
+        };
+        let private_key: PrivateKeyDer<'static> = {
+            let f = fs::File::open(key_path).map_err(|_| ShuffleError::Other)?;
+            pkcs8_private_keys(&mut BufReader::new(f))
+                .next()
+                .ok_or(ShuffleError::Other)?
+                .map(PrivateKeyDer::Pkcs8)
+                .map_err(|_| ShuffleError::Other)?
+        };
+        let ca_store = {
+            let f = fs::File::open(ca_path).map_err(|_| ShuffleError::Other)?;
+            let mut store = RootCertStore::empty();
+            for cert in certs(&mut BufReader::new(f)).flatten() {
+                store.add(cert).map_err(|_| ShuffleError::Other)?;
+            }
+            store
+        };
+        let client_auth = rustls::server::WebPkiClientVerifier::builder(StdArc::new(ca_store))
+            .build()
+            .map_err(|_| ShuffleError::Other)?;
+        let cfg = ServerConfig::builder()
+            .with_client_cert_verifier(client_auth)
+            .with_single_cert(chain, private_key)
+            .map_err(|_| ShuffleError::Other)?;
+        Ok(tokio_rustls::TlsAcceptor::from(StdArc::new(cfg)))
+    }
+
+    #[cfg(feature = "tls")]
+    fn launch_async_server(
+        conn: TcpListener,
+        cache: Arc<dyn ShuffleCache>,
+        tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    ) -> LibResult<()> {
+        use hyper::server::conn::http1;
+        let (s, r) = cb_channel::bounded::<LibResult<()>>(1);
+
+        tokio::spawn(async move {
+            conn.set_nonblocking(true)
+                .map_err(|_| ShuffleError::FailedToStart)?;
+            let listener = tokio::net::TcpListener::from_std(conn)
+                .map_err(|_| ShuffleError::FailedToStart)?;
+
+            loop {
+                let (stream, _) = listener
+                    .accept()
+                    .await
+                    .map_err(|_| ShuffleError::FailedToStart)?;
+                let cache_clone = cache.clone();
+
+                if let Some(ref acceptor) = tls_acceptor {
+                    let acceptor = acceptor.clone();
+                    tokio::spawn(async move {
+                        match acceptor.accept(stream).await {
+                            Ok(tls_stream) => {
+                                let io = TokioIo::new(tls_stream);
+                                if let Err(e) = http1::Builder::new()
+                                    .serve_connection(io, ShuffleService::new(cache_clone))
+                                    .await
+                                {
+                                    log::error!("TLS shuffle connection error: {e}");
+                                }
+                            }
+                            Err(e) => log::warn!("TLS handshake failed on shuffle server: {e}"),
+                        }
+                    });
+                    continue;
+                }
+
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    if let Err(err) = http1::Builder::new()
+                        .serve_connection(io, ShuffleService::new(cache_clone))
+                        .await
+                    {
+                        log::error!("Error serving connection: {:?}", err);
+                    }
+                });
+            }
+
+            #[allow(unreachable_code)]
+            s.send(Err(ShuffleError::FailedToStart)).unwrap();
+            Err::<(), _>(ShuffleError::FailedToStart)
+        });
+
+        cb_channel::select! {
+            recv(r) -> msg => { msg.map_err(|_| ShuffleError::FailedToStart)??; }
+            default(Duration::from_millis(25)) => log::debug!("started shuffle server"),
+        };
+        Ok(())
+    }
+
+    #[cfg(not(feature = "tls"))]
+    fn launch_async_server(
+        conn: TcpListener,
+        cache: Arc<dyn ShuffleCache>,
+        _tls: Option<std::convert::Infallible>,
+    ) -> LibResult<()> {
         use hyper::server::conn::http1;
         let (s, r) = cb_channel::bounded::<LibResult<()>>(1);
 
