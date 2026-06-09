@@ -7,7 +7,7 @@ use crate::rdd::mapper::MapperRdd;
 use crate::rdd::pair::FlatMappedValuesRdd;
 use crate::rdd::parallel_collection::ParallelCollection;
 use crate::rdd::partitionwise_sampled::PartitionwiseSampledRdd;
-use crate::backend::Backend;
+use crate::executors::Backend;
 use crate::task_traits::{BinaryTask, UnaryTask};
 use atomic_data::cache::StorageLevel;
 use atomic_data::dependency::Dependency;
@@ -2558,7 +2558,7 @@ where
                     driver_ops,
                     combined,
                 );
-                let result = crate::backend::NativeBackend::default()
+                let result = crate::executors::ComputeEngine::default()
                     .execute("local-driver", &task)
                     .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
                 match result.status {

@@ -1,12 +1,12 @@
-pub mod native_executor;
+pub mod native;
 
 #[cfg(feature = "python")]
-pub mod python_executor;
+pub mod py;
 
 #[cfg(feature = "js")]
-pub mod js_executor;
+pub mod js;
 
-pub use native_executor::NativeBackend;
+pub use native::ComputeEngine;
 
 use atomic_data::distributed::{PipelineOp, TaskEnvelope, TaskResultEnvelope};
 use crate::error::ComputeResult;
@@ -27,9 +27,9 @@ pub trait Backend: Default + Send + Sync {
 
 /// Dispatches a single pipeline operation for one specific runtime.
 ///
-/// Register concrete implementations in `NativeBackend::default()` keyed by
+/// Register concrete implementations in [`ComputeEngine::default`] keyed by
 /// [`TaskRuntime`].  Adding a new runtime = one new `impl OpDispatcher` + one
-/// `HashMap` entry.  `NativeBackend::execute()` never needs to change.
+/// `HashMap` entry.  [`ComputeEngine::execute`] never needs to change.
 pub(crate) trait OpDispatcher: Send + Sync {
     /// Execute one pipeline op and return the transformed output bytes.
     ///
@@ -41,5 +41,6 @@ pub(crate) trait OpDispatcher: Send + Sync {
         op: &PipelineOp,
         partition_id: usize,
         data: &[u8],
-    ) -> std::result::Result<Vec<u8>, String>;
+    ) -> ComputeResult<Vec<u8>>;
 }
+

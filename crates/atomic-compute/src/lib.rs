@@ -1,6 +1,7 @@
 pub mod app;
-pub mod backend;
+pub mod executors;
 pub mod builtin_tasks;
+pub mod shuffle_map;
 pub mod context;
 pub mod env;
 pub mod error;
@@ -41,7 +42,7 @@ macro_rules! register_shuffle_map {
         $crate::__macro_support::inventory::submit!(
             $crate::__macro_support::ShuffleMapEntry {
                 type_id: || concat!(stringify!($K), "::", stringify!($V)),
-                handler: $crate::builtin_tasks::shuffle_map_handler::<$K, $V>,
+                handler: $crate::shuffle_map::shuffle_map_handler::<$K, $V>,
             }
         );
         $crate::__macro_support::inventory::submit!(

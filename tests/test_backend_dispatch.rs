@@ -4,7 +4,7 @@
 //! independent of any single runtime — broadcast loading, accumulator draining, and
 //! multi-op pipeline orchestration — using only public API types.
 
-use atomic_compute::backend::{Backend, NativeBackend};
+use atomic_compute::executors::{Backend, NativeBackend};
 use atomic_compute::context::Context;
 use atomic_compute::env::Config;
 use atomic_compute::task;

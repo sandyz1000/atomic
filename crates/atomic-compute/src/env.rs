@@ -558,7 +558,7 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
             use crate::tls::tls_impl::{TlsConnector, make_client_config};
             match make_client_config(cert, key, ca) {
                 Ok(client_cfg) => {
-                    let connector = Arc::new(TlsConnector::from(Arc::new(client_cfg)));
+                    let connector = Arc::new(TlsConnector::from(client_cfg));
                     atomic_data::env::set_shuffle_tls_connector(connector);
                 }
                 Err(e) => log::warn!("Failed to build shuffle TLS connector: {e}"),

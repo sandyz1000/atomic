@@ -1,8 +1,8 @@
 use crate::env::{Config, DeploymentMode};
 use crate::error::{ComputeError, ComputeResult};
 use crate::executor::{Executor, Signal};
+use crate::executors::{Backend, ComputeEngine};
 use crate::io::ReaderConfiguration;
-use crate::backend::{Backend, NativeBackend};
 use crate::rdd::typed::TypedRdd;
 use crate::rdd::{ParallelCollection, UnionRdd};
 use crate::{env, hosts};
@@ -10,7 +10,7 @@ use atomic_data::accumulator::{Accumulator, MergeFn, make_merge_fn, next_accumul
 use atomic_data::broadcast::{BroadcastVar, next_broadcast_id};
 use atomic_data::data::Data;
 use atomic_data::distributed::{
-    TRANSPORT_HEADER_LEN, PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime,
+    PipelineOp, ResultStatus, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope, TaskRuntime,
     TransportFrameKind, WireDecode, WireEncode, WorkerCapabilities, encode_transport_frame,
     parse_transport_header,
 };
@@ -114,16 +114,19 @@ impl Context {
     pub fn new() -> ComputeResult<Arc<Self>> {
         let mut config = Config::from_env();
         // In env-var mode, load workers from hosts.conf for distributed drivers.
-        if config.mode == DeploymentMode::Distributed && config.workers.is_empty()
-            && let Ok(hosts) = hosts::Hosts::get() {
-                config.workers = hosts.slaves
-                    .iter()
-                    .filter_map(|s| {
-                        let hp = s.split('@').nth(1)?;
-                        hp.parse().ok()
-                    })
-                    .collect();
-            }
+        if config.mode == DeploymentMode::Distributed
+            && config.workers.is_empty()
+            && let Ok(hosts) = hosts::Hosts::get()
+        {
+            config.workers = hosts
+                .slaves
+                .iter()
+                .filter_map(|s| {
+                    let hp = s.split('@').nth(1)?;
+                    hp.parse().ok()
+                })
+                .collect();
+        }
         Context::new_with_config(config)
     }
 
@@ -230,7 +233,11 @@ impl Context {
                     address_map.push(endpoint);
                 }
                 Err(e) => {
-                    log::warn!("worker {} unreachable during handshake, skipping: {}", endpoint, e);
+                    log::warn!(
+                        "worker {} unreachable during handshake, skipping: {}",
+                        endpoint,
+                        e
+                    );
                 }
             }
         }
@@ -243,10 +250,7 @@ impl Context {
 
         // Start proactive heartbeat loop if configured.
         env::Env::run_in_async_rt(|| {
-            scheduler.start_heartbeat(
-                config.heartbeat_interval_secs,
-                config.heartbeat_timeout_ms,
-            );
+            scheduler.start_heartbeat(config.heartbeat_interval_secs, config.heartbeat_timeout_ms);
         });
 
         // Start self-registration endpoint so workers can join dynamically.
@@ -315,10 +319,14 @@ impl Context {
         while Instant::now() < deadline {
             match TcpStream::connect(endpoint) {
                 Ok(mut stream) => {
-                    stream.write_all(&frame).map_err(ComputeError::OutputWrite)?;
+                    stream
+                        .write_all(&frame)
+                        .map_err(ComputeError::OutputWrite)?;
 
                     let mut header = [0_u8; TRANSPORT_HEADER_LEN];
-                    stream.read_exact(&mut header).map_err(ComputeError::InputRead)?;
+                    stream
+                        .read_exact(&mut header)
+                        .map_err(ComputeError::InputRead)?;
                     let (kind, payload_len) = parse_transport_header(&header)
                         .map_err(|err| ComputeError::InvalidTransportFrame(err.to_string()))?;
                     if kind != TransportFrameKind::WorkerCapabilities {
@@ -329,7 +337,9 @@ impl Context {
                     }
 
                     let mut payload = vec![0_u8; payload_len];
-                    stream.read_exact(&mut payload).map_err(ComputeError::InputRead)?;
+                    stream
+                        .read_exact(&mut payload)
+                        .map_err(ComputeError::InputRead)?;
                     return WorkerCapabilities::decode_wire(&payload)
                         .map_err(|err| ComputeError::WorkerHandshake(err.to_string()));
                 }
@@ -370,10 +380,7 @@ impl Context {
                 Ok(json) => {
                     let addr = format!("{}:{}", socket_addr.ip(), socket_addr.port() + 10);
                     match TcpStream::connect(&addr) {
-                        Err(_) => error!(
-                            "Failed to connect to {} to stop its executor",
-                            addr
-                        ),
+                        Err(_) => error!("Failed to connect to {} to stop its executor", addr),
                         Ok(mut stream) => {
                             let mut signal = (json.len() as u32).to_le_bytes().to_vec();
                             signal.extend_from_slice(&json);
@@ -393,9 +400,7 @@ impl Context {
     /// from a worker are not rolled back.  In local mode this is a no-op.
     pub fn cancel_job(&self, run_id: usize) -> ComputeResult<()> {
         match &self.scheduler {
-            atomic_scheduler::Schedulers::Distributed(sched) => {
-                Ok(sched.cancel_job(run_id)?)
-            }
+            atomic_scheduler::Schedulers::Distributed(sched) => Ok(sched.cancel_job(run_id)?),
             atomic_scheduler::Schedulers::Local(_) => Ok(()),
         }
     }
@@ -427,8 +432,7 @@ impl Context {
         Vec<T>: WireDecode,
     {
         use crate::rdd::TypedRdd;
-        Ok(TypedRdd::new(rdd, self.clone())
-            .collect()?)
+        Ok(TypedRdd::new(rdd, self.clone()).collect()?)
     }
 
     pub fn new_rdd_id(&self) -> usize {
@@ -496,8 +500,12 @@ impl Context {
                 acc.id
             )
         });
-        T::decode_wire(&entry.value().0)
-            .unwrap_or_else(|e| panic!("accumulator id={}: failed to decode current value: {}", acc.id, e))
+        T::decode_wire(&entry.value().0).unwrap_or_else(|e| {
+            panic!(
+                "accumulator id={}: failed to decode current value: {}",
+                acc.id, e
+            )
+        })
     }
 
     /// Merge incoming accumulator deltas from a completed task result into driver-side values.
@@ -603,10 +611,16 @@ impl Context {
                     let keys = crate::io::s3::s3_impl::list_keys(&s3uri.bucket, &s3uri.key);
                     if keys.is_empty() {
                         // Treat the URI itself as a single key (file, not a prefix directory).
-                        vec![TextFileSource::S3 { bucket: s3uri.bucket, key: s3uri.key }]
+                        vec![TextFileSource::S3 {
+                            bucket: s3uri.bucket,
+                            key: s3uri.key,
+                        }]
                     } else {
                         keys.into_iter()
-                            .map(|k| TextFileSource::S3 { bucket: s3uri.bucket.clone(), key: k })
+                            .map(|k| TextFileSource::S3 {
+                                bucket: s3uri.bucket.clone(),
+                                key: k,
+                            })
                             .collect()
                     }
                 } else {
@@ -705,7 +719,8 @@ impl Context {
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + Debug + Send + Sync + 'static,
     {
-        Ok(self.scheduler
+        Ok(self
+            .scheduler
             .run_approximate_job(Arc::new(func), rdd, evaluator, timeout)?)
     }
 
@@ -733,7 +748,12 @@ impl Context {
         U: Data + Clone + WireDecode,
         Vec<U>: WireDecode,
     {
-        let ops = vec![PipelineOp { op_id: op_id.to_string(), action, runtime: TaskRuntime::Native, payload }];
+        let ops = vec![PipelineOp {
+            op_id: op_id.to_string(),
+            action,
+            runtime: TaskRuntime::Native,
+            payload,
+        }];
         let encoded = Self::encode_rdd_partitions(rdd)?;
         let result_bytes = self.dispatch_pipeline(encoded, ops)?;
         result_bytes
@@ -757,7 +777,12 @@ impl Context {
         Vec<T>: WireEncode + WireDecode,
     {
         let payload = zero.encode_wire()?;
-        let ops = vec![PipelineOp { op_id: op_id.to_string(), action: TaskAction::Fold, runtime: TaskRuntime::Native, payload }];
+        let ops = vec![PipelineOp {
+            op_id: op_id.to_string(),
+            action: TaskAction::Fold,
+            runtime: TaskRuntime::Native,
+            payload,
+        }];
         let encoded = Self::encode_rdd_partitions(rdd)?;
         let partition_results_raw = self.dispatch_pipeline(encoded, ops.clone())?;
 
@@ -782,12 +807,16 @@ impl Context {
             payload: vec![],
         }];
         let task = TaskEnvelope::new(
-            0, 0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
+            0,
             format!("driver-reduce-{}", op_id),
             reduce_ops,
             combined_data,
         );
-        let result = NativeBackend::default().execute("local-driver", &task)?;
+        let result = ComputeEngine::default().execute("local-driver", &task)?;
         match result.status {
             ResultStatus::Success => Ok(T::decode_wire(&result.data)?),
             _ => Err(ComputeError::InvalidPayload(
@@ -810,17 +839,22 @@ impl Context {
         let broadcasts = self.broadcast_snapshot();
         match &self.scheduler {
             Schedulers::Local(_) => {
-                let backend = NativeBackend::default();
+                let backend = ComputeEngine::default();
                 source_partitions
                     .into_iter()
                     .enumerate()
                     .map(|(part_id, data)| {
                         let task = TaskEnvelope::new(
-                            0, 0, part_id, 0, part_id,
+                            0,
+                            0,
+                            part_id,
+                            0,
+                            part_id,
                             format!("local-pipeline-{}", part_id),
                             ops.clone(),
                             data,
-                        ).with_broadcasts(broadcasts.clone());
+                        )
+                        .with_broadcasts(broadcasts.clone());
                         let result = backend.execute("local-driver", &task)?;
                         match result.status {
                             ResultStatus::Success => {
@@ -836,18 +870,20 @@ impl Context {
                     })
                     .collect()
             }
-            Schedulers::Distributed(sched) => {
-                Ok(env::Env::run_in_async_rt(|| {
-                    futures::executor::block_on(
-                        sched.run_native_job_with_broadcasts(ops, source_partitions, broadcasts)
-                    )
-                })?)
-            }
+            Schedulers::Distributed(sched) => Ok(env::Env::run_in_async_rt(|| {
+                futures::executor::block_on(sched.run_native_job_with_broadcasts(
+                    ops,
+                    source_partitions,
+                    broadcasts,
+                ))
+            })?),
         }
     }
 
     /// Encode every partition of an RDD into rkyv bytes.
-    pub(crate) fn encode_rdd_partitions<T>(rdd: Arc<dyn Rdd<Item = T>>) -> ComputeResult<Vec<Vec<u8>>>
+    pub(crate) fn encode_rdd_partitions<T>(
+        rdd: Arc<dyn Rdd<Item = T>>,
+    ) -> ComputeResult<Vec<Vec<u8>>>
     where
         T: Data + Clone + WireEncode,
         Vec<T>: WireEncode,
@@ -861,7 +897,7 @@ impl Context {
             .collect()
     }
 
-/// In distributed mode, find all pending `ShuffleDependency` nodes in the DAG,
+    /// In distributed mode, find all pending `ShuffleDependency` nodes in the DAG,
     /// run their map stages on remote workers, and register all shuffle server URIs
     /// with `MapOutputTracker`.
     ///
@@ -889,8 +925,8 @@ impl Context {
             if let Dependency::Shuffle(shuffle_dep) = dep {
                 // Encode the parent RDD partitions (the shuffle map input).
                 // The typed closure on ShuffleDependencyBox rkyv-encodes Vec<(K,V)> per partition.
-                let parent_partitions = (shuffle_dep.encode_partitions)()
-                    .map_err(ComputeError::InvalidPayload)?;
+                let parent_partitions =
+                    (shuffle_dep.encode_partitions)().map_err(ComputeError::InvalidPayload)?;
 
                 // Build the shuffle-map op. The payload carries the type_id string so
                 // the worker can look up the correct SHUFFLE_MAP_REGISTRY handler.
@@ -907,7 +943,11 @@ impl Context {
                 // Prefer ops stored on the dep (set when a staged pipeline precedes the shuffle).
                 // Fall back to the caller-supplied preceding_ops.
                 let dep_preceding = shuffle_dep.preceding_ops.clone();
-                let base_ops = if !dep_preceding.is_empty() { dep_preceding } else { preceding_ops.clone() };
+                let base_ops = if !dep_preceding.is_empty() {
+                    dep_preceding
+                } else {
+                    preceding_ops.clone()
+                };
                 let mut ops = base_ops;
                 ops.push(shuffle_op);
 
@@ -959,14 +999,6 @@ pub fn start_worker(config: Config) -> ! {
         log::warn!("shuffle service could not start on worker: {e}");
     }
 
-    // Spawn the Python subprocess worker pool (one process per CPU, each with its own GIL).
-    #[cfg(feature = "python")]
-    {
-        let pool_size = num_cpus::get().max(1);
-        crate::backend::python_executor::init_python_worker_pool(pool_size);
-        log::info!("Python worker pool started ({pool_size} subprocesses)");
-    }
-
     // Eagerly warm up the JS V8 runtime on N blocking threads so the first UDF task
     // does not pay the cold-start cost.  spawn_blocking is used because JsRuntime is
     // !Send and must be initialized on the thread that will use it.
@@ -975,7 +1007,7 @@ pub fn start_worker(config: Config) -> ! {
         let n = num_cpus::get().max(1);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let handles: Vec<_> = (0..n)
-                .map(|_| handle.spawn_blocking(crate::backend::js_executor::warmup_js_runtime))
+                .map(|_| handle.spawn_blocking(|| crate::executors::js::JsDispatcher::with_runtime(|_| {})))
                 .collect();
             for h in handles {
                 let _ = tokio::task::block_in_place(|| handle.block_on(h));
@@ -1003,11 +1035,17 @@ pub fn start_worker(config: Config) -> ! {
                 config.tls_cert.as_deref(),
                 config.tls_key.as_deref(),
             ) {
-                executor = executor.with_tls(
-                    config.tls_cert.as_ref().unwrap(),
-                    config.tls_key.as_ref().unwrap(),
-                    config.tls_ca_cert.as_ref().unwrap(),
-                ).map_err(|e| ComputeError::GetOrCreateConfig(Box::leak(format!("TLS init: {e}").into_boxed_str())))?;
+                executor = executor
+                    .with_tls(
+                        config.tls_cert.as_ref().unwrap(),
+                        config.tls_key.as_ref().unwrap(),
+                        config.tls_ca_cert.as_ref().unwrap(),
+                    )
+                    .map_err(|e| {
+                        ComputeError::GetOrCreateConfig(Box::leak(
+                            format!("TLS init: {e}").into_boxed_str(),
+                        ))
+                    })?;
             }
             let executor = Arc::new(executor);
             executor.worker()

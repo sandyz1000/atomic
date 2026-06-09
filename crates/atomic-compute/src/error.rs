@@ -136,3 +136,9 @@ impl From<BaseError> for ComputeError {
         ComputeError::InvalidPayload(e.to_string())
     }
 }
+
+impl From<String> for ComputeError {
+    fn from(s: String) -> Self {
+        ComputeError::InvalidPayload(s)
+    }
+}

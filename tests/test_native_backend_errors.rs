@@ -17,7 +17,7 @@
 //! Note: these tests call `NativeBackend` and `TaskEnvelope` via the public API
 //! (`atomic_compute::backend::NativeBackend`, `atomic_data::distributed::*`).
 
-use atomic_compute::backend::{Backend, NativeBackend};
+use atomic_compute::executors::{Backend, NativeBackend};
 use atomic_compute::context::Context;
 use atomic_compute::env::Config;
 use atomic_compute::task;

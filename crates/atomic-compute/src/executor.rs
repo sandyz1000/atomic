@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::{Backend, NativeBackend};
+use crate::executors::{Backend, ComputeEngine};
 use crate::env;
 use crate::error::{ComputeError, ComputeResult};
 use atomic_data::distributed::{
@@ -22,7 +22,7 @@ pub struct Executor {
     port: u16,
     max_concurrent_tasks: u16,
     worker_id: Arc<str>,
-    backend: NativeBackend,
+    backend: ComputeEngine,
     /// Pre-built TLS acceptor. `None` means plain TCP (default).
     #[cfg(feature = "tls")]
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
@@ -34,7 +34,7 @@ impl Executor {
             port,
             max_concurrent_tasks,
             worker_id: Arc::from(format!("worker-{}", port)),
-            backend: NativeBackend::default(),
+            backend: ComputeEngine::default(),
             #[cfg(feature = "tls")]
             tls_acceptor: None,
         }
@@ -89,7 +89,7 @@ impl Executor {
             .with_registry_fingerprint(*crate::task_registry::REGISTRY_FINGERPRINT)
     }
 
-    /// Worker loop: binds TCP port, reads transport frames, dispatches via NativeBackend.
+    /// Worker loop: binds TCP port, reads transport frames, dispatches via ComputeEngine.
     #[allow(dropping_copy_types)]
     pub fn worker(self: Arc<Self>) -> ComputeResult<Signal> {
         env::Env::run_in_async_rt(move || -> ComputeResult<Signal> {

@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 # `udf` enables both `python` and `js` features inside atomic-compute (subprocess pool + V8).
-atomic-compute = { workspace = true, features = ["udf"] }
+atomic-compute = { workspace = true, features = ["embedded-runtime"] }
 tokio = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }

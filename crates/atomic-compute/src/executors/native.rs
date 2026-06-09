@@ -6,14 +6,20 @@ use atomic_data::distributed::{
     PipelineOp, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime,
 };
 
-use crate::backend::{Backend, OpDispatcher};
+use crate::executors::{Backend, OpDispatcher};
 use crate::error::{ComputeError, ComputeResult};
 use crate::task_registry::{SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
 
 
 /// Handles `TaskRuntime::Native` ops — both compile-time `#[task]` registry
 /// lookups and shuffle-map writes.
-pub(crate) struct NativeDispatcher;
+pub(crate) struct NativeDispatcher {}
+
+impl NativeDispatcher {
+    pub(crate) fn new() -> Self {
+        Self {}
+    }
+}
 
 impl OpDispatcher for NativeDispatcher {
     fn dispatch(
@@ -21,29 +27,29 @@ impl OpDispatcher for NativeDispatcher {
         op: &PipelineOp,
         partition_id: usize,
         data: &[u8],
-    ) -> Result<Vec<u8>, String> {
+    ) -> ComputeResult<Vec<u8>> {
         match &op.action {
             TaskAction::ShuffleMap {
                 shuffle_id,
                 num_output_partitions,
             } => {
                 let type_id = std::str::from_utf8(&op.payload)
-                    .map_err(|e| format!("ShuffleMap: payload not UTF-8: {e}"))?;
+                    .map_err(|e| ComputeError::InvalidPayload(format!("ShuffleMap: payload not UTF-8: {e}")))?;
                 match SHUFFLE_MAP_REGISTRY.get(type_id) {
-                    None => Err(format!(
+                    None => Err(ComputeError::UnknownOperation(format!(
                         "no shuffle handler for type_id='{type_id}'; \
                          add `register_shuffle_map!(K, V)` to your binary"
-                    )),
+                    ))),
                     Some(handler) => {
-                        handler(data, *shuffle_id, partition_id, *num_output_partitions)
-                            .map(|_| data.to_vec())
+                        handler(data, *shuffle_id, partition_id, *num_output_partitions)?;
+                        Ok(data.to_vec())
                     }
                 }
             }
             _ => match TASK_REGISTRY.get(op.op_id.as_str()) {
                 None => {
                     let registered: Vec<&str> = TASK_REGISTRY.keys().copied().collect();
-                    Err(format!(
+                    Err(ComputeError::UnknownOperation(format!(
                         "Task '{}' not registered in TASK_REGISTRY. \
                          Ensure this binary was compiled with the crate that defines \
                          #[task] or task_fn! for '{}'. \
@@ -52,48 +58,50 @@ impl OpDispatcher for NativeDispatcher {
                         op.op_id,
                         registered.len(),
                         registered.join(", ")
-                    ))
+                    )))
                 }
-                Some(handler) => handler(&op.action, &op.payload, data),
+                Some(handler) => Ok(handler(&op.action, &op.payload, data)?),
             },
         }
     }
 }
 
 
-/// Native in-process task executor.
+/// Multi-runtime task executor.
 ///
-/// Dispatches each [`PipelineOp`] to the [`OpDispatcher`] registered for its
+/// Routes each [`PipelineOp`] to the [`OpDispatcher`] registered for its
 /// [`TaskRuntime`] via an O(1) [`HashMap`] lookup.  Adding a new runtime requires
-/// only one new `impl OpDispatcher` and one entry in [`NativeBackend::default`] —
-/// this function never changes.
+/// only one new `impl OpDispatcher` and one entry in [`ComputeEngine::default`] —
+/// `execute()` never changes.
 ///
 /// This is only valid when the driver and worker run the same binary; the
 /// dispatch table is built at compile time from all `#[task]`-annotated functions
 /// linked into the binary.
-pub struct NativeBackend {
+pub struct ComputeEngine {
     dispatchers: HashMap<TaskRuntime, Box<dyn OpDispatcher>>,
 }
 
-impl Default for NativeBackend {
+impl Default for ComputeEngine {
     fn default() -> Self {
-        let mut d: HashMap<TaskRuntime, Box<dyn OpDispatcher>> = HashMap::new();
-        d.insert(TaskRuntime::Native, Box::new(NativeDispatcher));
+        let mut dispatchers: HashMap<TaskRuntime, Box<dyn OpDispatcher>> = HashMap::new();
+        dispatchers.insert(TaskRuntime::Native, Box::new(NativeDispatcher::new()));
         #[cfg(feature = "python")]
-        d.insert(
+        dispatchers.insert(
             TaskRuntime::Python,
-            Box::new(crate::backend::python_executor::PythonDispatcher),
+            Box::new(crate::executors::py::PythonDispatcher::new(
+                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
+            )),
         );
         #[cfg(feature = "js")]
-        d.insert(
+        dispatchers.insert(
             TaskRuntime::JavaScript,
-            Box::new(crate::backend::js_executor::JsDispatcher),
+            Box::new(crate::executors::js::JsDispatcher::new()),
         );
-        NativeBackend { dispatchers: d }
+        ComputeEngine { dispatchers }
     }
 }
 
-impl Backend for NativeBackend {
+impl Backend for ComputeEngine {
     fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> ComputeResult<TaskResultEnvelope> {
         if task.ops.is_empty() {
             return Err(ComputeError::UnknownOperation("empty pipeline".to_string()));
@@ -120,7 +128,7 @@ impl Backend for NativeBackend {
 
             match dispatcher.dispatch(op, task.partition_id, &data) {
                 Ok(out) => data = out,
-                Err(msg) => {
+                Err(e) => {
                     return Ok(TaskResultEnvelope::fatal_failure(
                         task.run_id,
                         task.stage_id,
@@ -128,7 +136,7 @@ impl Backend for NativeBackend {
                         task.attempt_id,
                         task.partition_id,
                         worker_id.to_string(),
-                        msg,
+                        e.to_string(),
                     ));
                 }
             }
@@ -191,7 +199,7 @@ mod tests {
 
     #[test]
     fn native_runtime_unknown_op_returns_fatal_failure() {
-        let backend = NativeBackend::default();
+        let backend = ComputeEngine::default();
         let task = make_task("no.such.op", TaskAction::Map, TaskRuntime::Native, vec![]);
         let result = backend.execute("test-worker", &task).unwrap();
         assert_eq!(result.status, ResultStatus::FatalFailure);
@@ -200,13 +208,8 @@ mod tests {
 
     #[test]
     fn default_backend_has_native_dispatcher() {
-        // Verify the dispatcher registry is non-empty and handles Native ops.
-        // We test this behaviorally: a Native op with an unknown id produces
-        // FatalFailure (not Err, which would indicate no dispatcher found at all).
-        let backend = NativeBackend::default();
+        let backend = ComputeEngine::default();
         let task = make_task("nonexistent", TaskAction::Map, TaskRuntime::Native, vec![]);
-        // If there were no Native dispatcher, execute() would return Err.
-        // FatalFailure means the dispatcher ran but the op_id wasn't found.
         let result = backend.execute("w", &task);
         assert!(result.is_ok(), "Native dispatcher must be registered");
         assert_eq!(result.unwrap().status, ResultStatus::FatalFailure);
@@ -214,7 +217,7 @@ mod tests {
 
     #[test]
     fn empty_pipeline_returns_err() {
-        let backend = NativeBackend::default();
+        let backend = ComputeEngine::default();
         let task = TaskEnvelope::new(1, 2, 3, 0, 0, "t".into(), vec![], vec![]);
         assert!(
             backend.execute("w", &task).is_err(),
@@ -224,14 +227,7 @@ mod tests {
 
     #[test]
     fn unregistered_runtime_returns_err() {
-        // If a PipelineOp carries a runtime not in the dispatcher registry,
-        // execute() must return Err (not panic) so the scheduler can handle it.
-        // We construct a task and patch the runtime field post-hoc to simulate
-        // an unrecognised runtime by testing that the error path exists.
-        // (The only way to trigger this without a new variant is to confirm the
-        // HashMap-lookup-or-else path is reachable via the known happy path.)
-        let backend = NativeBackend::default();
-        // A known-good Native op — confirms dispatch succeeds when runtime is registered.
+        let backend = ComputeEngine::default();
         let task = make_task("no.such.op", TaskAction::Map, TaskRuntime::Native, vec![]);
         assert!(backend.execute("w", &task).is_ok());
     }

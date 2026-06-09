@@ -21,7 +21,7 @@
 /// { "ok": true,  "data_json": "[…]", "error": null }
 /// { "ok": false, "data_json": null,  "error": "…" }
 /// ```
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, mpsc};
 
 use atomic_data::distributed::PythonUdfPayload;
+use crate::error::{ComputeError, ComputeResult};
 
 
 const WORKER_SCRIPT: &str = r#"
@@ -278,49 +279,51 @@ impl PythonWorkerPool {
     }
 }
 
-/// Process-wide Python worker pool. Initialized once at worker startup via
-/// [`init_python_worker_pool`].
-pub static PYTHON_WORKER_POOL: OnceLock<PythonWorkerPool> = OnceLock::new();
-
-/// Initialize the global [`PYTHON_WORKER_POOL`] with `pool_size` subprocesses.
-///
-/// Builds a temporary single-thread tokio runtime for the async pool init so
-/// that it is safe to call from any context, including `start_worker` before
-/// the main executor loop starts. Safe to call multiple times — only the first
-/// call has any effect.
-pub fn init_python_worker_pool(pool_size: usize) {
-    PYTHON_WORKER_POOL.get_or_init(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio rt for python worker pool init");
-        rt.block_on(PythonWorkerPool::new(pool_size))
-            .expect("failed to start Python worker pool")
-    });
-}
-
 
 /// [`OpDispatcher`] for `TaskRuntime::Python` ops.
 ///
-/// Decodes the [`PythonUdfPayload`] from `op.payload` and forwards the partition
-/// bytes to the process-wide [`PYTHON_WORKER_POOL`].
-pub(crate) struct PythonDispatcher;
+/// Owns the [`PythonWorkerPool`] and forwards partition bytes to it. Constructed
+/// by [`ComputeEngine::default`]; the pool is initialized on first use of the engine,
+/// not as a global side-effect.
+pub(crate) struct PythonDispatcher {
+    pool: Arc<PythonWorkerPool>,
+}
 
-impl crate::backend::OpDispatcher for PythonDispatcher {
+impl PythonDispatcher {
+    /// Spawn `pool_size` Python worker subprocesses and return a ready dispatcher.
+    ///
+    /// Builds a temporary single-thread tokio runtime for the async pool init so
+    /// that it is safe to call from any context, including worker startup before
+    /// the main executor loop starts.
+    pub(crate) fn new(pool_size: usize) -> Self {
+        // Spawn a dedicated OS thread so pool init never conflicts with an
+        // existing tokio runtime on the calling thread (e.g. inside tests).
+        let pool = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio rt for python worker pool init");
+            rt.block_on(PythonWorkerPool::new(pool_size))
+                .expect("failed to start Python worker pool")
+        })
+        .join()
+        .expect("python worker pool init thread panicked");
+        Self { pool: Arc::new(pool) }
+    }
+}
+
+impl crate::executors::OpDispatcher for PythonDispatcher {
     fn dispatch(
         &self,
         op: &atomic_data::distributed::PipelineOp,
         _partition_id: usize,
         data: &[u8],
-    ) -> std::result::Result<Vec<u8>, String> {
+    ) -> ComputeResult<Vec<u8>> {
         let spec: PythonUdfPayload = serde_json::from_slice(&op.payload)
-            .map_err(|e| format!("python_udf payload decode: {e}"))?;
-        let pool = PYTHON_WORKER_POOL
-            .get()
-            .ok_or("PythonWorkerPool not initialized — call init_python_worker_pool() at startup")?;
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(pool.execute(&spec, data))
-        })
+            .map_err(|e| ComputeError::InvalidPayload(format!("python_udf payload decode: {e}")))?;
+        Ok(tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.pool.execute(&spec, data))
+        })?)
     }
 }
 
