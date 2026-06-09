@@ -577,6 +577,246 @@ fn apply_transform(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::VecDeque;
+
+    // Helper: create a Queue-backed DStreamInner directly.
+    fn make_queue(batches: Vec<Vec<JV>>) -> (Arc<JsDStreamInner>, Arc<Mutex<VecDeque<Vec<JV>>>>) {
+        let q: Arc<Mutex<VecDeque<Vec<JV>>>> =
+            Arc::new(Mutex::new(batches.into_iter().collect()));
+        let inner = Arc::new(JsDStreamInner::Queue { queue: Arc::clone(&q) });
+        (inner, q)
+    }
+
+    fn empty_state() -> HashMap<String, JV> {
+        HashMap::new()
+    }
+
+    // --- key_str: covers all variant arms ---
+    // key_str is pure Rust; it is called on every key in the pair transforms.
+
+    #[test]
+    fn key_str_string() {
+        assert_eq!(key_str(&json!("hello")).unwrap(), "hello");
+    }
+
+    #[test]
+    fn key_str_integer() {
+        assert_eq!(key_str(&json!(42)).unwrap(), "42");
+    }
+
+    #[test]
+    fn key_str_negative_number() {
+        assert_eq!(key_str(&json!(-7)).unwrap(), "-7");
+    }
+
+    #[test]
+    fn key_str_bool_true() {
+        assert_eq!(key_str(&json!(true)).unwrap(), "true");
+    }
+
+    #[test]
+    fn key_str_bool_false() {
+        assert_eq!(key_str(&json!(false)).unwrap(), "false");
+    }
+
+    #[test]
+    fn key_str_null() {
+        // null falls into the `other => Ok(other.to_string())` arm.
+        assert_eq!(key_str(&json!(null)).unwrap(), "null");
+    }
+
+    // --- Queue DStream ---
+
+    #[test]
+    fn queue_empty_batch() {
+        let (inner, _q) = make_queue(vec![]);
+        let batch = compute_batch(&inner, &mut empty_state()).unwrap();
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn queue_pops_batch() {
+        let (inner, _q) = make_queue(vec![
+            vec![json!(1), json!(2)],
+            vec![json!(3)],
+        ]);
+        let b1 = compute_batch(&inner, &mut empty_state()).unwrap();
+        let b2 = compute_batch(&inner, &mut empty_state()).unwrap();
+        let b3 = compute_batch(&inner, &mut empty_state()).unwrap();
+        assert_eq!(b1, vec![json!(1), json!(2)]);
+        assert_eq!(b2, vec![json!(3)]);
+        assert!(b3.is_empty());
+    }
+
+    // --- GroupByKey transform (no StoredFn — pure Rust) ---
+
+    #[test]
+    fn group_by_key() {
+        let pairs = vec![json!(["a", 1]), json!(["b", 2]), json!(["a", 3])];
+        let (inner, _q) = make_queue(vec![pairs]);
+        let grouped_inner = Arc::new(JsDStreamInner::Transform {
+            parent: inner,
+            op: JsStreamTransform::GroupByKey,
+        });
+        let result = compute_batch(&grouped_inner, &mut empty_state()).unwrap();
+        // Should have two keys: "a" and "b"
+        assert_eq!(result.len(), 2);
+        let a_entry = result.iter().find(|e| e[0] == json!("a")).unwrap();
+        let b_entry = result.iter().find(|e| e[0] == json!("b")).unwrap();
+        let a_vals: Vec<JV> = serde_json::from_value(a_entry[1].clone()).unwrap();
+        let b_vals: Vec<JV> = serde_json::from_value(b_entry[1].clone()).unwrap();
+        assert_eq!(a_vals, vec![json!(1), json!(3)]);
+        assert_eq!(b_vals, vec![json!(2)]);
+    }
+
+    #[test]
+    fn group_single_elem() {
+        let pairs = vec![json!(["x", 99])];
+        let (inner, _q) = make_queue(vec![pairs]);
+        let grouped = Arc::new(JsDStreamInner::Transform {
+            parent: inner,
+            op: JsStreamTransform::GroupByKey,
+        });
+        let result = compute_batch(&grouped, &mut empty_state()).unwrap();
+        assert_eq!(result, vec![json!(["x", [99]])]);
+    }
+
+    #[test]
+    fn group_rejects_non_pair() {
+        let pairs = vec![json!("not_a_pair")];
+        let (inner, _q) = make_queue(vec![pairs]);
+        let grouped = Arc::new(JsDStreamInner::Transform {
+            parent: inner,
+            op: JsStreamTransform::GroupByKey,
+        });
+        assert!(compute_batch(&grouped, &mut empty_state()).is_err());
+    }
+
+    // --- Join transform (no StoredFn — pure Rust) ---
+
+    #[test]
+    fn join_matching_pairs() {
+        let left = vec![json!(["k", "lv"])];
+        let right = vec![json!(["k", "rv"])];
+        let (left_inner, _) = make_queue(vec![left]);
+        let (right_inner, _) = make_queue(vec![right]);
+        let joined = Arc::new(JsDStreamInner::Transform {
+            parent: left_inner,
+            op: JsStreamTransform::Join(right_inner),
+        });
+        let result = compute_batch(&joined, &mut empty_state()).unwrap();
+        assert_eq!(result, vec![json!(["k", ["lv", "rv"]])]);
+    }
+
+    #[test]
+    fn join_no_match() {
+        let left = vec![json!(["a", 1])];
+        let right = vec![json!(["b", 2])];
+        let (left_inner, _) = make_queue(vec![left]);
+        let (right_inner, _) = make_queue(vec![right]);
+        let joined = Arc::new(JsDStreamInner::Transform {
+            parent: left_inner,
+            op: JsStreamTransform::Join(right_inner),
+        });
+        let result = compute_batch(&joined, &mut empty_state()).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn join_multi_right() {
+        let left = vec![json!(["k", "lv"])];
+        let right = vec![json!(["k", "r1"]), json!(["k", "r2"])];
+        let (left_inner, _) = make_queue(vec![left]);
+        let (right_inner, _) = make_queue(vec![right]);
+        let joined = Arc::new(JsDStreamInner::Transform {
+            parent: left_inner,
+            op: JsStreamTransform::Join(right_inner),
+        });
+        let result = compute_batch(&joined, &mut empty_state()).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    // --- LeftOuterJoin transform (no StoredFn — pure Rust) ---
+
+    #[test]
+    fn loj_match_present() {
+        let left = vec![json!(["k", "lv"])];
+        let right = vec![json!(["k", "rv"])];
+        let (left_inner, _) = make_queue(vec![left]);
+        let (right_inner, _) = make_queue(vec![right]);
+        let joined = Arc::new(JsDStreamInner::Transform {
+            parent: left_inner,
+            op: JsStreamTransform::LeftOuterJoin(right_inner),
+        });
+        let result = compute_batch(&joined, &mut empty_state()).unwrap();
+        assert_eq!(result, vec![json!(["k", ["lv", "rv"]])]);
+    }
+
+    #[test]
+    fn loj_no_match_null() {
+        let left = vec![json!(["a", "lv"])];
+        let right = vec![json!(["b", "rv"])];
+        let (left_inner, _) = make_queue(vec![left]);
+        let (right_inner, _) = make_queue(vec![right]);
+        let joined = Arc::new(JsDStreamInner::Transform {
+            parent: left_inner,
+            op: JsStreamTransform::LeftOuterJoin(right_inner),
+        });
+        let result = compute_batch(&joined, &mut empty_state()).unwrap();
+        assert_eq!(result, vec![json!(["a", ["lv", null]])]);
+    }
+
+    // --- Windowed DStream ---
+
+    #[test]
+    fn window_accumulates() {
+        let (src, q) = make_queue(vec![]);
+        let windowed = Arc::new(JsDStreamInner::Windowed {
+            parent: src,
+            window_ms: 60_000,
+            buffer: Mutex::new(VecDeque::new()),
+        });
+        // Push two batches and check that both are included in the window.
+        q.lock().push_back(vec![json!(1), json!(2)]);
+        let b1 = compute_batch(&windowed, &mut empty_state()).unwrap();
+        assert_eq!(b1, vec![json!(1), json!(2)]);
+
+        q.lock().push_back(vec![json!(3)]);
+        let b2 = compute_batch(&windowed, &mut empty_state()).unwrap();
+        // Window is 60s; both batches are still fresh, so result includes all 3.
+        assert_eq!(b2.len(), 3);
+    }
+
+    #[test]
+    fn window_zero_evicts() {
+        let (src, q) = make_queue(vec![]);
+        let windowed = Arc::new(JsDStreamInner::Windowed {
+            parent: src,
+            window_ms: 0, // zero-length window: only items from this exact instant
+            buffer: Mutex::new(VecDeque::new()),
+        });
+        q.lock().push_back(vec![json!(1)]);
+        let _b1 = compute_batch(&windowed, &mut empty_state()).unwrap();
+
+        q.lock().push_back(vec![json!(2)]);
+        let b2 = compute_batch(&windowed, &mut empty_state()).unwrap();
+        // With 0ms window, the previous batch was already older → evicted.
+        // Result contains only items from the current tick.
+        assert_eq!(b2, vec![json!(2)]);
+    }
+
+    // --- Confirm StoredFn is Send + Sync (compile-time check for the unsafe impls) ---
+    fn _assert_send_sync<T: Send + Sync>() {}
+    #[test]
+    fn stored_fn_send_sync() {
+        _assert_send_sync::<StoredFn>();
+    }
+}
+
 fn key_str(val: &JV) -> Result<String> {
     match val {
         JV::String(s) => Ok(s.clone()),

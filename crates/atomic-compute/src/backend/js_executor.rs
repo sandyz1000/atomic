@@ -132,9 +132,14 @@ pub fn eval_partition(
         // ContextScope layers a context on top; &**cs gives PinnedRef<HandleScope<()>>
         // for Local::new, and &*cs gives PinnedRef<HandleScope<Context>> for to_rust_string_lossy.
         let context = rt.main_context();
-        let hs_storage = deno_core::v8::HandleScope::new(rt.v8_isolate());
-        // std::pin::pin! safely pins a stack-local value without unsafe.
-        let mut hs = std::pin::pin!(hs_storage).init();
+        let mut hs = deno_core::v8::HandleScope::new(rt.v8_isolate());
+        
+        // SAFETY: hs (ScopeStorage) is immediately shadowed by the PinnedRef below;
+        // it stays on the stack and cannot be moved after this point.
+        let mut hs = {
+            let pinned = unsafe { std::pin::Pin::new_unchecked(&mut hs) };
+            pinned.init()
+        };
         let hs = &mut hs;
         let ctx_local = deno_core::v8::Local::new(&*hs, context);
         let mut cs = deno_core::v8::ContextScope::new(hs, ctx_local);
@@ -234,5 +239,72 @@ mod tests {
         let r = eval_partition(fn_source, None, "[99]").unwrap();
         let v: Vec<i64> = serde_json::from_slice(&r).unwrap();
         assert_eq!(v, vec![100]);
+    }
+
+    // --- Pin::new_unchecked coverage ---
+    // eval_partition creates a HandleScope via Pin::new_unchecked on every call.
+    // The tests below exercise that code path with varied inputs to verify no
+    // memory unsafety (crash, corruption, or wrong result) from handle scope
+    // creation / teardown across multiple successive calls on the same thread.
+
+    #[test]
+    fn scope_fresh_each_call() {
+        // Each call to eval_partition creates a new pin/init/drop cycle for the
+        // HandleScope.  Ten distinct computations confirm no state leaks.
+        for i in 0..10i64 {
+            let data = format!("[{}]", i);
+            let r = eval_partition("(p) => p.map(x => x * x)", None, &data).unwrap();
+            let v: Vec<i64> = serde_json::from_slice(&r).unwrap();
+            assert_eq!(v, vec![i * i]);
+        }
+    }
+
+    #[test]
+    fn scope_large_result() {
+        // Forces V8 to produce a large string, stressing the to_rust_string_lossy
+        // extraction through the pinned handle scope.
+        let data = "[1,2,3,4,5,6,7,8,9,10]";
+        let r = eval_partition("(p) => p.map(x => x.toString().repeat(100))", None, data)
+            .unwrap();
+        let v: Vec<String> = serde_json::from_slice(&r).unwrap();
+        assert_eq!(v.len(), 10);
+        assert_eq!(v[0].len(), 100); // "1" repeated 100 times
+    }
+
+    #[test]
+    fn scope_context_switch() {
+        // Inject a context, evaluate, then change the context and evaluate again.
+        // Verifies the HandleScope + ContextScope lifecycle is correct.
+        let r1 = eval_partition(
+            "(p, ctx) => p.map(x => x + ctx.offset)",
+            Some(r#"{"offset": 10}"#),
+            "[1, 2]",
+        )
+        .unwrap();
+        let r2 = eval_partition(
+            "(p, ctx) => p.map(x => x + ctx.offset)",
+            Some(r#"{"offset": 20}"#),
+            "[1, 2]",
+        )
+        .unwrap();
+        let v1: Vec<i64> = serde_json::from_slice(&r1).unwrap();
+        let v2: Vec<i64> = serde_json::from_slice(&r2).unwrap();
+        assert_eq!(v1, vec![11, 12]);
+        assert_eq!(v2, vec![21, 22]);
+    }
+
+    #[test]
+    fn scope_clears_context() {
+        // After a call that sets __ctx, a call with None must clear it so old
+        // context values are not visible.
+        eval_partition("(p) => p", Some(r#"{"secret": 42}"#), "[1]").unwrap();
+        let r = eval_partition(
+            "(p) => p.map(x => typeof globalThis.__ctx)",
+            None,
+            "[0]",
+        )
+        .unwrap();
+        let v: Vec<String> = serde_json::from_slice(&r).unwrap();
+        assert_eq!(v, vec!["undefined"]);
     }
 }

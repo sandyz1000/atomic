@@ -178,6 +178,112 @@ impl BlockGenerator {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    // --- next_block_id() increments correctly ---
+
+    #[test]
+    fn block_id_increments() {
+        let bg = BlockGenerator::new(7, Duration::from_secs(1));
+        let a = bg.next_block_id();
+        let b = bg.next_block_id();
+        let c = bg.next_block_id();
+        assert_eq!(a.stream_id, 7);
+        assert_eq!(a.unique_id, 0);
+        assert_eq!(b.unique_id, 1);
+        assert_eq!(c.unique_id, 2);
+    }
+
+    // --- The key safety property: Arc<AtomicUsize> is shared correctly ---
+    // This directly tests that the counter replacing the raw pointer is visible
+    // from both the spawning thread and any thread that clones the Arc.
+
+    #[test]
+    fn arc_counter_cross_thread() {
+        let bg = BlockGenerator::new(0, Duration::from_secs(1));
+        // Clone the Arc just like BlockGenerator::start() does.
+        let shared = Arc::clone(&bg.next_block_id);
+        let handle = std::thread::spawn(move || {
+            shared.fetch_add(5, Ordering::SeqCst);
+        });
+        handle.join().unwrap();
+        // The add from the other thread must be visible here.
+        assert_eq!(bg.next_block_id.load(Ordering::SeqCst), 5);
+        // next_block_id() must see the update too.
+        let id = bg.next_block_id();
+        assert_eq!(id.unique_id, 5);
+    }
+
+    #[test]
+    fn arc_no_lost_updates() {
+        let bg = BlockGenerator::new(0, Duration::from_secs(1));
+        let mut handles = vec![];
+        for _ in 0..8 {
+            let shared = Arc::clone(&bg.next_block_id);
+            handles.push(std::thread::spawn(move || {
+                shared.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(bg.next_block_id.load(Ordering::SeqCst), 8);
+    }
+
+    // --- add_data respects the Active state guard ---
+
+    #[test]
+    fn add_data_not_active() {
+        let bg = BlockGenerator::new(0, Duration::from_secs(1));
+        // Generator is Initialised, not Active — data must be silently dropped.
+        bg.add_data(Box::new(42u32));
+        assert_eq!(bg.current_buffer.lock().len(), 0);
+    }
+
+    #[test]
+    fn add_data_active() {
+        let bg = BlockGenerator::new(0, Duration::from_secs(60));
+        bg.start();
+        bg.add_data(Box::new(1u32));
+        bg.add_data(Box::new(2u32));
+        assert_eq!(bg.current_buffer.lock().len(), 2);
+        bg.stop();
+    }
+
+    // --- start / stop lifecycle ---
+
+    #[test]
+    fn active_after_start() {
+        let bg = BlockGenerator::new(0, Duration::from_secs(60));
+        assert!(!bg.is_active());
+        bg.start();
+        assert!(bg.is_active());
+        bg.stop();
+        assert!(!bg.is_active());
+    }
+
+    // --- StreamBlockId helpers ---
+
+    #[test]
+    fn block_id_name() {
+        let id = StreamBlockId::new(3, 17);
+        assert_eq!(id.name(), "input-3-17");
+    }
+
+    #[test]
+    fn block_id_equality() {
+        let a = StreamBlockId::new(1, 2);
+        let b = StreamBlockId::new(1, 2);
+        let c = StreamBlockId::new(1, 3);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+}
+
 // RateLimiter (stub)
 
 /// Controls the rate at which a receiver ingests data.
