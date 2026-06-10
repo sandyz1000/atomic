@@ -17,7 +17,7 @@
 //! Note: these tests call `NativeBackend` and `TaskEnvelope` via the public API
 //! (`atomic_compute::backend::NativeBackend`, `atomic_data::distributed::*`).
 
-use atomic_compute::executors::{Backend, NativeBackend};
+use atomic_compute::runtimes::{Backend, ComputeEngine};
 use atomic_compute::context::Context;
 use atomic_compute::env::Config;
 use atomic_compute::task;
@@ -78,7 +78,7 @@ fn single_op(op_id: &str, action: TaskAction) -> PipelineOp {
 /// the guard — a regression.
 #[test]
 fn test_empty_pipeline() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let task = make_envelope_with_ops(vec![], vec![]);
     let result = backend.execute("worker-0", &task);
     assert!(
@@ -100,7 +100,7 @@ fn test_empty_pipeline() {
 /// This complements the inline test in `native_executor.rs` with an external call.
 #[test]
 fn test_unknown_op_fatal() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let task = make_envelope_with_ops(
         vec![single_op("no.such.handler.xyz", TaskAction::Map)],
         encode(vec![1i32, 2, 3]),
@@ -125,7 +125,7 @@ fn test_unknown_op_fatal() {
 /// Validates the data-threading loop in `native_executor.rs`.
 #[test]
 fn test_2op_thread() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let input: Vec<i32> = vec![1, 2, 3];
     let ops = vec![
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
@@ -146,7 +146,7 @@ fn test_2op_thread() {
 ///   op3: double_val → [50, 34, 56]
 #[test]
 fn test_3op_thread() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let input: Vec<i32> = vec![5, -3, 8];
     let ops = vec![
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
@@ -164,7 +164,7 @@ fn test_3op_thread() {
 /// subsequent ops (the pipeline stops at the first error).
 #[test]
 fn test_mid_op_shortcircuit() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let ops = vec![
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
         single_op("DOES_NOT_EXIST", TaskAction::Map), // fails here
@@ -181,7 +181,7 @@ fn test_mid_op_shortcircuit() {
 /// This test verifies that builtin `sum::i32` correctly sums a partition.
 #[test]
 fn test_fold_op_sums_partition() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let zero: i32 = 0;
     let items: Vec<i32> = vec![1, 2, 3, 4, 5];
     let op = PipelineOp {

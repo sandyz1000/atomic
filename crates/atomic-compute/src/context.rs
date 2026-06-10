@@ -1,7 +1,7 @@
 use crate::env::{Config, DeploymentMode};
 use crate::error::{ComputeError, ComputeResult};
 use crate::executor::{Executor, Signal};
-use crate::executors::{Backend, ComputeEngine};
+use crate::runtimes::{Backend, ComputeEngine};
 use crate::io::ReaderConfiguration;
 use crate::rdd::typed::TypedRdd;
 use crate::rdd::{ParallelCollection, UnionRdd};
@@ -1007,7 +1007,7 @@ pub fn start_worker(config: Config) -> ! {
         let n = num_cpus::get().max(1);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let handles: Vec<_> = (0..n)
-                .map(|_| handle.spawn_blocking(|| crate::executors::js::JsDispatcher::with_runtime(|_| {})))
+                .map(|_| handle.spawn_blocking(|| crate::runtimes::js::JsDispatcher::with_runtime(|_| {})))
                 .collect();
             for h in handles {
                 let _ = tokio::task::block_in_place(|| handle.block_on(h));

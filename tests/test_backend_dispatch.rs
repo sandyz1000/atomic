@@ -4,7 +4,7 @@
 //! independent of any single runtime — broadcast loading, accumulator draining, and
 //! multi-op pipeline orchestration — using only public API types.
 
-use atomic_compute::executors::{Backend, NativeBackend};
+use atomic_compute::runtimes::{Backend, ComputeEngine};
 use atomic_compute::context::Context;
 use atomic_compute::env::Config;
 use atomic_compute::task;
@@ -56,7 +56,7 @@ fn envelope(ops: Vec<PipelineOp>, data: Vec<u8>) -> TaskEnvelope {
 /// Single-op pipeline executes without error and produces correct output.
 #[test]
 fn single_op_square_pipeline() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let input: Vec<i32> = vec![2, 3, 4];
     let task = envelope(
         vec![native_op(<Square as UnaryTask<i32, i32>>::NAME, TaskAction::Map)],
@@ -71,7 +71,7 @@ fn single_op_square_pipeline() {
 /// Two-op pipeline: square then negate — verifies data threading between ops.
 #[test]
 fn two_op_pipeline_square_then_negate() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let input: Vec<i32> = vec![3, 4];
     let task = envelope(
         vec![
@@ -89,7 +89,7 @@ fn two_op_pipeline_square_then_negate() {
 /// A failed op mid-pipeline short-circuits: subsequent ops do not run.
 #[test]
 fn failed_op_mid_pipeline_produces_fatal_failure() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let task = envelope(
         vec![
             native_op(<Square as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
@@ -107,7 +107,7 @@ fn failed_op_mid_pipeline_produces_fatal_failure() {
 /// — verifies `drain_deltas()` is called and the field is accessible.
 #[test]
 fn result_envelope_has_accumulator_deltas_field() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let task = envelope(
         vec![native_op(<Square as UnaryTask<i32, i32>>::NAME, TaskAction::Map)],
         encode(vec![3i32]),
@@ -121,7 +121,7 @@ fn result_envelope_has_accumulator_deltas_field() {
 /// `NativeBackend` does not panic on an empty broadcast_values list.
 #[test]
 fn empty_broadcast_values_is_fine() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let task = envelope(
         vec![native_op(<Square as UnaryTask<i32, i32>>::NAME, TaskAction::Map)],
         encode(vec![5i32]),
@@ -147,7 +147,7 @@ async fn context_map_task_roundtrip() {
 /// Verify `partition_id` is correctly threaded through to `TaskResultEnvelope`.
 #[test]
 fn result_envelope_carries_partition_id() {
-    let backend = NativeBackend::default();
+    let backend = ComputeEngine::default();
     let mut task = envelope(
         vec![native_op(<Square as UnaryTask<i32, i32>>::NAME, TaskAction::Map)],
         encode(vec![1i32]),

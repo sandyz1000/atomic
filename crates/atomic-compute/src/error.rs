@@ -142,3 +142,9 @@ impl From<String> for ComputeError {
         ComputeError::InvalidPayload(s)
     }
 }
+
+impl From<std::str::Utf8Error> for ComputeError {
+    fn from(e: std::str::Utf8Error) -> Self {
+        ComputeError::InvalidPayload(format!("payload is not valid UTF-8: {e}"))
+    }
+}

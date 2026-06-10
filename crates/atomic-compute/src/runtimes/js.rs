@@ -1,5 +1,22 @@
 use crate::error::{ComputeError, ComputeResult};
 use atomic_data::distributed::JsUdfPayload;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub(crate) enum JsUdfError {
+    #[error("payload decode: {0}")]
+    PayloadDecode(#[from] serde_json::Error),
+    #[error("partition data is not valid UTF-8: {0}")]
+    Utf8(#[from] std::str::Utf8Error),
+    #[error("JS runtime error: {0}")]
+    Eval(String),
+}
+
+impl From<JsUdfError> for ComputeError {
+    fn from(e: JsUdfError) -> Self {
+        ComputeError::InvalidPayload(e.to_string())
+    }
+}
 /// Thread-local V8 JavaScript runtime for UDF execution (deno_core).
 ///
 /// One [`deno_core::JsRuntime`] is kept per tokio blocking thread.  Because V8
@@ -75,7 +92,7 @@ impl JsDispatcher {
     fn ensure_fn_compiled(
         rt: &mut deno_core::JsRuntime,
         fn_source: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, JsUdfError> {
         use std::hash::{Hash, Hasher};
         let mut hasher = rustc_hash::FxHasher::default();
         fn_source.hash(&mut hasher);
@@ -90,7 +107,7 @@ impl JsDispatcher {
             "<fn_init>",
             format!("globalThis.{js_name} = ({fn_source});"),
         )
-        .map_err(|e| format!("fn compile: {e}"))?;
+        .map_err(|e| JsUdfError::Eval(e.to_string()))?;
 
         FN_CACHE.with(|c| c.borrow_mut().insert(key, js_name.clone()));
         Ok(js_name)
@@ -108,21 +125,21 @@ impl JsDispatcher {
         fn_source: &str,
         context_json: Option<&str>,
         data_str: &str,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, JsUdfError> {
         Self::with_runtime(|rt| {
             let ctx_js = match context_json {
                 Some(ctx) => format!("globalThis.__ctx = {ctx};"),
                 None => "globalThis.__ctx = undefined;".to_string(),
             };
             rt.execute_script("<ctx>", ctx_js)
-                .map_err(|e| format!("ctx inject: {e}"))?;
+                .map_err(|e| JsUdfError::Eval(e.to_string()))?;
 
             let fn_var = Self::ensure_fn_compiled(rt, fn_source)?;
 
             let script = format!("JSON.stringify(({})({}));", fn_var, data_str);
             let result = rt
                 .execute_script("<udf>", script)
-                .map_err(|e| format!("JS eval: {e}"))?;
+                .map_err(|e| JsUdfError::Eval(e.to_string()))?;
 
             // SAFETY: hs (ScopeStorage) is immediately shadowed by the PinnedRef below;
             // it stays on the stack and cannot be moved after this point.
@@ -141,18 +158,26 @@ impl JsDispatcher {
     }
 }
 
-impl crate::executors::OpDispatcher for JsDispatcher {
+impl JsDispatcher {
+    fn dispatch_impl(
+        &self,
+        op: &atomic_data::distributed::PipelineOp,
+        data: &[u8],
+    ) -> Result<Vec<u8>, JsUdfError> {
+        let spec: JsUdfPayload = serde_json::from_slice(&op.payload)?;
+        let data_str = std::str::from_utf8(data)?;
+        self.eval_partition(&spec.fn_source, spec.context_json.as_deref(), data_str)
+    }
+}
+
+impl crate::runtimes::OpDispatcher for JsDispatcher {
     fn dispatch(
         &self,
         op: &atomic_data::distributed::PipelineOp,
         _partition_id: usize,
         data: &[u8],
     ) -> ComputeResult<Vec<u8>> {
-        let spec: JsUdfPayload = serde_json::from_slice(&op.payload)
-            .map_err(|e| ComputeError::InvalidPayload(format!("js_udf payload decode: {e}")))?;
-        let data_str = std::str::from_utf8(data)
-            .map_err(|e| ComputeError::InvalidPayload(format!("data utf8: {e}")))?;
-        Ok(self.eval_partition(&spec.fn_source, spec.context_json.as_deref(), data_str)?)
+        Ok(self.dispatch_impl(op, data)?)
     }
 }
 

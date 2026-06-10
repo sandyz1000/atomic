@@ -6,10 +6,9 @@ use atomic_data::distributed::{
     PipelineOp, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime,
 };
 
-use crate::executors::{Backend, OpDispatcher};
 use crate::error::{ComputeError, ComputeResult};
+use crate::runtimes::{Backend, OpDispatcher};
 use crate::task_registry::{SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
-
 
 /// Handles `TaskRuntime::Native` ops — both compile-time `#[task]` registry
 /// lookups and shuffle-map writes.
@@ -33,8 +32,7 @@ impl OpDispatcher for NativeDispatcher {
                 shuffle_id,
                 num_output_partitions,
             } => {
-                let type_id = std::str::from_utf8(&op.payload)
-                    .map_err(|e| ComputeError::InvalidPayload(format!("ShuffleMap: payload not UTF-8: {e}")))?;
+                let type_id = std::str::from_utf8(&op.payload)?;
                 match SHUFFLE_MAP_REGISTRY.get(type_id) {
                     None => Err(ComputeError::UnknownOperation(format!(
                         "no shuffle handler for type_id='{type_id}'; \
@@ -66,7 +64,6 @@ impl OpDispatcher for NativeDispatcher {
     }
 }
 
-
 /// Multi-runtime task executor.
 ///
 /// Routes each [`PipelineOp`] to the [`OpDispatcher`] registered for its
@@ -88,14 +85,16 @@ impl Default for ComputeEngine {
         #[cfg(feature = "python")]
         dispatchers.insert(
             TaskRuntime::Python,
-            Box::new(crate::executors::py::PythonDispatcher::new(
-                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
+            Box::new(crate::runtimes::py::PythonDispatcher::new(
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4),
             )),
         );
         #[cfg(feature = "js")]
         dispatchers.insert(
             TaskRuntime::JavaScript,
-            Box::new(crate::executors::js::JsDispatcher::new()),
+            Box::new(crate::runtimes::js::JsDispatcher::new()),
         );
         ComputeEngine { dispatchers }
     }
