@@ -45,6 +45,7 @@ atomic-scheduler.workspace = true
 atomic-runtime-macros.workspace = true
 tokio-util.workspace = true
 pyo3 = { workspace = true, optional = true }
+pythonize = { workspace = true, optional = true }
 deno_core = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
@@ -56,7 +57,7 @@ rustls-pemfile = { workspace = true, optional = true }
 
 [features]
 # Embedded PyO3 thread-pool — each worker thread acquires the GIL per task.
-python = ["pyo3", "atomic-data/python"]
+python = ["pyo3", "pythonize", "atomic-data/python"]
 # Embedded V8 (deno_core) — thread-local JsRuntime per tokio blocking thread.
 js = ["deno_core", "atomic-data/javascript"]
 embedded-runtime = ["python", "js"]

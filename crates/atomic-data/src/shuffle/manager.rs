@@ -28,7 +28,9 @@ fn get_free_connection(ip: Ipv4Addr) -> LibResult<(TcpListener, u16)> {
             return Ok((conn, port));
         }
     }
-    Err(ShuffleError::NetworkError(NetworkError::FreePortNotFound(port, 100)))
+    Err(ShuffleError::NetworkError(NetworkError::FreePortNotFound(
+        port, 100,
+    )))
 }
 
 fn get_dynamic_port() -> u16 {
@@ -82,9 +84,10 @@ impl ShuffleManager {
 
     pub fn clean_up_shuffle_data(&self) {
         if self.config.log_cleanup
-            && let Err(e) = fs::remove_dir_all(&self.shuffle_dir) {
-                log::error!("failed removing tmp work dir: {}", e);
-            }
+            && let Err(e) = fs::remove_dir_all(&self.shuffle_dir)
+        {
+            log::error!("failed removing tmp work dir: {}", e);
+        }
     }
 
     pub fn get_output_file(
@@ -143,7 +146,11 @@ impl ShuffleManager {
             p
         };
 
-        let scheme = if shuffle_config.tls_enabled() { "https" } else { "http" };
+        let scheme = if shuffle_config.tls_enabled() {
+            "https"
+        } else {
+            "http"
+        };
         let server_uri = format!("{}://{}:{}", scheme, bind_ip, bind_port);
         log::debug!("server_uri {:?}", server_uri);
         Ok((server_uri, bind_port))
@@ -151,15 +158,15 @@ impl ShuffleManager {
 
     #[cfg(feature = "tls")]
     fn make_tls_acceptor(config: &ShuffleConfig) -> LibResult<tokio_rustls::TlsAcceptor> {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+        use rustls::{RootCertStore, ServerConfig};
+        use rustls_pemfile::{certs, pkcs8_private_keys};
         use std::io::BufReader;
         use std::sync::Arc as StdArc;
-        use rustls::{RootCertStore, ServerConfig};
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-        use rustls_pemfile::{certs, pkcs8_private_keys};
 
         let cert_path = config.tls_cert.as_ref().ok_or(ShuffleError::Other)?;
-        let key_path  = config.tls_key.as_ref().ok_or(ShuffleError::Other)?;
-        let ca_path   = config.tls_ca.as_ref().ok_or(ShuffleError::Other)?;
+        let key_path = config.tls_key.as_ref().ok_or(ShuffleError::Other)?;
+        let ca_path = config.tls_ca.as_ref().ok_or(ShuffleError::Other)?;
 
         let chain: Vec<CertificateDer<'static>> = {
             let f = fs::File::open(cert_path).map_err(|_| ShuffleError::Other)?;
@@ -205,8 +212,8 @@ impl ShuffleManager {
         tokio::spawn(async move {
             conn.set_nonblocking(true)
                 .map_err(|_| ShuffleError::FailedToStart)?;
-            let listener = tokio::net::TcpListener::from_std(conn)
-                .map_err(|_| ShuffleError::FailedToStart)?;
+            let listener =
+                tokio::net::TcpListener::from_std(conn).map_err(|_| ShuffleError::FailedToStart)?;
 
             loop {
                 let (stream, _) = listener
@@ -371,8 +378,7 @@ impl ShuffleManager {
 
     fn get_shuffle_data_dir(local_dir_root: &std::path::Path) -> LibResult<PathBuf> {
         for _ in 0..10 {
-            let local_dir =
-                local_dir_root.join(format!("ns-shuffle-{}", Uuid::new_v4()));
+            let local_dir = local_dir_root.join(format!("ns-shuffle-{}", Uuid::new_v4()));
             if !local_dir.exists() {
                 log::debug!("creating directory at path: {:?}", &local_dir);
                 fs::create_dir_all(&local_dir)
@@ -425,12 +431,18 @@ impl ShuffleService {
             }
             Ok(parts) => parts,
         };
-        let params = &(parts[0], parts[1], parts[2]);
-        if let Some(cached_data) = self.cache.get(params) {
+        // Resolve the reduce partition's bytes from either the consolidated (sort-shuffle)
+        // layout or the legacy per-bucket layout — transparent to the reduce client.
+        if let Some(cached_data) = crate::shuffle::cache::get_consolidated_or_bucket(
+            self.cache.as_ref(),
+            parts[0],
+            parts[1],
+            parts[2],
+        ) {
             log::debug!(
                 "got a request @ `{}`, params: {:?}, returning data",
                 uri,
-                params
+                (parts[0], parts[1], parts[2])
             );
             Ok(Vec::from(&cached_data[..]))
         } else {
@@ -440,7 +452,9 @@ impl ShuffleService {
 
     #[inline]
     fn parse_path_part(part: &str) -> LibResult<usize> {
-        Ok(part.parse::<u64>().map_err(|_| ShuffleError::NotValidRequest)? as usize)
+        Ok(part
+            .parse::<u64>()
+            .map_err(|_| ShuffleError::NotValidRequest)? as usize)
     }
 }
 

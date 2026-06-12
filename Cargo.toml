@@ -63,6 +63,7 @@ atomic-py = { path = "crates/atomic-py" }
 atomic-js = { path = "crates/atomic-js" }
 atomic-worker = { path = "crates/atomic-worker" }
 pyo3 = { version = "0.28.3" }
+pythonize = "0.28"
 pyo3-arrow = "0.18.0"
 deno_core = { version = "0.403.0" }
 base64 = { version = "0.22" }
@@ -78,7 +79,7 @@ crossbeam = "0.8.4"
 hyper-util = "0.1.20"
 log = "0.4.32"
 petgraph = { version = "0.8.3" }
-datafusion = "54.0.0"
+datafusion = "53.1.0"
 parquet = "59.0.0"
 tokio-util = "0.7.17"
 dotenvy = "0.15.7"

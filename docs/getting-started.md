@@ -225,20 +225,21 @@ rdd.map((line: string) => line.toUpperCase()).saveAsTextFile('s3://my-bucket/out
 ## 9. Natural language queries (NLQ)
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... cargo run --example nlq
+OPENAI_API_KEY=sk-... cargo run --example nlq
 ```
 
 ```rust
 use atomic_nlq::{NlqConfig, NlqContext};
 
-let ctx = NlqContext::build(NlqConfig::default()); // reads ANTHROPIC_API_KEY
+let ctx = NlqContext::build(NlqConfig::default()); // reads OPENAI_API_KEY
 ctx.sql_ctx().register_batches("orders", batches)?;
 
-let df = ctx.query("show the top 5 customers by total spend").await?;
-df.show().await?;
+// query() runs the agent loop and returns an AgentResult (not a DataFrame).
+let result = ctx.query("show the top 5 customers by total spend").await?;
+println!("{}", result.answer);
 ```
 
-If `ANTHROPIC_API_KEY` is not set the `examples/nlq` binary falls back to direct DataFusion SQL automatically.
+If `OPENAI_API_KEY` is not set the `examples/nlq` binary falls back to direct DataFusion SQL automatically.
 
 ---
 

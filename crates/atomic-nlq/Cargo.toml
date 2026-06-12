@@ -10,7 +10,10 @@ integration = []
 atomic-sql = { workspace = true }
 atomic-compute = { workspace = true }
 datafusion = { workspace = true }
-async-openai = { version = "0.40", features = ["chat-completion", "embedding"] }
+async-openai = { version = "0.41.0", features = [
+    "chat-completion",
+    "embedding",
+] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -24,4 +27,3 @@ parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
-

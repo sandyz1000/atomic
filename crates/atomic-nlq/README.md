@@ -1,202 +1,213 @@
 # atomic-nlq
 
-Natural language query layer for the Atomic analytics platform. Translates plain-English questions into executable [DataFusion](https://github.com/apache/datafusion) plans using Anthropic's Claude API.
+Natural-language analytics for the Atomic engine. A user asks a question in plain English; an LLM
+(OpenAI) plans a **`WorkflowPlan`** — a dependency graph of tool calls — and an executor runs it on
+Atomic, looping until the question is answered and streaming progress along the way.
 
 ## Overview
 
-`atomic-nlq` sits between the user and `atomic-sql`. A user writes a natural language query; the crate calls Claude to produce a structured JSON plan, parses it into a DataFusion `LogicalPlan`, and hands it off to the execution engine.
+`atomic-nlq` is an **agent**, not an NL→SQL translator. The LLM never emits raw SQL or a DataFusion
+plan directly; it chooses *tools*. SQL is one built-in tool. Inside a SQL step, LLM operations
+(`llm_filter`, `llm_map`, `embed`, `vector_search`) are real DataFusion plan operators, so the
+optimizer can batch per-row LLM calls.
 
 ```text
 User NL query
     │
-    ▼  LlmPlanner (Anthropic API: schema + UDF list + query)
-Structured JSON plan
+    ▼  LlmPlanner (OpenAI: schema + tool list + query)
+WorkflowPlan — a dependency graph of tool calls (JSON)
     │
-    ▼  IrParser
-DataFusion LogicalPlan
-    │  (relational ops: TableScan / Filter / Aggregate / Join / Sort / Limit)
-    │  (extension ops:  LlmFilter / LlmMap / Embed / VectorSearch)
+    ▼  WorkflowExecutor — runs steps in parallel dependency waves (tokio JoinSet)
+    │     ├── Builtin(SqlQuery) → AtomicSqlContext.sql()
+    │     │     └─ in-SQL LLM ops: LlmBatchingRule → LlmFilterExec / LlmMapExec / EmbedExec
+    │     ├── Python(code)      → atomic-worker PyO3 runtime
+    │     └── JavaScript(code)  → atomic-worker V8 runtime
     │
-    ▼  DataFusion optimizer  (predicate push-down, projection pruning, …)
-    ▼  LlmBatchingRule       (groups per-row LLM calls into batched requests)
-    │
-    ▼  Physical plan + execution
-Arrow RecordBatch stream
+    ▼  AgentLoop.evaluate (OpenAI) → { done, answer, visualization? } — repeat until done
+AgentResult  (+ a live stream of AgentEvents)
 ```
+
+> An earlier design had the LLM emit JSON parsed by an `IrParser` into a DataFusion `LogicalPlan`.
+> That `ir/` module is gone; the planner now produces a `WorkflowPlan`. The LLM operators survive as
+> DataFusion extension nodes used inside SQL steps.
 
 ## Features
 
 | Feature | What it does |
-|---------|-------------|
-| **Relational queries** | Full SQL-style plans without writing SQL — scan, filter, aggregate, sort, join, limit |
-| **LLM filter** | `LlmFilter` — per-row boolean predicate evaluated by the LLM (e.g. "is this a luxury item?") |
-| **LLM map** | `LlmMap` — per-row text/numeric transformation (e.g. "summarise this review in one sentence") |
-| **Embed** | `Embed` — adds a `FixedSizeList<Float32>` embedding column using Voyage AI |
-| **Vector search** | `VectorSearch` — ANN similarity search against a registered `VectorIndexProvider` |
-| **UDF integration** | Register Rust / Python / JS scalar UDFs; the LLM planner sees their names and descriptions |
-| **RDD-backed tables** | Register `TypedRdd<RecordBatch>` tables from `atomic-compute` via `build_with_compute` |
-| **Retry + jitter** | Automatic exponential back-off with jitter on 429 / 503 / 529 responses |
-| **Safety guards** | Payload size cap (200 KB), response length validation, query sanitisation, config validation |
+| --- | --- |
+| **Agentic loop** | `plan → execute → evaluate → repeat` until the question is answered or `max_rounds` is hit |
+| **Streaming** | `query_streaming` emits `AgentEvent`s (plan, per-step start/finish, done) for live UIs |
+| **SQL tool** | `sql_query` — full DataFusion SQL over registered tables, without the user writing SQL |
+| **Python / JS tools** | Register user code as tools the planner can call (PyO3 / V8 on `atomic-worker`) |
+| **LLM filter / map** | Per-row predicate or transform evaluated by the LLM, batched by `LlmBatchingRule` |
+| **Embed** | Adds a `FixedSizeList<Float32>` embedding column using an OpenAI embedding model |
+| **Vector search** | ANN similarity search against a registered `VectorIndexProvider` |
+| **RDD-backed tables** | Register `TypedRdd<RecordBatch>` from `atomic-compute` via `build_with_compute` |
+| **Visualization hint** | The evaluation step returns a `VisualizationSpec` for dashboards |
+| **Retry + jitter** | Exponential back-off with jitter on 429 / 503 / 529 |
 
 ## Quick start
-
-Add to `Cargo.toml`:
 
 ```toml
 atomic-nlq = { path = "../atomic-nlq" }
 ```
 
-Set environment variables:
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-VOYAGE_API_KEY=pa-...        # only needed for Embed nodes
+```text
+OPENAI_API_KEY=sk-...        # required (planning, evaluation, embeddings)
 ```
 
-### Basic usage
+### Basic usage (RDD-backed table)
 
 ```rust
+use std::sync::Arc;
+use atomic_compute::context::Context;
 use atomic_nlq::{NlqConfig, NlqContext};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let ctx = NlqContext::build(NlqConfig::default());
+    // SQL-backed analytics need the compute backend.
+    let sc = Arc::new(Context::new_with_config(config)?);
+    let rdd = sc.parallelize_typed(batches, num_partitions);
 
-    // Register an Arrow in-memory table
-    ctx.sql_ctx()
-        .register_batches("orders", batches)?;
+    let ctx = NlqContext::build_with_compute(NlqConfig::default(), sc); // reads OPENAI_API_KEY
+    ctx.register_rdd("orders", rdd)?;
 
-    // Execute a natural language query
-    let df = ctx.query("show the top 5 customers by total spend").await?;
-    df.show().await?;
+    // query() runs the agent loop and returns an AgentResult (not a DataFrame).
+    let result = ctx.query("show the top 5 customers by total spend").await?;
+    println!("{}", result.answer);
+    if let Some(viz) = result.visualization {
+        println!("suggested chart: {}", viz.chart_type);
+    }
     Ok(())
 }
 ```
 
-### Registering custom UDFs
+### Streaming (drive a live UI)
 
 ```rust
-use atomic_nlq::registry::NlqRegistry;
-
-ctx.registry.register_scalar(
-    "is_luxury",
-    "Returns true if the product category is a luxury item",
-    "(category: Utf8) -> Boolean",
-    |args| { /* your implementation */ },
-);
+let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+tokio::spawn(async move {
+    while let Some(event) = rx.recv().await {
+        // AgentEvent::PlanCreated | StepStarted | StepCompleted | RoundEvaluating | Done | …
+        println!("{event:?}");
+    }
+});
+let result = ctx.query_streaming("count events grouped by user_id", tx).await?;
 ```
 
-The UDF name and description are included in the LLM planner prompt automatically.
+### Dry-run the plan
 
-### Vector search (semantic similarity)
+```rust
+let plan = ctx.plan("find customers who bought luxury items").await?; // WorkflowPlan, not executed
+for step in &plan.steps {
+    println!("{}: {} (depends_on {:?})", step.id, step.tool, step.depends_on);
+}
+```
+
+### Register a Python/JS tool
+
+```rust
+use atomic_nlq::{ToolDefinition, ToolRuntime};
+
+ctx.register_tool(ToolDefinition {
+    name: "zscore".into(),
+    description: "Standard-score a numeric column the LLM passes in.".into(),
+    input_schema: serde_json::json!({ "type": "object", "properties": { "col": { "type": "string" } } }),
+    runtime: ToolRuntime::Python("def run(args, inputs): ...".into()),
+});
+```
+
+The tool's name and description are included in the planner prompt, so the LLM knows when to call it.
+
+### Register a DataFusion UDF (used inside SQL steps)
+
+```rust
+ctx.sql_ctx(); // the AtomicSqlContext
+// Scalar/aggregate UDFs are registered via the ToolRegistry:
+// registry.register_scalar(my_scalar_udf, "Returns true for luxury categories");
+```
+
+### Vector search
 
 ```rust
 use std::sync::Arc;
-use atomic_nlq::vector::in_memory::InMemoryVectorIndex;
+use atomic_nlq::InMemoryVectorIndex;
 
-// Register a 1024-dimensional index
 let index = Arc::new(InMemoryVectorIndex::new("products", 1024));
-index.upsert(1, embedding_vector).await?;
+// index.upsert(id, embedding).await?;
 ctx.register_vector_index(index);
 
-// Now the LLM can emit Embed + VectorSearch nodes for semantic queries:
-let df = ctx
-    .query("find products similar to 'luxury handbag'")
-    .await?;
-```
-
-### RDD-backed tables (with atomic-compute)
-
-```rust
-use atomic_nlq::{NlqConfig, NlqContext};
-use atomic_compute::context::Context;
-use std::sync::Arc;
-
-let sc = Arc::new(Context::new_with_config(config)?);
-let rdd = sc.parallelize_typed(batches, num_partitions);
-
-let ctx = NlqContext::build_with_compute(NlqConfig::default(), sc);
-ctx.register_rdd("events", rdd)?;
-
-let df = ctx.query("count events grouped by user_id").await?;
+let result = ctx.query("find products similar to 'luxury handbag'").await?;
 ```
 
 ## Configuration
 
-`NlqConfig` can be constructed manually or via `Default` (reads env vars):
+`NlqConfig::default()` reads env vars; fields can also be set manually.
 
 | Field | Default | Description |
-|-------|---------|-------------|
-| `anthropic_api_key` | `$ANTHROPIC_API_KEY` | Anthropic API key |
-| `embed_api_key` | `$VOYAGE_API_KEY` | Voyage AI API key (for `Embed` nodes) |
-| `default_model` | `claude-sonnet-4-6` | Claude model for NL-to-plan translation |
-| `embed_model` | `voyage-3` | Embedding model |
-| `embed_model_dim` | `None` (auto) | Override embedding dimension |
-| `embed_base_url` | Voyage AI v1 endpoint | Embed API base URL |
-| `llm_batch_size` | `50` | Rows per LLM API call in LlmFilter/LlmMap |
-| `max_chunk_bytes` | `200_000` | Max serialised bytes per chunk (≈50 k tokens) |
+| --- | --- | --- |
+| `openai_api_key` | `$OPENAI_API_KEY` | OpenAI API key (planning, evaluation, embeddings) |
+| `openai_base_url` | `https://api.openai.com/v1` | Override for proxies / Azure OpenAI |
+| `model` | `gpt-4o` | Model for planning and agent evaluation |
+| `embed_model` | `text-embedding-3-small` | Embedding model for `embed` |
+| `max_rounds` | `5` | Max agent rounds before returning the best result so far |
+| `llm_batch_size` | `50` | Rows per LLM API call in `llm_filter` / `llm_map` |
+| `max_chunk_bytes` | `200_000` | Max serialized bytes per chunk (~50k tokens) |
 | `max_retries` | `3` | Retries on 429 / 503 / 529 |
 | `timeout_secs` | `60` | HTTP request timeout |
-| `anthropic_base_url` | Anthropic API endpoint | Anthropic API base URL |
 
-`NlqContext::build` panics immediately on invalid config (empty API key, zero batch size).
+`NlqContext::build` validates config and panics immediately on an empty key or zero batch size /
+chunk size / round count.
 
-## Plan node reference
+## Tools & operators
 
-The LLM produces JSON nodes from this grammar. All node types:
+The planner picks from these **tools**:
 
+```text
+sql_query     — run a SQL SELECT over registered tables (returns a DataFrame)
+llm_filter    — per-row boolean predicate via the LLM
+llm_map       — per-row transform via the LLM (Utf8 / Int64 / Float64 / Boolean output)
+embed         — add a FixedSizeList<Float32> embedding column (OpenAI)
+vector_search — ANN top-k against a registered vector index
+<your tools>  — any Python/JS tool you registered
 ```
-TableScan   — scan a registered table
-Filter      — WHERE predicate (SQL expression)
-Projection  — SELECT expressions
-Aggregate   — GROUP BY + aggregation functions (sum / count / avg / min / max)
-Sort        — ORDER BY
-Limit       — SKIP + FETCH
-Join        — Inner / Left / Right / Full / LeftSemi / LeftAnti
-LlmFilter   — per-row boolean filter via LLM
-LlmMap      — per-row value transform via LLM (Utf8 / Int64 / Float64 / Boolean output)
-Embed       — add a FixedSizeList<Float32> embedding column (Voyage AI)
-VectorSearch — ANN top-k search against a registered vector index
-```
+
+`llm_filter` / `llm_map` / `embed` / `vector_search` are also DataFusion **extension operators**
+(`LlmFilterNode` + `LlmFilterExec`, etc.) so they can appear inside a `sql_query` plan and be batched
+by `LlmBatchingRule`.
 
 ## Architecture
 
-```
+```text
 crates/atomic-nlq/src/
-├── context.rs               — NlqContext: public entry point
+├── context.rs               — NlqContext: public entry point (build / query / query_streaming / plan)
 ├── config.rs                — NlqConfig
 ├── errors.rs                — NlqError
-├── registry.rs              — NlqRegistry: UDF registration + description
-├── anthropic/
-│   ├── client.rs            — AnthropicClient (messages API)
-│   ├── embed_client.rs      — EmbedClient (Voyage AI /embeddings)
-│   ├── retry.rs             — exponential back-off with jitter
-│   └── types.rs             — request / response types
+├── registry.rs              — ToolRegistry: builtin + Python/JS tools; DataFusion UDF registration
+├── openai/                  — OpenAiClient (chat + embeddings, retry/back-off)
 ├── planner/
-│   ├── llm_planner.rs       — LlmPlanner: NL query → JSON plan
-│   └── prompt.rs            — system prompt builder
-├── ir/
-│   ├── json_plan.rs         — JsonPlanNode / JsonExpr serde types
-│   └── parser.rs            — IrParser: JSON → DataFusion LogicalPlan
-├── nodes/
-│   ├── llm_filter.rs        — LlmFilterNode + LlmFilterExec
-│   ├── llm_map.rs           — LlmMapNode + LlmMapExec
-│   ├── embed.rs             — EmbedNode + EmbedExec
-│   └── vector_search.rs     — VectorSearchNode + VectorSearchExec
+│   ├── llm_planner.rs       — LlmPlanner: NL query → WorkflowPlan
+│   └── prompt.rs            — system-prompt builder
+├── workflow/
+│   ├── mod.rs               — WorkflowPlan / WorkflowStep / StepOutput
+│   ├── agent_loop.rs        — AgentLoop: plan → execute → evaluate → repeat; AgentResult
+│   ├── executor.rs          — WorkflowExecutor: parallel dependency-wave execution
+│   └── streaming.rs         — AgentEvent / VisualizationSpec
+├── nodes/                   — LlmFilterNode/Exec, LlmMapNode/Exec, EmbedNode/Exec, VectorSearchNode/Exec
 ├── optimizer/
-│   └── llm_batching_rule.rs — OptimizerRule: groups per-row LLM calls into batches
+│   └── llm_batching_rule.rs — OptimizerRule: batch per-row LLM calls in a SQL plan
 ├── physical/
 │   └── extension_planner.rs — ExtensionPlanner + QueryPlanner wiring
 └── vector/
     ├── provider.rs          — VectorIndexProvider trait
-    └── in_memory.rs         — InMemoryVectorIndex (cosine similarity, for testing)
+    └── in_memory.rs         — InMemoryVectorIndex (cosine similarity)
 ```
 
 ## Running the demo
 
 ```bash
-# With an Anthropic API key: runs NLQ queries via the LLM pipeline
-ANTHROPIC_API_KEY=sk-ant-... cargo run --example nlq
+# With a key: runs the full agentic NLQ pipeline
+OPENAI_API_KEY=sk-... cargo run --example nlq
 
 # Without a key: falls back to direct SQL, demonstrating DataFusion integration
 cargo run --example nlq
@@ -208,11 +219,9 @@ cargo run --example nlq
 cargo test -p atomic-nlq
 ```
 
-31 tests covering: NlqContext build and SQL execution, IrParser roundtrip (TableScan / Filter / Projection / Aggregate), LlmFilter node and batching rule, UDF registry, schema validation.
-
-The full end-to-end LLM pipeline test (`test_full_nlq_pipeline`) runs automatically when
-`ANTHROPIC_API_KEY` is set in the environment; it is skipped silently when not set:
+Context-level tests (`tests/test_context.rs`) run without an API key. The end-to-end LLM test
+(`test_full_nlq_pipeline`) runs only when `OPENAI_API_KEY` is set, and is skipped silently otherwise:
 
 ```bash
-ANTHROPIC_API_KEY=sk-ant-... cargo test -p atomic-nlq test_full_nlq_pipeline
+OPENAI_API_KEY=sk-... cargo test -p atomic-nlq test_full_nlq_pipeline
 ```

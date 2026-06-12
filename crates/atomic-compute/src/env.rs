@@ -185,6 +185,11 @@ pub struct Config {
     /// `None` (default) disables the registration endpoint.
     /// Env var: `ATOMIC_REGISTER_PORT`.
     pub register_port: Option<u16>,
+    /// Reduce-partition count at or above which shuffle writes use the consolidated
+    /// (sort-shuffle) layout — one DATA blob + offset INDEX per map task instead of one
+    /// bucket per reduce partition. `None` (default) falls back to the
+    /// `ATOMIC_SORT_SHUFFLE_THRESHOLD` env var, otherwise 200.
+    pub sort_shuffle_threshold: Option<usize>,
 }
 
 impl Config {
@@ -208,6 +213,7 @@ impl Config {
             tls_cert: None,
             tls_key: None,
             register_port: None,
+            sort_shuffle_threshold: None,
         }
     }
 
@@ -231,6 +237,7 @@ impl Config {
             tls_cert: None,
             tls_key: None,
             register_port: None,
+            sort_shuffle_threshold: None,
         }
     }
 
@@ -254,6 +261,7 @@ impl Config {
             tls_cert: None,
             tls_key: None,
             register_port: None,
+            sort_shuffle_threshold: None,
         }
     }
 
@@ -367,6 +375,10 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<u16>().ok());
 
+        let sort_shuffle_threshold = std::env::var(format!("{PREFIX}SORT_SHUFFLE_THRESHOLD"))
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
+
         // In env-var mode, workers come from hosts.conf — resolved by the caller.
         Config {
             local_ip,
@@ -386,6 +398,7 @@ impl Config {
             tls_cert,
             tls_key,
             register_port,
+            sort_shuffle_threshold,
         }
     }
 
@@ -493,6 +506,13 @@ impl ConfigBuilder {
         self
     }
 
+    /// Reduce-partition count at/above which shuffle writes use the consolidated
+    /// sort-shuffle layout. `0` forces it on; `usize::MAX` keeps the legacy per-bucket layout.
+    pub fn sort_shuffle_threshold(mut self, n: usize) -> Self {
+        self.inner.sort_shuffle_threshold = Some(n);
+        self
+    }
+
     /// Consume the builder and return the final `Config`.
     pub fn build(self) -> Config {
         self.inner
@@ -537,6 +557,11 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
             Arc::new(DashMapShuffleCache::default())
         };
     atomic_data::env::set_shuffle_cache(cache.clone());
+
+    // Programmatic sort-shuffle threshold; absent it falls back to ATOMIC_SORT_SHUFFLE_THRESHOLD / 200.
+    if let Some(n) = config.sort_shuffle_threshold {
+        atomic_data::env::set_sort_shuffle_threshold(n);
+    }
 
     let tracker = Arc::new(atomic_data::shuffle::MapOutputTracker::default());
     atomic_data::env::set_map_output_tracker(tracker);

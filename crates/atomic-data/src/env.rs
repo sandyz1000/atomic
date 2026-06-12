@@ -41,6 +41,27 @@ pub fn set_map_output_tracker(v: Arc<MapOutputTracker>) {
     *MAP_OUTPUT_TRACKER.write().unwrap() = Some(v);
 }
 
+/// Reduce-partition count at or above which map-side shuffle writes switch from the legacy
+/// per-bucket layout to the consolidated (sort-shuffle) layout: one DATA blob + one offset
+/// INDEX per map task instead of `R` entries. Set from `ShuffleConfig` during init; falls
+/// back to the `ATOMIC_SORT_SHUFFLE_THRESHOLD` env var, otherwise 200 (à la Spark's
+/// `bypassMergeThreshold`).
+pub static SORT_SHUFFLE_THRESHOLD: RwLock<Option<usize>> = RwLock::new(None);
+
+pub fn set_sort_shuffle_threshold(n: usize) {
+    *SORT_SHUFFLE_THRESHOLD.write().unwrap() = Some(n);
+}
+
+pub fn sort_shuffle_threshold() -> usize {
+    if let Some(n) = *SORT_SHUFFLE_THRESHOLD.read().unwrap() {
+        return n;
+    }
+    std::env::var("ATOMIC_SORT_SHUFFLE_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(200)
+}
+
 /// Base directory for `MemoryAndDisk` / `DiskOnly` partition spill files.
 /// Set by `Context` during init (`rdd-cache/` under the job work_dir).
 /// `None` means disk storage levels fall back to `MemoryOnly`.
@@ -60,6 +81,7 @@ pub fn clear_shuffle_infrastructure() {
     *SHUFFLE_SERVER_URI.write().unwrap() = None;
     *SHUFFLE_CACHE.write().unwrap() = None;
     *MAP_OUTPUT_TRACKER.write().unwrap() = None;
+    *SORT_SHUFFLE_THRESHOLD.write().unwrap() = None;
     #[cfg(feature = "tls")]
     {
         *SHUFFLE_TLS_CONNECTOR.write().unwrap() = None;

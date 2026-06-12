@@ -155,6 +155,10 @@ impl DisplayAs for LlmFilterExec {
 }
 
 impl ExecutionPlan for LlmFilterExec {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn name(&self) -> &str {
         "LlmFilterExec"
     }

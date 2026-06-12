@@ -1,25 +1,59 @@
 # Atomic
 
-**A distributed compute engine in stable Rust — where your task functions are compiled in,
-not pickled across.**
+**A distributed compute engine in stable Rust — process datasets across many machines, deploy as a
+single self-contained binary, and write your jobs in Rust, Python, or TypeScript.**
 
-Atomic is a Spark-inspired RDD engine built on three ideas no other distributed framework has combined:
+## In plain terms
 
-1. **Zero closure serialization.** Task functions are registered at compile time via `#[task]` and dispatched by ID. Workers can never receive code they weren't compiled with. No pickle failures, no "class not found", no nightly Rust required.
-2. **One binary, anywhere.** Driver and worker are the same executable. No JVM, no daemon, no cluster manager required to start. Cross-compile with `atomic build`, ship with `atomic ship` over SSH — workers are running in under a minute.
-3. **Prototype in Python, optimize in Rust — same API.** Write a job in Python or TypeScript, confirm it's correct, then rewrite the hot partition as a `#[task]` Rust function. The driver script does not change. No rewrite from scratch, no framework switch.
+Some data jobs are too big for one computer, so the work is split across a cluster of machines.
+Doing that normally means a heavy stack — a Java Virtual Machine on every node, a cluster manager,
+containers. Atomic removes all of that: you ship **one small executable** to each machine and you are
+running in under a minute. You write your logic in **Python or TypeScript** when you want to move
+fast, or in **Rust** when you want maximum speed — the same job API in every language. The result is
+a faster, lighter, safer way to run distributed data and analytics workloads, including SQL and
+LLM-powered natural-language queries.
+
+## What makes it different (for engineers)
+
+Atomic builds on the RDD model that Apache Spark popularized, then combines three ideas no other
+engine has put together:
+
+1. **Two first-class ways to run your code — pick per language, not per project.**
+   - **Python & TypeScript — dynamic closure shipping.** Your functions travel *with the job*:
+     Python lambdas are serialized with `cloudpickle`, JS functions are captured as source (and can
+     capture driver-side values as context). They run on the worker's embedded PyO3 / V8 runtime.
+     Change a lambda, re-run — no rebuild, no redeploy. This is a real execution path, not a toy.
+   - **Rust — compiled task dispatch.** Rust has no closure serialization, so Atomic does the
+     principled thing instead: `#[task]` functions are registered at compile time and dispatched by
+     string ID. The worker runs the *same binary* as the driver, so the function is already there —
+     you ship the binary, not the code. The payoff is the safety guarantee in idea 3.
+2. **One binary, anywhere.** Driver and worker are the same executable. No JVM, no daemon, no cluster
+   manager required to start. Cross-compile with `atomic build`, ship with `atomic ship` over SSH —
+   workers are running in under a minute.
+3. **Wrong code can't run by accident.** Because Rust tasks are dispatched by ID against a
+   compile-time registry, a worker can never execute code it wasn't built with. A missing or
+   mismatched task fails *immediately, at dispatch*, with a clear error — not three hours later in a
+   worker log. This is a structural guarantee, not a coding convention (details below).
 
 ---
 
 ## Why This Matters
 
-Every other distributed framework ships code to workers at runtime:
+Distributed engines have to get your code onto the workers. There are two honest ways to do it, and
+Atomic deliberately uses **both** — choosing the right one per language instead of forcing one model
+on everyone:
 
-- **Spark/PySpark** pickles Python closures and ships JVM bytecode. "Pickle errors" and "task not serializable" are rites of passage.
-- **Flink** serializes Java lambdas. Kryo failures are a known production hazard.
-- **Ray** ships Python functions by serializing their closure state. Complex Python object graphs fail to serialize in ways that are hard to debug.
+- **Serialize the code and ship it** — flexible and dynamic, the right call for scripting languages.
+  This is Atomic's **Python/TypeScript** path (`cloudpickle` / JS source), and it's how PySpark, Ray,
+  and Flink work too. The trade-off is that serialization can fail at runtime for awkward object
+  graphs — a familiar tax in those ecosystems.
+- **Compile the code in and dispatch by name** — fast and verifiable, the right call for a systems
+  language. This is Atomic's **Rust** path, and it's the one most engines *can't* offer.
 
-Atomic's `#[task]` approach inverts this. The worker's dispatch table is linked at compile time via `inventory`. The driver sends a string ID and a data payload — not code. If a task ID doesn't exist on the worker, you get a clear error with a list of what *is* registered, at dispatch time, not buried in a worker log three hours later.
+For Rust, the `#[task]` approach means the worker's dispatch table is linked at compile time via
+`inventory`. The driver sends a string ID and a data payload — not code. If a task ID doesn't exist
+on the worker, you get a clear error listing what *is* registered, at dispatch time, not buried in a
+worker log three hours later:
 
 ```text
 Task 'my_crate::transform::normalize_v2' not registered in TASK_REGISTRY.
@@ -71,7 +105,7 @@ let config = Config::builder()
     .build();
 ```
 
-### Python (prototype)
+### Python (dynamic)
 
 ```python
 import atomic_compute
@@ -102,11 +136,22 @@ console.log(result);  // [1, 9, 25]
 
 ---
 
-## The PoC → Production Workflow
+## Two Execution Models — and an Optional Path Between Them
 
-Atomic is designed around a progressive adoption model. Start with Python or TypeScript to prove correctness quickly, then rewrite the job in Rust for production throughput.
+Atomic gives you two production-grade ways to run a job, and you can use either on its own:
 
-### Step 1 — Prototype in Python
+- **Dynamic (Python / TypeScript).** Closures ship with the job. Ideal for fast iteration,
+  exploratory analytics, and teams that live in Python or TS. Nothing about this is "temporary" —
+  many jobs run this way in production forever.
+- **Compiled (Rust).** `#[task]` functions are built into the binary. Ideal for CPU-bound hot paths
+  where you want native speed and the compile-time dispatch guarantee.
+
+Because **all three languages share the same job API**, there is also an *optional* progression: when
+a dynamic job is proven and you want to squeeze out more throughput, you can re-express the hot path
+as a Rust `#[task]` without changing the shape of the program. The steps below show that path — but
+treat it as one option, not a mandate.
+
+### Step 1 — Start dynamic, in Python
 
 ```python
 import atomic_compute
@@ -123,9 +168,9 @@ result = (
 
 Python lambdas are pickled with `cloudpickle` and executed by the embedded PyO3 runtime on workers. This works immediately — no compilation step.
 
-### Step 2 — Rewrite in Rust when correctness is confirmed
+### Step 2 — Optionally re-express the hot path in Rust
 
-Once the Python job produces correct results, rewrite it in Rust using the `#[task]` API. This is a new program, not a patch to the Python driver:
+If (and only if) you need more throughput, re-express the job in Rust using the `#[task]` API. This is a separate program, not a patch to the Python driver — and the Python version keeps working:
 
 ```rust
 use atomic_compute::{context::Context, env::Config, task};
@@ -235,29 +280,33 @@ df.writeParquet("/tmp/output/");
 
 ## Natural Language Queries (`atomic-nlq`)
 
-Atomic's NLQ layer makes LLM-native query planning a first-class feature, not a prompt-engineering wrapper.
+Ask a question in plain English; Atomic plans the analysis, runs it, and streams its progress back
+live. This is built into the engine, not a chatbot bolted on top.
 
-The LLM doesn't produce SQL. It produces a structured JSON plan that `IrParser` converts directly to a DataFusion `LogicalPlan`. Novel operators (`LlmFilterNode`, `LlmMapNode`, `EmbedNode`, `VectorSearchNode`) are DataFusion `Extension` nodes — they participate in predicate push-down, projection pruning, and `LlmBatchingRule` groups per-row LLM calls into batched API requests before the physical plan runs.
+**How it works (for engineers).** An LLM (OpenAI) turns the question into a **`WorkflowPlan`** — a
+small dependency graph of *tool calls* — and an executor runs the steps in parallel on Atomic,
+looping until the question is answered. Tools are built-in SQL plus any Python/JS tools you register.
+SQL is one tool — and *inside* a SQL step, LLM operations (`llm_filter`, `llm_map`, `embed`,
+`vector_search`) are real DataFusion query-plan operators, so the optimizer can batch per-row LLM
+calls into grouped API requests instead of one call per row.
 
 ```text
 User: "find customers who bought luxury items and estimate lifetime value"
          │
-         ▼  LlmPlanner (Anthropic API: schema + NL query)
-  Structured JSON plan (not SQL)
+         ▼  LlmPlanner (OpenAI) → WorkflowPlan: a graph of tool calls
+    a: sql_query   { "SELECT … FROM orders" }
+    b: llm_filter  { "is this a luxury item?" }   depends_on: [a]
          │
-         ▼  IrParser → DataFusion LogicalPlan
-  Aggregate {
-    LlmFilterNode { prompt: "is this a luxury item?", col: "category" }
-      TableScan("orders")
-  }
+         ▼  WorkflowExecutor → parallel dependency waves on Atomic
+    sql_query → DataFusion (LlmBatchingRule batches per-row LLM ops) → RddScanExec / LlmFilterExec
+    python / js tools → atomic-worker PyO3 / V8 runtimes
          │
-         ▼  LlmBatchingRule → batch N rows into one API call
-         ▼  Physical planner → RddScanExec + LlmFilterExec
-         │
-         ▼  atomic-compute workers
+         ▼  AgentLoop evaluates results → answer + VisualizationSpec; repeat until done
+         ▼  every step streamed back to the caller as AgentEvents
 ```
 
-No other distributed compute framework has wired LLM calls into a distributed query optimizer as first-class plan nodes.
+Wiring LLM calls into a distributed query engine as first-class, batchable plan operators — wrapped
+in a streaming agent loop — is not something other distributed compute frameworks offer.
 
 ---
 
@@ -306,6 +355,7 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 | | `cache`, `persist`, `unpersist`, `checkpoint` | yes |
 | | `MemoryAndDisk` / `DiskOnly` storage levels | yes |
 | **Shuffle** | Hash shuffle + disk spill | yes |
+| | Sort-based shuffle (consolidated file + sort-merge reduce) | yes (local; distributed sorted-handler is a follow-up) |
 | | Adaptive partition coalescing | yes |
 | | Shuffle-map stage fault recovery | yes |
 | **SQL** | DataFusion query engine (30+ optimizer rules) | yes |
@@ -351,7 +401,7 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 │                                    │                        │
 │              AtomicSqlContext → DataFusion LogicalPlan       │
 │                                    │                        │
-│              NlqContext → LlmPlanner → IrParser             │
+│              NlqContext → LlmPlanner → WorkflowPlan         │
 └────────────────────────┬────────────────────────────────────┘
                          │  TCP (optional mTLS)
             ┌────────────┼────────────┐
@@ -394,9 +444,12 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 
 ---
 
-## Honest Comparison With Spark
+## Honest Comparison
 
-| Dimension | Spark | Atomic |
+Atomic stands on its own, but the fair reference point is the incumbent JVM-based engine most teams
+already know. Here is the unvarnished trade-off — including where the incumbent still wins:
+
+| Dimension | JVM engine (e.g. Spark) | Atomic |
 | --- | --- | --- |
 | Task dispatch | Runtime pickle / bytecode shipping | Compile-time `#[task]` dispatch table |
 | Worker startup | JVM cold start (seconds) | Native binary (milliseconds) |
@@ -410,7 +463,14 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 | NLQ / LLM | Plugin / prompt wrapper | First-class plan nodes |
 | Stability | Exabyte-tested | Early-stage; strong test suite |
 
-Atomic is likely **faster** for small-to-medium CPU-bound jobs where JVM overhead and GC dominate. Spark wins for very large shuffles, complex joins with AQE, and Kafka-scale streaming. Choose Atomic if you want to avoid the JVM stack entirely and accept being an early adopter.
+Atomic is likely **faster** for small-to-medium CPU-bound jobs where JVM overhead and GC dominate.
+The remaining gap versus mature JVM engines is **feature coverage, not language efficiency**: very
+large shuffles and complex joins need sort-merge join, broadcast join, adaptive join-strategy
+selection, and skew handling — all of which are tractable in Rust and planned (see
+[ROADMAP.md](ROADMAP.md)). Atomic already has shuffle hash joins, disk-spilling shuffle, adaptive
+partition coalescing, and range-partitioned distributed sort. Kafka-scale streaming is the other
+open area. Choose Atomic if you want to avoid the JVM stack entirely, run the same job in three
+languages, and accept being an early adopter.
 
 ---
 
@@ -494,7 +554,7 @@ See [docs/getting-started.md](docs/getting-started.md), [docs/configuration.md](
 
 - yes **Ready**: Local-mode jobs, SQL analytics (DataFusion), graph algorithms, Python/JS prototyping, musl static binary deployment
 - ⚠️ **Early adopter**: Distributed mode on real workloads — core is solid, but cluster management (K8s) and streaming sources (Kafka) are missing
-- no **Not yet**: Kafka streaming, Kubernetes operator, event-time watermarking, sort-based shuffle
+- no **Not yet**: Kafka streaming, Kubernetes operator, event-time watermarking
 
 ---
 

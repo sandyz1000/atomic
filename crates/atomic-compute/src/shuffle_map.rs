@@ -1,4 +1,3 @@
-
 use crate::task_registry::TaskEntry;
 use crate::task_traits::BinaryTask;
 use atomic_data::distributed::WireDecode;
@@ -40,10 +39,28 @@ where
     let cache = atomic_data::env::get_shuffle_cache()
         .ok_or_else(|| "shuffle_map_handler: SHUFFLE_CACHE not initialized".to_string())?;
 
-    for (reduce_id, bucket) in buckets.into_iter().enumerate() {
-        let bytes = bincode::encode_to_vec(&bucket, bincode::config::standard())
-            .map_err(|e| format!("shuffle_map_handler: encode bucket: {e}"))?;
-        cache.insert((shuffle_id, map_partition_id, reduce_id), bytes);
+    // Encode each reduce-partition bucket once (per-partition framing is preserved in both layouts).
+    let encoded: Vec<Vec<u8>> = buckets
+        .into_iter()
+        .map(|bucket| {
+            bincode::encode_to_vec(&bucket, bincode::config::standard())
+                .map_err(|e| format!("shuffle_map_handler: encode bucket: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+
+    if num_reduce_partitions >= atomic_data::env::sort_shuffle_threshold() {
+        // Consolidated (sort-shuffle) layout: one DATA blob + one INDEX for this map task.
+        atomic_data::shuffle::cache::write_consolidated(
+            cache.as_ref(),
+            shuffle_id,
+            map_partition_id,
+            &encoded,
+        )?;
+    } else {
+        // Legacy per-bucket layout: one entry per reduce partition.
+        for (reduce_id, bytes) in encoded.into_iter().enumerate() {
+            cache.insert((shuffle_id, map_partition_id, reduce_id), bytes);
+        }
     }
 
     log::debug!(
@@ -54,6 +71,3 @@ where
     );
     Ok(())
 }
-
-
-

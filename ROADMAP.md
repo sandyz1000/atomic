@@ -49,7 +49,7 @@ New capabilities worth building after gap closure:
 - **`mapWithState`** — arbitrary stateful streaming beyond `updateStateByKey`
 - **`atomic-sql` streaming** — streaming SQL queries via DataFusion's streaming APIs
 - **Worker auto-scaling** — hooks into AWS ASG, GKE node pools for elastic clusters
-- **`atomic-nlq` CI integration test** — end-to-end test requiring `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in CI
+- **`atomic-nlq` CI integration test** — end-to-end test requiring `OPENAI_API_KEY` in CI
 - **Streaming NLQ** — NLQ queries over micro-batch DStreams
 
 ---

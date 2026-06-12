@@ -26,7 +26,6 @@ use std::sync::mpsc;
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use serde_json;
 use thiserror::Error;
 
 use crate::error::{ComputeError, ComputeResult};
@@ -38,8 +37,8 @@ pub enum PythonUdfError {
     Py(#[from] pyo3::PyErr),
     #[error("payload decode: {0}")]
     PayloadDecode(#[from] serde_json::Error),
-    #[error("partition data is not valid UTF-8: {0}")]
-    Utf8(#[from] std::str::Utf8Error),
+    #[error("data conversion: {0}")]
+    Convert(#[from] pythonize::PythonizeError),
     #[error("worker channel closed")]
     ChannelClosed,
 }
@@ -65,15 +64,22 @@ impl PyWorker {
     /// Execute one pickled Python UDF against a JSON-encoded partition.
     ///
     /// Called from within `Python::attach` so `py` is the live GIL token.
+    /// `pythonize`/`depythonize` convert between `serde_json::Value` and Python
+    /// objects in Rust — the only Python import needed is `cloudpickle`/`pickle`.
     fn run_udf(py: Python<'_>, fn_bytes: &[u8], data: &[u8]) -> Result<Vec<u8>, PythonUdfError> {
+        // Unpickle the user's UDF — cloudpickle is the only Python import needed.
         let pickle = py.import("cloudpickle").or_else(|_| py.import("pickle"))?;
         let fn_obj = pickle.call_method1("loads", (PyBytes::new(py, fn_bytes),))?;
-        let json = py.import("json")?;
-        let data_str = std::str::from_utf8(data)?;
-        let partition = json.call_method1("loads", (data_str,))?;
+
+        // Deserialise partition bytes → serde_json::Value → Python object (no json module).
+        let value: serde_json::Value = serde_json::from_slice(data)?;
+        let partition = pythonize::pythonize(py, &value)?;
+
         let result = fn_obj.call1((partition,))?;
-        let result_json: String = json.call_method1("dumps", (result,))?.extract()?;
-        Ok(result_json.into_bytes())
+
+        // Convert Python result → serde_json::Value → bytes (no json module).
+        let out: serde_json::Value = pythonize::depythonize(&result)?;
+        Ok(serde_json::to_vec(&out)?)
     }
 
     fn spawn() -> Self {

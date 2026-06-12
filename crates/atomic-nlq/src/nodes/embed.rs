@@ -207,6 +207,10 @@ impl DisplayAs for EmbedExec {
 }
 
 impl ExecutionPlan for EmbedExec {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn name(&self) -> &str {
         "EmbedExec"
     }

@@ -29,6 +29,9 @@ where
     part: Partitioner,
     shuffle_id: usize,
     fetcher: Arc<ShuffleFetcher>,
+    /// When `Some`, the map side wrote sorted runs and `compute` k-way merges them
+    /// instead of building a `HashMap` (sort-shuffle). `None` keeps the HashMap reduce.
+    comparator: Option<atomic_data::dependency::KeyComparator<K>>,
 }
 
 impl<K, V, C> Clone for ShuffledRdd<K, V, C>
@@ -45,6 +48,7 @@ where
             part: self.part.clone(),
             shuffle_id: self.shuffle_id,
             fetcher: self.fetcher.clone(),
+            comparator: self.comparator.clone(),
         }
     }
 }
@@ -64,7 +68,7 @@ where
         part: Partitioner,
         fetcher: Arc<ShuffleFetcher>,
     ) -> Self {
-        Self::new_with_staged(id, shuffle_id, parent, aggregator, part, fetcher, None)
+        Self::new_with_staged(id, shuffle_id, parent, aggregator, part, fetcher, None, None)
     }
 
     /// Variant used when a staged pipeline (from `_task` ops) precedes the shuffle.
@@ -78,16 +82,29 @@ where
         part: Partitioner,
         fetcher: Arc<ShuffleFetcher>,
         staged: Option<(Vec<Vec<u8>>, Vec<atomic_data::distributed::PipelineOp>)>,
+        comparator: Option<atomic_data::dependency::KeyComparator<K>>,
     ) -> Self {
         let mut vals = RddVals::new(id);
 
-        let shuffle_dep = ShuffleDependency::new(
-            shuffle_id,
-            false,
-            parent.clone(),
-            aggregator.clone(),
-            part.clone(),
-        );
+        // Sort-shuffle when a comparator is supplied: the dependency sorts each bucket so the
+        // reduce side can k-way merge sorted runs. Otherwise the legacy unsorted layout.
+        let shuffle_dep = match &comparator {
+            Some(cmp) => ShuffleDependency::new_sorted(
+                shuffle_id,
+                false,
+                parent.clone(),
+                aggregator.clone(),
+                part.clone(),
+                cmp.clone(),
+            ),
+            None => ShuffleDependency::new(
+                shuffle_id,
+                false,
+                parent.clone(),
+                aggregator.clone(),
+                part.clone(),
+            ),
+        };
         let shuffle_key = SHUFFLE_KEY_REGISTRY
             .get(&TypeId::of::<(K, V)>())
             .copied()
@@ -115,6 +132,7 @@ where
             part,
             shuffle_id,
             fetcher,
+            comparator,
         }
     }
 }
@@ -221,6 +239,33 @@ where
         } else {
             vec![coalesced_id]
         };
+
+        // Sort-shuffle reduce: the map side wrote sorted runs; merge them by key and coalesce
+        // equal keys via the aggregator. Ordering is driven by the stored comparator closure
+        // (K is only `Hash`-bound here, so we cannot use `Ord`/`BinaryHeap` directly).
+        if let Some(cmp) = &self.comparator {
+            let mut merged: Vec<(K, C)> = Vec::new();
+            for orig_id in original_ids {
+                let runs = Handle::current()
+                    .block_on(self.fetcher.fetch_runs::<K, C>(self.shuffle_id, orig_id))
+                    .map_err(|e| BaseError::Other(format!("Shuffle fetch error: {}", e)))?;
+                for run in runs {
+                    merged.extend(run);
+                }
+            }
+            merged.sort_by(|a, b| cmp(&a.0, &b.0));
+            let mut out: Vec<(K, C)> = Vec::with_capacity(merged.len());
+            for (k, c) in merged {
+                match out.last_mut() {
+                    Some(last) if cmp(&last.0, &k) == std::cmp::Ordering::Equal => {
+                        (self.aggregator.merge_combiners)(&mut last.1, c);
+                    }
+                    _ => out.push((k, c)),
+                }
+            }
+            log::debug!("time taken for sort-merge fetch {}", start.elapsed().as_millis());
+            return Ok(Box::new(out.into_iter()));
+        }
 
         let mut combiners: HashMap<K, C> = HashMap::new();
         for orig_id in original_ids {

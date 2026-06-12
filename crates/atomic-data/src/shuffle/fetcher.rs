@@ -34,16 +34,18 @@ impl ShuffleFetcher {
         Self { tracker }
     }
 
-    pub async fn fetch<K, V>(
+    /// Fetch each map task's output for `reduce_id` as a separate run (not flattened).
+    /// Sort-shuffle reduce uses this to k-way merge sorted runs; `fetch` flattens it.
+    pub async fn fetch_runs<K, V>(
         &self,
         shuffle_id: usize,
         reduce_id: usize,
-    ) -> LibResult<impl Iterator<Item = (K, V)>>
+    ) -> LibResult<Vec<Vec<(K, V)>>>
     where
         K: Data + bincode::Decode<()>,
         V: Data + bincode::Decode<()>,
     {
-        log::debug!("inside fetch function");
+        log::debug!("inside fetch_runs function");
         let mut inputs_by_uri = HashMap::new();
         let server_uris: Vec<String> = self
             .tracker
@@ -125,25 +127,40 @@ impl ShuffleFetcher {
                             }
                         }
                     }
-                    Ok::<Box<dyn Iterator<Item = (K, V)> + Send>, _>(Box::new(
-                        shuffle_chunks.into_iter().flatten(),
-                    ))
+                    Ok::<Vec<Vec<(K, V)>>, _>(shuffle_chunks)
                 } else {
-                    Ok::<Box<dyn Iterator<Item = (K, V)> + Send>, _>(Box::new(std::iter::empty()))
+                    Ok::<Vec<Vec<(K, V)>>, _>(Vec::new())
                 }
             };
             tasks.push(tokio::spawn(task));
         }
         log::debug!("total_results fetch results: {}", total_results);
         let task_results = future::join_all(tasks.into_iter()).await;
-        let mut results = Vec::<(K, V)>::with_capacity(total_results);
+        let mut runs: Vec<Vec<(K, V)>> = Vec::with_capacity(total_results);
         for res in task_results {
             match res {
-                Ok(Ok(items)) => results.extend(items),
+                Ok(Ok(chunks)) => runs.extend(chunks),
                 _ => return Err(ShuffleError::FailedFetchOp),
             }
         }
-        Ok(results.into_iter())
+        Ok(runs)
+    }
+
+    /// Fetch and flatten all map outputs for `reduce_id` into a single iterator.
+    pub async fn fetch<K, V>(
+        &self,
+        shuffle_id: usize,
+        reduce_id: usize,
+    ) -> LibResult<impl Iterator<Item = (K, V)>>
+    where
+        K: Data + bincode::Decode<()>,
+        V: Data + bincode::Decode<()>,
+    {
+        Ok(self
+            .fetch_runs::<K, V>(shuffle_id, reduce_id)
+            .await?
+            .into_iter()
+            .flatten())
     }
 
     fn make_chunk_uri(

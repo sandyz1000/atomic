@@ -25,7 +25,9 @@ pub enum DependencyType {
 #[derive(Clone)]
 pub enum Dependency {
     /// One-to-one narrow dependency where each partition depends on exactly one parent partition
-    OneToOne { rdd_base: Arc<dyn RddBase> },
+    OneToOne {
+        rdd_base: Arc<dyn RddBase>,
+    },
     /// Range narrow dependency between ranges of partitions in parent and child RDDs
     Range {
         rdd_base: Arc<dyn RddBase>,
@@ -200,6 +202,11 @@ impl Ord for ShuffleDependencyBox {
     }
 }
 
+/// Type-erased key comparator for the sort-shuffle path. Built by the constructing op
+/// where `K: Ord` is statically available (e.g. `sort_by_key`); `None` means the legacy
+/// unsorted layout. Stored erased so `ShuffleDependency`'s `K` bound stays `Hash`-only.
+pub type KeyComparator<K> = Arc<dyn Fn(&K, &K) -> Ordering + Send + Sync>;
+
 /// Generic shuffle dependency with full type information
 /// This struct is fully typed and doesn't require iterator_any or unsafe downcasting
 pub struct ShuffleDependency<K: Data, V: Data, C: Data> {
@@ -211,6 +218,9 @@ pub struct ShuffleDependency<K: Data, V: Data, C: Data> {
     aggregator: Arc<Aggregator<K, V, C>>,
     /// Partitioner for determining output partitions
     partitioner: Partitioner,
+    /// When `Some`, each reduce-partition bucket is sorted by key before it is written,
+    /// producing sorted runs the reduce side can k-way merge (sort-shuffle).
+    comparator: Option<KeyComparator<K>>,
     _phantom: std::marker::PhantomData<(K, V, C)>,
 }
 
@@ -222,7 +232,7 @@ where
     V: Data + Clone,
     C: Data,
 {
-    /// Create a new shuffle dependency
+    /// Create a new shuffle dependency (legacy unsorted layout).
     pub fn new(
         shuffle_id: usize,
         is_cogroup: bool,
@@ -236,6 +246,29 @@ where
             rdd,
             aggregator,
             partitioner,
+            comparator: None,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
+    /// Create a sort-shuffle dependency: each reduce-partition bucket is sorted by `comparator`
+    /// before it is written, so the reduce side can k-way merge sorted runs. The caller supplies
+    /// the comparator from a site where `K: Ord` (e.g. `Arc::new(|a, b| a.cmp(b))`).
+    pub fn new_sorted(
+        shuffle_id: usize,
+        is_cogroup: bool,
+        rdd: Arc<dyn crate::rdd::Rdd<Item = (K, V)>>,
+        aggregator: Arc<Aggregator<K, V, C>>,
+        partitioner: Partitioner,
+        comparator: KeyComparator<K>,
+    ) -> Arc<Self> {
+        Arc::new(ShuffleDependency {
+            shuffle_id,
+            is_cogroup_flag: is_cogroup,
+            rdd,
+            aggregator,
+            partitioner,
+            comparator: Some(comparator),
             _phantom: std::marker::PhantomData,
         })
     }
@@ -291,31 +324,48 @@ where
             }
         }
 
-        // Serialize and store shuffle data
-        for (i, bucket) in buckets.into_iter().enumerate() {
-            let set: Vec<(K, C)> = bucket.into_iter().collect();
-            let config = bincode::config::standard();
-            match bincode::encode_to_vec(&set, config) {
-                Ok(ser_bytes) => {
-                    log::debug!(
-                        "shuffle dependency map task set from bucket #{} in shuffle id #{}, partition #{}: {:?}",
-                        i,
-                        self.shuffle_id,
-                        partition,
-                        set.first()
-                    );
-                    if let Some(cache) = crate::env::get_shuffle_cache() {
-                        cache.insert((self.shuffle_id, partition, i), ser_bytes);
-                    } else {
-                        log::warn!(
-                            "SHUFFLE_CACHE not initialized — shuffle data for ({},{},{}) dropped",
-                            self.shuffle_id, partition, i
-                        );
-                    }
+        // Serialize each reduce-partition bucket, then store via the consolidated
+        // (sort-shuffle) layout for wide shuffles or the legacy per-bucket layout otherwise.
+        let cache = match crate::env::get_shuffle_cache() {
+            Some(c) => c,
+            None => {
+                log::warn!(
+                    "SHUFFLE_CACHE not initialized — shuffle data for shuffle #{} partition #{} dropped",
+                    self.shuffle_id,
+                    partition
+                );
+                return crate::env::get_shuffle_server_uri().unwrap_or_default();
+            }
+        };
+
+        let config = bincode::config::standard();
+        let encoded: Vec<Vec<u8>> = buckets
+            .into_iter()
+            .map(|bucket| {
+                let mut set: Vec<(K, C)> = bucket.into_iter().collect();
+                // Sort-shuffle: emit each bucket as a sorted run so the reduce side can k-way merge.
+                if let Some(cmp) = &self.comparator {
+                    set.sort_by(|a, b| cmp(&a.0, &b.0));
                 }
-                Err(e) => {
-                    log::error!("Error serializing shuffle data: {:?}", e);
-                }
+                bincode::encode_to_vec(&set, config).unwrap_or_else(|e| {
+                    log::error!("Error serializing shuffle bucket: {:?}", e);
+                    bincode::encode_to_vec(Vec::<(K, C)>::new(), config).unwrap_or_default()
+                })
+            })
+            .collect();
+
+        if num_output_splits >= crate::env::sort_shuffle_threshold() {
+            if let Err(e) = crate::shuffle::cache::write_consolidated(
+                cache.as_ref(),
+                self.shuffle_id,
+                partition,
+                &encoded,
+            ) {
+                log::error!("write_consolidated failed: {e}");
+            }
+        } else {
+            for (i, ser_bytes) in encoded.into_iter().enumerate() {
+                cache.insert((self.shuffle_id, partition, i), ser_bytes);
             }
         }
 

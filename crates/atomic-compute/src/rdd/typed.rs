@@ -1071,6 +1071,7 @@ impl<T: Data + Clone> TypedRdd<T> {
                 a
             },
             partitioner,
+            None,
         )
         .map_partitions(|iter| {
             Box::new(iter.flat_map(|(_, vs)| vs.into_iter())) as Box<dyn Iterator<Item = T>>
@@ -1238,6 +1239,7 @@ where
             partitioner,
             fetcher,
             staged_info,
+            None,
         );
         TypedRdd::new(Arc::new(shuffled), self.context)
     }
@@ -1254,7 +1256,7 @@ where
         Vec<(K, V)>: WireEncode,
     {
         let p = Partitioner::from_custom(partitioner);
-        self.combine_by_key_with_partitioner(|v| v, |_, v| v, |c, _| c, p)
+        self.combine_by_key_with_partitioner(|v| v, |_, v| v, |c, _| c, p, None)
     }
 
     /// Internal: `combine_by_key` with an explicit `Partitioner` instead of hash.
@@ -1264,6 +1266,7 @@ where
         merge_value: MV,
         merge_combiners: MC,
         partitioner: Partitioner,
+        comparator: Option<atomic_data::dependency::KeyComparator<K>>,
     ) -> TypedRdd<(K, C)>
     where
         C: Data + Clone + bincode::Encode + bincode::Decode<()>,
@@ -1308,6 +1311,7 @@ where
             partitioner,
             fetcher,
             staged_info,
+            comparator,
         );
         TypedRdd::new(Arc::new(shuffled), self.context)
     }
@@ -1443,6 +1447,7 @@ where
             partitioner,
             fetcher,
             staged_info,
+            None,
         );
         TypedRdd::new(Arc::new(shuffled), self.context)
     }
@@ -1501,6 +1506,7 @@ where
             partitioner,
             fetcher,
             staged_info,
+            None,
         );
         TypedRdd::new(Arc::new(shuffled), self.context)
     }
@@ -2190,7 +2196,14 @@ where
 
         let partitioner = Partitioner::range(bounds, ascending);
 
-        let asc = ascending;
+        // Sort-shuffle: the comparator makes the shuffle write sorted runs and the reduce
+        // k-way sort-merge them, so each range partition is already key-ordered — no
+        // post-shuffle re-sort needed, just flatten the grouped values back to pairs.
+        let cmp: atomic_data::dependency::KeyComparator<K> = if ascending {
+            Arc::new(|a: &K, b: &K| a.cmp(b))
+        } else {
+            Arc::new(|a: &K, b: &K| b.cmp(a))
+        };
         self.combine_by_key_with_partitioner(
             |v| vec![v],
             |mut buf, v| {
@@ -2202,18 +2215,15 @@ where
                 a
             },
             partitioner,
+            Some(cmp),
         )
         .map_partitions(move |iter| {
-            let mut pairs: Vec<(K, Vec<V>)> = iter.collect();
-            if asc {
-                pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
-            } else {
-                pairs.sort_by(|(a, _), (b, _)| b.cmp(a));
-            }
             Box::new(
-                pairs
-                    .into_iter()
-                    .flat_map(|(k, vs)| vs.into_iter().map(move |v| (k.clone(), v))),
+                iter.flat_map(|(k, vs): (K, Vec<V>)| {
+                    vs.into_iter()
+                        .map(move |v| (k.clone(), v))
+                        .collect::<Vec<_>>()
+                }),
             ) as Box<dyn Iterator<Item = (K, V)>>
         })
     }
