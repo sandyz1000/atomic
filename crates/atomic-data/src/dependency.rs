@@ -139,6 +139,9 @@ pub struct ShuffleDependencyBox {
     pub rdd_base: Arc<dyn RddBase>,
     pub is_cogroup: bool,
     pub num_output_partitions: usize,
+    /// Serializable partitioner spec, shipped to workers so they partition shuffle output using
+    /// the RDD's real partitioner (e.g. range for `sort_by_key`) instead of plain hash.
+    pub partitioner_spec: crate::partitioner::PartitionerSchema,
     /// Identifies the registered `SHUFFLE_MAP_REGISTRY` handler for the `(K, V)` type pair.
     ///
     /// Set to `std::any::type_name::<(K, V)>()` when the dependency is created.
@@ -439,6 +442,7 @@ impl ShuffleDependencyBox {
             rdd_base: dep.rdd.get_rdd_base(),
             is_cogroup: dep.is_cogroup_flag,
             num_output_partitions: dep.partitioner.get_num_of_partitions(),
+            partitioner_spec: dep.partitioner.to_spec(),
             type_id: shuffle_key,
             encode_partitions,
             preceding_ops: vec![],

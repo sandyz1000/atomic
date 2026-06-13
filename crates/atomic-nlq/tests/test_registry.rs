@@ -7,11 +7,13 @@ use datafusion::logical_expr::{
     ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
 
-
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct IsLuxury;
 
 impl ScalarUDFImpl for IsLuxury {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn name(&self) -> &str {
         "is_luxury"
     }
@@ -33,7 +35,9 @@ impl ScalarUDFImpl for IsLuxury {
         args: datafusion::logical_expr::ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         let _ = args;
-        Ok(ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Boolean(Some(false))))
+        Ok(ColumnarValue::Scalar(
+            datafusion::scalar::ScalarValue::Boolean(Some(false)),
+        ))
     }
 }
 
@@ -41,6 +45,9 @@ impl ScalarUDFImpl for IsLuxury {
 struct EstimateLtv;
 
 impl ScalarUDFImpl for EstimateLtv {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn name(&self) -> &str {
         "estimate_ltv"
     }
@@ -62,10 +69,11 @@ impl ScalarUDFImpl for EstimateLtv {
         args: datafusion::logical_expr::ScalarFunctionArgs,
     ) -> datafusion::error::Result<ColumnarValue> {
         let _ = args;
-        Ok(ColumnarValue::Scalar(datafusion::scalar::ScalarValue::Float64(Some(0.0))))
+        Ok(ColumnarValue::Scalar(
+            datafusion::scalar::ScalarValue::Float64(Some(0.0)),
+        ))
     }
 }
-
 
 fn make_registry() -> ToolRegistry {
     let ctx = Arc::new(SessionContext::new());
@@ -76,7 +84,8 @@ fn make_registry() -> ToolRegistry {
 fn test_register_scalar() {
     let reg = make_registry();
     let udf = ScalarUDF::from(IsLuxury);
-    reg.register_scalar(udf, "Returns true if the category is a luxury item").unwrap();
+    reg.register_scalar(udf, "Returns true if the category is a luxury item")
+        .unwrap();
 
     let descs = reg.udf_descriptions();
     assert_eq!(descs.len(), 1);
@@ -111,7 +120,8 @@ fn test_register_multiple_udfs() {
 #[test]
 fn test_udf_signature() {
     let reg = make_registry();
-    reg.register_scalar(ScalarUDF::from(IsLuxury), "Returns true if luxury").unwrap();
+    reg.register_scalar(ScalarUDF::from(IsLuxury), "Returns true if luxury")
+        .unwrap();
 
     let descs = reg.udf_descriptions();
     assert!(
@@ -129,8 +139,10 @@ fn test_empty_registry() {
 #[test]
 fn test_duplicate_registration_overwrites() {
     let reg = make_registry();
-    reg.register_scalar(ScalarUDF::from(IsLuxury), "first description").unwrap();
-    reg.register_scalar(ScalarUDF::from(IsLuxury), "second description").unwrap();
+    reg.register_scalar(ScalarUDF::from(IsLuxury), "first description")
+        .unwrap();
+    reg.register_scalar(ScalarUDF::from(IsLuxury), "second description")
+        .unwrap();
 
     let descs = reg.udf_descriptions();
     // DashMap replace on same key — only one entry

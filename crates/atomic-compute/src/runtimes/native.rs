@@ -8,7 +8,7 @@ use atomic_data::distributed::{
 
 use crate::error::{ComputeError, ComputeResult};
 use crate::runtimes::{Backend, OpDispatcher};
-use crate::task_registry::{SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
+use crate::task_registry::{SHUFFLE_MAP_REGISTRY, SORT_SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
 
 /// Handles `TaskRuntime::Native` ops — both compile-time `#[task]` registry
 /// lookups and shuffle-map writes.
@@ -32,14 +32,29 @@ impl OpDispatcher for NativeDispatcher {
                 shuffle_id,
                 num_output_partitions,
             } => {
-                let type_id = std::str::from_utf8(&op.payload)?;
-                match SHUFFLE_MAP_REGISTRY.get(type_id) {
+                // Payload carries the dispatch key + the shipped partitioner spec.
+                let payload: crate::shuffle_map::ShuffleMapPayload =
+                    bincode::decode_from_slice(&op.payload, bincode::config::standard())
+                        .map(|(p, _)| p)
+                        .map_err(|e| {
+                            ComputeError::InvalidPayload(format!("shuffle-map payload decode: {e}"))
+                        })?;
+                let type_id = payload.type_id.as_str();
+                let spec = &payload.partitioner_spec;
+                // Range (sort) shuffles use the sorted handler when one is registered for the type
+                // (K: Ord, via register_sort_shuffle_map!); otherwise fall back to the hash handler.
+                let handler = spec
+                    .is_range()
+                    .then(|| SORT_SHUFFLE_MAP_REGISTRY.get(type_id))
+                    .flatten()
+                    .or_else(|| SHUFFLE_MAP_REGISTRY.get(type_id));
+                match handler {
                     None => Err(ComputeError::UnknownOperation(format!(
                         "no shuffle handler for type_id='{type_id}'; \
                          add `register_shuffle_map!(K, V)` to your binary"
                     ))),
                     Some(handler) => {
-                        handler(data, *shuffle_id, partition_id, *num_output_partitions)?;
+                        handler(data, *shuffle_id, partition_id, *num_output_partitions, spec)?;
                         Ok(data.to_vec())
                     }
                 }

@@ -928,8 +928,9 @@ impl Context {
                 let parent_partitions =
                     (shuffle_dep.encode_partitions)().map_err(ComputeError::InvalidPayload)?;
 
-                // Build the shuffle-map op. The payload carries the type_id string so
-                // the worker can look up the correct SHUFFLE_MAP_REGISTRY handler.
+                // Build the shuffle-map op. The payload carries the dispatch key (for the
+                // SHUFFLE_MAP_REGISTRY lookup) plus the serializable partitioner spec, so the
+                // worker partitions output with the RDD's real partitioner (range for sort_by_key).
                 let shuffle_op = PipelineOp {
                     op_id: format!("shuffle-map-{}", shuffle_dep.shuffle_id),
                     action: TaskAction::ShuffleMap {
@@ -937,7 +938,16 @@ impl Context {
                         num_output_partitions: shuffle_dep.num_output_partitions,
                     },
                     runtime: TaskRuntime::Native,
-                    payload: shuffle_dep.type_id.as_bytes().to_vec(),
+                    payload: bincode::encode_to_vec(
+                        crate::shuffle_map::ShuffleMapPayload {
+                            type_id: shuffle_dep.type_id.to_string(),
+                            partitioner_spec: shuffle_dep.partitioner_spec.clone(),
+                        },
+                        bincode::config::standard(),
+                    )
+                    .map_err(|e| {
+                        ComputeError::InvalidPayload(format!("shuffle-map payload encode: {e}"))
+                    })?,
                 };
 
                 // Prefer ops stored on the dep (set when a staged pipeline precedes the shuffle).

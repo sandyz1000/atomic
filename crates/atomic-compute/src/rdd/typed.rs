@@ -2240,7 +2240,7 @@ where
     pub fn sort_by_key_range(self, num_partitions: usize, ascending: bool) -> Self
     where
         Vec<(K, V)>: WireDecode,
-        K: WireEncode,
+        K: WireEncode + bincode::Encode,
         V: WireEncode,
     {
         use atomic_data::partitioner::Partitioner;

@@ -114,7 +114,13 @@ pub struct ShuffleMapEntry {
     /// that is stable across compiler versions (unlike `std::any::type_name`).
     pub type_id: fn() -> &'static str,
     /// The actual write handler.
-    pub handler: fn(&[u8], usize, usize, usize) -> Result<(), String>,
+    pub handler: fn(
+        &[u8],
+        usize,
+        usize,
+        usize,
+        &atomic_data::partitioner::PartitionerSchema,
+    ) -> Result<(), String>,
 }
 
 inventory::collect!(ShuffleMapEntry);
@@ -125,9 +131,60 @@ inventory::collect!(ShuffleMapEntry);
 /// Keyed by the stringify-based key (e.g. `"String::u32"`).
 /// `NativeBackend` uses this when it sees `TaskAction::ShuffleMap`.
 pub static SHUFFLE_MAP_REGISTRY: Lazy<
-    HashMap<&'static str, fn(&[u8], usize, usize, usize) -> Result<(), String>>,
+    HashMap<
+        &'static str,
+        fn(
+            &[u8],
+            usize,
+            usize,
+            usize,
+            &atomic_data::partitioner::PartitionerSchema,
+        ) -> Result<(), String>,
+    >,
 > = Lazy::new(|| {
     inventory::iter::<ShuffleMapEntry>
+        .into_iter()
+        .map(|entry| ((entry.type_id)(), entry.handler))
+        .collect()
+});
+
+/// A compile-time **sorted** shuffle-write handler for `(K, V)` where `K: Ord`.
+///
+/// Registered by `register_sort_shuffle_map!(K, V)` (opt-in for ordered keys). When the
+/// driver marks a shuffle as a sort-shuffle, the worker uses this handler to sort each
+/// reduce-partition bucket by key before writing, so the driver-side reduce can k-way merge
+/// sorted runs instead of full-sorting.
+pub struct SortShuffleMapEntry {
+    /// Stable dispatch key for the `(K, V)` pair (same `"K::V"` string as `ShuffleMapEntry`).
+    pub type_id: fn() -> &'static str,
+    /// The sorted write handler.
+    pub handler: fn(
+        &[u8],
+        usize,
+        usize,
+        usize,
+        &atomic_data::partitioner::PartitionerSchema,
+    ) -> Result<(), String>,
+}
+
+inventory::collect!(SortShuffleMapEntry);
+
+/// Global compile-time **sorted** shuffle-map registry. Keyed by the same `"K::V"` string as
+/// [`SHUFFLE_MAP_REGISTRY`]; an entry exists only for key types where
+/// `register_sort_shuffle_map!(K, V)` was called (i.e. `K: Ord`).
+pub static SORT_SHUFFLE_MAP_REGISTRY: Lazy<
+    HashMap<
+        &'static str,
+        fn(
+            &[u8],
+            usize,
+            usize,
+            usize,
+            &atomic_data::partitioner::PartitionerSchema,
+        ) -> Result<(), String>,
+    >,
+> = Lazy::new(|| {
+    inventory::iter::<SortShuffleMapEntry>
         .into_iter()
         .map(|entry| ((entry.type_id)(), entry.handler))
         .collect()

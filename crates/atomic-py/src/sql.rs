@@ -604,6 +604,9 @@ impl PySqlContext {
         }
 
         impl ScalarUDFImpl for PyUdf {
+            fn as_any(&self) -> &dyn std::any::Any {
+                todo!()
+            }
             fn name(&self) -> &str {
                 &self.name
             }

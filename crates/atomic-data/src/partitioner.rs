@@ -47,6 +47,11 @@ pub enum Partitioner {
     /// `get_partition_fn` performs a binary search over the pre-computed bounds.
     Range {
         num_partitions: usize,
+        /// Sort direction, retained so the partitioner can be shipped/reconstructed on workers.
+        ascending: bool,
+        /// `bincode(Vec<K>)` of the sorted split-point bounds, captured at construction so the
+        /// range partitioner can be shipped to and reconstructed on workers.
+        bounds_bytes: Vec<u8>,
         get_partition_fn: Arc<dyn Fn(&dyn Any) -> usize + Send + Sync>,
     },
     /// User-defined partitioner supplied via `TypedRdd::partition_by()`.
@@ -82,11 +87,16 @@ impl Partitioner {
     /// Pass `ascending = false` to reverse the ordering (largest keys to partition 0).
     pub fn range<K>(bounds: Vec<K>, ascending: bool) -> Self
     where
-        K: Data + Ord + Clone,
+        K: Data + Ord + Clone + bincode::Encode,
     {
         let num_partitions = bounds.len() + 1;
+        // Capture the bounds in serializable form so this partitioner can be shipped to workers.
+        let bounds_bytes =
+            bincode::encode_to_vec(&bounds, bincode::config::standard()).unwrap_or_default();
         let get_partition_fn = Arc::new(move |key: &dyn Any| -> usize {
-            let k = key.downcast_ref::<K>().expect("RangePartitioner: key type mismatch");
+            let k = key
+                .downcast_ref::<K>()
+                .expect("RangePartitioner: key type mismatch");
             // For ascending bounds [b0, b1, ...]: key < b0 → 0, b0 <= key < b1 → 1, ...
             // For descending bounds [b0, b1, ...] (b0 > b1): key >= b0 → 0, b1 <= key < b0 → 1, ...
             let part = if ascending {
@@ -96,7 +106,12 @@ impl Partitioner {
             };
             part.min(num_partitions.saturating_sub(1))
         });
-        Partitioner::Range { num_partitions, get_partition_fn }
+        Partitioner::Range {
+            num_partitions,
+            ascending,
+            bounds_bytes,
+            get_partition_fn,
+        }
     }
 
     /// Build a `Partitioner` from any type that implements `CustomPartitioner`.
@@ -112,9 +127,30 @@ impl Partitioner {
     /// Check if two partitioners are equal (same type and same num_partitions)
     pub fn equals(&self, other: &Partitioner) -> bool {
         match (self, other) {
-            (Partitioner::Hash { num_partitions: n1, .. }, Partitioner::Hash { num_partitions: n2, .. }) => n1 == n2,
-            (Partitioner::Range { num_partitions: n1, .. }, Partitioner::Range { num_partitions: n2, .. }) => n1 == n2,
-            (Partitioner::Custom { num_partitions: n1, .. }, Partitioner::Custom { num_partitions: n2, .. }) => n1 == n2,
+            (
+                Partitioner::Hash {
+                    num_partitions: n1, ..
+                },
+                Partitioner::Hash {
+                    num_partitions: n2, ..
+                },
+            ) => n1 == n2,
+            (
+                Partitioner::Range {
+                    num_partitions: n1, ..
+                },
+                Partitioner::Range {
+                    num_partitions: n2, ..
+                },
+            ) => n1 == n2,
+            (
+                Partitioner::Custom {
+                    num_partitions: n1, ..
+                },
+                Partitioner::Custom {
+                    num_partitions: n2, ..
+                },
+            ) => n1 == n2,
             _ => false,
         }
     }
@@ -133,9 +169,101 @@ impl Partitioner {
 
     pub fn get_partition(&self, key: &dyn Any) -> usize {
         match self {
-            Partitioner::Hash { get_partition_fn, .. }
-            | Partitioner::Range { get_partition_fn, .. }
-            | Partitioner::Custom { get_partition_fn, .. } => get_partition_fn(key),
+            Partitioner::Hash {
+                get_partition_fn, ..
+            }
+            | Partitioner::Range {
+                get_partition_fn, ..
+            }
+            | Partitioner::Custom {
+                get_partition_fn, ..
+            } => get_partition_fn(key),
+        }
+    }
+
+    /// Build the wire-shippable spec for this partitioner (sent to workers in the shuffle-map task).
+    pub fn to_spec(&self) -> PartitionerSchema {
+        match self {
+            Partitioner::Hash { num_partitions, .. } => PartitionerSchema::Hash {
+                num_parts: *num_partitions,
+            },
+            Partitioner::Range {
+                num_partitions,
+                ascending,
+                bounds_bytes,
+                ..
+            } => PartitionerSchema::Range {
+                num_parts: *num_partitions,
+                ascending: *ascending,
+                bounds_bytes: bounds_bytes.clone(),
+            },
+            Partitioner::Custom { num_partitions, .. } => PartitionerSchema::Custom {
+                num_parts: *num_partitions,
+            },
+        }
+    }
+}
+
+/// Serializable, wire-shippable description of a `Partitioner`. The driver builds this from a
+/// `Partitioner` (`Partitioner::to_spec`) and ships it in the shuffle-map task; the worker
+/// reconstructs a real `Partitioner` from it, monomorphized for the key type `K`.
+///
+/// `Custom` partitioners hold a user closure and cannot be serialized, so they degrade to hash
+/// partitioning in distributed mode (their `num_partitions` is still honored).
+#[derive(Clone, Debug, bincode::Encode, bincode::Decode)]
+pub enum PartitionerSchema {
+    Hash {
+        num_parts: usize,
+    },
+    Range {
+        num_parts: usize,
+        ascending: bool,
+        bounds_bytes: Vec<u8>,
+    },
+    Custom {
+        num_parts: usize,
+    },
+}
+
+impl PartitionerSchema {
+    pub fn num_partitions(&self) -> usize {
+        match self {
+            PartitionerSchema::Hash { num_parts: num_partitions }
+            | PartitionerSchema::Range { num_parts: num_partitions, .. }
+            | PartitionerSchema::Custom { num_parts: num_partitions } => *num_partitions,
+        }
+    }
+
+    pub fn is_range(&self) -> bool {
+        matches!(self, PartitionerSchema::Range { .. })
+    }
+
+    /// Reconstruct a hash partitioner (used by the `Hash`-only no-combine worker handler).
+    /// `Range`/`Custom` specs fall back to hash here — reconstructing a `Range` needs `K: Ord`
+    /// (see [`PartitionerSpec::into_partitioner`]).
+    pub fn into_hash<K: Data + Hash + Eq>(&self) -> Partitioner {
+        Partitioner::hash::<K>(self.num_partitions())
+    }
+
+    /// Reconstruct the real partitioner for an ordered key: `Range` decodes its bounds back into a
+    /// `RangePartitioner`; `Hash`/`Custom` produce a hash partitioner.
+    pub fn into_partitioner<K>(&self) -> Partitioner
+    where
+        K: Data + Ord + Clone + Hash + Eq + bincode::Encode + bincode::Decode<()>,
+    {
+        match self {
+            PartitionerSchema::Range {
+                ascending,
+                bounds_bytes,
+                ..
+            } => {
+                let bounds: Vec<K> =
+                    bincode::decode_from_slice(bounds_bytes, bincode::config::standard())
+                        .map(|(b, _)| b)
+                        .unwrap_or_default();
+                Partitioner::range(bounds, *ascending)
+            }
+            _ => Partitioner::hash::<K>(self.num_partitions()),
         }
     }
 }
