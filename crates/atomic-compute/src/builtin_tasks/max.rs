@@ -1,5 +1,5 @@
-use crate::task_traits::BinaryTask;
 use crate::task_registry::TaskEntry;
+use crate::task_traits::BinaryTask;
 
 /// Built-in: return the greater of two `Ord` values.
 ///
@@ -55,7 +55,6 @@ handler: |action, payload, data| {
         }
     };
 }
-
 
 impl_max_task!(i32);
 impl_max_task!(i64);

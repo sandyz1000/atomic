@@ -20,7 +20,7 @@ pub struct Stage {
 
 impl PartialOrd for Stage {
     fn partial_cmp(&self, other: &Stage) -> Option<Ordering> {
-        Some(self.id.cmp(&other.id))
+        Some(self.cmp(other))
     }
 }
 

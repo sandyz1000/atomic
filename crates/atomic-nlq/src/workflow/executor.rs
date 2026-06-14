@@ -29,25 +29,27 @@ impl WorkflowExecutor {
         sql_ctx: Option<Arc<AtomicSqlContext>>,
         openai_client: Arc<OpenAiClient>,
     ) -> Self {
-        Self { tool_registry, sql_ctx, openai_client }
+        Self {
+            tool_registry,
+            sql_ctx,
+            openai_client,
+        }
     }
 
     /// Execute a plan and return results keyed by step id.
-    pub async fn execute(
-        &self,
-        plan: WorkflowPlan,
-    ) -> Result<HashMap<String, StepResult>> {
+    pub async fn execute(&self, plan: WorkflowPlan) -> Result<HashMap<String, StepResult>> {
         let mut completed: HashMap<String, StepResult> = HashMap::new();
         let mut remaining: Vec<WorkflowStep> = plan.steps;
 
         while !remaining.is_empty() {
-            let done_ids: HashSet<&str> =
-                completed.keys().map(|s| s.as_str()).collect();
+            let done_ids: HashSet<&str> = completed.keys().map(|s| s.as_str()).collect();
 
             // Partition into ready (all deps satisfied) and not-yet-ready.
-            let (ready, blocked): (Vec<_>, Vec<_>) = remaining
-                .into_iter()
-                .partition(|step| step.depends_on.iter().all(|d| done_ids.contains(d.as_str())));
+            let (ready, blocked): (Vec<_>, Vec<_>) = remaining.into_iter().partition(|step| {
+                step.depends_on
+                    .iter()
+                    .all(|d| done_ids.contains(d.as_str()))
+            });
 
             if ready.is_empty() {
                 // Circular dependency or missing dep — report which steps are stuck.
@@ -63,9 +65,7 @@ impl WorkflowExecutor {
             let upstream_snapshots: HashMap<String, StepResult> = ready
                 .iter()
                 .flat_map(|s| s.depends_on.iter())
-                .filter_map(|dep_id| {
-                    completed.get(dep_id).map(|r| (dep_id.clone(), r.clone()))
-                })
+                .filter_map(|dep_id| completed.get(dep_id).map(|r| (dep_id.clone(), r.clone())))
                 .collect();
 
             let mut join_set: JoinSet<Result<StepResult>> = JoinSet::new();
@@ -82,8 +82,7 @@ impl WorkflowExecutor {
             }
 
             while let Some(res) = join_set.join_next().await {
-                let step_result = res
-                    .map_err(|e| NlqError::WorkflowExecution(e.to_string()))??;
+                let step_result = res.map_err(|e| NlqError::WorkflowExecution(e.to_string()))??;
                 completed.insert(step_result.step_id.clone(), step_result);
             }
         }
@@ -105,9 +104,11 @@ impl WorkflowExecutor {
         while !remaining.is_empty() {
             let done_ids: HashSet<&str> = completed.keys().map(|s| s.as_str()).collect();
 
-            let (ready, blocked): (Vec<_>, Vec<_>) = remaining
-                .into_iter()
-                .partition(|step| step.depends_on.iter().all(|d| done_ids.contains(d.as_str())));
+            let (ready, blocked): (Vec<_>, Vec<_>) = remaining.into_iter().partition(|step| {
+                step.depends_on
+                    .iter()
+                    .all(|d| done_ids.contains(d.as_str()))
+            });
 
             if ready.is_empty() {
                 let stuck: Vec<_> = blocked.iter().map(|s| s.id.as_str()).collect();
@@ -154,7 +155,7 @@ impl WorkflowExecutor {
 
             while let Some(join_result) = join_set.join_next().await {
                 match join_result {
-                    Ok((step_id, tool_name, Ok(step_result))) => {
+                    Ok((_step_id, tool_name, Ok(step_result))) => {
                         let (output_kind, preview) = match &step_result.output {
                             StepOutput::DataFrame(bufs) => {
                                 let kind = "dataframe".to_string();
@@ -225,7 +226,10 @@ async fn run_step(
         ToolRuntime::JavaScript(code) => run_javascript(code, &step, &upstream).await?,
     };
 
-    Ok(StepResult { step_id: step.id, output })
+    Ok(StepResult {
+        step_id: step.id,
+        output,
+    })
 }
 
 async fn run_builtin(
@@ -248,13 +252,15 @@ async fn run_builtin(
                 .get("query")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    NlqError::WorkflowExecution(
-                        "SqlQuery tool requires an 'query' arg".to_string(),
-                    )
+                    NlqError::WorkflowExecution("SqlQuery tool requires an 'query' arg".to_string())
                 })?;
-            let df = ctx.sql(query).await
+            let df = ctx
+                .sql(query)
+                .await
                 .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
-            let batches = df.collect().await
+            let batches = df
+                .collect()
+                .await
                 .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
             // Serialize each RecordBatch as Arrow IPC for transport.
             let ipc_bytes: Vec<Vec<u8>> = batches
@@ -263,12 +269,13 @@ async fn run_builtin(
                     let mut buf = Vec::new();
                     {
                         use datafusion::arrow::ipc::writer::FileWriter;
-                        let mut writer =
-                            FileWriter::try_new(&mut buf, &batch.schema())
-                                .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
-                        writer.write(batch)
+                        let mut writer = FileWriter::try_new(&mut buf, &batch.schema())
                             .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
-                        writer.finish()
+                        writer
+                            .write(batch)
+                            .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
+                        writer
+                            .finish()
                             .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
                     }
                     Ok::<_, NlqError>(buf)
@@ -276,7 +283,10 @@ async fn run_builtin(
                 .collect::<Result<_>>()?;
             Ok(StepOutput::DataFrame(ipc_bytes))
         }
-        BuiltinTool::LlmFilter | BuiltinTool::LlmMap | BuiltinTool::Embed | BuiltinTool::VectorSearch => {
+        BuiltinTool::LlmFilter
+        | BuiltinTool::LlmMap
+        | BuiltinTool::Embed
+        | BuiltinTool::VectorSearch => {
             // These builtins delegate to the DataFusion extension nodes via SQL.
             // For now, surface a clear message — full wiring goes through NlqContext.query().
             Err(NlqError::WorkflowExecution(format!(
@@ -295,7 +305,11 @@ async fn run_python(
     // Python UDFs are executed via the atomic-worker PyO3 runtime.
     // The code string is the full function body; args are passed as JSON.
     // This dispatches through Atomic's existing Python UDF infrastructure.
-    log::debug!("running Python tool for step '{}': {} bytes of code", step.id, code.len());
+    log::debug!(
+        "running Python tool for step '{}': {} bytes of code",
+        step.id,
+        code.len()
+    );
     let args_json = serde_json::to_string(&step.args)
         .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
     // Placeholder: real dispatch goes through atomic_compute's Python pool.
@@ -311,7 +325,11 @@ async fn run_javascript(
     step: &WorkflowStep,
     _upstream: &HashMap<String, StepResult>,
 ) -> Result<StepOutput> {
-    log::debug!("running JS tool for step '{}': {} bytes of code", step.id, code.len());
+    log::debug!(
+        "running JS tool for step '{}': {} bytes of code",
+        step.id,
+        code.len()
+    );
     let args_json = serde_json::to_string(&step.args)
         .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
     Ok(StepOutput::Text(format!(

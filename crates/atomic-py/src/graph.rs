@@ -5,7 +5,8 @@ use atomic_graph::{
         connected_component, label_propagation, page_rank, shortest_path,
         strongly_connected_component, triangle_count,
     },
-    graph::Graph, topology::Edge,
+    graph::Graph,
+    topology::Edge,
 };
 use pyo3::prelude::*;
 
@@ -200,19 +201,14 @@ impl PyGraph {
             for edge in graph.edges() {
                 let src_vd = vdata.get(&edge.src).copied().unwrap_or(0.0);
                 let dst_vd = vdata.get(&edge.dst).copied().unwrap_or(0.0);
-                let result = send_msg.call1(
-                    py,
-                    (edge.src, src_vd, edge.dst, dst_vd, edge.attr),
-                )?;
+                let result = send_msg.call1(py, (edge.src, src_vd, edge.dst, dst_vd, edge.attr))?;
                 let pairs: Vec<(i64, f64)> = result
                     .bind(py)
                     .extract::<Vec<(i64, f64)>>()
                     .unwrap_or_default();
                 for (target, m) in pairs {
                     if let Some(existing) = msgs.get(&target).copied() {
-                        let merged = merge_msg
-                            .call1(py, (existing, m))?
-                            .extract::<f64>(py)?;
+                        let merged = merge_msg.call1(py, (existing, m))?.extract::<f64>(py)?;
                         msgs.insert(target, merged);
                     } else {
                         msgs.insert(target, m);
@@ -226,9 +222,7 @@ impl PyGraph {
 
             for (vid, msg) in &msgs {
                 if let Some(&old_vd) = vdata.get(vid) {
-                    let new_vd = vprog
-                        .call1(py, (*vid, old_vd, *msg))?
-                        .extract::<f64>(py)?;
+                    let new_vd = vprog.call1(py, (*vid, old_vd, *msg))?.extract::<f64>(py)?;
                     vdata.insert(*vid, new_vd);
                 }
             }

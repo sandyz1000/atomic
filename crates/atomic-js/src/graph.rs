@@ -1,22 +1,21 @@
-use std::collections::HashMap;
 use atomic_graph::{
-    graph::Graph,
-    pregel,
-    topology::{Edge, EdgeDirection},
     algo::{
-        connected_component,
-        label_propagation,
-        page_rank,
-        shortest_path,
-        strongly_connected_component,
-        triangle_count,
+        connected_component, label_propagation, page_rank, shortest_path,
+        strongly_connected_component, triangle_count,
     },
+    graph::Graph,
+    topology::Edge,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use std::collections::HashMap;
 
 // VertexId in atomic-graph is i64.
 type VertexId = i64;
+
+/// JS `send_msg` callback for Pregel: `(srcId, dstId, edgeAttr, srcRank, dstRank)`
+/// returns a list of `[targetId, message]` pairs.
+type PregelSendFn<'a> = Function<'a, FnArgs<(f64, f64, f64, f64, f64)>, Vec<Vec<f64>>>;
 
 #[napi]
 pub struct JsGraph {
@@ -38,7 +37,7 @@ impl JsGraph {
             .iter()
             .map(|v| {
                 let id = v
-                    .get(0)
+                    .first()
                     .and_then(|x| x.as_i64())
                     .ok_or_else(|| napi::Error::from_reason("vertex id must be integer"))?;
                 let w = v
@@ -53,7 +52,7 @@ impl JsGraph {
             .iter()
             .map(|e| {
                 let src = e
-                    .get(0)
+                    .first()
                     .and_then(|x| x.as_i64())
                     .ok_or_else(|| napi::Error::from_reason("edge src must be integer"))?;
                 let dst = e
@@ -130,12 +129,15 @@ impl JsGraph {
     #[napi(ts_return_type = "Record<string, Record<string, number>>")]
     pub fn shortest_path(&self, landmarks: Vec<i64>) -> Result<serde_json::Value> {
         // shortest_path::run requires Graph<(), f64>; build one from our f64/f64 graph.
-        let verts: Vec<(VertexId, ())> =
-            self.inner.vertices().map(|(id, _)| (id, ())).collect();
+        let verts: Vec<(VertexId, ())> = self.inner.vertices().map(|(id, _)| (id, ())).collect();
         let edges: Vec<Edge<f64>> = self
             .inner
             .edges()
-            .map(|e| Edge { src: e.src, dst: e.dst, attr: e.attr })
+            .map(|e| Edge {
+                src: e.src,
+                dst: e.dst,
+                attr: e.attr,
+            })
             .collect();
         let unit_graph: Graph<(), f64> = Graph::from_vertices_edges(verts, edges);
 
@@ -195,7 +197,7 @@ impl JsGraph {
         initial_msg: f64,
         max_iterations: u32,
         vprog: Function<FnArgs<(f64, f64, f64)>, f64>,
-        send_msg: Function<FnArgs<(f64, f64, f64, f64, f64)>, Vec<Vec<f64>>>,
+        send_msg: PregelSendFn<'_>,
         merge_msg: Function<FnArgs<(f64, f64)>, f64>,
     ) -> Result<JsGraph> {
         // Implement the Pregel loop directly so JS functions stay on the current
@@ -256,7 +258,6 @@ impl JsGraph {
         Ok(JsGraph { inner: result })
     }
 }
-
 
 fn i64map_f64_to_json(map: HashMap<VertexId, f64>) -> serde_json::Value {
     let m: serde_json::Map<String, serde_json::Value> = map

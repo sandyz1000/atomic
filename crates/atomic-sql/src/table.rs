@@ -9,8 +9,8 @@ use datafusion::error::Result as DFResult;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
 
-use crate::exec_plan::AtomicScanExec;
 use crate::errors::{AtomicSqlError, Result};
+use crate::exec_plan::AtomicScanExec;
 use crate::schema::project_schema;
 
 /// A DataFusion [`TableProvider`] backed by in-memory Arrow [`RecordBatch`]es.
@@ -30,10 +30,9 @@ pub struct AtomicTableProvider {
 impl AtomicTableProvider {
     /// Create from a flat list of batches (treated as a single partition).
     pub fn from_batches(batches: Vec<RecordBatch>) -> Result<Self> {
-        let schema = batches
-            .first()
-            .map(|b| b.schema())
-            .ok_or_else(|| AtomicSqlError::Schema("Cannot infer schema from empty batch list".into()))?;
+        let schema = batches.first().map(|b| b.schema()).ok_or_else(|| {
+            AtomicSqlError::Schema("Cannot infer schema from empty batch list".into())
+        })?;
         Ok(Self {
             schema,
             data: vec![batches],
@@ -48,7 +47,9 @@ impl AtomicTableProvider {
             .flat_map(|p| p.first())
             .map(|b| b.schema())
             .next()
-            .ok_or_else(|| AtomicSqlError::Schema("Cannot infer schema from empty partitions".into()))?;
+            .ok_or_else(|| {
+                AtomicSqlError::Schema("Cannot infer schema from empty partitions".into())
+            })?;
         Ok(Self {
             schema,
             data: partitions,
@@ -102,6 +103,9 @@ impl TableProvider for AtomicTableProvider {
             self.data.clone()
         };
 
-        Ok(Arc::new(AtomicScanExec::new(projected_data, projected_schema)))
+        Ok(Arc::new(AtomicScanExec::new(
+            projected_data,
+            projected_schema,
+        )))
     }
 }

@@ -52,7 +52,11 @@ impl<T: Data + Clone> CachedRdd<T> {
         let mut vals = RddVals::new(id);
         vals.should_cache = true;
         vals.dependencies.push(Dependency::OneToOne { rdd_base });
-        CachedRdd { inner, vals: Arc::new(vals), storage_level: level }
+        CachedRdd {
+            inner,
+            vals: Arc::new(vals),
+            storage_level: level,
+        }
     }
 
     /// Wrap `inner` with `MemoryOnly` (the default).
@@ -86,7 +90,6 @@ impl<T: Data + Clone> Clone for CachedRdd<T> {
         }
     }
 }
-
 
 impl<T: Data + Clone> RddBase for CachedRdd<T> {
     fn get_rdd_id(&self) -> usize {
@@ -123,7 +126,6 @@ impl<T: Data + Clone> RddBase for CachedRdd<T> {
     }
 }
 
-
 impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
     type Item = T;
 
@@ -141,10 +143,13 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
 
         match self.storage_level {
             StorageLevel::MemoryOnly | StorageLevel::MemoryOnlySer => {
-                if let Some(store) = PARTITION_CACHE.get() {
-                    if let Some(cached) = store.get::<T>(rdd_id, idx) {
-                        return Ok(Box::new(ArcVecIter { data: cached, pos: 0 }));
-                    }
+                if let Some(store) = PARTITION_CACHE.get()
+                    && let Some(cached) = store.get::<T>(rdd_id, idx)
+                {
+                    return Ok(Box::new(ArcVecIter {
+                        data: cached,
+                        pos: 0,
+                    }));
                 }
                 let items: Vec<T> = self.inner.iterator(split)?.collect();
                 let arc = Arc::new(items);
@@ -160,10 +165,13 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
                 // the caller registered a spill path via `persist_with_disk`).
                 // `PartitionStore::put` writes the evicted entry to disk if a spill
                 // path was registered.  No extra code needed here.
-                if let Some(store) = PARTITION_CACHE.get() {
-                    if let Some(cached) = store.get::<T>(rdd_id, idx) {
-                        return Ok(Box::new(ArcVecIter { data: cached, pos: 0 }));
-                    }
+                if let Some(store) = PARTITION_CACHE.get()
+                    && let Some(cached) = store.get::<T>(rdd_id, idx)
+                {
+                    return Ok(Box::new(ArcVecIter {
+                        data: cached,
+                        pos: 0,
+                    }));
                 }
                 let items: Vec<T> = self.inner.iterator(split)?.collect();
                 let arc = Arc::new(items);

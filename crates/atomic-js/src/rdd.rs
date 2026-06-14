@@ -38,7 +38,6 @@ pub struct JsRdd {
     staged: Option<StagedJsPipeline>,
 }
 
-
 impl JsRdd {
     pub fn from_data(
         elements: Vec<serde_json::Value>,
@@ -62,7 +61,7 @@ impl JsRdd {
     fn encode_source_partitions(&self) -> Result<Vec<Vec<u8>>> {
         let total = self.elements.len();
         let np = self.num_partitions.max(1);
-        let chunk_size = ((total + np - 1) / np).max(1);
+        let chunk_size = total.div_ceil(np).max(1);
 
         let mut partitions = Vec::with_capacity(np);
         for chunk in self.elements.chunks(chunk_size) {
@@ -155,10 +154,8 @@ impl JsRdd {
     }
 }
 
-
 #[napi]
 impl JsRdd {
-
     /// Apply `f` to each element, returning a new RDD.
     #[napi]
     pub fn map(&mut self, f: Function<serde_json::Value, serde_json::Value>) -> Result<JsRdd> {
@@ -590,7 +587,7 @@ impl JsRdd {
     ) -> Result<JsRdd> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = ((total + np - 1) / np).max(1);
+        let chunk_size = total.div_ceil(np).max(1);
         let mut elements = Vec::new();
         for chunk in self.elements.chunks(chunk_size) {
             let result = f.call(chunk.to_vec())?;
@@ -736,7 +733,6 @@ impl JsRdd {
         self.coalesce(n)
     }
 
-
     /// Return all elements as a JavaScript array.
     #[napi]
     pub fn collect(&mut self) -> Result<Vec<serde_json::Value>> {
@@ -875,7 +871,7 @@ impl JsRdd {
     ) -> Result<()> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = ((total + np - 1) / np).max(1);
+        let chunk_size = total.div_ceil(np).max(1);
         for chunk in self.elements.chunks(chunk_size) {
             f.call(chunk.to_vec())?;
         }
@@ -1097,7 +1093,7 @@ impl JsRdd {
     ) -> Result<serde_json::Value> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = ((total + np - 1) / np).max(1);
+        let chunk_size = total.div_ceil(np).max(1);
 
         let mut partition_results = Vec::new();
         for chunk in self.elements.chunks(chunk_size) {
@@ -1114,7 +1110,6 @@ impl JsRdd {
         }
         Ok(result)
     }
-
 
     /// Inner join two pair RDDs on their first element (key).
     ///
@@ -1217,7 +1212,6 @@ impl JsRdd {
         ))
     }
 
-
     /// Sort elements by a key extracted via `key_fn(element)`.
     ///
     /// `ascending` defaults to `true`. The key function is called on each
@@ -1296,7 +1290,6 @@ impl JsRdd {
         ))
     }
 
-
     /// Return elements divided into `num_partitions` logical partition arrays.
     ///
     /// Returns a nested JavaScript array, one inner array per partition.
@@ -1304,7 +1297,7 @@ impl JsRdd {
     pub fn glom(&self) -> Vec<Vec<serde_json::Value>> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = ((total + np - 1) / np).max(1);
+        let chunk_size = total.div_ceil(np).max(1);
         let mut result: Vec<Vec<serde_json::Value>> = self
             .elements
             .chunks(chunk_size)
@@ -1316,7 +1309,6 @@ impl JsRdd {
         }
         result
     }
-
 
     /// Mark this RDD to be cached in memory on first action.
     ///

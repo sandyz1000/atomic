@@ -11,7 +11,6 @@ use datafusion::arrow::array::{Int32Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 
-
 fn make_people_batch(ids: &[i32], names: &[&str], ages: &[i32]) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),
@@ -33,7 +32,6 @@ fn local_context() -> Arc<Context> {
     Context::local().expect("failed to create local atomic context")
 }
 
-
 #[tokio::test]
 async fn test_rdd_select_all() {
     let sc = local_context();
@@ -41,9 +39,13 @@ async fn test_rdd_select_all() {
 
     let rdd = sc.parallelize_typed(vec![batch], 1);
     let ctx = AtomicSqlContext::with_compute(Arc::clone(&sc));
-    ctx.register_rdd("people", rdd).expect("register_rdd failed");
+    ctx.register_rdd("people", rdd)
+        .expect("register_rdd failed");
 
-    let df = ctx.sql("SELECT id, name FROM people ORDER BY id").await.unwrap();
+    let df = ctx
+        .sql("SELECT id, name FROM people ORDER BY id")
+        .await
+        .unwrap();
     let batches = df.collect().await.unwrap();
 
     let ids: Vec<i32> = batches
@@ -64,13 +66,21 @@ async fn test_rdd_select_all() {
 #[tokio::test]
 async fn test_rdd_filter() {
     let sc = local_context();
-    let batch = make_people_batch(&[1, 2, 3, 4], &["Alice", "Bob", "Carol", "Dave"], &[30, 25, 35, 20]);
+    let batch = make_people_batch(
+        &[1, 2, 3, 4],
+        &["Alice", "Bob", "Carol", "Dave"],
+        &[30, 25, 35, 20],
+    );
 
     let rdd = sc.parallelize_typed(vec![batch], 1);
     let ctx = AtomicSqlContext::with_compute(Arc::clone(&sc));
-    ctx.register_rdd("people", rdd).expect("register_rdd failed");
+    ctx.register_rdd("people", rdd)
+        .expect("register_rdd failed");
 
-    let df = ctx.sql("SELECT name FROM people WHERE age > 28 ORDER BY name").await.unwrap();
+    let df = ctx
+        .sql("SELECT name FROM people WHERE age > 28 ORDER BY name")
+        .await
+        .unwrap();
     let batches = df.collect().await.unwrap();
 
     let names: Vec<String> = batches
@@ -98,7 +108,8 @@ async fn test_register_rdd_multipartition() {
     // Two separate batches → two partitions
     let rdd = sc.parallelize_typed(vec![batch1, batch2], 2);
     let ctx = AtomicSqlContext::with_compute(Arc::clone(&sc));
-    ctx.register_rdd("people", rdd).expect("register_rdd failed");
+    ctx.register_rdd("people", rdd)
+        .expect("register_rdd failed");
 
     let df = ctx.sql("SELECT COUNT(*) AS cnt FROM people").await.unwrap();
     let batches = df.collect().await.unwrap();
@@ -122,5 +133,8 @@ async fn test_rdd_needs_context() {
 
     let ctx = AtomicSqlContext::new(); // no compute context
     let result = ctx.register_rdd("people", rdd);
-    assert!(result.is_err(), "expected error when no compute context is set");
+    assert!(
+        result.is_err(),
+        "expected error when no compute context is set"
+    );
 }

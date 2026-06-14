@@ -13,7 +13,6 @@
 //! are in the `atomic-compute` crate (which is linked into every driver and worker
 //! binary), the handlers are always present — no user action required.
 
-
 pub mod count;
 pub mod distinct;
 pub mod max;

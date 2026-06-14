@@ -56,7 +56,7 @@ impl Checkpoint {
         let tmp_path = dir.join(format!("{}.tmp", filename));
 
         let bytes = bincode::encode_to_vec(self, bincode::config::standard())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         fs::write(&tmp_path, &bytes)?;
         fs::rename(&tmp_path, &final_path)?;
@@ -85,7 +85,11 @@ impl Checkpoint {
         let bytes = fs::read(&latest)?;
         let (cp, _) = bincode::decode_from_slice::<Self, _>(&bytes, bincode::config::standard())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        log::info!("Loaded checkpoint from {:?} (time={}ms)", latest, cp.checkpoint_time_ms);
+        log::info!(
+            "Loaded checkpoint from {:?} (time={}ms)",
+            latest,
+            cp.checkpoint_time_ms
+        );
         Ok(Some(cp))
     }
 
@@ -98,12 +102,11 @@ impl Checkpoint {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if let Some(ts_str) = name.strip_prefix("checkpoint-") {
-                if let Ok(ts) = ts_str.parse::<u64>() {
-                    if ts < threshold_ms {
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
+            if let Some(ts_str) = name.strip_prefix("checkpoint-")
+                && let Ok(ts) = ts_str.parse::<u64>()
+                && ts < threshold_ms
+            {
+                let _ = fs::remove_file(entry.path());
             }
         }
         Ok(())

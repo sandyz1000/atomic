@@ -1,3 +1,6 @@
+// Return-typed `task_fn!` closures need block bodies; clippy's unused_braces is a false positive.
+#![allow(unused_braces)]
+
 use atomic_compute::{context::Context, task, task_fn};
 use std::sync::Arc;
 
@@ -13,10 +16,7 @@ async fn test_count_by_value_words() {
         .map(|s| s.to_string())
         .collect();
 
-    let counts = ctx
-        .parallelize_typed(words, 2)
-        .count_by_value()
-        .unwrap();
+    let counts = ctx.parallelize_typed(words, 2).count_by_value().unwrap();
 
     assert_eq!(counts["apple"], 3);
     assert_eq!(counts["banana"], 2);

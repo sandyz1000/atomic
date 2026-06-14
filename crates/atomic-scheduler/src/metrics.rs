@@ -5,11 +5,9 @@
 ///
 /// Enable by setting `Config::metrics_port = Some(9090)` before creating a `Context`.
 use prometheus::{
-    Counter, CounterVec, Gauge, Histogram, HistogramOpts, HistogramVec, Opts, Registry,
-    TextEncoder, Encoder,
+    Counter, CounterVec, Encoder, Gauge, Histogram, HistogramOpts, Opts, TextEncoder,
 };
 use std::sync::OnceLock;
-
 
 static METRICS: OnceLock<SchedulerMetrics> = OnceLock::new();
 
@@ -22,7 +20,6 @@ pub fn init_metrics() -> &'static SchedulerMetrics {
 pub fn get_metrics() -> Option<&'static SchedulerMetrics> {
     METRICS.get()
 }
-
 
 /// All Prometheus metrics exposed by the Atomic scheduler.
 pub struct SchedulerMetrics {
@@ -127,6 +124,66 @@ impl SchedulerMetrics {
     }
 }
 
+pub fn start_metrics_server(port: u16) {
+    // Register metrics with the default registry before starting the server.
+    if let Some(m) = get_metrics() {
+        m.register_all();
+    }
+
+    tokio::spawn(async move {
+        use http_body_util::Full;
+        use hyper::body::Bytes;
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Method, Request, Response, StatusCode};
+
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("metrics server: failed to bind on port {port}: {e}");
+                return;
+            }
+        };
+
+        log::info!("Prometheus metrics endpoint listening on http://0.0.0.0:{port}/metrics");
+
+        loop {
+            let Ok((stream, _peer)) = listener.accept().await else {
+                continue;
+            };
+            let io = hyper_util::rt::TokioIo::new(stream);
+
+            tokio::spawn(async move {
+                let _ = http1::Builder::new()
+                    .serve_connection(
+                        io,
+                        service_fn(|req: Request<hyper::body::Incoming>| async move {
+                            let resp =
+                                if req.method() == Method::GET && req.uri().path() == "/metrics" {
+                                    let encoder = TextEncoder::new();
+                                    let families = prometheus::gather();
+                                    let mut buf = Vec::new();
+                                    let _ = encoder.encode(&families, &mut buf);
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header("Content-Type", encoder.format_type())
+                                        .body(Full::new(Bytes::from(buf)))
+                                        .unwrap()
+                                } else {
+                                    Response::builder()
+                                        .status(StatusCode::NOT_FOUND)
+                                        .body(Full::new(Bytes::from("not found")))
+                                        .unwrap()
+                                };
+                            Ok::<_, std::convert::Infallible>(resp)
+                        }),
+                    )
+                    .await;
+            });
+        }
+    });
+}
 
 /// Spawn a Prometheus `/metrics` HTTP server on `port`.
 ///
@@ -153,7 +210,10 @@ mod tests {
         let mut buf = Vec::new();
         encoder.encode(&families, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("atomic_tasks_total"), "expected metric in output");
+        assert!(
+            output.contains("atomic_tasks_total"),
+            "expected metric in output"
+        );
     }
 
     #[tokio::test]
@@ -175,68 +235,11 @@ mod tests {
             let mut buf = vec![0u8; 2048];
             let n = stream.read(&mut buf).await.unwrap_or(0);
             let response = String::from_utf8_lossy(&buf[..n]);
-            assert!(response.contains("200") || response.contains("HTTP"), "expected HTTP 200");
+            assert!(
+                response.contains("200") || response.contains("HTTP"),
+                "expected HTTP 200"
+            );
         }
         // If TCP connect fails the server may not have bound in time — that's OK in CI
     }
-}
-
-pub fn start_metrics_server(port: u16) {
-    // Register metrics with the default registry before starting the server.
-    if let Some(m) = get_metrics() {
-        m.register_all();
-    }
-
-    tokio::spawn(async move {
-        use hyper::server::conn::http1;
-        use hyper::service::service_fn;
-        use hyper::{Method, Request, Response, StatusCode};
-        use http_body_util::Full;
-        use hyper::body::Bytes;
-
-        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-        let listener = match tokio::net::TcpListener::bind(addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                log::error!("metrics server: failed to bind on port {port}: {e}");
-                return;
-            }
-        };
-
-        log::info!("Prometheus metrics endpoint listening on http://0.0.0.0:{port}/metrics");
-
-        loop {
-            let Ok((stream, _peer)) = listener.accept().await else { continue };
-            let io = hyper_util::rt::TokioIo::new(stream);
-
-            tokio::spawn(async move {
-                let _ = http1::Builder::new()
-                    .serve_connection(
-                        io,
-                        service_fn(|req: Request<hyper::body::Incoming>| async move {
-                            let resp = if req.method() == Method::GET
-                                && req.uri().path() == "/metrics"
-                            {
-                                let encoder = TextEncoder::new();
-                                let families = prometheus::gather();
-                                let mut buf = Vec::new();
-                                let _ = encoder.encode(&families, &mut buf);
-                                Response::builder()
-                                    .status(StatusCode::OK)
-                                    .header("Content-Type", encoder.format_type())
-                                    .body(Full::new(Bytes::from(buf)))
-                                    .unwrap()
-                            } else {
-                                Response::builder()
-                                    .status(StatusCode::NOT_FOUND)
-                                    .body(Full::new(Bytes::from("not found")))
-                                    .unwrap()
-                            };
-                            Ok::<_, std::convert::Infallible>(resp)
-                        }),
-                    )
-                    .await;
-            });
-        }
-    });
 }

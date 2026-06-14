@@ -115,7 +115,9 @@ impl Rdd for LocalFsReader<BytesReader> {
         let split = split
             .as_any()
             .downcast_ref::<BytesReader>()
-            .ok_or_else(|| BaseError::DowncastFailure("expected BytesReader split for LocalFsReader".into()))?;
+            .ok_or_else(|| {
+                BaseError::DowncastFailure("expected BytesReader split for LocalFsReader".into())
+            })?;
         let files_by_part = self.load_local_files()?;
         let idx = split.idx;
         let host = split.host;
@@ -139,10 +141,9 @@ impl Rdd for LocalFsReader<FileReader> {
     }
 
     fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
-        let split = split
-            .as_any()
-            .downcast_ref::<FileReader>()
-            .ok_or_else(|| BaseError::DowncastFailure("expected FileReader split for LocalFsReader".into()))?;
+        let split = split.as_any().downcast_ref::<FileReader>().ok_or_else(|| {
+            BaseError::DowncastFailure("expected FileReader split for LocalFsReader".into())
+        })?;
         let files_by_part = self.load_local_files()?;
         let idx = split.idx;
         let host = split.host;

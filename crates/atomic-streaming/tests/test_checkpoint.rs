@@ -7,7 +7,9 @@ fn test_roundtrip() {
     let cp = Checkpoint::new(1_000, 50, td.path().to_string_lossy().as_ref(), None);
     cp.write(td.path()).unwrap();
 
-    let loaded = Checkpoint::read_latest(td.path()).unwrap().expect("should find a checkpoint");
+    let loaded = Checkpoint::read_latest(td.path())
+        .unwrap()
+        .expect("should find a checkpoint");
     assert_eq!(loaded.checkpoint_time_ms, 1_000);
     assert_eq!(loaded.batch_duration_ms, 50);
 }
@@ -95,5 +97,8 @@ fn test_batch_loop_checkpoint() {
 
     // The batch loop should have written at least one checkpoint file.
     let result = Checkpoint::read_latest(td.path()).unwrap();
-    assert!(result.is_some(), "batch loop should write checkpoints when dir is set");
+    assert!(
+        result.is_some(),
+        "batch loop should write checkpoints when dir is set"
+    );
 }

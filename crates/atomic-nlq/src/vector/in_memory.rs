@@ -20,7 +20,11 @@ pub struct InMemoryVectorIndex {
 
 impl InMemoryVectorIndex {
     pub fn new(name: impl Into<String>, dim: usize) -> Self {
-        Self { name: name.into(), dim, store: RwLock::new(HashMap::new()) }
+        Self {
+            name: name.into(),
+            dim,
+            store: RwLock::new(HashMap::new()),
+        }
     }
 }
 

@@ -1,10 +1,8 @@
-use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use datafusion::arrow::array::{Array, ArrayRef, FixedSizeListArray, Float32Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -37,7 +35,6 @@ fn model_dim(model: &str, config_override: Option<usize>) -> i32 {
         _ => 1024, // safe fallback
     }
 }
-
 
 /// Adds a `FixedSizeList<Float32>` embedding column to each row.
 #[derive(Debug, Clone)]
@@ -72,8 +69,12 @@ impl Hash for EmbedNode {
 
 impl PartialOrd for EmbedNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        (&self.input_col, &self.output_col, &self.model, self.dim)
-            .partial_cmp(&(&other.input_col, &other.output_col, &other.model, other.dim))
+        (&self.input_col, &self.output_col, &self.model, self.dim).partial_cmp(&(
+            &other.input_col,
+            &other.output_col,
+            &other.model,
+            other.dim,
+        ))
     }
 }
 
@@ -87,7 +88,14 @@ impl EmbedNode {
     ) -> Self {
         let dim = model_dim(&model, embed_model_dim);
         let output_schema = build_output_df_schema(&input, &output_col, dim);
-        Self { input_col, output_col, model, dim, input, output_schema }
+        Self {
+            input_col,
+            output_col,
+            model,
+            dim,
+            input,
+            output_schema,
+        }
     }
 }
 
@@ -128,7 +136,11 @@ impl UserDefinedLogicalNodeCore for EmbedNode {
         )
     }
 
-    fn with_exprs_and_inputs(&self, _exprs: Vec<Expr>, mut inputs: Vec<LogicalPlan>) -> DFResult<Self> {
+    fn with_exprs_and_inputs(
+        &self,
+        _exprs: Vec<Expr>,
+        mut inputs: Vec<LogicalPlan>,
+    ) -> DFResult<Self> {
         let new_input = inputs.swap_remove(0);
         let output_schema = build_output_df_schema(&new_input, &self.output_col, self.dim);
         Ok(Self {
@@ -141,7 +153,6 @@ impl UserDefinedLogicalNodeCore for EmbedNode {
         })
     }
 }
-
 
 pub struct EmbedExec {
     input_col: String,
@@ -202,7 +213,11 @@ impl EmbedExec {
 
 impl DisplayAs for EmbedExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "EmbedExec: output_col={}, model={}", self.output_col, self.model)
+        write!(
+            f,
+            "EmbedExec: output_col={}, model={}",
+            self.output_col, self.model
+        )
     }
 }
 
@@ -334,7 +349,10 @@ impl ExecutionPlan for EmbedExec {
             }
         };
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema_for_adapter, out)))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema_for_adapter,
+            out,
+        )))
     }
 }
 
@@ -349,18 +367,17 @@ fn append_empty_embed_col(
 
 fn build_embed_batch(
     input: &RecordBatch,
-    output_col: &str,
+    _output_col: &str,
     dim: i32,
     embeddings: Vec<Vec<f32>>,
     schema: SchemaRef,
 ) -> DFResult<RecordBatch> {
-    let n = embeddings.len();
+    let _n = embeddings.len();
     let flat: Vec<f32> = embeddings.into_iter().flatten().collect();
 
     let values = Arc::new(Float32Array::from(flat));
     let item_field = Arc::new(Field::new("item", DataType::Float32, true));
-    let embed_col: ArrayRef =
-        Arc::new(FixedSizeListArray::try_new(item_field, dim, values, None)?);
+    let embed_col: ArrayRef = Arc::new(FixedSizeListArray::try_new(item_field, dim, values, None)?);
 
     let mut columns: Vec<ArrayRef> = input.columns().to_vec();
     columns.push(embed_col);

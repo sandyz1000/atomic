@@ -6,17 +6,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Shared queue of per-batch RDDs feeding a `queue_stream`.
+type RddQueue = Arc<Mutex<VecDeque<Arc<dyn atomic_data::rdd::Rdd<Item = i32>>>>>;
+
 fn local_sc() -> Arc<Context> {
     Context::local().unwrap()
 }
 
-fn ssc_with_queue(
-    sc: Arc<Context>,
-    batch_ms: u64,
-) -> (
-    Arc<StreamingContext>,
-    Arc<Mutex<VecDeque<Arc<dyn atomic_data::rdd::Rdd<Item = i32>>>>>,
-) {
+fn ssc_with_queue(sc: Arc<Context>, batch_ms: u64) -> (Arc<StreamingContext>, RddQueue) {
     let ssc = StreamingContext::new(sc, Duration::from_millis(batch_ms));
     let queue = Arc::new(Mutex::new(VecDeque::new()));
     let stream = ssc.queue_stream(Arc::clone(&queue), true);

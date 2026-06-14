@@ -6,8 +6,8 @@ use atomic_data::data::Data;
 use atomic_data::rdd::Rdd;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Global counter for unique RDD IDs created by streaming transforms.
@@ -256,9 +256,13 @@ where
     T: Data + Clone,
     F: Fn(Arc<dyn Rdd<Item = T>>, u64) + Send + Sync + 'static,
 {
+    // Retained from construction; the output-operation path drives execution
+    // through `foreach_func`/`parent` and does not read these directly.
+    #[allow(dead_code)]
     stream_id: usize,
     parent: Arc<dyn DStream<T>>,
     foreach_func: Arc<F>,
+    #[allow(dead_code)]
     ssc: Arc<StreamingContext>,
 }
 

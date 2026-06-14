@@ -14,8 +14,13 @@ use std::time::Duration;
 // Rate estimation (stub — Phase 4)
 
 pub trait RateEstimator: Send + Sync {
-    fn compute(&self, time_ms: u64, elements: u64, work_delay_ms: u64, wait_delay_ms: u64)
-        -> Option<f64>;
+    fn compute(
+        &self,
+        time_ms: u64,
+        elements: u64,
+        work_delay_ms: u64,
+        wait_delay_ms: u64,
+    ) -> Option<f64>;
 }
 
 // Common state for input DStreams
@@ -29,7 +34,11 @@ pub struct InputDStreamState {
 impl InputDStreamState {
     pub fn new(ssc: Arc<StreamingContext>, stream_id: usize) -> Self {
         let batch_duration = ssc.batch_duration;
-        InputDStreamState { stream_id, ssc, batch_duration }
+        InputDStreamState {
+            stream_id,
+            ssc,
+            batch_duration,
+        }
     }
 }
 
@@ -90,7 +99,9 @@ impl<T: Data + Clone> DStream<T> for QueueInputDStream<T> {
         } else if rdds.len() == 1 {
             Some(rdds.into_iter().next().unwrap())
         } else {
-            ctx.union(&rdds).ok().map(|u| Arc::new(u) as Arc<dyn Rdd<Item = T>>)
+            ctx.union(&rdds)
+                .ok()
+                .map(|u| Arc::new(u) as Arc<dyn Rdd<Item = T>>)
         }
     }
 
@@ -196,7 +207,11 @@ impl DStream<String> for FileInputDStream {
                     candidates
                 }
                 Err(e) => {
-                    log::error!("FileInputDStream: failed to read dir {:?}: {}", self.directory, e);
+                    log::error!(
+                        "FileInputDStream: failed to read dir {:?}: {}",
+                        self.directory,
+                        e
+                    );
                     vec![]
                 }
             }

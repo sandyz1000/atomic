@@ -15,9 +15,13 @@ where
 {
     stream_id: usize,
     parent: Arc<dyn DStream<T>>,
-    transform_func: Arc<dyn Fn(Arc<dyn Rdd<Item = T>>, u64) -> Arc<dyn Rdd<Item = U>> + Send + Sync>,
+    transform_func: TransformFn<T, U>,
     generated: Mutex<HashMap<u64, Arc<dyn Rdd<Item = U>>>>,
 }
+
+/// User transform applied per batch: `(batch_rdd, time_ms) -> new_rdd`.
+type TransformFn<T, U> =
+    Arc<dyn Fn(Arc<dyn Rdd<Item = T>>, u64) -> Arc<dyn Rdd<Item = U>> + Send + Sync>;
 
 impl<T, U> TransformedDStream<T, U>
 where

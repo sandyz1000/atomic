@@ -54,7 +54,13 @@ impl OpDispatcher for NativeDispatcher {
                          add `register_shuffle_map!(K, V)` to your binary"
                     ))),
                     Some(handler) => {
-                        handler(data, *shuffle_id, partition_id, *num_output_partitions, spec)?;
+                        handler(
+                            data,
+                            *shuffle_id,
+                            partition_id,
+                            *num_output_partitions,
+                            spec,
+                        )?;
                         Ok(data.to_vec())
                     }
                 }
@@ -166,7 +172,7 @@ impl Backend for ComputeEngine {
             .ops
             .iter()
             .any(|op| matches!(op.action, TaskAction::ShuffleMap { .. }))
-            .then(|| atomic_data::env::get_shuffle_server_uri())
+            .then(atomic_data::env::get_shuffle_server_uri)
             .flatten();
 
         Ok(TaskResultEnvelope::ok(

@@ -4,6 +4,8 @@
 use std::time::Duration;
 
 pub struct ExecutorAllocationManager {
+    // WIP: drives the scaling cadence once dynamic executor allocation is implemented.
+    #[allow(dead_code)]
     batch_duration: Duration,
 }
 

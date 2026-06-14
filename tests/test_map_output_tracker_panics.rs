@@ -23,10 +23,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 fn tracker() -> MapOutputTracker {
     // `is_master = false` avoids spawning the background HTTP server.
     // Safe for unit tests — no tokio runtime required.
-    MapOutputTracker::new(
-        false,
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-    )
+    MapOutputTracker::new(false, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
 }
 
 // ── Bug B2 ────────────────────────────────────────────────────────────────────
@@ -47,9 +44,12 @@ fn test_unregistered_shuffle() {
 fn test_register_map_ok() {
     let t = tracker();
     t.register_shuffle(1, 3);
-    t.register_map_output(1, 0, "http://host1:9000".to_string()).unwrap();
-    t.register_map_output(1, 1, "http://host2:9000".to_string()).unwrap();
-    t.register_map_output(1, 2, "http://host3:9000".to_string()).unwrap();
+    t.register_map_output(1, 0, "http://host1:9000".to_string())
+        .unwrap();
+    t.register_map_output(1, 1, "http://host2:9000".to_string())
+        .unwrap();
+    t.register_map_output(1, 2, "http://host3:9000".to_string())
+        .unwrap();
     // All three slots filled.
     assert!(t.server_uris.contains_key(&1));
 }
@@ -73,8 +73,10 @@ fn test_oob_map_id() {
 fn test_inbounds_map_id() {
     let t = tracker();
     t.register_shuffle(5, 3);
-    t.register_map_output(5, 0, "http://a:9000".to_string()).unwrap();
-    t.register_map_output(5, 2, "http://c:9000".to_string()).unwrap();
+    t.register_map_output(5, 0, "http://a:9000".to_string())
+        .unwrap();
+    t.register_map_output(5, 2, "http://c:9000".to_string())
+        .unwrap();
     // map_id 1 left as None — that is valid.
 }
 

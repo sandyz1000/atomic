@@ -1,8 +1,8 @@
 use atomic_compute::context::Context;
 use atomic_data::rdd::Rdd;
 use atomic_streaming::context::StreamingContext;
-use atomic_streaming::dstream::mapped::{FilteredDStream, MappedDStream};
 use atomic_streaming::dstream::DStream;
+use atomic_streaming::dstream::mapped::{FilteredDStream, MappedDStream};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -31,7 +31,11 @@ fn test_map_pipeline() {
     queue.lock().push_back(make_rdd(&sc, vec![1, 2, 3]));
 
     let stream = ssc.queue_stream(Arc::clone(&queue), true);
-    let mapped = Arc::new(MappedDStream::new(next_id(), stream as Arc<dyn DStream<i32>>, |x: i32| x * 2));
+    let mapped = Arc::new(MappedDStream::new(
+        next_id(),
+        stream as Arc<dyn DStream<i32>>,
+        |x: i32| x * 2,
+    ));
 
     let results: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
     let res_cl = Arc::clone(&results);
@@ -39,7 +43,9 @@ fn test_map_pipeline() {
     ssc.foreach_rdd(mapped as Arc<dyn DStream<i32>>, move |rdd, _t| {
         if let Ok(parts) = sc_cl.run_job(rdd.get_rdd(), |iter| iter.collect::<Vec<i32>>()) {
             let mut v = res_cl.lock();
-            for p in parts { v.extend(p); }
+            for p in parts {
+                v.extend(p);
+            }
         }
     });
 
@@ -78,7 +84,9 @@ fn test_filter_map_pipeline() {
     ssc.foreach_rdd(mapped as Arc<dyn DStream<i32>>, move |rdd, _t| {
         if let Ok(parts) = sc_cl.run_job(rdd.get_rdd(), |iter| iter.collect::<Vec<i32>>()) {
             let mut v = res_cl.lock();
-            for p in parts { v.extend(p); }
+            for p in parts {
+                v.extend(p);
+            }
         }
     });
 
@@ -108,7 +116,9 @@ fn test_multiple_batches() {
     ssc.foreach_rdd(stream, move |rdd, _t| {
         if let Ok(parts) = sc_cl.run_job(rdd.get_rdd(), |iter| iter.collect::<Vec<i32>>()) {
             let mut v = res_cl.lock();
-            for p in parts { v.extend(p); }
+            for p in parts {
+                v.extend(p);
+            }
         }
     });
 
@@ -179,7 +189,9 @@ fn test_pipeline_checkpoint() {
     ssc.foreach_rdd(stream, move |rdd, _t| {
         if let Ok(parts) = sc_cl.run_job(rdd.get_rdd(), |iter| iter.collect::<Vec<i32>>()) {
             let mut v = res_cl.lock();
-            for p in parts { v.extend(p); }
+            for p in parts {
+                v.extend(p);
+            }
         }
     });
 

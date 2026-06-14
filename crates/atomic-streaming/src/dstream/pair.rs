@@ -10,6 +10,11 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Per-batch cache of generated RDDs, keyed by batch validation time (ms).
+type GeneratedRdds<T> = Mutex<HashMap<u64, Arc<dyn Rdd<Item = T>>>>;
+/// Cached running-state RDD for stateful DStreams.
+type StateRdd<T> = Mutex<Option<Arc<dyn Rdd<Item = T>>>>;
+
 // StateSpec and StateSpecImpl (stubs for mapWithState)
 
 pub trait StateSpec<K, V, S, M>: Sized + Send + Sync + 'static {
@@ -38,7 +43,9 @@ impl<K, V, S, M> StateSpecImpl<K, V, S, M> {
 }
 
 impl<K, V, S, M> Default for StateSpecImpl<K, V, S, M> {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<K, V, S, M> StateSpec<K, V, S, M> for StateSpecImpl<K, V, S, M>
@@ -49,13 +56,16 @@ where
     M: Data + Clone,
 {
     fn initial_state(mut self, rdd: Arc<dyn Rdd<Item = (K, S)>>) -> Self {
-        self.initial_state_rdd = Some(rdd); self
+        self.initial_state_rdd = Some(rdd);
+        self
     }
     fn num_partitions(mut self, n: usize) -> Self {
-        self.num_partitions = Some(n); self
+        self.num_partitions = Some(n);
+        self
     }
     fn timeout(mut self, idle: Duration) -> Self {
-        self.timeout = Some(idle); self
+        self.timeout = Some(idle);
+        self
     }
 }
 
@@ -90,14 +100,23 @@ where
     {
         let id = self.ssc.sc.new_rdd_id();
         Arc::new(ReduceByKeyDStream::new(
-            id, self.stream.clone(), self.ssc.clone(), func, num_partitions,
+            id,
+            self.stream.clone(),
+            self.ssc.clone(),
+            func,
+            num_partitions,
         ))
     }
 
     /// Group values with the same key in each batch.
     pub fn group_by_key(&self, num_partitions: usize) -> Arc<GroupByKeyDStream<K, V>> {
         let id = self.ssc.sc.new_rdd_id();
-        Arc::new(GroupByKeyDStream::new(id, self.stream.clone(), self.ssc.clone(), num_partitions))
+        Arc::new(GroupByKeyDStream::new(
+            id,
+            self.stream.clone(),
+            self.ssc.clone(),
+            num_partitions,
+        ))
     }
 
     /// Join two pair DStreams on matching keys in each batch.
@@ -113,7 +132,12 @@ where
         Vec<(K, W)>: Data + Clone,
     {
         let id = self.ssc.sc.new_rdd_id();
-        Arc::new(JoinDStream::new(id, self.stream.clone(), other, self.ssc.clone()))
+        Arc::new(JoinDStream::new(
+            id,
+            self.stream.clone(),
+            other,
+            self.ssc.clone(),
+        ))
     }
 
     /// Left-outer join two pair DStreams.
@@ -127,7 +151,12 @@ where
         Vec<(K, W)>: Data + Clone,
     {
         let id = self.ssc.sc.new_rdd_id();
-        Arc::new(LeftOuterJoinDStream::new(id, self.stream.clone(), other, self.ssc.clone()))
+        Arc::new(LeftOuterJoinDStream::new(
+            id,
+            self.stream.clone(),
+            other,
+            self.ssc.clone(),
+        ))
     }
 
     /// Update running state for each key across batches.
@@ -137,10 +166,7 @@ where
     /// evicts the key from the state store.
     ///
     /// The returned `StateDStream` emits the full `(K, S)` state RDD each batch.
-    pub fn update_state_by_key<S, F>(
-        &self,
-        func: F,
-    ) -> Arc<StateDStream<K, V, S, F>>
+    pub fn update_state_by_key<S, F>(&self, func: F) -> Arc<StateDStream<K, V, S, F>>
     where
         S: Data + Clone + std::fmt::Debug + 'static,
         F: Fn(&[V], Option<S>) -> Option<S> + Send + Sync + Clone + 'static,
@@ -148,7 +174,12 @@ where
         V: std::fmt::Debug + 'static,
     {
         let id = self.ssc.sc.new_rdd_id();
-        Arc::new(StateDStream::new(id, self.stream.clone(), self.ssc.clone(), func))
+        Arc::new(StateDStream::new(
+            id,
+            self.stream.clone(),
+            self.ssc.clone(),
+            func,
+        ))
     }
 }
 
@@ -164,8 +195,10 @@ where
     parent: Arc<dyn DStream<(K, V)>>,
     ssc: Arc<StreamingContext>,
     reduce_func: Arc<F>,
+    /// Output partition count taken at construction; reserved for partition-aware shuffle.
+    #[allow(dead_code)]
     num_partitions: usize,
-    generated: Mutex<HashMap<u64, Arc<dyn Rdd<Item = (K, V)>>>>,
+    generated: GeneratedRdds<(K, V)>,
 }
 
 impl<K, V, F> ReduceByKeyDStream<K, V, F>
@@ -182,7 +215,9 @@ where
         num_partitions: usize,
     ) -> Self {
         ReduceByKeyDStream {
-            stream_id, parent, ssc,
+            stream_id,
+            parent,
+            ssc,
             reduce_func: Arc::new(func),
             num_partitions,
             generated: Mutex::new(HashMap::new()),
@@ -196,8 +231,12 @@ where
     V: Data + Clone,
     F: Fn(V, V) -> V + Send + Sync + 'static,
 {
-    fn slide_duration(&self) -> Duration { self.parent.slide_duration() }
-    fn id(&self) -> usize { self.stream_id }
+    fn slide_duration(&self) -> Duration {
+        self.parent.slide_duration()
+    }
+    fn id(&self) -> usize {
+        self.stream_id
+    }
     fn base_dependencies(&self) -> Vec<Arc<dyn DStreamBase>> {
         vec![self.parent.clone() as Arc<dyn DStreamBase>]
     }
@@ -214,21 +253,25 @@ where
         let ctx = self.ssc.sc.clone();
         let f = self.reduce_func.clone();
 
-        let pairs = ctx.run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
+        let pairs = ctx
+            .run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
             .unwrap_or_default();
 
         let mut agg: std::collections::HashMap<K, V> = std::collections::HashMap::new();
         for partition in pairs {
             for (k, v) in partition {
                 agg.entry(k)
-                    .and_modify(|c| { let new_c = f(c.clone(), v.clone()); *c = new_c; })
+                    .and_modify(|c| {
+                        let new_c = f(c.clone(), v.clone());
+                        *c = new_c;
+                    })
                     .or_insert(v);
             }
         }
         let result: Vec<(K, V)> = agg.into_iter().collect();
         let id = ctx.new_rdd_id();
         Some(Arc::new(
-            atomic_compute::rdd::parallel_collection::ParallelCollection::new(id, result, 1)
+            atomic_compute::rdd::parallel_collection::ParallelCollection::new(id, result, 1),
         ))
     }
 
@@ -255,8 +298,10 @@ where
     stream_id: usize,
     parent: Arc<dyn DStream<(K, V)>>,
     ssc: Arc<StreamingContext>,
+    /// Output partition count taken at construction; reserved for partition-aware shuffle.
+    #[allow(dead_code)]
     num_partitions: usize,
-    generated: Mutex<HashMap<u64, Arc<dyn Rdd<Item = (K, Vec<V>)>>>>,
+    generated: GeneratedRdds<(K, Vec<V>)>,
 }
 
 impl<K, V> GroupByKeyDStream<K, V>
@@ -270,7 +315,13 @@ where
         ssc: Arc<StreamingContext>,
         num_partitions: usize,
     ) -> Self {
-        GroupByKeyDStream { stream_id, parent, ssc, num_partitions, generated: Mutex::new(HashMap::new()) }
+        GroupByKeyDStream {
+            stream_id,
+            parent,
+            ssc,
+            num_partitions,
+            generated: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -279,8 +330,12 @@ where
     K: Data + Clone + Hash + Eq,
     V: Data + Clone,
 {
-    fn slide_duration(&self) -> Duration { self.parent.slide_duration() }
-    fn id(&self) -> usize { self.stream_id }
+    fn slide_duration(&self) -> Duration {
+        self.parent.slide_duration()
+    }
+    fn id(&self) -> usize {
+        self.stream_id
+    }
     fn base_dependencies(&self) -> Vec<Arc<dyn DStreamBase>> {
         vec![self.parent.clone() as Arc<dyn DStreamBase>]
     }
@@ -295,7 +350,8 @@ where
         let parent_rdd = self.parent.get_or_compute(valid_time_ms)?;
         let ctx = self.ssc.sc.clone();
 
-        let pairs = ctx.run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
+        let pairs = ctx
+            .run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
             .unwrap_or_default();
 
         let mut agg: std::collections::HashMap<K, Vec<V>> = std::collections::HashMap::new();
@@ -307,14 +363,16 @@ where
         let result: Vec<(K, Vec<V>)> = agg.into_iter().collect();
         let id = ctx.new_rdd_id();
         Some(Arc::new(
-            atomic_compute::rdd::parallel_collection::ParallelCollection::new(id, result, 1)
+            atomic_compute::rdd::parallel_collection::ParallelCollection::new(id, result, 1),
         ))
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, Vec<V>)>>> {
         {
             let cache = self.generated.lock();
-            if let Some(rdd) = cache.get(&valid_time_ms) { return Some(rdd.clone()); }
+            if let Some(rdd) = cache.get(&valid_time_ms) {
+                return Some(rdd.clone());
+            }
         }
         let rdd = self.compute(valid_time_ms)?;
         self.generated.lock().insert(valid_time_ms, rdd.clone());
@@ -334,7 +392,7 @@ where
     left: Arc<dyn DStream<(K, V)>>,
     right: Arc<dyn DStream<(K, W)>>,
     ssc: Arc<StreamingContext>,
-    generated: Mutex<HashMap<u64, Arc<dyn Rdd<Item = (K, (V, W))>>>>,
+    generated: GeneratedRdds<(K, (V, W))>,
 }
 
 impl<K, V, W> JoinDStream<K, V, W>
@@ -349,7 +407,13 @@ where
         right: Arc<dyn DStream<(K, W)>>,
         ssc: Arc<StreamingContext>,
     ) -> Self {
-        JoinDStream { stream_id, left, right, ssc, generated: Mutex::new(HashMap::new()) }
+        JoinDStream {
+            stream_id,
+            left,
+            right,
+            ssc,
+            generated: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -359,8 +423,12 @@ where
     V: Data + Clone,
     W: Data + Clone,
 {
-    fn slide_duration(&self) -> Duration { self.left.slide_duration() }
-    fn id(&self) -> usize { self.stream_id }
+    fn slide_duration(&self) -> Duration {
+        self.left.slide_duration()
+    }
+    fn id(&self) -> usize {
+        self.stream_id
+    }
     fn base_dependencies(&self) -> Vec<Arc<dyn DStreamBase>> {
         vec![
             self.left.clone() as Arc<dyn DStreamBase>,
@@ -389,7 +457,9 @@ where
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, (V, W))>>> {
         {
             let cache = self.generated.lock();
-            if let Some(rdd) = cache.get(&valid_time_ms) { return Some(rdd.clone()); }
+            if let Some(rdd) = cache.get(&valid_time_ms) {
+                return Some(rdd.clone());
+            }
         }
         let rdd = self.compute(valid_time_ms)?;
         self.generated.lock().insert(valid_time_ms, rdd.clone());
@@ -407,7 +477,7 @@ where
     left: Arc<dyn DStream<(K, V)>>,
     right: Arc<dyn DStream<(K, W)>>,
     ssc: Arc<StreamingContext>,
-    generated: Mutex<HashMap<u64, Arc<dyn Rdd<Item = (K, (V, Option<W>))>>>>,
+    generated: GeneratedRdds<(K, (V, Option<W>))>,
 }
 
 impl<K, V, W> LeftOuterJoinDStream<K, V, W>
@@ -422,7 +492,13 @@ where
         right: Arc<dyn DStream<(K, W)>>,
         ssc: Arc<StreamingContext>,
     ) -> Self {
-        LeftOuterJoinDStream { stream_id, left, right, ssc, generated: Mutex::new(HashMap::new()) }
+        LeftOuterJoinDStream {
+            stream_id,
+            left,
+            right,
+            ssc,
+            generated: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -432,8 +508,12 @@ where
     V: Data + Clone,
     W: Data + Clone,
 {
-    fn slide_duration(&self) -> Duration { self.left.slide_duration() }
-    fn id(&self) -> usize { self.stream_id }
+    fn slide_duration(&self) -> Duration {
+        self.left.slide_duration()
+    }
+    fn id(&self) -> usize {
+        self.stream_id
+    }
     fn base_dependencies(&self) -> Vec<Arc<dyn DStreamBase>> {
         vec![
             self.left.clone() as Arc<dyn DStreamBase>,
@@ -459,10 +539,15 @@ where
         Some(left_typed.left_outer_join_local(right_typed).into_rdd())
     }
 
-    fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, (V, Option<W>))>>> {
+    fn get_or_compute(
+        &self,
+        valid_time_ms: u64,
+    ) -> Option<Arc<dyn Rdd<Item = (K, (V, Option<W>))>>> {
         {
             let cache = self.generated.lock();
-            if let Some(rdd) = cache.get(&valid_time_ms) { return Some(rdd.clone()); }
+            if let Some(rdd) = cache.get(&valid_time_ms) {
+                return Some(rdd.clone());
+            }
         }
         let rdd = self.compute(valid_time_ms)?;
         self.generated.lock().insert(valid_time_ms, rdd.clone());
@@ -489,8 +574,8 @@ where
     ssc: Arc<StreamingContext>,
     update_fn: Arc<F>,
     /// Current state RDD (grows/shrinks as keys are added/evicted).
-    state_rdd: Mutex<Option<Arc<dyn Rdd<Item = (K, S)>>>>,
-    generated: Mutex<HashMap<u64, Arc<dyn Rdd<Item = (K, S)>>>>,
+    state_rdd: StateRdd<(K, S)>,
+    generated: GeneratedRdds<(K, S)>,
 }
 
 impl<K, V, S, F> StateDStream<K, V, S, F>
@@ -507,7 +592,9 @@ where
         func: F,
     ) -> Self {
         StateDStream {
-            stream_id, parent, ssc,
+            stream_id,
+            parent,
+            ssc,
             update_fn: Arc::new(func),
             state_rdd: Mutex::new(None),
             generated: Mutex::new(HashMap::new()),
@@ -522,8 +609,12 @@ where
     S: Data + Clone,
     F: Fn(&[V], Option<S>) -> Option<S> + Send + Sync + Clone + 'static,
 {
-    fn slide_duration(&self) -> Duration { self.parent.slide_duration() }
-    fn id(&self) -> usize { self.stream_id }
+    fn slide_duration(&self) -> Duration {
+        self.parent.slide_duration()
+    }
+    fn id(&self) -> usize {
+        self.stream_id
+    }
     fn base_dependencies(&self) -> Vec<Arc<dyn DStreamBase>> {
         vec![self.parent.clone() as Arc<dyn DStreamBase>]
     }
@@ -544,7 +635,8 @@ where
         let func = self.update_fn.clone();
 
         // Collect new batch values grouped by key.
-        let new_pairs = ctx.run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
+        let new_pairs = ctx
+            .run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
             .unwrap_or_default();
         let mut new_by_key: std::collections::HashMap<K, Vec<V>> = std::collections::HashMap::new();
         for partition in new_pairs {
@@ -584,8 +676,10 @@ where
         let id = ctx.new_rdd_id();
         let new_rdd: Arc<dyn Rdd<Item = (K, S)>> = Arc::new(
             atomic_compute::rdd::parallel_collection::ParallelCollection::new(
-                id, state_vec.clone(), 1,
-            )
+                id,
+                state_vec.clone(),
+                1,
+            ),
         );
 
         // Persist the new state for the next batch.
@@ -597,7 +691,9 @@ where
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, S)>>> {
         {
             let cache = self.generated.lock();
-            if let Some(rdd) = cache.get(&valid_time_ms) { return Some(rdd.clone()); }
+            if let Some(rdd) = cache.get(&valid_time_ms) {
+                return Some(rdd.clone());
+            }
         }
         let rdd = self.compute(valid_time_ms)?;
         self.generated.lock().insert(valid_time_ms, rdd.clone());

@@ -27,6 +27,15 @@ pub enum ShuffleError {
     #[error("shuffle fetcher failed while fetching chunk")]
     FailedFetchOp,
 
+    /// A specific map output could not be fetched because its host is
+    /// unreachable. Carries the identity needed to recompute that map partition.
+    #[error("fetch failed: shuffle {shuffle_id} map {map_id} on {server_uri}")]
+    FetchFailed {
+        shuffle_id: usize,
+        map_id: usize,
+        server_uri: String,
+    },
+
     #[error("failed to start shuffle server")]
     FailedToStart,
 
@@ -100,6 +109,23 @@ impl From<ShuffleError> for Response<Body> {
     }
 }
 
+impl From<ShuffleError> for crate::error::BaseError {
+    fn from(err: ShuffleError) -> Self {
+        match err {
+            ShuffleError::FetchFailed {
+                shuffle_id,
+                map_id,
+                server_uri,
+            } => crate::error::BaseError::FetchFailed {
+                shuffle_id,
+                map_id,
+                server_uri,
+            },
+            other => crate::error::BaseError::Other(other.to_string()),
+        }
+    }
+}
+
 impl ShuffleError {
     pub fn no_port(&self) -> bool {
         matches!(
@@ -116,5 +142,38 @@ impl From<ShuffleError> for tonic::Status {
             ShuffleError::RequestedCacheNotFound => tonic::Status::not_found(err.to_string()),
             _ => tonic::Status::internal(err.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShuffleError;
+    use crate::error::BaseError;
+
+    #[test]
+    fn fetch_failed_preserved() {
+        let base: BaseError = ShuffleError::FetchFailed {
+            shuffle_id: 7,
+            map_id: 3,
+            server_uri: "http://10.0.0.2:9000".to_string(),
+        }
+        .into();
+        match base {
+            BaseError::FetchFailed {
+                shuffle_id,
+                map_id,
+                server_uri,
+            } => {
+                assert_eq!((shuffle_id, map_id), (7, 3));
+                assert_eq!(server_uri, "http://10.0.0.2:9000");
+            }
+            other => panic!("expected FetchFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_errors_stringify() {
+        let base: BaseError = ShuffleError::FailedFetchOp.into();
+        assert!(matches!(base, BaseError::Other(_)));
     }
 }

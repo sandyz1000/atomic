@@ -20,7 +20,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 
 use crate::base::{Mutators, NativeScheduler};
-use crate::dag::{CompletionEvent, TastEndReason};
+use crate::dag::{CompletionEvent, FetchFailedVals, TastEndReason};
 use crate::error::{LibResult, SchedulerError};
 use crate::job::JobTracker;
 use crate::listener::{
@@ -36,6 +36,8 @@ pub struct LocalScheduler {
     poll_timeout: u64,
     /// Shared mutable state: stage cache, event queues, map-output tracker, and ID counters.
     mutators: Mutators,
+    /// Scheduler role flag taken at construction; retained as config (driver vs. worker).
+    #[allow(dead_code)]
     master: bool,
     scheduler_lock: Arc<Mutex<()>>,
     live_listener_bus: LiveListenerBus,
@@ -46,7 +48,11 @@ impl LocalScheduler {
         Self::new_with_coalesce(max_failures, master, 0)
     }
 
-    pub fn new_with_coalesce(max_failures: usize, master: bool, coalesce_threshold_bytes: u64) -> Self {
+    pub fn new_with_coalesce(
+        max_failures: usize,
+        master: bool,
+        coalesce_threshold_bytes: u64,
+    ) -> Self {
         let mut live_listener_bus = LiveListenerBus::new();
         live_listener_bus.start().unwrap();
         LocalScheduler {
@@ -152,10 +158,9 @@ impl LocalScheduler {
     {
         // TODO: update cache
 
-        if allow_local
-            && let Some(result) = LocalScheduler::local_execution(jt.clone())? {
-                return Ok(result);
-            }
+        if allow_local && let Some(result) = LocalScheduler::local_execution(jt.clone())? {
+            return Ok(result);
+        }
 
         self.mutators
             .event_queues
@@ -275,14 +280,12 @@ impl LocalScheduler {
             .collect())
     }
 
-    fn run_task<T: Data, U: Data, F>(
+    fn run_task(
         event_queues: Arc<DashMap<usize, VecDeque<CompletionEvent>>>,
         task: TaskOption,
         _id_in_job: usize,
         attempt_id: usize,
-    ) where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
-    {
+    ) {
         let result = task.run(attempt_id);
         match result {
             Ok(task_result) => {
@@ -298,11 +301,26 @@ impl LocalScheduler {
                 );
             }
             Err(err) => {
-                let err_msg = format!("Task execution failed: {}", err);
+                // A lost-map-output fetch failure must route to the FetchFailed path so the
+                // scheduler recomputes that map partition from lineage; everything else is a
+                // plain task failure that retries the same task.
+                let reason = match err.downcast_ref::<atomic_data::error::BaseError>() {
+                    Some(atomic_data::error::BaseError::FetchFailed {
+                        shuffle_id,
+                        map_id,
+                        server_uri,
+                    }) => TastEndReason::FetchFailed(FetchFailedVals {
+                        server_uri: server_uri.clone(),
+                        shuffle_id: *shuffle_id,
+                        map_id: *map_id,
+                        reduce_id: 0,
+                    }),
+                    _ => TastEndReason::OtherFailure(format!("Task execution failed: {}", err)),
+                };
                 LocalScheduler::handle_completion_event(
                     event_queues,
                     task,
-                    TastEndReason::OtherFailure(err_msg),
+                    reason,
                     Box::new(()) as Box<dyn Data>, // Placeholder for error case
                 );
             }
@@ -369,7 +387,7 @@ impl NativeScheduler for LocalScheduler {
                 task_id,
                 std::thread::current().id(),
             );
-            LocalScheduler::run_task::<T, U, F>(event_queues, task, id_in_job, my_attempt_id)
+            LocalScheduler::run_task(event_queues, task, id_in_job, my_attempt_id)
         });
     }
 
@@ -408,13 +426,18 @@ impl NativeScheduler for LocalScheduler {
                     log::debug!(
                         "shuffle #{} already complete from distributed run; \
                          pre-populating stage #{} output_locs ({} partitions, {} uris)",
-                        shuffle_id, stage.id, stage.num_partitions, uris.len()
+                        shuffle_id,
+                        stage.id,
+                        stage.num_partitions,
+                        uris.len()
                     );
                     // Stage uses the placeholder RDD's partition count, which may be
                     // smaller than the number of distributed map outputs (2 vs 1 for
                     // staged pipelines). Only populate as many slots as the stage has.
-                    for (partition, uri) in uris.into_iter().enumerate().take(stage.num_partitions) {
-                        self.mutators.add_output_loc_to_stage(stage.id, partition, uri);
+                    for (partition, uri) in uris.into_iter().enumerate().take(stage.num_partitions)
+                    {
+                        self.mutators
+                            .add_output_loc_to_stage(stage.id, partition, uri);
                     }
                 }
                 // Re-fetch from stage_cache so output_locs mutations are reflected.

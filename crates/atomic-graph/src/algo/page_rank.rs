@@ -28,7 +28,7 @@ pub fn run<VD: Clone, ED: Clone>(
     // Start: uniform rank = 1.0 / n; edge weight = 1 / out_degree[src].
     let initial_rank = 1.0 / n;
     // Build a weighted graph: vertex attr = rank, edge attr = 1/out_degree[src].
-    let weighted: Graph<f64, f64> = graph.from_edge_weights(&out_degrees, initial_rank);
+    let weighted: Graph<f64, f64> = graph.with_edge_weights(&out_degrees, initial_rank);
 
     let mut current = weighted;
 
@@ -51,7 +51,7 @@ pub fn run<VD: Clone, ED: Clone>(
             })
             .collect();
 
-        current = graph.from_edge_weights(&out_degrees, initial_rank);
+        current = graph.with_edge_weights(&out_degrees, initial_rank);
         current = current.outer_join_vertices(&new_ranks, |_vid, _default, rank_opt| {
             rank_opt.copied().unwrap_or(initial_rank)
         });
@@ -71,7 +71,7 @@ pub fn run<VD: Clone, ED: Clone>(
 /// * `tol`        — convergence tolerance (e.g., `0.001`).
 /// * `reset_prob` — teleportation probability (GraphX default: 0.15).
 /// * `max_iter`   — hard cap on iterations (GraphX uses `Int.MaxValue`; use
-///                  a finite value like `100` for safety).
+///   a finite value like `100` for safety).
 pub fn run_until_convergence<VD: Clone, ED: Clone>(
     graph: &Graph<VD, ED>,
     tol: f64,
@@ -86,7 +86,7 @@ pub fn run_until_convergence<VD: Clone, ED: Clone>(
     let out_degrees = graph.out_degrees();
     let initial_rank = 1.0 / n;
 
-    let weighted: Graph<f64, f64> = graph.from_edge_weights(&out_degrees, initial_rank);
+    let weighted: Graph<f64, f64> = graph.with_edge_weights(&out_degrees, initial_rank);
     let mut current = weighted;
 
     for _ in 0..max_iter {
@@ -109,7 +109,7 @@ pub fn run_until_convergence<VD: Clone, ED: Clone>(
             })
             .collect();
 
-        current = graph.from_edge_weights(&out_degrees, initial_rank);
+        current = graph.with_edge_weights(&out_degrees, initial_rank);
         current = current.outer_join_vertices(&new_ranks, |_vid, _default, rank_opt| {
             rank_opt.copied().unwrap_or(initial_rank)
         });
@@ -125,7 +125,7 @@ pub fn run_until_convergence<VD: Clone, ED: Clone>(
 impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     /// Build a graph with f64 vertex attr = `initial_rank` and f64 edge attr
     /// = `1 / out_degree[src]`.  Used internally by PageRank.
-    fn from_edge_weights(
+    fn with_edge_weights(
         &self,
         out_degrees: &HashMap<VertexId, usize>,
         initial_rank: f64,

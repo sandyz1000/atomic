@@ -20,7 +20,10 @@ pub mod s3_impl {
         pub fn parse(uri: &str) -> Option<Self> {
             let rest = uri.strip_prefix("s3://")?;
             let (bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
-            Some(S3Uri { bucket: bucket.to_owned(), key: key.to_owned() })
+            Some(S3Uri {
+                bucket: bucket.to_owned(),
+                key: key.to_owned(),
+            })
         }
     }
 
@@ -70,18 +73,16 @@ pub mod s3_impl {
         run_sync(async move {
             let client = make_client().await;
             match client.get_object().bucket(&bucket).key(&key).send().await {
-                Ok(resp) => {
-                    match resp.body.collect().await {
-                        Ok(bytes) => {
-                            let text = String::from_utf8_lossy(&bytes.into_bytes()).into_owned();
-                            text.lines().map(|l| l.to_owned()).collect()
-                        }
-                        Err(e) => {
-                            log::error!("S3 body collect error for s3://{bucket}/{key}: {e}");
-                            vec![]
-                        }
+                Ok(resp) => match resp.body.collect().await {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes.into_bytes()).into_owned();
+                        text.lines().map(|l| l.to_owned()).collect()
                     }
-                }
+                    Err(e) => {
+                        log::error!("S3 body collect error for s3://{bucket}/{key}: {e}");
+                        vec![]
+                    }
+                },
                 Err(e) => {
                     log::error!("S3 get_object error for s3://{bucket}/{key}: {e}");
                     vec![]

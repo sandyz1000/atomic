@@ -89,7 +89,11 @@ where
     S: Clone,
 {
     pub fn new(key: K, state: Option<S>, last_updated_ms: u64) -> Self {
-        MapWithStateRDDRecord { key, state, last_updated_ms }
+        MapWithStateRDDRecord {
+            key,
+            state,
+            last_updated_ms,
+        }
     }
 
     pub fn update(&mut self, new_state: Option<S>, time_ms: u64) {

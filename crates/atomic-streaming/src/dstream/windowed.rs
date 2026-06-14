@@ -36,11 +36,15 @@ impl<T: Data + Clone> WindowedDStream<T> {
     ) -> Self {
         let parent_slide = parent.slide_duration();
         assert!(
-            window_duration.as_millis() % parent_slide.as_millis() == 0,
+            window_duration
+                .as_millis()
+                .is_multiple_of(parent_slide.as_millis()),
             "window_duration must be a multiple of parent slide_duration"
         );
         assert!(
-            slide_duration.as_millis() % parent_slide.as_millis() == 0,
+            slide_duration
+                .as_millis()
+                .is_multiple_of(parent_slide.as_millis()),
             "slide_duration must be a multiple of parent slide_duration"
         );
         WindowedDStream {
@@ -106,7 +110,6 @@ impl<T: Data + Clone> DStream<T> for WindowedDStream<T> {
     }
 }
 
-
 /// A DStream that reduces all elements across a sliding window.
 ///
 /// `compute(t)` collects every batch RDD in `[t - window, t]`, reduces all elements
@@ -168,8 +171,12 @@ where
     F: Fn(T, T) -> T + Send + Sync + 'static,
     Finv: Fn(T, T) -> T + Send + Sync + 'static,
 {
-    fn slide_duration(&self) -> Duration { self.slide_duration }
-    fn id(&self) -> usize { self.stream_id }
+    fn slide_duration(&self) -> Duration {
+        self.slide_duration
+    }
+    fn id(&self) -> usize {
+        self.stream_id
+    }
     fn base_dependencies(&self) -> Vec<Arc<dyn DStreamBase>> {
         vec![self.parent.clone() as Arc<dyn DStreamBase>]
     }
@@ -194,7 +201,8 @@ where
         for i in 0..num_steps {
             let t = valid_time_ms.saturating_sub(i * parent_slide_ms);
             if let Some(rdd) = self.parent.get_or_compute(t) {
-                let batch_items = ctx.run_job(rdd, |iter| iter.collect::<Vec<T>>())
+                let batch_items = ctx
+                    .run_job(rdd, |iter| iter.collect::<Vec<T>>())
                     .unwrap_or_default()
                     .into_iter()
                     .flatten()
@@ -205,7 +213,9 @@ where
 
         if all_elements.is_empty() {
             return Some(Arc::new(ParallelCollection::<T>::new(
-                ctx.new_rdd_id(), std::iter::empty::<T>(), 1,
+                ctx.new_rdd_id(),
+                std::iter::empty::<T>(),
+                1,
             )));
         }
 
@@ -214,7 +224,9 @@ where
         let first = iter.next().unwrap();
         let reduced = iter.fold(first, |acc, x| f(acc, x));
         Some(Arc::new(ParallelCollection::new(
-            ctx.new_rdd_id(), std::iter::once(reduced), 1,
+            ctx.new_rdd_id(),
+            std::iter::once(reduced),
+            1,
         )))
     }
 

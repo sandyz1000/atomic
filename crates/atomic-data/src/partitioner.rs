@@ -29,13 +29,16 @@ pub trait CustomPartitioner: Send + Sync {
     fn get_partition_for_key(&self, key: &dyn Any) -> usize;
 }
 
+/// Type-erased function mapping a key (`&dyn Any`) to a partition index.
+pub type PartitionFn = Arc<dyn Fn(&dyn Any) -> usize + Send + Sync>;
+
 /// Partitioner enum for creating Rdd partitions
 #[derive(Clone)]
 pub enum Partitioner {
     Hash {
         num_partitions: usize,
         // Type-erased function for computing partition from key
-        get_partition_fn: Arc<dyn Fn(&dyn Any) -> usize + Send + Sync>,
+        get_partition_fn: PartitionFn,
     },
     /// Range partitioner: assigns keys to partitions based on sorted bounds.
     ///
@@ -52,12 +55,12 @@ pub enum Partitioner {
         /// `bincode(Vec<K>)` of the sorted split-point bounds, captured at construction so the
         /// range partitioner can be shipped to and reconstructed on workers.
         bounds_bytes: Vec<u8>,
-        get_partition_fn: Arc<dyn Fn(&dyn Any) -> usize + Send + Sync>,
+        get_partition_fn: PartitionFn,
     },
     /// User-defined partitioner supplied via `TypedRdd::partition_by()`.
     Custom {
         num_partitions: usize,
-        get_partition_fn: Arc<dyn Fn(&dyn Any) -> usize + Send + Sync>,
+        get_partition_fn: PartitionFn,
     },
 }
 
@@ -228,9 +231,16 @@ pub enum PartitionerSchema {
 impl PartitionerSchema {
     pub fn num_partitions(&self) -> usize {
         match self {
-            PartitionerSchema::Hash { num_parts: num_partitions }
-            | PartitionerSchema::Range { num_parts: num_partitions, .. }
-            | PartitionerSchema::Custom { num_parts: num_partitions } => *num_partitions,
+            PartitionerSchema::Hash {
+                num_parts: num_partitions,
+            }
+            | PartitionerSchema::Range {
+                num_parts: num_partitions,
+                ..
+            }
+            | PartitionerSchema::Custom {
+                num_parts: num_partitions,
+            } => *num_partitions,
         }
     }
 
@@ -309,20 +319,23 @@ mod tests {
         assert!(!p1.equals(&p2_2));
 
         let mut p1 = Some(p1);
-        assert!(p1.clone().map(|p| p.equals(&p1.clone().unwrap())) == Some(true));
-        assert!(p1.clone().map(|p| p.equals(&p2_1)) == Some(false));
-        assert!(p1.clone().map(|p| p.equals(&p2_2)) == Some(false));
-        assert!(p1.clone().map(|p| p.equals(&p1.clone().unwrap())) != None);
-        assert!(p1.clone().map_or(false, |p| p.equals(&p1.clone().unwrap())));
-        assert!(!p1.clone().map_or(false, |p| p.equals(&p2_1)));
-        assert!(!p1.clone().map_or(false, |p| p.equals(&p2_2)));
+        assert_eq!(
+            p1.clone().map(|p| p.equals(p1.as_ref().unwrap())),
+            Some(true)
+        );
+        assert_eq!(p1.clone().map(|p| p.equals(&p2_1)), Some(false));
+        assert_eq!(p1.clone().map(|p| p.equals(&p2_2)), Some(false));
+        assert!(p1.clone().map(|p| p.equals(p1.as_ref().unwrap())).is_some());
+        assert!(p1.clone().is_some_and(|p| p.equals(p1.as_ref().unwrap())));
+        assert!(!p1.clone().is_some_and(|p| p.equals(&p2_1)));
+        assert!(!p1.clone().is_some_and(|p| p.equals(&p2_2)));
 
         p1 = None;
-        assert!(p1.clone().map(|p| p.equals(&p1.clone().unwrap())) == None);
-        assert!(p1.clone().map(|p| p.equals(&p2_1)) == None);
-        assert!(p1.clone().map(|p| p.equals(&p2_2)) == None);
-        assert!(!p1.clone().map_or(false, |p| p.equals(&p1.clone().unwrap())));
-        assert!(!p1.clone().map_or(false, |p| p.equals(&p2_1)));
-        assert!(!p1.map_or(false, |p| p.equals(&p2_2)));
+        assert!(p1.clone().map(|p| p.equals(p1.as_ref().unwrap())).is_none());
+        assert!(p1.clone().map(|p| p.equals(&p2_1)).is_none());
+        assert!(p1.clone().map(|p| p.equals(&p2_2)).is_none());
+        assert!(!p1.clone().is_some_and(|p| p.equals(p1.as_ref().unwrap())));
+        assert!(!p1.clone().is_some_and(|p| p.equals(&p2_1)));
+        assert!(!p1.is_some_and(|p| p.equals(&p2_2)));
     }
 }

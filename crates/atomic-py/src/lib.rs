@@ -1,20 +1,20 @@
 mod context;
+mod distributed_vars;
 mod graph;
 mod rdd;
-mod distributed_vars;
 mod sql;
 mod streaming;
 
 use pyo3::prelude::*;
 
 use context::PyContext;
+use distributed_vars::{PyAccumulator, PyBroadcastVar};
 use graph::PyGraph;
 use rdd::PyRdd;
-use distributed_vars::{PyAccumulator, PyBroadcastVar};
 use sql::{PyDataFrame, PySqlContext};
 use streaming::{PyBatchQueue, PyDStream, PyStreamingContext};
 
-/// Atomic Python client — Spark-like distributed computing and SQL for Python.
+/// Atomic Python client — RDD-style distributed computing and SQL for Python.
 ///
 /// # RDD quick start
 /// ```python

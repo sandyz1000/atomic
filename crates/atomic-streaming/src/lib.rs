@@ -1,9 +1,9 @@
-pub mod scheduler;
 pub mod api;
-pub mod receiver;
-pub mod rdd;
-pub mod dstream;
-pub mod streaming_support;
-pub mod context;
 pub mod checkpoint;
+pub mod context;
+pub mod dstream;
 pub mod errors;
+pub mod rdd;
+pub mod receiver;
+pub mod scheduler;
+pub mod streaming_support;

@@ -10,7 +10,7 @@ use crate::topology::{EdgeDirection, VertexId, VertexMap};
 /// # Parameters
 /// * `graph`         — input graph.
 /// * `max_iterations`— maximum number of Pregel supersteps (use `usize::MAX`
-///                     for full convergence).
+///   for full convergence).
 ///
 /// Returns a `VertexMap<VertexId>` mapping each vertex to the representative
 /// (lowest ID) of its component.

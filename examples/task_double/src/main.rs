@@ -1,3 +1,6 @@
+// Return-typed `task_fn!` closures need block bodies; clippy's unused_braces is a false positive.
+#![allow(unused_braces)]
+
 /// Simplest `#[task]` example — double, filter, and sum a dataset.
 ///
 /// # What `#[task]` does

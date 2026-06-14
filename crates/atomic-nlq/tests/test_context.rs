@@ -18,7 +18,10 @@ fn test_config_default_values() {
 
 #[test]
 fn test_config_empty_key() {
-    let cfg = NlqConfig { openai_api_key: String::new(), ..Default::default() };
+    let cfg = NlqConfig {
+        openai_api_key: String::new(),
+        ..Default::default()
+    };
     assert!(cfg.validate().is_err());
 }
 
@@ -34,7 +37,10 @@ fn test_config_zero_batch() {
 
 #[test]
 fn test_config_validation_ok() {
-    let cfg = NlqConfig { openai_api_key: "sk-test".to_string(), ..Default::default() };
+    let cfg = NlqConfig {
+        openai_api_key: "sk-test".to_string(),
+        ..Default::default()
+    };
     assert!(cfg.validate().is_ok());
 }
 

@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -328,7 +327,7 @@ fn build_vs_batch(
     scores: Vec<f32>,
     schema: SchemaRef,
 ) -> DFResult<RecordBatch> {
-    let n = ids.len();
+    let _n = ids.len();
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(input.num_columns() + 2);
     for col in input.columns() {
         columns.push(col.slice(0, 0));

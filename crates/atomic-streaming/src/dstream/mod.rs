@@ -172,7 +172,10 @@ impl DStreamGraph {
     }
 
     pub fn num_receivers(&self) -> usize {
-        self.input_streams.iter().filter(|is| is.is_receiver_input()).count()
+        self.input_streams
+            .iter()
+            .filter(|is| is.is_receiver_input())
+            .count()
     }
 
     pub fn input_stream_ids(&self) -> Vec<usize> {

@@ -1,11 +1,7 @@
-/// Receiver infrastructure for streaming data ingestion.
-///
-/// `BlockGenerator` buffers incoming items and periodically emits blocks.
-use crate::streaming_support::file_sink::StorageLevel;
 use parking_lot::Mutex;
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 // Block identifier
@@ -18,7 +14,10 @@ pub struct StreamBlockId {
 
 impl StreamBlockId {
     pub fn new(stream_id: usize, unique_id: u64) -> Self {
-        StreamBlockId { stream_id, unique_id }
+        StreamBlockId {
+            stream_id,
+            unique_id,
+        }
     }
 
     pub fn name(&self) -> String {
@@ -32,7 +31,10 @@ pub enum ReceivedBlock {
     /// A batch of items as boxed Any values.
     DataIterator(Vec<Box<dyn Any + Send>>),
     /// A block already identified by its ID.
-    DataBlock { block_id: StreamBlockId, data: Vec<Box<dyn Any + Send>> },
+    DataBlock {
+        block_id: StreamBlockId,
+        data: Vec<Box<dyn Any + Send>>,
+    },
 }
 
 // Receiver trait
@@ -56,10 +58,10 @@ pub trait Receiver: Send + Sync + 'static {
 
 /// Callbacks fired by BlockGenerator on block lifecycle events.
 pub trait BlockGeneratorListener: Send + Sync + 'static {
-    fn on_add_data(&self, data: &Box<dyn Any + Send>, metadata: Option<&dyn Any>) {}
-    fn on_generate_block(&self, block_id: &StreamBlockId, iterator: &[Box<dyn Any + Send>]) {}
-    fn on_push_block(&self, block_id: &StreamBlockId) {}
-    fn on_error(&self, message: &str, throwable: Option<&dyn std::error::Error>) {
+    fn on_add_data(&self, _data: &Box<dyn Any + Send>, _metadata: Option<&dyn Any>) {}
+    fn on_generate_block(&self, _block_id: &StreamBlockId, _iterator: &[Box<dyn Any + Send>]) {}
+    fn on_push_block(&self, _block_id: &StreamBlockId) {}
+    fn on_error(&self, message: &str, _throwable: Option<&dyn std::error::Error>) {
         log::error!("BlockGenerator error: {}", message);
     }
 }
@@ -145,15 +147,20 @@ impl BlockGenerator {
                         let block_id = StreamBlockId::new(stream_id, unique_id as u64);
                         log::debug!(
                             "BlockGenerator[{}]: block {} with {} items",
-                            stream_id, unique_id, num_records
+                            stream_id,
+                            unique_id,
+                            num_records
                         );
                         if let Some(ref t) = tracker {
-                            t.add_block(stream_id, ReceivedBlockInfo {
+                            t.add_block(
                                 stream_id,
-                                block_id,
-                                num_records: Some(num_records),
-                                metadata: None,
-                            });
+                                ReceivedBlockInfo {
+                                    stream_id,
+                                    block_id,
+                                    num_records: Some(num_records),
+                                    metadata: None,
+                                },
+                            );
                         }
                     }
                 }
@@ -170,6 +177,8 @@ impl BlockGenerator {
         *self.state.lock() == GeneratorState::Active
     }
 
+    // WIP: used once distributed (cross-node) receiver scheduling is implemented.
+    #[allow(dead_code)]
     fn next_block_id(&self) -> StreamBlockId {
         StreamBlockId::new(
             self.stream_id,

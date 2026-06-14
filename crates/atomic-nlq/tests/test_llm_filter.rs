@@ -4,7 +4,7 @@ use datafusion::arrow::array::{Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::execution::context::SessionContext;
-use datafusion::logical_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use std::sync::Arc;
 
 fn make_orders_schema() -> Arc<Schema> {
@@ -16,14 +16,19 @@ fn make_orders_schema() -> Arc<Schema> {
 
 #[test]
 fn test_filter_schema_passthrough() {
-    let session = SessionContext::new();
+    let _session = SessionContext::new();
     let empty_plan = LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
         produce_one_row: false,
         schema: Arc::new(
             datafusion::common::DFSchema::try_from(make_orders_schema().as_ref().clone()).unwrap(),
         ),
     });
-    let node = LlmFilterNode::new("is_luxury_item".to_string(), "gpt-4o".to_string(), empty_plan.clone(), 50);
+    let node = LlmFilterNode::new(
+        "is_luxury_item".to_string(),
+        "gpt-4o".to_string(),
+        empty_plan.clone(),
+        50,
+    );
     assert_eq!(node.schema(), empty_plan.schema());
     assert_eq!(node.name(), "LlmFilter");
 }

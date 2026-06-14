@@ -15,10 +15,9 @@
 //! These tests also document the retry/backoff behaviour and the exponential
 //! backoff sequence (100ms * min(2^attempt, 32)).
 
-use atomic_scheduler::DistributedScheduler;
 use atomic_data::distributed::WorkerCapabilities;
+use atomic_scheduler::DistributedScheduler;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -45,7 +44,10 @@ fn test_worker_selectable() {
     sched.register_worker(addr, capabilities(&[]));
 
     let selected = sched.next_executor().unwrap();
-    assert_eq!(selected, addr, "registered worker must be returned by next_executor()");
+    assert_eq!(
+        selected, addr,
+        "registered worker must be returned by next_executor()"
+    );
 }
 
 /// Registering the same worker twice must not duplicate it in the round-robin list.
@@ -69,7 +71,10 @@ fn test_register_worker_idempotent() {
 fn test_next_executor_empty_returns_error() {
     let sched = DistributedScheduler::new(3, true);
     let result = sched.next_executor();
-    assert!(result.is_err(), "expected error when no workers are registered");
+    assert!(
+        result.is_err(),
+        "expected error when no workers are registered"
+    );
 }
 
 // ── Capability checking ───────────────────────────────────────────────────────
@@ -99,7 +104,7 @@ fn test_worker_with_empty_ops_accepts_all() {
 /// after the 3rd failure `next_executor` errors.
 #[tokio::test]
 async fn test_worker_tcp_removal() {
-    use atomic_data::distributed::{TaskAction, TaskEnvelope, TaskRuntime, PipelineOp};
+    use atomic_data::distributed::{PipelineOp, TaskAction, TaskEnvelope, TaskRuntime};
 
     // Bind an ephemeral port — the listener immediately drops each connection
     // to simulate a dead worker.
@@ -127,7 +132,11 @@ async fn test_worker_tcp_removal() {
 
     // Build a minimal task envelope.
     let task = TaskEnvelope::new(
-        1, 1, 1, 0, 0,
+        1,
+        1,
+        1,
+        0,
+        0,
         "test".to_string(),
         vec![PipelineOp {
             op_id: "no.op".to_string(),
@@ -178,7 +187,7 @@ async fn test_worker_tcp_removal() {
 /// setup overhead.
 #[tokio::test]
 async fn test_exponential_backoff() {
-    use atomic_data::distributed::{TaskAction, TaskEnvelope, TaskRuntime, PipelineOp};
+    use atomic_data::distributed::{PipelineOp, TaskAction, TaskEnvelope, TaskRuntime};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -187,7 +196,9 @@ async fn test_exponential_backoff() {
     tokio::spawn(async move {
         for _ in 0..10 {
             match listener.accept().await {
-                Ok((mut s, _)) => { let _ = s.shutdown().await; }
+                Ok((mut s, _)) => {
+                    let _ = s.shutdown().await;
+                }
                 Err(_) => break,
             }
         }
@@ -198,7 +209,11 @@ async fn test_exponential_backoff() {
     sched.register_worker(addr, capabilities(&[]));
 
     let task = TaskEnvelope::new(
-        1, 1, 1, 0, 0,
+        1,
+        1,
+        1,
+        0,
+        0,
         "test".to_string(),
         vec![PipelineOp {
             op_id: "no.op".to_string(),
@@ -231,11 +246,48 @@ async fn test_exponential_backoff() {
 fn test_zero_capacity() {
     let sched = DistributedScheduler::new(3, true);
     let addr = worker_addr(29103);
-    sched.register_worker(addr, WorkerCapabilities::new("test-worker".to_string(), 0, vec![]));
+    sched.register_worker(
+        addr,
+        WorkerCapabilities::new("test-worker".to_string(), 0, vec![]),
+    );
 
     let result = sched.next_executor_with_capacity();
     assert!(
         result.is_err(),
         "worker with max_tasks=0 must not be selected"
+    );
+}
+
+// ── Lineage fault recovery ────────────────────────────────────────────────────
+
+/// When a worker is removed, its shuffle-map outputs must be invalidated in the
+/// `MapOutputTracker` so the lost partitions are recomputed (not refetched from
+/// the dead host). Verifies the `remove_worker` → tracker glue end-to-end.
+#[test]
+fn removed_worker_clears_outputs() {
+    use atomic_data::shuffle::MapOutputTracker;
+    use std::sync::Arc;
+
+    let tracker = Arc::new(MapOutputTracker::default());
+    // shuffle 0: map 0 on the worker we will remove, map 1 on a survivor.
+    tracker.register_map_outputs(
+        0,
+        vec![
+            Some("http://127.0.0.1:31000".to_string()),
+            Some("http://10.0.0.9:31000".to_string()),
+        ],
+    );
+    atomic_data::env::set_map_output_tracker(Arc::clone(&tracker));
+
+    let sched = DistributedScheduler::new(3, true);
+    let dead = worker_addr(31500); // 127.0.0.1 — matches map 0's host
+    sched.register_worker(dead, capabilities(&[]));
+    sched.remove_worker(dead);
+
+    let locs = tracker.server_uris.get(&0).unwrap().clone();
+    assert_eq!(
+        locs,
+        vec![None, Some("http://10.0.0.9:31000".to_string())],
+        "the dead worker's map output must be cleared; the survivor's must remain"
     );
 }

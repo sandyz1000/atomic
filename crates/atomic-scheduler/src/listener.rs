@@ -57,7 +57,7 @@ trait AsyncEventQueue: Send + Sync {
 
 type QueueBuffer = Option<Arc<Mutex<Vec<Arc<dyn ListenerEvent>>>>>;
 
-/// Asynchronously passes SparkListenerEvents to registered SparkListeners.
+/// Asynchronously passes listener events to registered listeners.
 ///
 /// Until `start()` is called, all posted events are only buffered. Only after this listener bus
 /// has started will events be actually propagated to all attached listeners. This listener bus

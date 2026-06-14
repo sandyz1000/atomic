@@ -81,7 +81,9 @@ impl DataFrame {
 
     /// Rename a column.
     pub fn with_column_renamed(self, old_name: &str, new_name: &str) -> Result<Self> {
-        Ok(Self::new(self.inner.with_column_renamed(old_name, new_name)?))
+        Ok(Self::new(
+            self.inner.with_column_renamed(old_name, new_name)?,
+        ))
     }
 
     /// Add a computed column.
@@ -123,7 +125,9 @@ impl DataFrame {
         options: datafusion::dataframe::DataFrameWriteOptions,
         writer_options: Option<datafusion::common::config::TableParquetOptions>,
     ) -> Result<()> {
-        self.inner.write_parquet(path, options, writer_options).await?;
+        self.inner
+            .write_parquet(path, options, writer_options)
+            .await?;
         Ok(())
     }
 

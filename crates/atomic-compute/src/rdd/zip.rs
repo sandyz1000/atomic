@@ -126,10 +126,7 @@ where
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    fn compute(
-        &self,
-        split: Box<dyn Split>,
-    ) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<dyn Split>) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>> {
         let current_split = split
             .as_any()
             .downcast_ref::<ZippedPartitionsSplit>()
@@ -140,10 +137,7 @@ where
         Ok(Box::new(fst_iter.zip(sec_iter)))
     }
 
-    fn iterator(
-        &self,
-        split: Box<dyn Split>,
-    ) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>> {
+    fn iterator(&self, split: Box<dyn Split>) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>> {
         self.compute(split.clone())
     }
 }

@@ -82,8 +82,7 @@ impl ReaderConfiguration<PathBuf> for LocalFsReaderConfig {
     {
         let reader = LocalFsReader::<FileReader>::new(self, context.clone());
         let read_files = |_part: usize, readers: Box<dyn Iterator<Item = FileReader>>| {
-            Box::new(readers.flat_map(|reader| reader.into_iter()))
-                as Box<dyn Iterator<Item = _>>
+            Box::new(readers.flat_map(|reader| reader.into_iter())) as Box<dyn Iterator<Item = _>>
         };
 
         let id1 = context.new_rdd_id();
@@ -104,9 +103,7 @@ pub struct LocalFsReader<T> {
     path: PathBuf,
     is_single_file: bool,
     filter_ext: Option<std::ffi::OsString>,
-    expect_dir: bool,
     executor_partitions: Option<u64>,
-    context: Arc<Context>,
     // explicitly copy the address map as the map under context is not
     // deserialized in tasks and this is required:
     pub(super) splits: Vec<SocketAddrV4>,
@@ -117,7 +114,7 @@ impl<T> LocalFsReader<T> {
     fn new(config: LocalFsReaderConfig, context: Arc<Context>) -> Self {
         let LocalFsReaderConfig {
             dir_path,
-            expect_dir,
+            expect_dir: _,
             filter_ext,
             executor_partitions,
         } = config;
@@ -132,10 +129,8 @@ impl<T> LocalFsReader<T> {
             path: dir_path,
             is_single_file,
             filter_ext,
-            expect_dir,
             executor_partitions,
             splits: context.address_map.clone(),
-            context,
             _marker_reader_data: PhantomData,
         }
     }
@@ -279,7 +274,9 @@ impl<T> LocalFsReader<T> {
             // partitions than specified. This the number of partitions is actually the specified.
             if partitions[current_pos].len() > 1 {
                 // Only take from this partition while it has more than one element.
-                let last_part = partitions[current_pos].pop().expect("checked non-empty above");
+                let last_part = partitions[current_pos]
+                    .pop()
+                    .expect("checked non-empty above");
                 partitions.push(vec![last_part])
             } else if current_pos > 0 {
                 current_pos -= 1;
@@ -305,15 +302,13 @@ mod tests {
 
     #[test]
     fn load_files() {
-        let context = Context::new().unwrap();
+        let _context = Context::new().unwrap();
         let mut loader: LocalFsReader<Vec<u8>> = LocalFsReader {
             id: 0,
             path: "A".into(),
             is_single_file: false,
             filter_ext: None,
-            expect_dir: true,
             executor_partitions: Some(4),
-            context,
             splits: Vec::new(),
             _marker_reader_data: PhantomData,
         };

@@ -5,7 +5,6 @@ use datafusion::arrow::array::{Int32Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 
-
 /// Build a RecordBatch with columns `(key: i32, value: i32)`.
 fn make_kv_batch(keys: &[i32], values: &[i32]) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
@@ -77,14 +76,19 @@ fn total_rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(|b| b.num_rows()).sum()
 }
 
-
 #[tokio::test]
 async fn test_select_all() {
     let ctx = AtomicSqlContext::new();
     let batch = make_kv_batch(&[1, 2, 3], &[10, 20, 30]);
     ctx.register_batches("t", vec![batch]).unwrap();
 
-    let result = ctx.sql("SELECT * FROM t").await.unwrap().collect().await.unwrap();
+    let result = ctx
+        .sql("SELECT * FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
     assert_eq!(total_rows(&result), 3);
 }
 
@@ -94,12 +98,17 @@ async fn test_select_columns() {
     let batch = make_kv_batch(&[1, 2], &[10, 20]);
     ctx.register_batches("t", vec![batch]).unwrap();
 
-    let result = ctx.sql("SELECT key FROM t").await.unwrap().collect().await.unwrap();
+    let result = ctx
+        .sql("SELECT key FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
     assert_eq!(result[0].num_columns(), 1);
     assert_eq!(result[0].schema().field(0).name(), "key");
     assert_eq!(total_rows(&result), 2);
 }
-
 
 #[tokio::test]
 async fn test_where_filter() {
@@ -132,7 +141,6 @@ async fn test_filter_no_results() {
         .unwrap();
     assert_eq!(total_rows(&result), 0);
 }
-
 
 #[tokio::test]
 async fn test_count() {
@@ -208,7 +216,6 @@ async fn test_group_by_sum() {
     assert_eq!(totals, vec![30, 20]);
 }
 
-
 #[tokio::test]
 async fn test_order_by_asc() {
     let ctx = AtomicSqlContext::new();
@@ -243,7 +250,6 @@ async fn test_order_by_desc() {
     assert_eq!(keys, vec![3, 2, 1]);
 }
 
-
 #[tokio::test]
 async fn test_limit() {
     let ctx = AtomicSqlContext::new();
@@ -260,12 +266,14 @@ async fn test_limit() {
     assert_eq!(total_rows(&result), 2);
 }
 
-
 #[tokio::test]
 async fn test_inner_join() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("people", vec![make_person_batch(&[1, 2, 3], &["Alice", "Bob", "Carol"])])
-        .unwrap();
+    ctx.register_batches(
+        "people",
+        vec![make_person_batch(&[1, 2, 3], &["Alice", "Bob", "Carol"])],
+    )
+    .unwrap();
 
     let salary_schema = Arc::new(Schema::new(vec![
         Field::new("person_id", DataType::Int32, false),
@@ -279,7 +287,8 @@ async fn test_inner_join() {
         ],
     )
     .unwrap();
-    ctx.register_batches("salaries", vec![salary_batch]).unwrap();
+    ctx.register_batches("salaries", vec![salary_batch])
+        .unwrap();
 
     let result = ctx
         .sql("SELECT p.name, s.amount FROM people p JOIN salaries s ON p.id = s.person_id ORDER BY p.id")
@@ -293,7 +302,6 @@ async fn test_inner_join() {
     let names = col_as_string(&result[0], 0);
     assert_eq!(names, vec!["Alice", "Bob"]);
 }
-
 
 #[tokio::test]
 async fn test_partitioned_batches() {
@@ -314,7 +322,6 @@ async fn test_partitioned_batches() {
     assert_eq!(col_as_i64(&result[0], 0), vec![100]);
 }
 
-
 #[tokio::test]
 async fn test_distinct() {
     let ctx = AtomicSqlContext::new();
@@ -331,7 +338,6 @@ async fn test_distinct() {
     assert_eq!(total_rows(&result), 3);
     assert_eq!(col_as_i32(&result[0], 0), vec![1, 2, 3]);
 }
-
 
 #[tokio::test]
 async fn test_explain() {

@@ -15,6 +15,11 @@
 //! Fix suggestion: use `RwLock<Option<String>>` (or `ArcSwap`) so the URI
 //! can be cleared when the ShuffleManager shuts down.
 
+// These tests intentionally hold a process-global serialization guard across
+// `.await` to run shuffle scenarios one at a time; the lock is never contended
+// on the async path here.
+#![allow(clippy::await_holding_lock)]
+
 // Register the shuffle handler for (String, i32) pairs.
 // This must appear at binary-level scope — once per KV type used with shuffle.
 atomic_compute::register_shuffle_map!(String, i32);
@@ -73,10 +78,7 @@ async fn test_first_shuffle_succeeds() {
         .collect()
         .unwrap();
     result.sort_by_key(|(k, _)| k.clone());
-    assert_eq!(
-        result,
-        vec![("a".to_string(), 4), ("b".to_string(), 2)]
-    );
+    assert_eq!(result, vec![("a".to_string(), 4), ("b".to_string(), 2)]);
 }
 
 /// Bug B1: Two sequential Contexts — the second shuffle fails with a dead-URI error.

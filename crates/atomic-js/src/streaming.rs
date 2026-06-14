@@ -26,13 +26,16 @@ use serde_json::Value as JV;
 // Each variant holds its own ManuallyDrop<Function<'static, ...>> to avoid type
 // erasure and raw-pointer dereferences — Deref is used for all call sites.
 
+/// JS `updateStateByKey` callback: `(newValues, runningState) -> newState`.
+type StateUpdateFn = Function<'static, (Vec<JV>, Option<JV>), Option<JV>>;
+
 // SAFETY: StoredFn is only constructed and called from the JS main thread.
 enum StoredFn {
     Map(ManuallyDrop<Function<'static, JV, JV>>),
     Filter(ManuallyDrop<Function<'static, JV, bool>>),
     FlatMap(ManuallyDrop<Function<'static, JV, Vec<JV>>>),
     Reduce(ManuallyDrop<Function<'static, (JV, JV), JV>>),
-    StateUpdate(ManuallyDrop<Function<'static, (Vec<JV>, Option<JV>), Option<JV>>>),
+    StateUpdate(ManuallyDrop<StateUpdateFn>),
     OutputCb(ManuallyDrop<Function<'static, Vec<JV>, ()>>),
 }
 
@@ -583,11 +586,15 @@ mod tests {
     use serde_json::json;
     use std::collections::VecDeque;
 
+    // Handle to a queue-backed DStream's shared batch buffer.
+    type QueueHandle = Arc<Mutex<VecDeque<Vec<JV>>>>;
+
     // Helper: create a Queue-backed DStreamInner directly.
-    fn make_queue(batches: Vec<Vec<JV>>) -> (Arc<JsDStreamInner>, Arc<Mutex<VecDeque<Vec<JV>>>>) {
-        let q: Arc<Mutex<VecDeque<Vec<JV>>>> =
-            Arc::new(Mutex::new(batches.into_iter().collect()));
-        let inner = Arc::new(JsDStreamInner::Queue { queue: Arc::clone(&q) });
+    fn make_queue(batches: Vec<Vec<JV>>) -> (Arc<JsDStreamInner>, QueueHandle) {
+        let q: Arc<Mutex<VecDeque<Vec<JV>>>> = Arc::new(Mutex::new(batches.into_iter().collect()));
+        let inner = Arc::new(JsDStreamInner::Queue {
+            queue: Arc::clone(&q),
+        });
         (inner, q)
     }
 
@@ -640,10 +647,7 @@ mod tests {
 
     #[test]
     fn queue_pops_batch() {
-        let (inner, _q) = make_queue(vec![
-            vec![json!(1), json!(2)],
-            vec![json!(3)],
-        ]);
+        let (inner, _q) = make_queue(vec![vec![json!(1), json!(2)], vec![json!(3)]]);
         let b1 = compute_batch(&inner, &mut empty_state()).unwrap();
         let b2 = compute_batch(&inner, &mut empty_state()).unwrap();
         let b3 = compute_batch(&inner, &mut empty_state()).unwrap();
@@ -969,6 +973,7 @@ impl JsStreamingContext {
 /// const ssc = streamingContextFromCheckpoint('/tmp/cp') ?? new StreamingContext(1.0);
 /// ```
 #[napi]
+#[allow(dead_code)] // exported to JS via napi; no Rust-side caller
 pub fn streaming_context_from_checkpoint(dir: String) -> Result<Option<JsStreamingContext>> {
     let path = std::path::Path::new(&dir).join("checkpoint.json");
     if !path.exists() {

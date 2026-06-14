@@ -7,7 +7,6 @@ use crate::dependency::Dependency;
 use crate::rdd::RddBase;
 use crate::task::{Task, TaskBase};
 
-
 #[derive(Clone)]
 pub struct ShuffleMapTask {
     pub task_id: usize,

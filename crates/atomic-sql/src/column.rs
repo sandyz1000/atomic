@@ -4,6 +4,6 @@
 //
 //   use atomic_sql::{col, lit};
 
+pub use datafusion::logical_expr::Expr;
 pub use datafusion::logical_expr::col;
 pub use datafusion::logical_expr::lit;
-pub use datafusion::logical_expr::Expr;

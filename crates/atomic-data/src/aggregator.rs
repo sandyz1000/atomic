@@ -1,23 +1,30 @@
+use crate::data::Data;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use crate::data::{Data};
+
+/// Starts a combiner `C` from the first value `V` of a key.
+pub type CreateCombinerFn<V, C> = Arc<dyn Fn(V) -> C + Send + Sync>;
+/// Merges a new value `V` into an existing combiner `C` in place.
+pub type MergeValueFn<V, C> = Arc<dyn Fn(&mut C, V) + Send + Sync>;
+/// Merges another combiner `C` into an existing combiner `C` in place.
+pub type MergeCombinersFn<C> = Arc<dyn Fn(&mut C, C) + Send + Sync>;
 
 /// Aggregator for shuffle tasks.
 /// Functions are wrapped in Arc to eliminate Clone requirement on C type.
 /// Functions take owned values for create_combiner, but references for merging
 /// to avoid unnecessary cloning.
 pub struct Aggregator<K: Data, V: Data, C: Data> {
-    pub create_combiner: Arc<dyn Fn(V) -> C + Send + Sync>,
-    pub merge_value: Arc<dyn Fn(&mut C, V) + Send + Sync>,
-    pub merge_combiners: Arc<dyn Fn(&mut C, C) + Send + Sync>,
+    pub create_combiner: CreateCombinerFn<V, C>,
+    pub merge_value: MergeValueFn<V, C>,
+    pub merge_combiners: MergeCombinersFn<C>,
     _marker: PhantomData<K>,
 }
 
 impl<K: Data, V: Data, C: Data> Aggregator<K, V, C> {
     pub fn new(
-        create_combiner: Arc<dyn Fn(V) -> C + Send + Sync>,
-        merge_value: Arc<dyn Fn(&mut C, V) + Send + Sync>,
-        merge_combiners: Arc<dyn Fn(&mut C, C) + Send + Sync>,
+        create_combiner: CreateCombinerFn<V, C>,
+        merge_value: MergeValueFn<V, C>,
+        merge_combiners: MergeCombinersFn<C>,
     ) -> Self {
         Aggregator {
             create_combiner,

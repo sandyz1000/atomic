@@ -40,18 +40,16 @@ fn test_plan_parallel_steps() {
 #[test]
 fn test_plan_roundtrip() {
     let plan = WorkflowPlan {
-        steps: vec![
-            WorkflowStep {
-                id: "step1".to_string(),
-                tool: "sql_query".to_string(),
-                args: {
-                    let mut m = HashMap::new();
-                    m.insert("query".to_string(), serde_json::json!("SELECT 1"));
-                    m
-                },
-                depends_on: vec![],
+        steps: vec![WorkflowStep {
+            id: "step1".to_string(),
+            tool: "sql_query".to_string(),
+            args: {
+                let mut m = HashMap::new();
+                m.insert("query".to_string(), serde_json::json!("SELECT 1"));
+                m
             },
-        ],
+            depends_on: vec![],
+        }],
     };
     let json = serde_json::to_string(&plan).unwrap();
     let parsed: WorkflowPlan = serde_json::from_str(&json).unwrap();

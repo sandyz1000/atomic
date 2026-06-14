@@ -92,7 +92,7 @@ pub trait NativeScheduler: Send + Sync {
         let rdd_id = rdd.get_rdd_id();
         if !visited.contains(&rdd_id) {
             visited.insert(rdd_id);
-            // TODO: CacheTracker register
+            // TODO: distributed cache-locality registration (deferred)
             for _ in 0..rdd.number_of_splits() {
                 let locs = self.get_mutators().get_cache_locs(rdd.clone());
                 log::debug!("cache locs: {:?}", locs);
@@ -193,13 +193,19 @@ pub trait NativeScheduler: Send + Sync {
             ..
         } = failed_vals;
 
-        // TODO: mapoutput tracker needs to be finished for this
-        // let failed_stage = self.id_to_stage.lock().get(&stage_id).?.clone();
+        // The reduce stage that hit the fetch failure: mark it failed so it is
+        // re-run after the lost map output is recomputed.
         let m = self.get_mutators();
         let failed_stage = m.fetch_from_stage_cache(stage_id);
         jt.running.lock().remove(&failed_stage);
         jt.failed.lock().insert(failed_stage);
-        // TODO: logging
+        log::warn!(
+            "fetch failed: shuffle {shuffle_id} map {map_id} on {server_uri} — \
+             invalidating the lost map output and resubmitting its stage for recompute"
+        );
+        // Drop the lost output from both the stage's output_locs and the
+        // MapOutputTracker, then mark the producing map stage failed so
+        // `submit_missing_tasks` recomputes exactly that partition.
         m.remove_output_loc_from_stage(shuffle_id, map_id, &server_uri);
         m.unregister_map_output(shuffle_id, map_id, server_uri);
         jt.failed
@@ -223,10 +229,7 @@ pub trait NativeScheduler: Send + Sync {
 
         match &completed_event.task {
             TaskOption::ResultTask(rt) => {
-                let result = completed_event
-                    .result
-                    .take()
-                    .ok_or(SchedulerError::Other)?;
+                let result = completed_event.result.take().ok_or(SchedulerError::Other)?;
 
                 jt.listener.task_succeeded(rt.output_id, &*result).await?;
 
@@ -281,19 +284,11 @@ pub trait NativeScheduler: Send + Sync {
                 );
                 log::debug!(
                     "running stages: {:?}",
-                    jt.running
-                        .lock()
-                        .iter()
-                        .map(|x| x.id)
-                        .collect::<Vec<_>>()
+                    jt.running.lock().iter().map(|x| x.id).collect::<Vec<_>>()
                 );
                 log::debug!(
                     "waiting stages: {:?}",
-                    jt.waiting
-                        .lock()
-                        .iter()
-                        .map(|x| x.id)
-                        .collect::<Vec<_>>()
+                    jt.waiting.lock().iter().map(|x| x.id).collect::<Vec<_>>()
                 );
 
                 if jt.running.lock().contains(&stage)
@@ -399,9 +394,7 @@ pub trait NativeScheduler: Send + Sync {
     {
         let m = self.get_mutators();
         let mut pending_tasks = jt.pending_tasks.lock();
-        let my_pending = pending_tasks
-            .entry(stage.clone())
-            .or_insert_with(BTreeSet::new);
+        let my_pending = pending_tasks.entry(stage.clone()).or_default();
         if stage == jt.final_stage {
             log::debug!("final stage #{}", stage.id);
             for (id_in_job, (id, part)) in jt
@@ -510,9 +503,10 @@ pub trait NativeScheduler: Send + Sync {
     fn get_preferred_locs(&self, rdd: Arc<dyn RddBase>, partition: usize) -> Vec<Ipv4Addr> {
         // TODO: have to implement this completely
         if let Some(cached) = self.get_mutators().get_cache_locs(rdd.clone())
-            && let Some(cached) = cached.get(partition) {
-                return cached.clone();
-            }
+            && let Some(cached) = cached.get(partition)
+        {
+            return cached.clone();
+        }
         let rdd_prefs = rdd.preferred_locations(rdd.splits()[partition].clone());
         if !rdd.is_pinned() {
             if !rdd_prefs.is_empty() {
@@ -740,7 +734,7 @@ impl Mutators {
             tracker
                 .server_uris
                 .get(&shuffle_id)
-                .map_or(false, |arr| !arr.is_empty() && arr.iter().all(|s| s.is_some()))
+                .is_some_and(|arr| !arr.is_empty() && arr.iter().all(|s| s.is_some()))
         } else {
             false
         }

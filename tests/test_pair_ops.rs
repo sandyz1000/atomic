@@ -71,10 +71,7 @@ async fn test_group_by_key() {
 #[tokio::test]
 async fn test_map_values_doubles() {
     let ctx = ctx();
-    let mut result = word_pairs(&ctx)
-        .map_values(|v| v * 2)
-        .collect()
-        .unwrap();
+    let mut result = word_pairs(&ctx).map_values(|v| v * 2).collect().unwrap();
     result.sort_by_key(|(k, _)| k.clone());
     assert_eq!(
         result,
@@ -97,7 +94,13 @@ async fn test_keys() {
     result.sort();
     assert_eq!(
         result,
-        vec!["a".to_string(), "a".to_string(), "b".to_string(), "b".to_string(), "c".to_string()]
+        vec![
+            "a".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+            "b".to_string(),
+            "c".to_string()
+        ]
     );
 }
 
@@ -143,14 +146,8 @@ async fn test_lookup_not_found() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_join_inner() {
     let ctx = ctx();
-    let left = ctx.parallelize_typed(
-        vec![("a".to_string(), 1i32), ("b".to_string(), 2)],
-        2,
-    );
-    let right = ctx.parallelize_typed(
-        vec![("a".to_string(), 10i32), ("c".to_string(), 30)],
-        2,
-    );
+    let left = ctx.parallelize_typed(vec![("a".to_string(), 1i32), ("b".to_string(), 2)], 2);
+    let right = ctx.parallelize_typed(vec![("a".to_string(), 10i32), ("c".to_string(), 30)], 2);
     let result = left.join(right).collect().unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0], ("a".to_string(), (1, 10)));
@@ -168,10 +165,7 @@ async fn test_join_no_overlap() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_left_outer_join() {
     let ctx = ctx();
-    let left = ctx.parallelize_typed(
-        vec![("a".to_string(), 1i32), ("b".to_string(), 2)],
-        2,
-    );
+    let left = ctx.parallelize_typed(vec![("a".to_string(), 1i32), ("b".to_string(), 2)], 2);
     let right = ctx.parallelize_typed(vec![("a".to_string(), 10i32)], 1);
     let mut result = left.left_outer_join(right).collect().unwrap();
     result.sort_by_key(|(k, _)| k.clone());
@@ -198,7 +192,15 @@ async fn test_partitioner_assign() {
 #[tokio::test]
 async fn test_range_sort_global() {
     let ctx = ctx();
-    let data: Vec<(i32, i32)> = vec![(5, 50), (1, 10), (3, 30), (7, 70), (2, 20), (6, 60), (4, 40)];
+    let data: Vec<(i32, i32)> = vec![
+        (5, 50),
+        (1, 10),
+        (3, 30),
+        (7, 70),
+        (2, 20),
+        (6, 60),
+        (4, 40),
+    ];
     let sorted = ctx
         .parallelize_typed(data, 3)
         .sort_by_key_range(3, true)
@@ -296,12 +298,21 @@ atomic_compute::register_shuffle_map!(String, i32);
 // Tasks used by Phase 2A shuffle tests.
 #[task]
 fn tokenize_line(line: String) -> Vec<(String, i32)> {
-    line.split_whitespace().map(|w| (w.to_lowercase(), 1i32)).collect()
+    line.split_whitespace()
+        .map(|w| (w.to_lowercase(), 1i32))
+        .collect()
 }
 
 #[task]
 fn bucket_by_parity(x: i32) -> (String, i32) {
-    (if x % 2 == 0 { "even".to_string() } else { "odd".to_string() }, x)
+    (
+        if x % 2 == 0 {
+            "even".to_string()
+        } else {
+            "odd".to_string()
+        },
+        x,
+    )
 }
 
 /// Classic word-count pipeline: tokenize → pair → reduce_by_key.
@@ -381,7 +392,10 @@ async fn test_group_many_partitions() {
     // Sort the inner Vec so assertions are deterministic.
     let mut result: Vec<(String, Vec<i32>)> = result
         .into_iter()
-        .map(|(k, mut v)| { v.sort(); (k, v) })
+        .map(|(k, mut v)| {
+            v.sort();
+            (k, v)
+        })
         .collect();
     result.sort_by_key(|(k, _)| k.clone());
 
@@ -422,19 +436,21 @@ atomic_compute::register_shuffle_map!(String, u32);
 async fn test_cogroup_basic() {
     let ctx = ctx();
     let rdd1 = ctx.parallelize_typed(
-        vec![("a".to_string(), 1i32), ("b".to_string(), 2), ("a".to_string(), 3)],
+        vec![
+            ("a".to_string(), 1i32),
+            ("b".to_string(), 2),
+            ("a".to_string(), 3),
+        ],
         2,
     );
-    let rdd2 = ctx.parallelize_typed(
-        vec![("a".to_string(), 10u32), ("c".to_string(), 30)],
-        2,
-    );
+    let rdd2 = ctx.parallelize_typed(vec![("a".to_string(), 10u32), ("c".to_string(), 30)], 2);
     let mut result = rdd1.cogroup(rdd2).collect().unwrap();
     result.sort_by_key(|(k, _, _)| k.clone());
 
     // "a" appears in both: v1s=[1,3] or [3,1], v2s=[10]
     let a = result.iter().find(|(k, _, _)| k == "a").unwrap();
-    let mut a_v1 = a.1.clone(); a_v1.sort();
+    let mut a_v1 = a.1.clone();
+    a_v1.sort();
     assert_eq!(a_v1, vec![1, 3]);
     assert_eq!(a.2, vec![10u32]);
 

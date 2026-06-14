@@ -222,7 +222,10 @@ impl ShuffleCache for SpillableShuffleCache {
     fn get_slice(&self, key: &(usize, usize, usize), start: usize, len: usize) -> Option<Vec<u8>> {
         // Memory: slice directly.
         if let Some(v) = self.memory.get(key) {
-            return v.value().get(start..start.checked_add(len)?).map(<[u8]>::to_vec);
+            return v
+                .value()
+                .get(start..start.checked_add(len)?)
+                .map(<[u8]>::to_vec);
         }
         // Disk: ranged read — seek to `start` and read exactly `len` bytes so a reduce fetch of
         // one partition's slice never loads the whole spilled consolidated blob.
@@ -254,7 +257,7 @@ impl ShuffleCache for SpillableShuffleCache {
         if let Ok(entries) = std::fs::read_dir(&self.spill_dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.extension().map_or(false, |e| e == "bin") {
+                if p.extension().is_some_and(|e| e == "bin") {
                     std::fs::remove_file(p).ok();
                 }
             }
@@ -313,7 +316,7 @@ mod tests {
     }
 
     fn enc(pairs: &[(i32, i32)]) -> Vec<u8> {
-        bincode::encode_to_vec(&pairs.to_vec(), bincode::config::standard()).unwrap()
+        bincode::encode_to_vec(pairs.to_vec(), bincode::config::standard()).unwrap()
     }
 
     #[test]
@@ -385,9 +388,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = SpillableShuffleCache::new(dir.path().to_path_buf(), 0); // 0 → always spill
         cache.insert((0, 0, SHUFFLE_DATA_KEY), (0..20u8).collect());
-        assert!(dir.path().join(format!("spill-0-0-{SHUFFLE_DATA_KEY}.bin")).exists());
+        assert!(
+            dir.path()
+                .join(format!("spill-0-0-{SHUFFLE_DATA_KEY}.bin"))
+                .exists()
+        );
         // Ranged read straight from disk (no whole-blob load).
-        assert_eq!(cache.get_slice(&(0, 0, SHUFFLE_DATA_KEY), 5, 4), Some(vec![5, 6, 7, 8]));
+        assert_eq!(
+            cache.get_slice(&(0, 0, SHUFFLE_DATA_KEY), 5, 4),
+            Some(vec![5, 6, 7, 8])
+        );
         // Range past EOF → None.
         assert_eq!(cache.get_slice(&(0, 0, SHUFFLE_DATA_KEY), 18, 5), None);
     }

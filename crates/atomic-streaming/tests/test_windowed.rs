@@ -1,8 +1,8 @@
 use atomic_compute::context::Context;
 use atomic_data::rdd::Rdd;
 use atomic_streaming::context::StreamingContext;
-use atomic_streaming::dstream::windowed::WindowedDStream;
 use atomic_streaming::dstream::DStream;
+use atomic_streaming::dstream::windowed::WindowedDStream;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -49,7 +49,9 @@ fn test_windowed_multi_batch() {
     ssc.foreach_rdd(windowed as Arc<dyn DStream<i32>>, move |rdd, _t| {
         if let Ok(parts) = sc_cl.run_job(rdd.get_rdd(), |iter| iter.collect::<Vec<i32>>()) {
             let mut v = res_cl.lock();
-            for p in parts { v.extend(p); }
+            for p in parts {
+                v.extend(p);
+            }
         }
     });
 
@@ -88,7 +90,9 @@ fn test_windowed_empty_queue() {
     ssc.foreach_rdd(windowed as Arc<dyn DStream<i32>>, move |rdd, _t| {
         if let Ok(parts) = sc_cl.run_job(rdd.get_rdd(), |iter| iter.collect::<Vec<i32>>()) {
             let mut v = res_cl.lock();
-            for p in parts { v.extend(p); }
+            for p in parts {
+                v.extend(p);
+            }
         }
     });
 

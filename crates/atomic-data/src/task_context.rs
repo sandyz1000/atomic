@@ -1,4 +1,3 @@
-
 pub struct TaskContext {
     pub stage_id: usize,
     pub split_id: usize,

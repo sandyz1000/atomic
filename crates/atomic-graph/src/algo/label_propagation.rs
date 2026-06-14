@@ -192,7 +192,7 @@ mod tests {
         );
         let valid_ids: std::collections::HashSet<VertexId> = g.vertices().map(|(v, _)| v).collect();
         let labels = run(&g, 10);
-        for (_, &label) in &labels {
+        for &label in labels.values() {
             assert!(
                 valid_ids.contains(&label),
                 "label {label} is not an original vertex ID"

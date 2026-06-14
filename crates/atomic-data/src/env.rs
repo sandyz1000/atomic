@@ -1,7 +1,7 @@
 use std::sync::{Arc, RwLock};
 
-use crate::shuffle::cache::ShuffleCache;
 use crate::shuffle::MapOutputTracker;
+use crate::shuffle::cache::ShuffleCache;
 
 /// Global shuffle cache — populated by `atomic_compute::env::init_shuffle()` before any
 /// jobs are submitted. Both the ShuffleManager HTTP server and `do_shuffle_task_typed`
@@ -44,8 +44,8 @@ pub fn set_map_output_tracker(v: Arc<MapOutputTracker>) {
 /// Reduce-partition count at or above which map-side shuffle writes switch from the legacy
 /// per-bucket layout to the consolidated (sort-shuffle) layout: one DATA blob + one offset
 /// INDEX per map task instead of `R` entries. Set from `ShuffleConfig` during init; falls
-/// back to the `ATOMIC_SORT_SHUFFLE_THRESHOLD` env var, otherwise 200 (à la Spark's
-/// `bypassMergeThreshold`).
+/// back to the `ATOMIC_SORT_SHUFFLE_THRESHOLD` env var, otherwise 200 (the bypass-merge
+/// threshold below which the per-bucket layout is kept).
 pub static SORT_SHUFFLE_THRESHOLD: RwLock<Option<usize>> = RwLock::new(None);
 
 pub fn set_sort_shuffle_threshold(n: usize) {

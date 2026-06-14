@@ -17,6 +17,9 @@ use crate::topology::{Edge, EdgeContext, EdgeTriplet, VertexId, VertexMap};
 /// mutating in place).
 pub struct Graph<VD, ED> {
     pub(crate) inner: StableGraph<(VertexId, VD), ED>,
+    // Vertex-id → petgraph node index map; backs the `node_index`/`out_neighbors`
+    // traversal helpers (not exercised by every built-in algorithm).
+    #[allow(dead_code)]
     pub(crate) id_to_node: HashMap<VertexId, NodeIndex>,
 }
 
@@ -188,11 +191,13 @@ impl<VD: Clone, ED: Clone> Graph<VD, ED> {
     }
 
     /// Return the `NodeIndex` for a vertex ID, if present.
+    #[allow(dead_code)]
     pub(crate) fn node_index(&self, vid: VertexId) -> Option<NodeIndex> {
         self.id_to_node.get(&vid).copied()
     }
 
     /// Return a `HashSet` of out-neighbor IDs for a given vertex.
+    #[allow(dead_code)]
     pub(crate) fn out_neighbors(&self, vid: VertexId) -> HashSet<VertexId> {
         match self.id_to_node.get(&vid) {
             None => HashSet::new(),

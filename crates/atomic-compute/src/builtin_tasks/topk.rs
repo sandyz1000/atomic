@@ -40,11 +40,6 @@ handler: |action, payload, data| {
     };
 }
 
-
-
-
-
-
 // Instantiate new built-in tasks for common primitive types.
 impl_top_k_task!(i32);
 impl_top_k_task!(i64);
@@ -52,4 +47,3 @@ impl_top_k_task!(u32);
 impl_top_k_task!(u64);
 impl_top_k_task!(f32);
 impl_top_k_task!(f64);
-

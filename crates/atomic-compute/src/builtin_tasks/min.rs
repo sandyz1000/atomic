@@ -50,7 +50,6 @@ handler: |action, payload, data| {
     };
 }
 
-
 impl_min_task!(i32);
 impl_min_task!(i64);
 impl_min_task!(u32);

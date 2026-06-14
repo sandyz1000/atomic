@@ -41,7 +41,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = NlqConfig::default();
     let ctx = NlqContext::build(config);
-    ctx.sql_ctx().register_partitioned_batches("orders", vec![vec![batch]])?;
+    ctx.sql_ctx()
+        .register_partitioned_batches("orders", vec![vec![batch]])?;
 
     for query in [
         "count all orders",

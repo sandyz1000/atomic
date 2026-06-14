@@ -23,27 +23,31 @@ pub mod tls_impl {
     use std::path::Path;
     use std::sync::Arc;
 
-    use rustls::ServerConfig;
     use rustls::ClientConfig;
     use rustls::RootCertStore;
+    use rustls::ServerConfig;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     use rustls_pemfile::{certs, pkcs8_private_keys};
     pub use tokio_rustls::{TlsAcceptor, TlsConnector};
 
     fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
-        let f = std::fs::File::open(path)
-            .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("{}: {e}", path.display())))?;
+        let f = std::fs::File::open(path).map_err(|e| {
+            io::Error::new(io::ErrorKind::NotFound, format!("{}: {e}", path.display()))
+        })?;
         certs(&mut BufReader::new(f))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
 
     fn load_private_key(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
-        let f = std::fs::File::open(path)
-            .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("{}: {e}", path.display())))?;
+        let f = std::fs::File::open(path).map_err(|e| {
+            io::Error::new(io::ErrorKind::NotFound, format!("{}: {e}", path.display()))
+        })?;
         pkcs8_private_keys(&mut BufReader::new(f))
             .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no PKCS#8 private key found"))?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "no PKCS#8 private key found")
+            })?
             .map(PrivateKeyDer::Pkcs8)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     }
@@ -51,7 +55,8 @@ pub mod tls_impl {
     fn load_ca(path: &Path) -> io::Result<RootCertStore> {
         let mut store = RootCertStore::empty();
         for cert in load_certs(path)? {
-            store.add(cert)
+            store
+                .add(cert)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         }
         Ok(store)

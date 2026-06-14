@@ -45,7 +45,6 @@ pub trait RddBase: Send + Sync {
     fn is_pinned(&self) -> bool {
         false
     }
-
 }
 
 // Rdd containing methods associated with processing

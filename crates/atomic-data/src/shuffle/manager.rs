@@ -43,7 +43,6 @@ fn get_dynamic_port() -> u16 {
 /// It also creates the file server required for serving files via HTTP request.
 pub struct ShuffleManager {
     config: ShuffleConfig,
-    cache: Arc<dyn ShuffleCache>,
     shuffle_dir: PathBuf,
     server_uri: String,
     pub server_port: u16,
@@ -63,7 +62,6 @@ impl ShuffleManager {
 
         let manager = ShuffleManager {
             config,
-            cache,
             shuffle_dir,
             server_uri,
             server_port,
@@ -109,7 +107,9 @@ impl ShuffleManager {
     }
 
     pub fn check_status(&self) -> LibResult<StatusCode> {
-        self.ask_status.send(()).unwrap();
+        self.ask_status
+            .send(())
+            .map_err(|_| ShuffleError::InternalError)?;
         // Use a timeout so this doesn't hang when the status-checker task can't run
         // (e.g. when called from a sync context inside a current-thread Tokio runtime).
         self.rcv_status
@@ -253,7 +253,7 @@ impl ShuffleManager {
             }
 
             #[allow(unreachable_code)]
-            s.send(Err(ShuffleError::FailedToStart)).unwrap();
+            let _ = s.send(Err(ShuffleError::FailedToStart));
             Err::<(), _>(ShuffleError::FailedToStart)
         });
 
@@ -274,6 +274,10 @@ impl ShuffleManager {
         let (s, r) = cb_channel::bounded::<LibResult<()>>(1);
 
         tokio::spawn(async move {
+            // Hold the start-up sender for the lifetime of the accept loop so the
+            // channel stays open while the caller waits on `r` below; dropping it
+            // early would disconnect `r` and spuriously report a start failure.
+            let _startup_sender = s;
             conn.set_nonblocking(true)
                 .map_err(|_| ShuffleError::FailedToStart)?;
 
@@ -298,7 +302,6 @@ impl ShuffleManager {
             }
 
             #[allow(unreachable_code)]
-            s.send(Err(ShuffleError::FailedToStart)).unwrap();
             Err::<(), _>(ShuffleError::FailedToStart)
         });
 
@@ -333,8 +336,17 @@ impl ShuffleManager {
                             match tokio::net::TcpStream::connect((host, port)).await {
                                 Ok(stream) => {
                                     let io = TokioIo::new(stream);
-                                    let (mut sender, conn) =
-                                        hyper::client::conn::http1::handshake(io).await.unwrap();
+                                    let handshake = hyper::client::conn::http1::handshake(io).await;
+                                    let (mut sender, conn) = match handshake {
+                                        Ok(pair) => pair,
+                                        Err(e) => {
+                                            log::error!("Status-check handshake failed: {:?}", e);
+                                            let _ =
+                                                send_child.send(Err(ShuffleError::InternalError));
+                                            tokio::time::sleep(Duration::from_millis(25)).await;
+                                            continue;
+                                        }
+                                    };
 
                                     tokio::spawn(async move {
                                         if let Err(err) = conn.await {
@@ -345,28 +357,27 @@ impl ShuffleManager {
                                     let request = Request::builder()
                                         .uri(status_uri.clone())
                                         .body(Body::default())
-                                        .unwrap();
+                                        .expect("invariant: status-check request is well-formed");
 
                                     match sender.send_request(request).await {
                                         Ok(res) => {
-                                            send_child.send(Ok(res.status())).unwrap();
+                                            let _ = send_child.send(Ok(res.status()));
                                         }
                                         Err(e) => {
                                             log::error!("Status check failed: {:?}", e);
-                                            send_child
-                                                .send(Err(ShuffleError::InternalError))
-                                                .unwrap();
+                                            let _ =
+                                                send_child.send(Err(ShuffleError::InternalError));
                                         }
                                     }
                                 }
                                 Err(e) => {
                                     log::error!("Connection failed: {:?}", e);
-                                    send_child.send(Err(ShuffleError::InternalError)).unwrap();
+                                    let _ = send_child.send(Err(ShuffleError::InternalError));
                                 }
                             }
                         }
                         None => {
-                            send_child.send(Err(ShuffleError::InternalError)).unwrap();
+                            let _ = send_child.send(Err(ShuffleError::InternalError));
                         }
                     }
                 }

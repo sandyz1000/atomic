@@ -1,3 +1,7 @@
+// `task_fn!(|x| -> T { .. })` requires block bodies (return-typed closures);
+// clippy's unused_braces is a false positive on these macro inputs.
+#![allow(unused_braces)]
+
 use atomic_compute::{context::Context, task, task_fn};
 use std::sync::Arc;
 
@@ -89,10 +93,7 @@ async fn test_take() {
 #[tokio::test]
 async fn test_take_more_than_available() {
     let ctx = ctx();
-    let taken = ctx
-        .parallelize_typed(vec![1i32, 2, 3], 2)
-        .take(10)
-        .unwrap();
+    let taken = ctx.parallelize_typed(vec![1i32, 2, 3], 2).take(10).unwrap();
     assert_eq!(taken.len(), 3);
 }
 
@@ -112,9 +113,13 @@ async fn test_count_by_value() {
 async fn test_chained_map_filter_fold() {
     // double → keep positives → sum, all via task pipeline
     #[task]
-    fn double_i32(x: i32) -> i32 { x * 2 }
+    fn double_i32(x: i32) -> i32 {
+        x * 2
+    }
     #[task]
-    fn is_positive(x: i32) -> bool { x > 0 }
+    fn is_positive(x: i32) -> bool {
+        x > 0
+    }
 
     let ctx = ctx();
     let result = ctx

@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
+use russh::ChannelMsg;
 use russh::client::{self, Handle};
 use russh::keys::{PrivateKeyWithHashAlg, check_known_hosts_path, load_secret_key};
-use russh::ChannelMsg;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,7 +57,11 @@ enum CliError {
     RemoteSha256Failed { host: String, code: i32 },
 
     #[error("remote command failed (exit {code}):\n  cmd: {cmd}\n  out: {output}")]
-    RemoteCommandFailed { code: i32, cmd: String, output: String },
+    RemoteCommandFailed {
+        code: i32,
+        cmd: String,
+        output: String,
+    },
 
     // SSH / auth
     #[error("cannot locate ~/.ssh")]
@@ -137,7 +141,6 @@ const CLUSTER_CONFIG_PATH: &str = ".atomic/cluster.toml";
 /// Change with --remote-path if /opt is not writable on your workers.
 const DEFAULT_REMOTE_PATH: &str = "/opt/atomic/worker";
 
-
 #[derive(Parser)]
 #[command(name = "atomic")]
 #[command(about = "Atomic — distributed compute CLI (build, ship, stop)")]
@@ -158,7 +161,6 @@ enum Commands {
     Stop(StopArgs),
 }
 
-
 #[derive(Args)]
 struct BuildArgs {
     /// Target triple for cross-compilation
@@ -171,7 +173,6 @@ struct BuildArgs {
     #[arg(last = true)]
     cargo_args: Vec<String>,
 }
-
 
 #[derive(Args)]
 struct ShipArgs {
@@ -195,7 +196,6 @@ struct ShipArgs {
     user: String,
 }
 
-
 #[derive(Args)]
 struct SubmitArgs {
     #[arg(long, value_delimiter = ',')]
@@ -215,7 +215,6 @@ struct SubmitArgs {
     driver_args: Vec<String>,
 }
 
-
 #[derive(Args)]
 struct StopArgs {
     /// Comma-separated list of worker addresses (host:port).
@@ -223,7 +222,6 @@ struct StopArgs {
     #[arg(long, value_delimiter = ',')]
     workers: Vec<String>,
 }
-
 
 #[derive(Serialize, Deserialize, Default)]
 struct ClusterConfig {
@@ -235,7 +233,6 @@ struct WorkerEntry {
     address: String,
 }
 
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -246,7 +243,6 @@ async fn main() -> Result<()> {
         Commands::Stop(args) => cmd_stop(args),
     }
 }
-
 
 fn cmd_build(args: BuildArgs) -> Result<()> {
     ensure_zigbuild()?;
@@ -270,7 +266,10 @@ fn cmd_build(args: BuildArgs) -> Result<()> {
     let profile = if args.release { "release" } else { "debug" };
     println!(
         "Build succeeded. Binaries in: {}",
-        PathBuf::from("target").join(&args.target).join(profile).display()
+        PathBuf::from("target")
+            .join(&args.target)
+            .join(profile)
+            .display()
     );
     Ok(())
 }
@@ -293,7 +292,6 @@ fn ensure_zigbuild() -> Result<()> {
     Err(CliError::ZigbuildInstallFailed)
 }
 
-
 async fn cmd_ship(args: ShipArgs) -> Result<()> {
     if !args.binary.exists() {
         return Err(CliError::BinaryNotFound(args.binary));
@@ -315,10 +313,19 @@ async fn cmd_ship(args: ShipArgs) -> Result<()> {
 
     for host in &args.workers {
         println!("\nShipping to {}…", host);
-        ship_to_host(host, &args.user, args.key.as_deref(), &binary_data, &local_sha256, &remote_path)
-            .await?;
+        ship_to_host(
+            host,
+            &args.user,
+            args.key.as_deref(),
+            &binary_data,
+            &local_sha256,
+            &remote_path,
+        )
+        .await?;
         println!("  ✓ {} — binary at {}", host, remote_path);
-        deployed.push(WorkerEntry { address: format!("{}:{}", host, args.port) });
+        deployed.push(WorkerEntry {
+            address: format!("{}:{}", host, args.port),
+        });
     }
 
     save_cluster_config(&deployed)?;
@@ -343,7 +350,10 @@ async fn ship_to_host(
     // Refuses unknown hosts (no StrictHostKeyChecking=no).
     // The caller must have already run `ssh-keyscan -H <host> >> ~/.ssh/known_hosts`.
     let config = Arc::new(client::Config::default());
-    let checker = KnownHostsChecker { host: host.to_owned(), port: 22 };
+    let checker = KnownHostsChecker {
+        host: host.to_owned(),
+        port: 22,
+    };
     let mut session = client::connect(config, (host, 22u16), checker).await?;
 
     authenticate(&mut session, user, key_path).await?;
@@ -352,7 +362,11 @@ async fn ship_to_host(
         .parent()
         .and_then(|p| p.to_str())
         .unwrap_or("/opt/atomic");
-    exec_checked(&mut session, &format!("mkdir -p {}", shell_quote(remote_dir))).await?;
+    exec_checked(
+        &mut session,
+        &format!("mkdir -p {}", shell_quote(remote_dir)),
+    )
+    .await?;
 
     //
     // Writing to `<path>.tmp` means the final destination always contains a
@@ -372,13 +386,24 @@ async fn ship_to_host(
     //
     // Catches bit-rot, truncated transfers, and any tampering between our
     // SCP upload and the rename.
-    let (output, code) =
-        exec_output(&mut session, &format!("sha256sum {}", shell_quote(&tmp_path))).await?;
+    let (output, code) = exec_output(
+        &mut session,
+        &format!("sha256sum {}", shell_quote(&tmp_path)),
+    )
+    .await?;
     if code != 0 {
         let _ = exec_output(&mut session, &format!("rm -f {}", shell_quote(&tmp_path))).await;
-        return Err(CliError::RemoteSha256Failed { host: host.to_owned(), code });
+        return Err(CliError::RemoteSha256Failed {
+            host: host.to_owned(),
+            code,
+        });
     }
-    let remote_sha256 = output.split_whitespace().next().unwrap_or("").trim().to_owned();
+    let remote_sha256 = output
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_owned();
     if remote_sha256 != expected_sha256 {
         let _ = exec_output(&mut session, &format!("rm -f {}", shell_quote(&tmp_path))).await;
         return Err(CliError::Sha256Mismatch {
@@ -402,10 +427,12 @@ async fn ship_to_host(
     )
     .await?;
 
-    session.disconnect(russh::Disconnect::ByApplication, "", "English").await.ok();
+    session
+        .disconnect(russh::Disconnect::ByApplication, "", "English")
+        .await
+        .ok();
     Ok(())
 }
-
 
 struct KnownHostsChecker {
     host: String,
@@ -424,7 +451,9 @@ impl client::Handler for KnownHostsChecker {
             .ok_or(CliError::NoSshDir)?;
 
         if !known_hosts.exists() {
-            return Err(CliError::KnownHostsMissing { host: self.host.clone() });
+            return Err(CliError::KnownHostsMissing {
+                host: self.host.clone(),
+            });
         }
 
         match check_known_hosts_path(&self.host, self.port, server_public_key, &known_hosts) {
@@ -432,18 +461,22 @@ impl client::Handler for KnownHostsChecker {
             Ok(true) => Ok(true),
 
             // Host not in known_hosts — refuse rather than auto-accept.
-            Ok(false) => Err(CliError::HostNotKnown { host: self.host.clone() }),
+            Ok(false) => Err(CliError::HostNotKnown {
+                host: self.host.clone(),
+            }),
 
             // Key mismatch — warn loudly; this is a potential MITM.
             Err(e) if e.to_string().to_lowercase().contains("changed") => {
-                Err(CliError::HostKeyMismatch { host: self.host.clone(), source: e })
+                Err(CliError::HostKeyMismatch {
+                    host: self.host.clone(),
+                    source: e,
+                })
             }
 
             Err(e) => Err(e.into()),
         }
     }
 }
-
 
 async fn authenticate(
     session: &mut Handle<KnownHostsChecker>,
@@ -475,14 +508,20 @@ async fn authenticate(
             continue;
         };
         let auth_key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
-        if session.authenticate_publickey(user, auth_key).await.map(|r| r.success()).unwrap_or(false) {
+        if session
+            .authenticate_publickey(user, auth_key)
+            .await
+            .map(|r| r.success())
+            .unwrap_or(false)
+        {
             return Ok(());
         }
     }
 
-    Err(CliError::SshAuthFailed { user: user.to_owned() })
+    Err(CliError::SshAuthFailed {
+        user: user.to_owned(),
+    })
 }
-
 
 /// Run a remote command; return an error if it exits non-zero.
 async fn exec_checked(session: &mut Handle<KnownHostsChecker>, cmd: &str) -> Result<()> {
@@ -498,10 +537,7 @@ async fn exec_checked(session: &mut Handle<KnownHostsChecker>, cmd: &str) -> Res
 }
 
 /// Run a remote command and return (stdout, exit_code).
-async fn exec_output(
-    session: &mut Handle<KnownHostsChecker>,
-    cmd: &str,
-) -> Result<(String, i32)> {
+async fn exec_output(session: &mut Handle<KnownHostsChecker>, cmd: &str) -> Result<(String, i32)> {
     let mut channel = session.channel_open_session().await?;
     channel.exec(true, cmd).await?;
 
@@ -521,7 +557,6 @@ async fn exec_output(
 
     Ok((String::from_utf8_lossy(&stdout).into_owned(), exit_code))
 }
-
 
 async fn cmd_submit(args: SubmitArgs) -> Result<()> {
     // 1. Build
@@ -556,7 +591,10 @@ async fn cmd_submit(args: SubmitArgs) -> Result<()> {
             .map(|w| w.address)
             .collect()
     } else {
-        args.workers.iter().map(|h| format!("{}:{}", h, args.port)).collect()
+        args.workers
+            .iter()
+            .map(|h| format!("{}:{}", h, args.port))
+            .collect()
     };
 
     let driver_binary = match find_binary(&PathBuf::from("target/release"))
@@ -583,16 +621,22 @@ async fn cmd_submit(args: SubmitArgs) -> Result<()> {
     Ok(())
 }
 
-
 fn cmd_stop(args: StopArgs) -> Result<()> {
     let addresses: Vec<String> = if args.workers.is_empty() {
-        load_cluster_config()?.workers.into_iter().map(|w| w.address).collect()
+        load_cluster_config()?
+            .workers
+            .into_iter()
+            .map(|w| w.address)
+            .collect()
     } else {
         args.workers
     };
 
     if addresses.is_empty() {
-        println!("No workers to stop (no --workers given and {} is empty).", CLUSTER_CONFIG_PATH);
+        println!(
+            "No workers to stop (no --workers given and {} is empty).",
+            CLUSTER_CONFIG_PATH
+        );
         return Ok(());
     }
 
@@ -620,7 +664,6 @@ fn stop_worker(address: &str) -> Result<()> {
     Ok(())
 }
 
-
 fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
@@ -636,12 +679,19 @@ fn ssh_dir() -> Option<PathBuf> {
 }
 
 fn is_available(bin: &str) -> bool {
-    Command::new(bin).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new(bin)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn format_cmd(cmd: &Command) -> String {
     let prog = cmd.get_program().to_string_lossy().to_string();
-    let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+    let args: Vec<_> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
     format!("{} {}", prog, args.join(" "))
 }
 
@@ -661,7 +711,11 @@ fn find_binary(dir: &Path) -> Result<PathBuf> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if entry.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false) {
+            if entry
+                .metadata()
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+            {
                 return Ok(path);
             }
         }
@@ -673,13 +727,14 @@ fn find_binary(dir: &Path) -> Result<PathBuf> {
     Err(CliError::NoBinaryFound(dir.to_path_buf()))
 }
 
-
 fn save_cluster_config(workers: &[WorkerEntry]) -> Result<()> {
     let config_path = PathBuf::from(CLUSTER_CONFIG_PATH);
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let toml = toml::to_string_pretty(&ClusterConfig { workers: workers.to_vec() })?;
+    let toml = toml::to_string_pretty(&ClusterConfig {
+        workers: workers.to_vec(),
+    })?;
     fs::write(&config_path, toml)?;
     Ok(())
 }

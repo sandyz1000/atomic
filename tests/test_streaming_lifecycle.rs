@@ -18,11 +18,14 @@
 
 use atomic_compute::context::Context;
 use atomic_compute::env::Config;
-use atomic_streaming::context::{StreamingContext, StreamingContextState};
+use atomic_streaming::context::StreamingContext;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Shared queue of per-batch RDDs feeding a `queue_stream`.
+type RddQueue<T> = Arc<Mutex<VecDeque<Arc<dyn atomic_data::rdd::Rdd<Item = T>>>>>;
 
 fn compute_ctx() -> Arc<Context> {
     Context::new_with_config(Config::local()).unwrap()
@@ -37,7 +40,9 @@ fn test_start_active() {
     let ssc = StreamingContext::new(sc, Duration::from_millis(100));
 
     // Register a no-op output operation so `start()` passes graph validation.
-    let queue = Arc::new(Mutex::new(VecDeque::<Arc<dyn atomic_data::rdd::Rdd<Item = i32>>>::new()));
+    let queue = Arc::new(Mutex::new(VecDeque::<
+        Arc<dyn atomic_data::rdd::Rdd<Item = i32>>,
+    >::new()));
     let stream = ssc.queue_stream(queue, true);
     ssc.foreach_rdd(stream, |_rdd, _t| {});
 
@@ -55,7 +60,9 @@ fn test_double_start() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(sc, Duration::from_millis(100));
 
-    let queue = Arc::new(Mutex::new(VecDeque::<Arc<dyn atomic_data::rdd::Rdd<Item = i32>>>::new()));
+    let queue = Arc::new(Mutex::new(VecDeque::<
+        Arc<dyn atomic_data::rdd::Rdd<Item = i32>>,
+    >::new()));
     let stream = ssc.queue_stream(queue, true);
     ssc.foreach_rdd(stream, |_rdd, _t| {});
 
@@ -79,7 +86,9 @@ fn test_start_post_stop() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(sc, Duration::from_millis(100));
 
-    let queue = Arc::new(Mutex::new(VecDeque::<Arc<dyn atomic_data::rdd::Rdd<Item = i32>>>::new()));
+    let queue = Arc::new(Mutex::new(VecDeque::<
+        Arc<dyn atomic_data::rdd::Rdd<Item = i32>>,
+    >::new()));
     let stream = ssc.queue_stream(queue, true);
     ssc.foreach_rdd(stream, |_rdd, _t| {});
 
@@ -104,7 +113,9 @@ fn test_stop_is_idempotent() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(sc, Duration::from_millis(100));
 
-    let queue = Arc::new(Mutex::new(VecDeque::<Arc<dyn atomic_data::rdd::Rdd<Item = i32>>>::new()));
+    let queue = Arc::new(Mutex::new(VecDeque::<
+        Arc<dyn atomic_data::rdd::Rdd<Item = i32>>,
+    >::new()));
     let stream = ssc.queue_stream(queue, true);
     ssc.foreach_rdd(stream, |_rdd, _t| {});
 
@@ -119,7 +130,9 @@ fn test_stop_sc_shutdown() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(100));
 
-    let queue = Arc::new(Mutex::new(VecDeque::<Arc<dyn atomic_data::rdd::Rdd<Item = i32>>>::new()));
+    let queue = Arc::new(Mutex::new(VecDeque::<
+        Arc<dyn atomic_data::rdd::Rdd<Item = i32>>,
+    >::new()));
     let stream = ssc.queue_stream(queue, true);
     ssc.foreach_rdd(stream, |_rdd, _t| {});
 
@@ -153,7 +166,9 @@ fn test_checkpoint_written() {
     let counter = Arc::new(AtomicU32::new(0));
     let counter_clone = counter.clone();
 
-    let queue = Arc::new(Mutex::new(VecDeque::<Arc<dyn atomic_data::rdd::Rdd<Item = i32>>>::new()));
+    let queue = Arc::new(Mutex::new(VecDeque::<
+        Arc<dyn atomic_data::rdd::Rdd<Item = i32>>,
+    >::new()));
     let stream = ssc.queue_stream(queue, true);
     ssc.foreach_rdd(stream, move |_rdd, _t| {
         counter_clone.fetch_add(1, Ordering::Relaxed);
@@ -172,11 +187,7 @@ fn test_checkpoint_written() {
     let checkpoint_files: Vec<_> = std::fs::read_dir(&checkpoint_path)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("checkpoint-")
-        })
+        .filter(|e| e.file_name().to_string_lossy().starts_with("checkpoint-"))
         .collect();
 
     // B10 fixed: checkpoint files must be written after each batch.
@@ -193,7 +204,12 @@ fn test_checkpoint_restore() {
     use atomic_streaming::checkpoint::Checkpoint;
 
     let dir = tempfile::tempdir().unwrap();
-    let cp = Checkpoint::new(1_000_000, 100, dir.path().to_string_lossy().as_ref(), Some(999_900));
+    let cp = Checkpoint::new(
+        1_000_000,
+        100,
+        dir.path().to_string_lossy().as_ref(),
+        Some(999_900),
+    );
     cp.write(dir.path()).unwrap();
 
     let sc = compute_ctx();
@@ -221,8 +237,10 @@ async fn test_foreach_rdd() {
 
     // Push 3 pre-built RDDs.
     for i in 0..3 {
-        let rdd = sc.parallelize_typed(vec![i as i32], 1);
-        queue.lock().push_back(Arc::new(rdd) as Arc<dyn atomic_data::rdd::Rdd<Item = i32>>);
+        let rdd = sc.parallelize_typed(vec![i], 1);
+        queue
+            .lock()
+            .push_back(Arc::new(rdd) as Arc<dyn atomic_data::rdd::Rdd<Item = i32>>);
     }
 
     let sum = Arc::new(AtomicI32::new(0));
@@ -268,8 +286,7 @@ fn test_stream_reduce() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(sc, Duration::from_millis(50));
 
-    let queue: Arc<Mutex<VecDeque<Arc<dyn atomic_data::rdd::Rdd<Item = (String, i32)>>>>> =
-        Arc::new(Mutex::new(VecDeque::new()));
+    let queue: RddQueue<(String, i32)> = Arc::new(Mutex::new(VecDeque::new()));
 
     // Push one batch: word count pairs
     let batch_rdd: Arc<dyn atomic_data::rdd::Rdd<Item = (String, i32)>> = Arc::new(
@@ -281,7 +298,7 @@ fn test_stream_reduce() {
                 ("hello".to_string(), 1),
             ],
             1,
-        )
+        ),
     );
     queue.lock().push_back(batch_rdd);
 
@@ -293,25 +310,39 @@ fn test_stream_reduce() {
 
     let sc_ref = ssc.sc.clone();
     let reduced = pair_ops.reduce_by_key(|a, b| a + b, 2);
-    ssc.foreach_rdd(reduced as Arc<dyn atomic_streaming::dstream::DStream<(String, i32)>>, move |rdd, _t| {
-        if let Ok(mut items) = sc_ref.collect_rdd(rdd) {
-            items.sort_by_key(|(k, _)| k.clone());
-            if !items.is_empty() {
-                *result_clone.lock() = items;
+    ssc.foreach_rdd(
+        reduced as Arc<dyn atomic_streaming::dstream::DStream<(String, i32)>>,
+        move |rdd, _t| {
+            if let Ok(mut items) = sc_ref.collect_rdd(rdd) {
+                items.sort_by_key(|(k, _)| k.clone());
+                if !items.is_empty() {
+                    *result_clone.lock() = items;
+                }
             }
-        }
-    });
+        },
+    );
 
     ssc.start().unwrap();
     std::thread::sleep(Duration::from_millis(200));
     ssc.stop(false, false);
 
     let results = result_store.lock().clone();
-    assert!(!results.is_empty(), "expected reduce_by_key results, got empty");
+    assert!(
+        !results.is_empty(),
+        "expected reduce_by_key results, got empty"
+    );
     let hello = results.iter().find(|(k, _)| k == "hello");
-    assert_eq!(hello.map(|(_, v)| v), Some(&2i32), "hello count should be 2");
+    assert_eq!(
+        hello.map(|(_, v)| v),
+        Some(&2i32),
+        "hello count should be 2"
+    );
     let world = results.iter().find(|(k, _)| k == "world");
-    assert_eq!(world.map(|(_, v)| v), Some(&1i32), "world count should be 1");
+    assert_eq!(
+        world.map(|(_, v)| v),
+        Some(&1i32),
+        "world count should be 1"
+    );
 }
 
 /// `await_termination_or_timeout()` must return within the given deadline.
@@ -320,13 +351,15 @@ fn test_timeout_deadline() {
     let sc = compute_ctx();
     let ssc = StreamingContext::new(sc, Duration::from_millis(1000));
 
-    let queue = Arc::new(Mutex::new(VecDeque::<Arc<dyn atomic_data::rdd::Rdd<Item = i32>>>::new()));
+    let queue = Arc::new(Mutex::new(VecDeque::<
+        Arc<dyn atomic_data::rdd::Rdd<Item = i32>>,
+    >::new()));
     let stream = ssc.queue_stream(queue, true);
     ssc.foreach_rdd(stream, |_rdd, _t| {});
     ssc.start().unwrap();
 
     let start = std::time::Instant::now();
-    ssc.await_termination_or_timeout(Duration::from_millis(150));
+    let _ = ssc.await_termination_or_timeout(Duration::from_millis(150));
     let elapsed = start.elapsed();
     ssc.stop(false, false);
 

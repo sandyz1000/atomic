@@ -1,6 +1,6 @@
 use super::error::ShuffleError;
-use crate::shuffle::map_output::MapOutputTracker;
 use crate::data::Data;
+use crate::shuffle::map_output::MapOutputTracker;
 use futures::future;
 use http_body_util::{BodyExt, Full};
 use hyper::Uri;
@@ -47,11 +47,13 @@ impl ShuffleFetcher {
     {
         log::debug!("inside fetch_runs function");
         let mut inputs_by_uri = HashMap::new();
-        let server_uris: Vec<String> = self
-            .tracker
-            .get_server_uris(shuffle_id)
-            .await
-            .map_err(|err| ShuffleError::FailFetchingShuffleUris { source: Box::new(err) })?;
+        let server_uris: Vec<String> =
+            self.tracker
+                .get_server_uris(shuffle_id)
+                .await
+                .map_err(|err| ShuffleError::FailFetchingShuffleUris {
+                    source: Box::new(err),
+                })?;
         log::debug!(
             "server uris for shuffle id #{}: {:?}",
             shuffle_id,
@@ -85,9 +87,9 @@ impl ShuffleFetcher {
             // spawn a future for each expected result set
             let task = async move {
                 let mut lock = server_queue.lock().await;
-                if let Some((server_uri, input_ids)) = lock.pop() {
+                if let Some((base_server_uri, input_ids)) = lock.pop() {
                     drop(lock); // Release lock early
-                    let server_uri = format!("{}/shuffle/{}", server_uri, shuffle_id);
+                    let server_uri = format!("{}/shuffle/{}", base_server_uri, shuffle_id);
                     let mut chunk_uri_str = String::with_capacity(server_uri.len() + 12);
                     chunk_uri_str.push_str(&server_uri);
                     let mut shuffle_chunks = Vec::with_capacity(input_ids.len());
@@ -110,7 +112,13 @@ impl ShuffleFetcher {
                             Err(e) => {
                                 log::error!("Failed to fetch chunk: {:?}", e);
                                 failure.store(true, atomic::Ordering::Release);
-                                return Err(ShuffleError::FailedFetchOp);
+                                // Host unreachable after retries → the map output is
+                                // lost; surface its identity so the scheduler recomputes it.
+                                return Err(ShuffleError::FetchFailed {
+                                    shuffle_id,
+                                    map_id: input_id,
+                                    server_uri: base_server_uri.clone(),
+                                });
                             }
                         };
 
@@ -135,7 +143,7 @@ impl ShuffleFetcher {
             tasks.push(tokio::spawn(task));
         }
         log::debug!("total_results fetch results: {}", total_results);
-        let task_results = future::join_all(tasks.into_iter()).await;
+        let task_results = future::join_all(tasks).await;
         let mut runs: Vec<Vec<(K, V)>> = Vec::with_capacity(total_results);
         for res in task_results {
             match res {
@@ -242,7 +250,6 @@ impl ShuffleFetcher {
     where
         IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-
         let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
             .map_err(|_| ShuffleError::FailedFetchOp)?;

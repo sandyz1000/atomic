@@ -20,7 +20,10 @@ use crate::rdd::rdd_val::RddVals;
 pub enum TextFileSource {
     Local(PathBuf),
     #[cfg(feature = "s3")]
-    S3 { bucket: String, key: String },
+    S3 {
+        bucket: String,
+        key: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -45,13 +48,19 @@ pub struct TextFileRdd {
 
 impl TextFileRdd {
     pub fn new(id: usize, sources: Vec<TextFileSource>) -> Self {
-        TextFileRdd { vals: Arc::new(RddVals::new(id)), sources }
+        TextFileRdd {
+            vals: Arc::new(RddVals::new(id)),
+            sources,
+        }
     }
 }
 
 impl Clone for TextFileRdd {
     fn clone(&self) -> Self {
-        TextFileRdd { vals: self.vals.clone(), sources: self.sources.clone() }
+        TextFileRdd {
+            vals: self.vals.clone(),
+            sources: self.sources.clone(),
+        }
     }
 }
 
@@ -103,7 +112,10 @@ impl Rdd for TextFileRdd {
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = String>>, BaseError> {
+    fn compute(
+        &self,
+        split: Box<dyn Split>,
+    ) -> Result<Box<dyn Iterator<Item = String>>, BaseError> {
         let idx = split.get_index();
         let source = self.sources.get(idx).ok_or_else(|| {
             BaseError::Other(format!("TextFileRdd: partition {idx} out of range"))
@@ -115,13 +127,14 @@ impl Rdd for TextFileRdd {
                 let file = std::fs::File::open(path).map_err(|e| {
                     BaseError::Other(format!("text_file: cannot open {}: {e}", path.display()))
                 })?;
-                std::io::BufReader::new(file).lines().filter_map(|l| l.ok()).collect()
+                std::io::BufReader::new(file)
+                    .lines()
+                    .map_while(Result::ok)
+                    .collect()
             }
 
             #[cfg(feature = "s3")]
-            TextFileSource::S3 { bucket, key } => {
-                crate::io::s3::s3_impl::read_lines(bucket, key)
-            }
+            TextFileSource::S3 { bucket, key } => crate::io::s3::s3_impl::read_lines(bucket, key),
         };
 
         Ok(Box::new(lines.into_iter()))

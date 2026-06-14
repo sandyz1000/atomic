@@ -6,5 +6,5 @@
 // Re-export common Parquet types so callers don't need a direct `datafusion`
 // dependency for typical use-cases.
 
-pub use datafusion::prelude::ParquetReadOptions;
 pub use datafusion::parquet::file::properties::WriterProperties;
+pub use datafusion::prelude::ParquetReadOptions;

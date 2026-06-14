@@ -25,6 +25,9 @@ pub struct NlqContext {
     sql_ctx: Arc<AtomicSqlContext>,
     agent_loop: AgentLoop,
     pub registry: Arc<ToolRegistry>,
+    /// Retained NLQ configuration (model, rounds, batching); referenced by future
+    /// agent tuning, not read on the current query path.
+    #[allow(dead_code)]
     config: Arc<NlqConfig>,
     vector_indexes: Arc<DashMap<String, Arc<dyn VectorIndexProvider>>>,
 }
@@ -59,11 +62,8 @@ impl NlqContext {
             Arc::new(DashMap::new());
 
         // Build the DataFusion session with LLM extension nodes (used by builtin tools).
-        let extension_planner = NlqExtensionPlanner::new(
-            client.clone(),
-            config.clone(),
-            vector_indexes.clone(),
-        );
+        let extension_planner =
+            NlqExtensionPlanner::new(client.clone(), config.clone(), vector_indexes.clone());
         let query_planner = NlqQueryPlanner::new(extension_planner);
         let state = SessionStateBuilder::new()
             .with_default_features()
@@ -83,7 +83,13 @@ impl NlqContext {
         ));
         let agent_loop = AgentLoop::new(planner, executor, config.clone());
 
-        Self { sql_ctx, agent_loop, registry, config, vector_indexes }
+        Self {
+            sql_ctx,
+            agent_loop,
+            registry,
+            config,
+            vector_indexes,
+        }
     }
 
     /// Register an RDD-backed table (requires `build_with_compute`).
@@ -122,7 +128,9 @@ impl NlqContext {
     pub async fn plan(&self, nl: &str) -> Result<crate::workflow::WorkflowPlan> {
         log::info!("NlqContext::plan (dry-run) — {nl:?}");
         let table_schemas = self.list_table_schemas().await?;
-        self.agent_loop.plan_only(nl, &self.registry, &table_schemas).await
+        self.agent_loop
+            .plan_only(nl, &self.registry, &table_schemas)
+            .await
     }
 
     /// Streaming variant: emits `AgentEvent` through `tx` as the query executes.
@@ -165,9 +173,13 @@ impl NlqContext {
         let mut result = HashMap::new();
         let session = self.sql_ctx.inner();
         for catalog_name in session.catalog_names() {
-            let Some(catalog) = session.catalog(&catalog_name) else { continue };
+            let Some(catalog) = session.catalog(&catalog_name) else {
+                continue;
+            };
             for schema_name in catalog.schema_names() {
-                let Some(schema_prov) = catalog.schema(&schema_name) else { continue };
+                let Some(schema_prov) = catalog.schema(&schema_name) else {
+                    continue;
+                };
                 for table_name in schema_prov.table_names() {
                     if let Ok(Some(table)) = schema_prov.table(&table_name).await {
                         result.insert(table_name, table.schema());

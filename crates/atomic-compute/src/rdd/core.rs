@@ -30,11 +30,7 @@ use std::{
 };
 
 use crate::rdd::{Data, Rdd, rdd_val::RddVals};
-use atomic_data::{
-    dependency::Dependency,
-    error::BaseError,
-    split::Split,
-};
+use atomic_data::{dependency::Dependency, error::BaseError, split::Split};
 
 /// Common fields for narrow-dependency RDDs: parent pointer, RDD metadata,
 /// op name, and pinned flag.
@@ -62,7 +58,6 @@ impl<T: Data> RddCore<T> {
             pinned: AtomicBool::new(false),
         }
     }
-
 
     pub fn rdd_id(&self) -> usize {
         self.vals.id

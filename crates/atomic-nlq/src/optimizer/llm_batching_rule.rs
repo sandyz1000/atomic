@@ -1,5 +1,3 @@
-use std::fmt;
-
 use datafusion::common::tree_node::Transformed;
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{Extension, LogicalPlan};

@@ -308,7 +308,7 @@ async fn test_broadcast_store_and_snapshot() {
 
 #[tokio::test]
 async fn test_broadcast_load_and_read() {
-    use atomic_data::broadcast::{load_broadcast_values, clear_broadcast_values, BroadcastVar};
+    use atomic_data::broadcast::{BroadcastVar, clear_broadcast_values, load_broadcast_values};
     use atomic_data::distributed::WireEncode;
 
     let bytes = 42i32.encode_wire().unwrap();

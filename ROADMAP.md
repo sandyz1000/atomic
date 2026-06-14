@@ -10,6 +10,7 @@ Atomic's roadmap mirrors Spark's path from research prototype to production syst
 | --- | --- |
 | Core engine | `#[task]` compile-time dispatch, `task_fn!` inline lambdas, binary version safety (body hash + registry fingerprint), `StagedPipeline` lazy op accumulation |
 | Execution | `LocalScheduler`, `DistributedScheduler` (TCP, capacity-aware), speculative execution, dynamic worker heartbeat + eviction |
+| Fault recovery | Lineage-based recompute on executor loss — a lost shuffle-map output (dead worker) surfaces as `FetchFailed`, the `MapOutputTracker` entry is invalidated, and the producing map partition is recomputed via stage resubmission instead of failing the job |
 | Shuffle | Disk spill, shuffle-map stage fault recovery, adaptive partition coalescing, filter push-down before shuffle, per-fetch exponential-backoff retry |
 | Persistence | `cache()` / `persist()`, LRU eviction for `PartitionStore`, `MemoryAndDisk` / `DiskOnly` levels, `unpersist()`, RDD checkpointing with lineage truncation |
 | SQL | `atomic-sql` on DataFusion — SQL parser, 30+ optimizer rules, Parquet/CSV/JSON, RDD-backed table providers |

@@ -19,7 +19,6 @@ use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyIterator, PyList, PyTuple};
 
-
 fn pickle_fn(py: Python<'_>, func: &Py<PyAny>) -> PyResult<Vec<u8>> {
     let pickle = PyModule::import(py, "cloudpickle").or_else(|_| PyModule::import(py, "pickle"))?;
     pickle
@@ -34,7 +33,6 @@ fn unpickle_fn(py: Python<'_>, bytes: &[u8]) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
-
 #[derive(Clone)]
 enum PyStreamTransform {
     Map(Vec<u8>),
@@ -47,7 +45,6 @@ enum PyStreamTransform {
     UpdateStateByKey(Vec<u8>),
     MapValues(Vec<u8>),
 }
-
 
 enum PyDStreamInner {
     Queue {
@@ -73,7 +70,6 @@ enum PyDStreamInner {
         buffer: Mutex<VecDeque<(Instant, Vec<Py<PyAny>>)>>,
     },
 }
-
 
 #[pyclass(name = "DStream")]
 pub struct PyDStream {
@@ -220,7 +216,6 @@ impl PyDStream {
     }
 }
 
-
 #[pyclass(name = "BatchQueue")]
 pub struct PyBatchQueue {
     queue: Arc<Mutex<VecDeque<Vec<Py<PyAny>>>>>,
@@ -236,12 +231,10 @@ impl PyBatchQueue {
     }
 }
 
-
 struct OutputOp {
     stream: Arc<PyDStreamInner>,
     func_bytes: Vec<u8>,
 }
-
 
 fn compute_batch(
     py: Python<'_>,
@@ -271,14 +264,21 @@ fn compute_batch(
             let parent_elems = compute_batch(py, parent, state_store)?;
             apply_transform(py, parent_elems, op, state_store)
         }
-        PyDStreamInner::Windowed { parent, window_ms, buffer } => {
+        PyDStreamInner::Windowed {
+            parent,
+            window_ms,
+            buffer,
+        } => {
             let batch = compute_batch(py, parent, state_store)?;
             let now = Instant::now();
             let cutoff = Duration::from_millis(*window_ms);
             let mut buf = buffer.lock();
             buf.push_back((now, batch));
             buf.retain(|(ts, _)| now.duration_since(*ts) < cutoff);
-            Ok(buf.iter().flat_map(|(_, elems)| elems.iter().map(|e| e.clone_ref(py))).collect())
+            Ok(buf
+                .iter()
+                .flat_map(|(_, elems)| elems.iter().map(|e| e.clone_ref(py)))
+                .collect())
         }
     }
 }
@@ -520,7 +520,6 @@ fn call_output_fn(py: Python<'_>, func_bytes: &[u8], elements: Vec<Py<PyAny>>) -
     Ok(())
 }
 
-
 #[pyclass(name = "StreamingContext")]
 pub struct PyStreamingContext {
     batch_secs: f64,
@@ -549,9 +548,8 @@ impl PyStreamingContext {
     /// `run_one_batch()` call. The directory is created if it does not exist.
     pub fn checkpoint(&mut self, dir: &str) -> PyResult<()> {
         let path = PathBuf::from(dir);
-        std::fs::create_dir_all(&path).map_err(|e| {
-            pyo3::exceptions::PyIOError::new_err(format!("checkpoint dir: {e}"))
-        })?;
+        std::fs::create_dir_all(&path)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("checkpoint dir: {e}")))?;
         self.checkpoint_dir = Some(path);
         Ok(())
     }
@@ -568,9 +566,8 @@ impl PyStreamingContext {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = std::fs::read(&path).map_err(|e| {
-            pyo3::exceptions::PyIOError::new_err(format!("read checkpoint: {e}"))
-        })?;
+        let bytes = std::fs::read(&path)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("read checkpoint: {e}")))?;
         let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("parse checkpoint: {e}"))
         })?;
@@ -711,12 +708,10 @@ impl PyStreamingContext {
         });
         let tmp = dir.join("checkpoint.json.tmp");
         let final_path = dir.join("checkpoint.json");
-        std::fs::write(&tmp, data.to_string()).map_err(|e| {
-            pyo3::exceptions::PyIOError::new_err(format!("write checkpoint: {e}"))
-        })?;
-        std::fs::rename(&tmp, &final_path).map_err(|e| {
-            pyo3::exceptions::PyIOError::new_err(format!("rename checkpoint: {e}"))
-        })
+        std::fs::write(&tmp, data.to_string())
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("write checkpoint: {e}")))?;
+        std::fs::rename(&tmp, &final_path)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("rename checkpoint: {e}")))
     }
 
     /// Start the background batch loop (pyo3 0.28: use `Python::attach` for GIL).

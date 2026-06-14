@@ -19,7 +19,7 @@ pub const DEFAULT_MAX_GAP_SAMPLING_FRACTION: f64 = 0.4;
 /// A good value for this parameter is at or near the minimum positive floating
 /// point value returned by for the RNG being used.
 // TODO: this is a straight port, it may not apply exactly to pcg64 rng but should be mostly fine;
-// double check; Apache Spark(tm) uses XORShift by default
+// double check; an XORShift generator is used by default
 pub const RNG_EPSILON: f64 = 5e-11;
 
 /// Sampling fraction arguments may be results of computation, and subject to floating
@@ -99,13 +99,11 @@ impl<T: Clone + 'static> RandomSampler<T> for PoissonSampler {
                     };
 
                     Box::new(items.flat_map(move |item| {
-                        let count;
-
-                        if use_gap_sampling {
-                            count = gap_sampling.as_mut().unwrap().sample();
+                        let count = if use_gap_sampling {
+                            gap_sampling.as_mut().unwrap().sample()
                         } else {
-                            count = dist.sample(&mut rng) as u64;
-                        }
+                            dist.sample(&mut rng) as u64
+                        };
                         if count != 0 {
                             vec![item; count as usize]
                         } else {
@@ -205,12 +203,7 @@ impl BernoulliCellSampler {
             if self.complement { 1 } else { 0 }
         } else {
             let x = rng.random::<f64>();
-            let n;
-            if x >= self.lb && x < self.ub {
-                n = 1;
-            } else {
-                n = 0;
-            }
+            let n = if x >= self.lb && x < self.ub { 1 } else { 0 };
 
             if self.complement { 1 - n } else { n }
         }

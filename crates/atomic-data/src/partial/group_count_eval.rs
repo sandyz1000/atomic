@@ -1,5 +1,5 @@
-use crate::partial::{approx_eval::ApproximateEvaluator, count_eval::bound};
 use crate::data::Data;
+use crate::partial::{approx_eval::ApproximateEvaluator, count_eval::bound};
 use atomic_utils::bounded_double::BoundedDouble;
 use std::collections::HashMap;
 use std::hash::Hash;

@@ -112,8 +112,17 @@ where
 /// - feature `python`     → enables [`TaskRuntime::Python`]
 /// - feature `javascript` → enables [`TaskRuntime::JavaScript`]
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize,
-    Serialize, Deserialize, Default,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    Serialize,
+    Deserialize,
+    Default,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum TaskRuntime {
@@ -176,7 +185,6 @@ pub enum TaskAction {
         num_output_partitions: usize,
     },
 }
-
 
 /// Metadata carried in `PipelineOp.payload` for a Python UDF step.
 ///
@@ -301,6 +309,7 @@ pub struct TaskResultEnvelope {
 }
 
 impl TaskResultEnvelope {
+    #[allow(clippy::too_many_arguments)]
     pub fn ok(
         run_id: usize,
         stage_id: usize,
@@ -327,6 +336,7 @@ impl TaskResultEnvelope {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn retryable_failure(
         run_id: usize,
         stage_id: usize,
@@ -387,7 +397,9 @@ impl TaskResultEnvelope {
 }
 
 /// Worker capabilities reported to the driver on handshake.
-#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
 pub struct WorkerCapabilities {
     pub version: u16,
     pub worker_id: String,

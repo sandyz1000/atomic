@@ -110,12 +110,10 @@ impl WriteAheadLog for FileBasedWriteAheadLog {
             if let Some(stripped) = name
                 .strip_prefix("wal-")
                 .and_then(|s| s.strip_suffix(".log"))
+                && let Ok(ts) = stripped.parse::<u64>()
+                && ts < threshold_ms
             {
-                if let Ok(ts) = stripped.parse::<u64>() {
-                    if ts < threshold_ms {
-                        let _ = fs::remove_file(entry.path());
-                    }
-                }
+                let _ = fs::remove_file(entry.path());
             }
         }
         Ok(())

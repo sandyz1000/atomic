@@ -254,13 +254,7 @@ impl MapOutputTracker {
                             // Get locations
                             let locs = server_uris
                                 .get(&shuffle_id)
-                                .map(|kv| {
-                                    kv.value()
-                                        .iter()
-                                        .cloned()
-                                        .flatten()
-                                        .collect::<Vec<_>>()
-                                })
+                                .map(|kv| kv.value().iter().flatten().cloned().collect::<Vec<_>>())
                                 .unwrap_or_default();
 
                             log::debug!(
@@ -361,17 +355,37 @@ impl MapOutputTracker {
             // Bounds-safe: out-of-range map_id is treated as a no-op.
             let should_clear = arr
                 .get(map_id)
-                .map_or(false, |slot| *slot == Some(server_uri));
+                .is_some_and(|slot| *slot == Some(server_uri));
             drop(arr); // release read guard before acquiring write guard
-            if should_clear {
-                if let Some(mut entry) = self.server_uris.get_mut(&shuffle_id) {
-                    if let Some(slot) = entry.get_mut(map_id) {
-                        *slot = None;
-                    }
-                }
+            if should_clear
+                && let Some(mut entry) = self.server_uris.get_mut(&shuffle_id)
+                && let Some(slot) = entry.get_mut(map_id)
+            {
+                *slot = None;
             }
             self.increment_generation();
         }
+    }
+
+    /// Invalidate every map output served by `host` (an IP string) across all
+    /// shuffles — used when a worker dies so its lost outputs are recomputed.
+    /// Matches by host substring because the registered shuffle URI uses the
+    /// worker's shuffle-server port, not its task port. Returns the number of
+    /// outputs cleared.
+    pub fn unregister_outputs_on_host(&self, host: &str) -> usize {
+        let mut cleared = 0;
+        for mut entry in self.server_uris.iter_mut() {
+            for slot in entry.value_mut().iter_mut() {
+                if slot.as_deref().is_some_and(|uri| uri.contains(host)) {
+                    *slot = None;
+                    cleared += 1;
+                }
+            }
+        }
+        if cleared > 0 {
+            self.increment_generation();
+        }
+        cleared
     }
 
     pub async fn get_server_uris(&self, shuffle_id: usize) -> Result<Vec<String>> {
@@ -455,4 +469,56 @@ pub enum MapOutputError {
 
     #[error(transparent)]
     NetworkError(#[from] NetworkError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tracker() -> MapOutputTracker {
+        // Default avoids starting the master status server (no runtime in unit tests).
+        MapOutputTracker::default()
+    }
+
+    #[test]
+    fn host_outputs_invalidated() {
+        let t = tracker();
+        // shuffle 0: map 0 on host A, map 1 on host B.
+        t.register_map_outputs(
+            0,
+            vec![
+                Some("http://10.0.0.1:9000".to_string()),
+                Some("http://10.0.0.2:9000".to_string()),
+            ],
+        );
+        // shuffle 1: both maps on host A.
+        t.register_map_outputs(
+            1,
+            vec![
+                Some("http://10.0.0.1:9000".to_string()),
+                Some("http://10.0.0.1:9000".to_string()),
+            ],
+        );
+
+        let cleared = t.unregister_outputs_on_host("10.0.0.1");
+        assert_eq!(cleared, 3, "all three outputs on host A must be cleared");
+
+        // Host A slots are now empty; host B is untouched.
+        assert_eq!(
+            t.server_uris.get(&0).unwrap().clone(),
+            vec![None, Some("http://10.0.0.2:9000".to_string())]
+        );
+        assert_eq!(t.server_uris.get(&1).unwrap().clone(), vec![None, None]);
+    }
+
+    #[test]
+    fn unknown_host_noop() {
+        let t = tracker();
+        t.register_map_outputs(0, vec![Some("http://10.0.0.2:9000".to_string())]);
+        assert_eq!(t.unregister_outputs_on_host("10.9.9.9"), 0);
+        assert_eq!(
+            t.server_uris.get(&0).unwrap().clone(),
+            vec![Some("http://10.0.0.2:9000".to_string())]
+        );
+    }
 }

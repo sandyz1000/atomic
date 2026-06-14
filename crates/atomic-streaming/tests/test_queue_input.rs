@@ -1,5 +1,4 @@
 use atomic_compute::context::Context;
-use atomic_compute::rdd::typed::TypedRdd;
 use atomic_data::rdd::Rdd;
 use atomic_streaming::context::StreamingContext;
 use parking_lot::Mutex;
@@ -36,8 +35,8 @@ fn collect_results(
     ssc.start().unwrap();
     std::thread::sleep(Duration::from_millis(wait_ms));
     ssc.stop(false, false);
-    let r = results.lock().clone();
-    r
+
+    results.lock().clone()
 }
 
 #[test]
@@ -109,7 +108,9 @@ fn test_late_push_processed() {
     ssc.foreach_rdd(stream, move |rdd, _t| {
         if let Ok(parts) = sc_cl.run_job(rdd.get_rdd(), |iter| iter.collect::<Vec<i32>>()) {
             let mut v = res_cl.lock();
-            for p in parts { v.extend(p); }
+            for p in parts {
+                v.extend(p);
+            }
         }
     });
     ssc.start().unwrap();

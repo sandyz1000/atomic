@@ -40,9 +40,7 @@ async fn test_coalesce_noop() {
 #[tokio::test]
 async fn test_repartition() {
     let ctx = ctx();
-    let rdd = ctx
-        .parallelize_typed(vec![1i32, 2, 3, 4], 2)
-        .repartition(4);
+    let rdd = ctx.parallelize_typed(vec![1i32, 2, 3, 4], 2).repartition(4);
     // repartition(n) = coalesce(n, shuffle=true); all elements preserved
     let mut result = rdd.collect().unwrap();
     result.sort();
@@ -115,9 +113,7 @@ async fn test_range_sum() {
     let ctx = ctx();
     // range(1, 10, step=1, partitions=2) → [1..=10]
     let rdd = TypedRdd::new(ctx.range(1, 10, 1, 2), ctx.clone());
-    let sum = rdd
-        .aggregate(0u64, |acc, x| acc + x, |a, b| a + b)
-        .unwrap();
+    let sum = rdd.aggregate(0u64, |acc, x| acc + x, |a, b| a + b).unwrap();
     assert_eq!(sum, 55);
 }
 
@@ -126,9 +122,7 @@ async fn test_range_sum() {
 #[tokio::test]
 async fn test_cache_consistent() {
     let ctx = ctx();
-    let rdd = ctx
-        .parallelize_typed(vec![1i32, 2, 3, 4, 5], 3)
-        .cache();
+    let rdd = ctx.parallelize_typed(vec![1i32, 2, 3, 4, 5], 3).cache();
     let first = rdd.collect().unwrap();
     let second = rdd.collect().unwrap();
     assert_eq!(first, second);
@@ -231,6 +225,9 @@ async fn test_repartition_shuffle_redistributes() {
     let total: usize = partitions.iter().map(|p| p.len()).sum();
     assert_eq!(total, 1000, "all elements must be preserved");
     for (i, part) in partitions.iter().enumerate() {
-        assert!(!part.is_empty(), "partition {i} should be non-empty after shuffle repartition");
+        assert!(
+            !part.is_empty(),
+            "partition {i} should be non-empty after shuffle repartition"
+        );
     }
 }

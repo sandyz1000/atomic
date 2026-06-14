@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::SchemaRef;
-use tokio::sync::mpsc;
 
 use crate::config::NlqConfig;
 use crate::errors::{NlqError, Result};
@@ -50,7 +49,11 @@ impl AgentLoop {
         executor: Arc<WorkflowExecutor>,
         config: Arc<NlqConfig>,
     ) -> Self {
-        Self { planner, executor, config }
+        Self {
+            planner,
+            executor,
+            config,
+        }
     }
 
     /// Translate a natural language query into a `WorkflowPlan` without executing it.
@@ -64,7 +67,9 @@ impl AgentLoop {
         table_schemas: &HashMap<String, SchemaRef>,
     ) -> Result<crate::workflow::WorkflowPlan> {
         let ctx = AgentContext::default();
-        self.planner.plan(nl_query, table_schemas, tool_registry, &ctx).await
+        self.planner
+            .plan(nl_query, table_schemas, tool_registry, &ctx)
+            .await
     }
 
     /// Run the agentic query loop.
@@ -94,8 +99,7 @@ impl AgentLoop {
                 plan.steps.len()
             );
 
-            let results: HashMap<String, StepResult> =
-                self.executor.execute(plan).await?;
+            let results: HashMap<String, StepResult> = self.executor.execute(plan).await?;
             let step_results: Vec<StepResult> = results.into_values().collect();
             ctx.previous_results.extend(step_results);
             ctx.rounds += 1;
@@ -152,7 +156,9 @@ impl AgentLoop {
             ctx.previous_results.extend(step_results);
             ctx.rounds += 1;
 
-            let _ = tx.send(AgentEvent::RoundEvaluating { round: ctx.rounds }).await;
+            let _ = tx
+                .send(AgentEvent::RoundEvaluating { round: ctx.rounds })
+                .await;
 
             let eval = self.evaluate(nl_query, &ctx).await?;
 
@@ -214,9 +220,7 @@ impl AgentLoop {
             - If done=false, set answer to a brief explanation of what is still missing and omit visualization.\n\
             Output ONLY valid JSON, no prose.";
 
-        let user = format!(
-            "Original question: {nl_query}\n\nResults so far:\n{results_summary}"
-        );
+        let user = format!("Original question: {nl_query}\n\nResults so far:\n{results_summary}");
 
         let text = self
             .planner
@@ -224,8 +228,9 @@ impl AgentLoop {
             .chat_with_retry(&self.config.model, system, &user, 512)
             .await?;
 
-        let json: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| NlqError::PlanParse(format!("evaluation parse error: {e}; got: {text}")))?;
+        let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            NlqError::PlanParse(format!("evaluation parse error: {e}; got: {text}"))
+        })?;
 
         let is_done = json.get("done").and_then(|v| v.as_bool()).unwrap_or(true);
         let answer = json
@@ -237,6 +242,10 @@ impl AgentLoop {
             .get("visualization")
             .and_then(|v| serde_json::from_value::<VisualizationSpec>(v.clone()).ok());
 
-        Ok(Evaluation { is_done, answer, visualization })
+        Ok(Evaluation {
+            is_done,
+            answer,
+            visualization,
+        })
     }
 }

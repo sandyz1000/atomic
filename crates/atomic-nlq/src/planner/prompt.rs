@@ -73,8 +73,7 @@ fn build_schema_section(tables: &HashMap<String, SchemaRef>) -> String {
             json!({ "table": name, "columns": columns })
         })
         .collect();
-    let schema_str =
-        serde_json::to_string_pretty(&Value::Array(table_descs)).unwrap_or_default();
+    let schema_str = serde_json::to_string_pretty(&Value::Array(table_descs)).unwrap_or_default();
     format!("TABLES:\n{schema_str}")
 }
 
@@ -88,7 +87,10 @@ fn build_tools_section(tools: &ToolRegistry) -> String {
         .map(|t| {
             let schema_str =
                 serde_json::to_string(&t.input_schema).unwrap_or_else(|_| "{}".to_string());
-            format!("- {}: {} | args schema: {}", t.name, t.description, schema_str)
+            format!(
+                "- {}: {} | args schema: {}",
+                t.name, t.description, schema_str
+            )
         })
         .collect();
     format!("TOOLS:\n{}", lines.join("\n"))

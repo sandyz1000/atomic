@@ -31,7 +31,7 @@ use crate::schema::project_schema;
 /// aggregate, join) on top of the returned Arrow batches.
 ///
 /// This is the bridge between DataFusion's SQL layer and atomic's RDD execution
-/// model — analogous to how Spark SQL uses Spark Core RDDs for data access.
+/// model — the SQL layer reads through the RDD execution model for data access.
 pub struct RddTableProvider {
     schema: SchemaRef,
     rdd: Arc<dyn Rdd<Item = RecordBatch>>,
@@ -39,11 +39,7 @@ pub struct RddTableProvider {
 }
 
 impl RddTableProvider {
-    pub fn new(
-        schema: SchemaRef,
-        rdd: Arc<dyn Rdd<Item = RecordBatch>>,
-        sc: Arc<Context>,
-    ) -> Self {
+    pub fn new(schema: SchemaRef, rdd: Arc<dyn Rdd<Item = RecordBatch>>, sc: Arc<Context>) -> Self {
         Self { schema, rdd, sc }
     }
 }
@@ -121,7 +117,14 @@ impl RddScanExec {
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
-        Self { schema, rdd, sc, projection, num_partitions, properties }
+        Self {
+            schema,
+            rdd,
+            sc,
+            projection,
+            num_partitions,
+            properties,
+        }
     }
 }
 
@@ -189,11 +192,7 @@ impl ExecutionPlan for RddScanExec {
         // run_job_with_partitions returns Vec<Vec<RecordBatch>> (one inner Vec per
         // requested partition); we request exactly one partition so flatten it.
         let mut batches: Vec<RecordBatch> = sc
-            .run_job_with_partitions(
-                rdd,
-                |iter| iter.collect::<Vec<RecordBatch>>(),
-                [partition],
-            )
+            .run_job_with_partitions(rdd, |iter| iter.collect::<Vec<RecordBatch>>(), [partition])
             .map_err(|e| {
                 datafusion::error::DataFusionError::Internal(format!(
                     "atomic-compute RDD execution failed: {}",

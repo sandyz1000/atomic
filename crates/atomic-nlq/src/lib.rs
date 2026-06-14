@@ -16,4 +16,6 @@ pub use errors::{NlqError, Result};
 pub use registry::{ToolDefinition, ToolRegistry, ToolRuntime, UdfDescription};
 pub use vector::in_memory::InMemoryVectorIndex;
 pub use vector::provider::VectorIndexProvider;
-pub use workflow::{AgentEvent, AgentEventSender, AgentResult, VisualizationSpec, WorkflowPlan, WorkflowStep};
+pub use workflow::{
+    AgentEvent, AgentEventSender, AgentResult, VisualizationSpec, WorkflowPlan, WorkflowStep,
+};

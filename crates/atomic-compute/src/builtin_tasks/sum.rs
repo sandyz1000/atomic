@@ -1,5 +1,5 @@
-use crate::task_traits::BinaryTask;
 use crate::task_registry::TaskEntry;
+use crate::task_traits::BinaryTask;
 
 /// Built-in: add two values.
 ///
@@ -54,7 +54,6 @@ handler: |action, payload, data| {
         }
     };
 }
-
 
 impl_sum_task!(i32);
 impl_sum_task!(i64);

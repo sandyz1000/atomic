@@ -10,11 +10,9 @@ use crate::topology::{EdgeContext, EdgeDirection, VertexId};
 /// 1. Apply `vprog(vid, vd, initial_msg)` to every vertex to obtain the
 ///    starting vertex state.
 /// 2. Repeat up to `max_iterations` supersteps:
-///    a. Call `send_msg` on every edge triplet; each call may emit messages
-///       via `ctx.send_to_src()` / `ctx.send_to_dst()`.
+///    a. Call `send_msg` on every edge triplet, emitting messages via `ctx.send_to_src()` / `ctx.send_to_dst()`.
 ///    b. Merge all messages destined for the same vertex with `merge_msg`.
-///    c. For each vertex that received a message, apply
-///       `vprog(vid, old_vd, msg)` to update its attribute.
+///    c. For each vertex that received a message, apply `vprog(vid, old_vd, msg)` to update its attribute.
 ///    d. If no messages were generated, terminate early.
 /// 3. Return the final graph.
 ///
@@ -30,8 +28,8 @@ use crate::topology::{EdgeContext, EdgeDirection, VertexId};
 /// * `initial_msg`      — message sent to every vertex before superstep 0.
 /// * `max_iterations`   — maximum number of supersteps.
 /// * `active_direction` — which direction of edges to consider when sending
-///                        messages.  `EdgeDirection::Either` (the GraphX default)
-///                        considers all edges.
+///   messages.  `EdgeDirection::Either` (the GraphX default)
+///   considers all edges.
 /// * `vprog`            — vertex program: `(vid, vd, msg) -> new_vd`.
 /// * `send_msg`         — edge UDF: receives an `EdgeContext` and emits messages.
 /// * `merge_msg`        — commutative associative combiner for messages.
@@ -62,8 +60,7 @@ where
 
     for _ in 0..max_iterations {
         // Aggregate messages.
-        let msgs =
-            current.aggregate_messages::<A, _, _>(|ctx| send_msg(ctx), |a, b| merge_msg(a, b));
+        let msgs = current.aggregate_messages::<A, _, _>(&send_msg, &merge_msg);
 
         if msgs.is_empty() {
             break;
@@ -171,7 +168,7 @@ mod tests {
         )
         .map_vertices(|vid, _| vid);
 
-        let mut calls = 0usize;
+        let _calls = 0usize;
         let result = run(
             &g,
             VertexId::MAX,

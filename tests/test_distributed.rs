@@ -146,8 +146,8 @@ fn distributed_shuffle_wordcount() {
 
     assert_eq!(out["hello"], serde_json::json!(2), "hello count mismatch");
     assert_eq!(out["world"], serde_json::json!(2), "world count mismatch");
-    assert_eq!(out["rust"],  serde_json::json!(2), "rust count mismatch");
-    assert_eq!(out["of"],    serde_json::json!(1), "of count mismatch");
+    assert_eq!(out["rust"], serde_json::json!(2), "rust count mismatch");
+    assert_eq!(out["of"], serde_json::json!(1), "of count mismatch");
 }
 
 // ── Test 3: multi-stage pipeline ──────────────────────────────────────────────
@@ -179,11 +179,16 @@ fn distributed_multi_stage_pipeline() {
         )
     });
 
-    let sorted = out["sorted_words"].as_array().expect("sorted_words must be array");
+    let sorted = out["sorted_words"]
+        .as_array()
+        .expect("sorted_words must be array");
 
     // The first element must have count >= last element (descending by count).
     let first_count = sorted.first().and_then(|v| v[1].as_i64()).unwrap_or(0);
-    let last_count  = sorted.last().and_then(|v| v[1].as_i64()).unwrap_or(i64::MAX);
+    let last_count = sorted
+        .last()
+        .and_then(|v| v[1].as_i64())
+        .unwrap_or(i64::MAX);
     assert!(
         first_count >= last_count,
         "sorted_words must be in descending count order; first={first_count}, last={last_count}"

@@ -35,7 +35,6 @@ handler: |action, _payload, data| {
     };
 }
 
-
 impl_sort_task!(i32);
 impl_sort_task!(i64);
 impl_sort_task!(u32);

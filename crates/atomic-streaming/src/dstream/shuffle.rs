@@ -25,8 +25,11 @@ where
     create_combiner: Arc<dyn Fn(V) -> C + Send + Sync>,
     merge_value: Arc<dyn Fn(C, V) -> C + Send + Sync>,
     merge_combiners: Arc<dyn Fn(C, C) -> C + Send + Sync>,
-    generated: Mutex<HashMap<u64, Arc<dyn Rdd<Item = (K, C)>>>>,
+    generated: GeneratedRdds<(K, C)>,
 }
+
+/// Per-batch cache of generated RDDs, keyed by batch validation time (ms).
+type GeneratedRdds<T> = Mutex<HashMap<u64, Arc<dyn Rdd<Item = T>>>>;
 
 impl<K, V, C> ShuffledDStream<K, V, C>
 where
@@ -60,8 +63,12 @@ where
     V: Data + Clone,
     C: Data + Clone,
 {
-    fn slide_duration(&self) -> Duration { self.parent.slide_duration() }
-    fn id(&self) -> usize { self.stream_id }
+    fn slide_duration(&self) -> Duration {
+        self.parent.slide_duration()
+    }
+    fn id(&self) -> usize {
+        self.stream_id
+    }
     fn base_dependencies(&self) -> Vec<Arc<dyn DStreamBase>> {
         vec![self.parent.clone() as Arc<dyn DStreamBase>]
     }
@@ -79,7 +86,8 @@ where
 
         // Collect batch to driver and aggregate per-key. For micro-batches this is
         // efficient; for large batches, use TypedRdd::combine_by_key with shuffle instead.
-        let pairs = ctx.run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
+        let pairs = ctx
+            .run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
             .unwrap_or_default();
 
         let cc = self.create_combiner.clone();
@@ -90,7 +98,10 @@ where
         for partition in pairs {
             for (k, v) in partition {
                 agg.entry(k)
-                    .and_modify(|c| { let new_c = mv(c.clone(), v.clone()); *c = new_c; })
+                    .and_modify(|c| {
+                        let new_c = mv(c.clone(), v.clone());
+                        *c = new_c;
+                    })
                     .or_insert_with(|| cc(v));
             }
         }
@@ -100,7 +111,7 @@ where
         let result: Vec<(K, C)> = agg.into_iter().collect();
         let id = ctx.new_rdd_id();
         Some(Arc::new(
-            atomic_compute::rdd::parallel_collection::ParallelCollection::new(id, result, 1)
+            atomic_compute::rdd::parallel_collection::ParallelCollection::new(id, result, 1),
         ) as Arc<dyn Rdd<Item = (K, C)>>)
     }
 

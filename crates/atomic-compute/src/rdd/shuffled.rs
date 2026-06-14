@@ -68,12 +68,15 @@ where
         part: Partitioner,
         fetcher: Arc<ShuffleFetcher>,
     ) -> Self {
-        Self::new_with_staged(id, shuffle_id, parent, aggregator, part, fetcher, None, None)
+        Self::new_with_staged(
+            id, shuffle_id, parent, aggregator, part, fetcher, None, None,
+        )
     }
 
     /// Variant used when a staged pipeline (from `_task` ops) precedes the shuffle.
     /// `staged` carries `(source_partitions, preceding_ops)` so workers run the ops
     /// before writing shuffle buckets.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_staged(
         id: usize,
         shuffle_id: usize,
@@ -123,7 +126,8 @@ where
         } else {
             dep_box
         };
-        vals.dependencies.push(Dependency::Shuffle(Arc::new(dep_box)));
+        vals.dependencies
+            .push(Dependency::Shuffle(Arc::new(dep_box)));
         let vals = Arc::new(vals);
         ShuffledRdd {
             parent,
@@ -159,10 +163,10 @@ where
 
     fn number_of_splits(&self) -> usize {
         // If adaptive coalescing ran for this shuffle, return the coalesced count.
-        if let Some(tracker) = atomic_data::env::get_map_output_tracker() {
-            if let Some(n) = tracker.get_coalesced_partitions(self.shuffle_id) {
-                return n;
-            }
+        if let Some(tracker) = atomic_data::env::get_map_output_tracker()
+            && let Some(n) = tracker.get_coalesced_partitions(self.shuffle_id)
+        {
+            return n;
         }
         self.part.get_num_of_partitions()
     }
@@ -221,24 +225,23 @@ where
         let original_num_partitions = self.part.get_num_of_partitions();
 
         // Determine which original reduce-partition IDs this coalesced split covers.
-        let original_ids: Vec<usize> = if let Some(tracker) =
-            atomic_data::env::get_map_output_tracker()
-        {
-            if let Some(coalesced_n) = tracker.get_coalesced_partitions(self.shuffle_id) {
-                // Map coalesced_id → original reduce partition range.
-                // Simple even-split mapping: coalesced partition i covers
-                // [i * (original / coalesced), (i+1) * (original / coalesced)).
-                let ratio = original_num_partitions.max(1);
-                let per_coalesced = (ratio + coalesced_n - 1) / coalesced_n; // ceil
-                let start_id = coalesced_id * per_coalesced;
-                let end_id = ((coalesced_id + 1) * per_coalesced).min(original_num_partitions);
-                (start_id..end_id).collect()
+        let original_ids: Vec<usize> =
+            if let Some(tracker) = atomic_data::env::get_map_output_tracker() {
+                if let Some(coalesced_n) = tracker.get_coalesced_partitions(self.shuffle_id) {
+                    // Map coalesced_id → original reduce partition range.
+                    // Simple even-split mapping: coalesced partition i covers
+                    // [i * (original / coalesced), (i+1) * (original / coalesced)).
+                    let ratio = original_num_partitions.max(1);
+                    let per_coalesced = ratio.div_ceil(coalesced_n); // ceil
+                    let start_id = coalesced_id * per_coalesced;
+                    let end_id = ((coalesced_id + 1) * per_coalesced).min(original_num_partitions);
+                    (start_id..end_id).collect()
+                } else {
+                    vec![coalesced_id]
+                }
             } else {
                 vec![coalesced_id]
-            }
-        } else {
-            vec![coalesced_id]
-        };
+            };
 
         // Sort-shuffle reduce: the map side wrote sorted runs; merge them by key and coalesce
         // equal keys via the aggregator. Ordering is driven by the stored comparator closure
@@ -248,7 +251,7 @@ where
             for orig_id in original_ids {
                 let runs = Handle::current()
                     .block_on(self.fetcher.fetch_runs::<K, C>(self.shuffle_id, orig_id))
-                    .map_err(|e| BaseError::Other(format!("Shuffle fetch error: {}", e)))?;
+                    .map_err(BaseError::from)?;
                 for run in runs {
                     merged.extend(run);
                 }
@@ -263,16 +266,17 @@ where
                     _ => out.push((k, c)),
                 }
             }
-            log::debug!("time taken for sort-merge fetch {}", start.elapsed().as_millis());
+            log::debug!(
+                "time taken for sort-merge fetch {}",
+                start.elapsed().as_millis()
+            );
             return Ok(Box::new(out.into_iter()));
         }
 
         let mut combiners: HashMap<K, C> = HashMap::new();
         for orig_id in original_ids {
             let fut = self.fetcher.fetch::<K, C>(self.shuffle_id, orig_id);
-            let result = Handle::current()
-                .block_on(fut)
-                .map_err(|e| BaseError::Other(format!("Shuffle fetch error: {}", e)))?;
+            let result = Handle::current().block_on(fut).map_err(BaseError::from)?;
             for (k, c) in result {
                 combiners
                     .entry(k)

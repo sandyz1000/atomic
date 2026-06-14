@@ -52,7 +52,6 @@ impl PyRdd {
         }
     }
 
-
     /// Pickle a callable using cloudpickle (if available) or stdlib pickle.
     ///
     /// cloudpickle is required for lambdas and closures; the worker subprocess
@@ -173,7 +172,6 @@ impl PyRdd {
 
 #[pymethods]
 impl PyRdd {
-
     /// Apply `f` to each element, returning a new RDD.
     pub fn map(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         if self.context.is_distributed() {
@@ -538,7 +536,6 @@ impl PyRdd {
     pub fn repartition(&self, py: Python, num_partitions: usize) -> PyRdd {
         self.coalesce(py, num_partitions)
     }
-
 
     /// Return all elements as a Python list.
     ///

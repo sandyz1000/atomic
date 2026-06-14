@@ -1,9 +1,9 @@
 pub mod cached;
-pub(crate) mod core;
-pub mod checkpoint;
 pub mod cartesian;
+pub mod checkpoint;
 pub mod co_grouped;
 pub mod coalesced;
+pub(crate) mod core;
 pub mod flatmapper;
 pub mod map_partitions;
 pub mod mapper;
@@ -15,7 +15,6 @@ pub mod shuffled;
 pub mod typed;
 pub mod union_rdd;
 pub mod zip;
-
 
 pub use crate::context::Context;
 pub use atomic_data::task_context::TaskContext;

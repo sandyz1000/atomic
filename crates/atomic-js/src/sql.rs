@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 use datafusion::arrow::array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    Int8Array, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -16,7 +16,6 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use atomic_sql::context::AtomicSqlContext;
-
 
 fn run_sql_async<F, T>(fut: F) -> T
 where
@@ -32,14 +31,12 @@ where
     }
 }
 
-
 static TMP_VIEW_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn tmp_view_name() -> String {
     let n = TMP_VIEW_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("__atomic_tmp_{n}")
 }
-
 
 fn arrow_scalar_to_json(col: &dyn Array, row: usize) -> serde_json::Value {
     if col.is_null(row) {
@@ -127,7 +124,6 @@ fn batches_to_json_rows(batches: &[RecordBatch]) -> Vec<serde_json::Value> {
     rows
 }
 
-
 /// A lazy structured dataset produced by `SqlContext.sql()`.
 ///
 /// Call `collect()`, `count()`, or `show()` to trigger execution.
@@ -145,7 +141,6 @@ pub struct JsDataFrame {
 
 #[napi]
 impl JsDataFrame {
-
     /// Execute the query and return all rows as an array of objects.
     ///
     /// Each object maps column name → value (number, string, boolean, or null).
@@ -159,8 +154,7 @@ impl JsDataFrame {
     /// Execute and print a formatted table to stdout (default: 20 rows).
     #[napi]
     pub fn show(&self) -> Result<()> {
-        run_sql_async(self.inner.clone().show())
-            .map_err(|e| Error::from_reason(e.to_string()))
+        run_sql_async(self.inner.clone().show()).map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Execute and print the first `n` rows to stdout.
@@ -178,7 +172,6 @@ impl JsDataFrame {
         Ok(n as u32)
     }
 
-
     /// Filter rows using a SQL WHERE-clause expression.
     ///
     /// @param expr - SQL expression string, e.g. `"amount > 100"`.
@@ -194,12 +187,17 @@ impl JsDataFrame {
         let session = self.session.clone();
         let result_df = run_sql_async(async move {
             session.register_table(&view, df.into_view())?;
-            let result = session.sql(&format!("SELECT * FROM {view} WHERE {expr}")).await;
+            let result = session
+                .sql(&format!("SELECT * FROM {view} WHERE {expr}"))
+                .await;
             let _ = session.deregister_table(&view);
             result
         })
         .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))?;
-        Ok(JsDataFrame { inner: result_df, session: self.session.clone() })
+        Ok(JsDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
     }
 
     /// Keep only the specified columns.
@@ -213,17 +211,29 @@ impl JsDataFrame {
     #[napi]
     pub fn select(&self, columns: Vec<String>) -> Result<JsDataFrame> {
         let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
-        let df = self.inner.clone().select_columns(&refs)
+        let df = self
+            .inner
+            .clone()
+            .select_columns(&refs)
             .map_err(|e| Error::from_reason(e.to_string()))?;
-        Ok(JsDataFrame { inner: df, session: self.session.clone() })
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
     }
 
     /// Limit the result to the first `n` rows.
     #[napi]
     pub fn limit(&self, n: u32) -> Result<JsDataFrame> {
-        let df = self.inner.clone().limit(0, Some(n as usize))
+        let df = self
+            .inner
+            .clone()
+            .limit(0, Some(n as usize))
             .map_err(|e| Error::from_reason(e.to_string()))?;
-        Ok(JsDataFrame { inner: df, session: self.session.clone() })
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
     }
 
     /// Sort by a column name.
@@ -233,11 +243,16 @@ impl JsDataFrame {
     #[napi]
     pub fn sort(&self, col: String, ascending: Option<bool>) -> Result<JsDataFrame> {
         let asc = ascending.unwrap_or(true);
-        let df = self.inner.clone().sort(vec![df_col(&col).sort(asc, true)])
+        let df = self
+            .inner
+            .clone()
+            .sort(vec![df_col(&col).sort(asc, true)])
             .map_err(|e| Error::from_reason(e.to_string()))?;
-        Ok(JsDataFrame { inner: df, session: self.session.clone() })
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
     }
-
 
     /// Return a JSON object mapping column name → Arrow type string.
     ///
@@ -249,11 +264,13 @@ impl JsDataFrame {
     pub fn schema(&self) -> Result<serde_json::Value> {
         let mut obj = serde_json::Map::new();
         for field in self.inner.schema().fields() {
-            obj.insert(field.name().clone(), serde_json::Value::String(field.data_type().to_string()));
+            obj.insert(
+                field.name().clone(),
+                serde_json::Value::String(field.data_type().to_string()),
+            );
         }
         Ok(serde_json::Value::Object(obj))
     }
-
 
     /// Write all rows to a Parquet file or directory.
     ///
@@ -288,7 +305,6 @@ impl JsDataFrame {
     }
 }
 
-
 /// SQL execution context backed by DataFusion.
 ///
 /// Register data sources (CSV, Parquet, JSON) and execute SQL queries.
@@ -318,7 +334,6 @@ impl JsSqlContext {
         Ok(Self { inner, session })
     }
 
-
     /// Parse and execute a SQL query. Returns a lazy `DataFrame`.
     ///
     /// The DataFrame is not executed until `collect()`, `show()`, or `count()` is called.
@@ -329,9 +344,11 @@ impl JsSqlContext {
         let session = self.session.clone();
         let df = run_sql_async(async move { session.sql(&query).await })
             .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))?;
-        Ok(JsDataFrame { inner: df, session: self.session.clone() })
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
     }
-
 
     /// Register a CSV file or directory as a named table.
     ///

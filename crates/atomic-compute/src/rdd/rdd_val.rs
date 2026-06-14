@@ -14,9 +14,4 @@ impl RddVals {
             should_cache: false,
         }
     }
-
-    fn cache(mut self) -> Self {
-        self.should_cache = true;
-        self
-    }
 }

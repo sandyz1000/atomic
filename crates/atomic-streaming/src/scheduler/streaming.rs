@@ -36,5 +36,5 @@ pub enum StreamingListenerEvent {
 
 /// A listener for streaming lifecycle events.
 pub trait StreamingListener: Send + Sync + 'static {
-    fn on_event(&self, event: &StreamingListenerEvent) {}
+    fn on_event(&self, _event: &StreamingListenerEvent) {}
 }

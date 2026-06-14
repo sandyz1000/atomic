@@ -2,12 +2,11 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use crate::error::ComputeError;
-use atomic_data::error::BaseResult;
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::union_rdd::UnionVariants::{NonUniquePartitioner, PartitionerAware};
 use crate::rdd::*;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::BaseResult;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::split::{PartitionerAwareUnionSplit, Split, UnionSplit};
 
@@ -60,7 +59,7 @@ impl<T: Data> UnionVariants<T> {
         let mut vals = RddVals::new(id);
 
         let mut pos = 0;
-        let final_rdds: Vec<_> = rdds.iter().map(|rdd| rdd.clone()).collect();
+        let final_rdds: Vec<_> = rdds.to_vec();
 
         if !UnionVariants::has_unique_partitioner(rdds) {
             let deps = rdds
@@ -81,7 +80,9 @@ impl<T: Data> UnionVariants<T> {
                 vals,
             })
         } else {
-            let part = rdds[0].partitioner().ok_or(ComputeError::LackingPartitioner)?;
+            let part = rdds[0]
+                .partitioner()
+                .ok_or(ComputeError::LackingPartitioner)?;
             log::debug!("inside partition aware constructor");
             let deps = rdds
                 .iter()
@@ -122,7 +123,7 @@ impl<T: Data> UnionVariants<T> {
 
     // Preferred-location computation is intentionally omitted here.
     // Locality-aware scheduling requires the Context/Scheduler layer to track which
-    // workers hold cached partitions. That protocol (`CacheTracker`) is deferred;
+    // workers hold cached partitions. That distributed cache-locality protocol is deferred;
     // until it is implemented `preferred_locations` returns an empty Vec for all
     // UnionRdd variants.
 }
@@ -161,10 +162,8 @@ impl<T: Data + Clone> RddBase for UnionRdd<T> {
                     return Vec::new();
                 };
 
-                // Locality-aware location tracking is deferred (requires CacheTracker protocol).
-                log::debug!(
-                    "Preferred locations for PartitionerAwareUnionRdd not yet implemented"
-                );
+                // Locality-aware location tracking is deferred (needs a distributed cache-locality protocol).
+                log::debug!("Preferred locations for PartitionerAwareUnionRdd not yet implemented");
                 Vec::new()
             }
         }

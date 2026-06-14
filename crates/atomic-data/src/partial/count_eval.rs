@@ -1,6 +1,9 @@
-use crate::partial::{approx_eval::ApproximateEvaluator};
+use crate::partial::approx_eval::ApproximateEvaluator;
 use atomic_utils::bounded_double::BoundedDouble;
-use statrs::{distribution::Poisson, statistics::Distribution};
+use statrs::{
+    distribution::{DiscreteCDF, Poisson},
+    statistics::Distribution,
+};
 
 /// An ApproximateEvaluator for counts.
 pub struct CountEvaluator {
@@ -44,15 +47,14 @@ pub fn bound(confidence: f64, sum: f64, p: f64) -> BoundedDouble {
     // p of the data. This suggests data is counted at a rate of sum / p across the whole data
     // set. The total expected count from the rest is distributed as
     // (1-p) Poisson(sum / p) = Poisson(sum*(1-p)/p)
-    let dist = Poisson::new(sum * (1.0f64 - p) / p).unwrap();
+    let dist = Poisson::new(sum * (1.0f64 - p) / p)
+        .expect("invariant: lambda = sum*(1-p)/p > 0 for sum > 0 and 0 < p < 1");
 
-    // Not quite symmetric; calculate interval straight from discrete distribution
-    // FIXME: (should be) val low_interval = dist.inverseCumulativeProbability((1 - confidence) / 2)
-    // let lower_range = (1.0 - confidence) / 2.0;
-    let low_interval = 0.0;
-    // FIXME: (should be) val high = dist.inverseCumulativeProbability((1 + confidence) / 2)
-    // let higher_range = (1.0 + confidence) / 2.0;
-    let high_interval = 0.0;
+    // Not quite symmetric; calculate interval straight from the discrete distribution.
+    // The remaining (unobserved) count lies within [low_interval, high_interval] with
+    // probability `confidence`, taken from the Poisson inverse CDF at the two tail points.
+    let low_interval = dist.inverse_cdf((1.0 - confidence) / 2.0) as f64;
+    let high_interval = dist.inverse_cdf((1.0 + confidence) / 2.0) as f64;
 
     // Add 'sum' to each because distribution is just of remaining count, not observed
     BoundedDouble::from((

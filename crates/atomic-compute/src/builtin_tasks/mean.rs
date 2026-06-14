@@ -39,8 +39,6 @@ handler: |action, _payload, data| {
     };
 }
 
-
-
 // MeanTask uses `x as f64` so only integer and float primitives apply.
 impl_mean_task!(i32);
 impl_mean_task!(i64);
@@ -48,5 +46,3 @@ impl_mean_task!(u32);
 impl_mean_task!(u64);
 impl_mean_task!(f32);
 impl_mean_task!(f64);
-
-

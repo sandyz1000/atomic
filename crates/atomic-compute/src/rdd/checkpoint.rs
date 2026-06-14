@@ -20,7 +20,6 @@ use atomic_data::split::Split;
 
 use crate::rdd::rdd_val::RddVals;
 
-
 #[derive(Debug, Clone)]
 struct CheckpointSplit {
     index: usize,
@@ -35,13 +34,15 @@ impl Split for CheckpointSplit {
     }
 }
 
-
 /// Where checkpoint data lives — local directory or S3 prefix.
 #[derive(Debug, Clone)]
 pub enum CheckpointStore {
     Local(PathBuf),
     #[cfg(feature = "s3")]
-    S3 { bucket: String, prefix: String },
+    S3 {
+        bucket: String,
+        prefix: String,
+    },
 }
 
 impl CheckpointStore {
@@ -52,7 +53,10 @@ impl CheckpointStore {
             {
                 use crate::io::s3::s3_impl::S3Uri;
                 if let Some(s3) = S3Uri::parse(uri) {
-                    return CheckpointStore::S3 { bucket: s3.bucket, prefix: s3.key };
+                    return CheckpointStore::S3 {
+                        bucket: s3.bucket,
+                        prefix: s3.key,
+                    };
                 }
             }
             log::warn!("CheckpointStore: s3:// URI requires 's3' feature; falling back to /tmp");
@@ -65,9 +69,10 @@ impl CheckpointStore {
     /// File path for the given rdd_id and partition index (local only).
     pub fn local_partition_path(&self, rdd_id: usize, partition: usize) -> Option<PathBuf> {
         match self {
-            CheckpointStore::Local(base) => {
-                Some(base.join(format!("{rdd_id}")).join(format!("{partition}.bin")))
-            }
+            CheckpointStore::Local(base) => Some(
+                base.join(format!("{rdd_id}"))
+                    .join(format!("{partition}.bin")),
+            ),
             #[cfg(feature = "s3")]
             CheckpointStore::S3 { .. } => None,
         }
@@ -84,7 +89,6 @@ impl CheckpointStore {
         }
     }
 }
-
 
 /// Leaf RDD that reads pre-checkpointed partitions from a `CheckpointStore`.
 ///
@@ -174,13 +178,12 @@ where
 
         match &self.store {
             CheckpointStore::Local(base) => {
-                let path = base.join(format!("{}", self.vals.id)).join(format!("{idx}.bin"));
+                let path = base
+                    .join(format!("{}", self.vals.id))
+                    .join(format!("{idx}.bin"));
                 use crate::rdd::cached::disk_read_partition;
                 let items = disk_read_partition::<T>(&path).map_err(|e| {
-                    BaseError::Other(format!(
-                        "checkpoint read failed at {}: {e}",
-                        path.display()
-                    ))
+                    BaseError::Other(format!("checkpoint read failed at {}: {e}", path.display()))
                 })?;
                 Ok(Box::new(items.into_iter()))
             }
@@ -193,16 +196,16 @@ where
                 let key = format!("{prefix}/{}/{idx}.bin", self.vals.id);
                 let lines = read_lines(bucket, &key);
                 let b64 = lines.into_iter().collect::<Vec<_>>().join("");
-                let bytes = base64::Engine::decode(
-                    &base64::engine::general_purpose::STANDARD,
-                    b64.trim(),
-                )
-                .map_err(|e| BaseError::Other(format!("checkpoint s3 base64 decode: {e}")))?;
-                let (items, _) = bincode::decode_from_slice::<Vec<T>, _>(
-                    &bytes,
-                    bincode::config::standard(),
-                )
-                .map_err(|e| BaseError::Other(format!("checkpoint s3 bincode decode: {e}")))?;
+                let bytes =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.trim())
+                        .map_err(|e| {
+                            BaseError::Other(format!("checkpoint s3 base64 decode: {e}"))
+                        })?;
+                let (items, _) =
+                    bincode::decode_from_slice::<Vec<T>, _>(&bytes, bincode::config::standard())
+                        .map_err(|e| {
+                            BaseError::Other(format!("checkpoint s3 bincode decode: {e}"))
+                        })?;
                 Ok(Box::new(items.into_iter()))
             }
         }

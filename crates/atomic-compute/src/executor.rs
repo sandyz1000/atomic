@@ -2,9 +2,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::runtimes::{Backend, ComputeEngine};
 use crate::env;
 use crate::error::{ComputeError, ComputeResult};
+use crate::runtimes::{Backend, ComputeEngine};
 use atomic_data::distributed::{
     TRANSPORT_HEADER_LEN, TaskEnvelope, TransportFrameKind, WireDecode, WireEncode,
     WorkerCapabilities, encode_transport_frame, parse_transport_header,
@@ -85,8 +85,12 @@ impl Executor {
             registered_ops.len(),
             crate::task_registry::SHUFFLE_MAP_REGISTRY.len(),
         );
-        WorkerCapabilities::new(self.worker_id.to_string(), self.max_concurrent_tasks, registered_ops)
-            .with_registry_fingerprint(*crate::task_registry::REGISTRY_FINGERPRINT)
+        WorkerCapabilities::new(
+            self.worker_id.to_string(),
+            self.max_concurrent_tasks,
+            registered_ops,
+        )
+        .with_registry_fingerprint(*crate::task_registry::REGISTRY_FINGERPRINT)
     }
 
     /// Worker loop: binds TCP port, reads transport frames, dispatches via ComputeEngine.
@@ -251,7 +255,10 @@ impl Executor {
         S: AsyncWrite + Unpin,
     {
         let frame = encode_transport_frame(frame_kind, payload);
-        stream.write_all(&frame).await.map_err(ComputeError::OutputWrite)
+        stream
+            .write_all(&frame)
+            .await
+            .map_err(ComputeError::OutputWrite)
     }
 
     /// Listens on `port + 10` for graceful or error shutdown signals.
@@ -305,7 +312,6 @@ impl Executor {
     }
 }
 
-
 /// Inspect one completed `JoinSet` result.
 /// Disconnections are logged and swallowed; other errors propagate.
 fn propagate_task_result(
@@ -352,7 +358,10 @@ mod tests {
         Arc::new(Executor::new(port, num_cpus::get().max(1) as u16))
     }
 
-    fn connect_to_executor(mut port: u16, signal_handler: bool) -> ComputeResult<std::net::TcpStream> {
+    fn connect_to_executor(
+        mut port: u16,
+        signal_handler: bool,
+    ) -> ComputeResult<std::net::TcpStream> {
         use std::net::TcpStream;
 
         let mut i: usize = 0;
@@ -378,7 +387,8 @@ mod tests {
     }
 
     fn shutdown_msg(stream: &mut std::net::TcpStream) -> ComputeResult<()> {
-        let json = serde_json::to_vec(&Signal::ShutDownGracefully).map_err(|e| ComputeError::Other(e.to_string()))?;
+        let json = serde_json::to_vec(&Signal::ShutDownGracefully)
+            .map_err(|e| ComputeError::Other(e.to_string()))?;
         let len = (json.len() as u32).to_le_bytes();
         stream.write_all(&len).map_err(ComputeError::OutputWrite)?;
         stream.write_all(&json).map_err(ComputeError::OutputWrite)?;
@@ -465,7 +475,9 @@ mod tests {
                 }
 
                 if let Ok(mut stream) = connect_to_executor(port, false) {
-                    stream.write_all(&frame).map_err(ComputeError::OutputWrite)?;
+                    stream
+                        .write_all(&frame)
+                        .map_err(ComputeError::OutputWrite)?;
                     let (kind, payload) = read_transport_response(&mut stream)?;
                     assert_eq!(kind, TransportFrameKind::WorkerCapabilities);
                     let capabilities = WorkerCapabilities::decode_wire(&payload)

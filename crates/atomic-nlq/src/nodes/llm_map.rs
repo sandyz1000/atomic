@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -364,7 +363,7 @@ async fn llm_map_chunk(
 
 fn build_output_batch(
     input: &RecordBatch,
-    output_col: &str,
+    _output_col: &str,
     output_type: &DataType,
     values: Vec<serde_json::Value>,
     schema: SchemaRef,

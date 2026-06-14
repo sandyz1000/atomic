@@ -41,7 +41,9 @@ where
     }
 
     pub fn pin(self) -> Self {
-        self.core.pinned.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.core
+            .pinned
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self
     }
 }
@@ -50,14 +52,30 @@ impl<T: Data, U: Data, F> RddBase for MapPartitionsRdd<T, U, F>
 where
     F: RddPartitionFn<T, U>,
 {
-    fn get_rdd_id(&self) -> usize                               { self.core.rdd_id() }
-    fn get_op_name(&self) -> String                             { self.core.op_name() }
-    fn register_op_name(&self, name: &str)                      { self.core.set_op_name(name) }
-    fn get_dependencies(&self) -> Vec<Dependency>               { self.core.dependencies() }
-    fn splits(&self) -> Vec<Box<dyn Split>>                     { self.core.splits() }
-    fn number_of_splits(&self) -> usize                         { self.core.number_of_splits() }
-    fn preferred_locations(&self, s: Box<dyn Split>) -> Vec<Ipv4Addr> { self.core.preferred_locations(s) }
-    fn is_pinned(&self) -> bool                                 { self.core.is_pinned() }
+    fn get_rdd_id(&self) -> usize {
+        self.core.rdd_id()
+    }
+    fn get_op_name(&self) -> String {
+        self.core.op_name()
+    }
+    fn register_op_name(&self, name: &str) {
+        self.core.set_op_name(name)
+    }
+    fn get_dependencies(&self) -> Vec<Dependency> {
+        self.core.dependencies()
+    }
+    fn splits(&self) -> Vec<Box<dyn Split>> {
+        self.core.splits()
+    }
+    fn number_of_splits(&self) -> usize {
+        self.core.number_of_splits()
+    }
+    fn preferred_locations(&self, s: Box<dyn Split>) -> Vec<Ipv4Addr> {
+        self.core.preferred_locations(s)
+    }
+    fn is_pinned(&self) -> bool {
+        self.core.is_pinned()
+    }
 
     fn cogroup_iterator_any(
         &self,
@@ -82,8 +100,12 @@ where
 {
     type Item = U;
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> { Arc::new(self.clone()) }
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> { Arc::new(self.clone()) }
+    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+        Arc::new(self.clone())
+    }
+    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+        Arc::new(self.clone())
+    }
 
     fn compute(
         &self,
@@ -94,7 +116,6 @@ where
         Ok(Box::new(f(index, self.core.prev.iterator(split)?)))
     }
 }
-
 
 /// An RDD that applies a function to every partition of the parent RDD, producing pair `(K, V)` items.
 ///
@@ -143,14 +164,30 @@ where
     V: Data + Clone,
     K: Data + Clone,
 {
-    fn get_rdd_id(&self) -> usize                               { self.core.rdd_id() }
-    fn get_op_name(&self) -> String                             { self.core.op_name() }
-    fn register_op_name(&self, name: &str)                      { self.core.set_op_name(name) }
-    fn get_dependencies(&self) -> Vec<Dependency>               { self.core.dependencies() }
-    fn splits(&self) -> Vec<Box<dyn Split>>                     { self.core.splits() }
-    fn number_of_splits(&self) -> usize                         { self.core.number_of_splits() }
-    fn preferred_locations(&self, s: Box<dyn Split>) -> Vec<Ipv4Addr> { self.core.preferred_locations(s) }
-    fn is_pinned(&self) -> bool                                 { self.core.is_pinned() }
+    fn get_rdd_id(&self) -> usize {
+        self.core.rdd_id()
+    }
+    fn get_op_name(&self) -> String {
+        self.core.op_name()
+    }
+    fn register_op_name(&self, name: &str) {
+        self.core.set_op_name(name)
+    }
+    fn get_dependencies(&self) -> Vec<Dependency> {
+        self.core.dependencies()
+    }
+    fn splits(&self) -> Vec<Box<dyn Split>> {
+        self.core.splits()
+    }
+    fn number_of_splits(&self) -> usize {
+        self.core.number_of_splits()
+    }
+    fn preferred_locations(&self, s: Box<dyn Split>) -> Vec<Ipv4Addr> {
+        self.core.preferred_locations(s)
+    }
+    fn is_pinned(&self) -> bool {
+        self.core.is_pinned()
+    }
 
     fn iterator_any(
         &self,
@@ -180,8 +217,12 @@ where
 {
     type Item = (K, V);
 
-    fn get_rdd_base(&self) -> Arc<dyn RddBase> { Arc::new(self.clone()) }
-    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> { Arc::new(self.clone()) }
+    fn get_rdd_base(&self) -> Arc<dyn RddBase> {
+        Arc::new(self.clone())
+    }
+    fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>> {
+        Arc::new(self.clone())
+    }
 
     fn compute(
         &self,

@@ -88,10 +88,26 @@ impl ToolRegistry {
         );
 
         for (name, description, builtin) in [
-            ("llm_filter", "Filter rows in a DataFrame using a natural-language predicate evaluated by the LLM.", BuiltinTool::LlmFilter),
-            ("llm_map", "Add a new column to a DataFrame by applying an LLM-evaluated transformation to each row.", BuiltinTool::LlmMap),
-            ("embed", "Generate text embeddings for a string column and store them in a new FixedSizeList<Float32> column.", BuiltinTool::Embed),
-            ("vector_search", "Run approximate nearest-neighbour search against a registered vector index.", BuiltinTool::VectorSearch),
+            (
+                "llm_filter",
+                "Filter rows in a DataFrame using a natural-language predicate evaluated by the LLM.",
+                BuiltinTool::LlmFilter,
+            ),
+            (
+                "llm_map",
+                "Add a new column to a DataFrame by applying an LLM-evaluated transformation to each row.",
+                BuiltinTool::LlmMap,
+            ),
+            (
+                "embed",
+                "Generate text embeddings for a string column and store them in a new FixedSizeList<Float32> column.",
+                BuiltinTool::Embed,
+            ),
+            (
+                "vector_search",
+                "Run approximate nearest-neighbour search against a registered vector index.",
+                BuiltinTool::VectorSearch,
+            ),
         ] {
             self.tools.insert(
                 name.to_string(),
@@ -125,7 +141,11 @@ impl ToolRegistry {
         self.session.register_udf(udf);
         self.udf_descriptions.insert(
             name.clone(),
-            UdfDescription { name, description: description.into(), signature },
+            UdfDescription {
+                name,
+                description: description.into(),
+                signature,
+            },
         );
         Ok(())
     }
@@ -141,12 +161,19 @@ impl ToolRegistry {
         self.session.register_udaf(udaf);
         self.udf_descriptions.insert(
             name.clone(),
-            UdfDescription { name, description: description.into(), signature },
+            UdfDescription {
+                name,
+                description: description.into(),
+                signature,
+            },
         );
         Ok(())
     }
 
     pub fn udf_descriptions(&self) -> Vec<UdfDescription> {
-        self.udf_descriptions.iter().map(|e| e.value().clone()).collect()
+        self.udf_descriptions
+            .iter()
+            .map(|e| e.value().clone())
+            .collect()
     }
 }

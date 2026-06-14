@@ -6,11 +6,11 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::Result as DFResult;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
 };
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use futures::stream;
 
 /// A leaf [`ExecutionPlan`] that serves pre-loaded Arrow [`RecordBatch`]es to
@@ -89,11 +89,7 @@ impl ExecutionPlan for AtomicScanExec {
         partition: usize,
         _context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
-        let batches = self
-            .data
-            .get(partition)
-            .cloned()
-            .unwrap_or_default();
+        let batches = self.data.get(partition).cloned().unwrap_or_default();
         let schema = self.schema.clone();
         let stream = stream::iter(batches.into_iter().map(Ok));
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))

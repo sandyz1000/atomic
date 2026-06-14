@@ -8,8 +8,8 @@ pub mod js;
 
 pub use native::ComputeEngine;
 
-use atomic_data::distributed::{PipelineOp, TaskEnvelope, TaskResultEnvelope};
 use crate::error::ComputeResult;
+use atomic_data::distributed::{PipelineOp, TaskEnvelope, TaskResultEnvelope};
 
 /// Full-task execution backend.
 ///
@@ -36,11 +36,6 @@ pub(crate) trait OpDispatcher: Send + Sync {
     /// `partition_id` is forwarded from the enclosing [`TaskEnvelope`]; most
     /// dispatchers ignore it, but the native shuffle-map path needs it to write
     /// the correct bucket.
-    fn dispatch(
-        &self,
-        op: &PipelineOp,
-        partition_id: usize,
-        data: &[u8],
-    ) -> ComputeResult<Vec<u8>>;
+    fn dispatch(&self, op: &PipelineOp, partition_id: usize, data: &[u8])
+    -> ComputeResult<Vec<u8>>;
 }
-

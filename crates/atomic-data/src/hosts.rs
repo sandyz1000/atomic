@@ -6,9 +6,15 @@ pub enum HostError {
     #[error("unable to determine home directory")]
     NoHome,
     #[error("failed to load hosts file {path}: {source}")]
-    LoadHosts { source: std::io::Error, path: PathBuf },
+    LoadHosts {
+        source: std::io::Error,
+        path: PathBuf,
+    },
     #[error("failed to parse hosts file {path}: {source}")]
-    ParseHosts { source: toml::de::Error, path: PathBuf },
+    ParseHosts {
+        source: toml::de::Error,
+        path: PathBuf,
+    },
 }
 
 type Result<T> = std::result::Result<T, HostError>;

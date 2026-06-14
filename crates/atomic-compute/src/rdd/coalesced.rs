@@ -159,7 +159,6 @@ type SplitIdx = usize;
 /// single-threadedly on the driver during `splits()`. They impose no real cost
 /// since `DefaultPartitionCoalescer` is stateless.
 pub trait PartitionCoalescer: Send + Sync {
-
     /// Coalesce the partitions of the given RDD.
     ///
     /// ## Arguments
@@ -334,20 +333,6 @@ impl Default for DefaultPartitionCoalescer {
 }
 
 impl DefaultPartitionCoalescer {
-    fn new(balance_slack: Option<f64>) -> Self {
-        if let Some(slack) = balance_slack {
-            DefaultPartitionCoalescer {
-                balance_slack: slack,
-                group_arr: Vec::new(),
-                group_hash: HashMap::new(),
-                initial_hash: HashSet::new(),
-                no_locality: true,
-            }
-        } else {
-            Self::default()
-        }
-    }
-
     fn add_part_to_pgroup(&mut self, part: Box<dyn Split>, pgroup: &mut PartitionGroup) -> bool {
         if !self.initial_hash.contains(&part.get_index()) {
             self.initial_hash.insert(part.get_index()); // needed to avoid assigning partitions to multiple buckets
@@ -365,9 +350,10 @@ impl DefaultPartitionCoalescer {
         if let Some(group) = self.group_hash.get(&key) {
             for g in group.as_slice() {
                 if let Some(ref cmin) = current_min
-                    && *cmin.lock() > *g.lock() {
-                        current_min = Some((*g).clone());
-                    }
+                    && *cmin.lock() > *g.lock()
+                {
+                    current_min = Some((*g).clone());
+                }
             }
         }
         current_min
@@ -438,10 +424,7 @@ impl DefaultPartitionCoalescer {
                 Some(*nxt_replica),
                 part_cnt.fetch_add(1, SyncOrd::SeqCst),
             ))));
-            self.add_part_to_pgroup(
-                dyn_clone::clone_box(&**nxt_part),
-                &mut pgroup.lock(),
-            );
+            self.add_part_to_pgroup(dyn_clone::clone_box(&**nxt_part), &mut pgroup.lock());
             self.group_hash
                 .entry(*nxt_replica)
                 .or_default()

@@ -51,7 +51,10 @@ where
     T: WireEncode + WireDecode,
 {
     pub fn new(id: usize) -> Self {
-        Accumulator { id, _phantom: PhantomData }
+        Accumulator {
+            id,
+            _phantom: PhantomData,
+        }
     }
 
     /// Accumulate a delta from inside a `#[task]` function (worker side).
@@ -60,7 +63,9 @@ where
     /// accumulate multiple values within a single task, fold them yourself before calling
     /// `add`.  The driver-side merge function combines per-task deltas.
     pub fn add(&self, delta: T) {
-        let bytes = delta.encode_wire().expect("Accumulator::add: encode failed");
+        let bytes = delta
+            .encode_wire()
+            .expect("Accumulator::add: encode failed");
         add_delta(self.id, bytes);
     }
 }

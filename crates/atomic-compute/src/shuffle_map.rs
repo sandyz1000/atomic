@@ -1,5 +1,3 @@
-use crate::task_registry::TaskEntry;
-use crate::task_traits::BinaryTask;
 use atomic_data::distributed::WireDecode;
 use atomic_data::partitioner::PartitionerSchema;
 use rustc_hash::FxHasher;
@@ -113,7 +111,13 @@ where
     // Reconstruct the RDD's real partitioner from the shipped spec (range bounds → correct global
     // ranges). Hash/Custom specs degrade to hash partitioning.
     let partitioner = spec.into_partitioner::<K>();
-    let descending = matches!(spec, PartitionerSchema::Range { ascending: false, .. });
+    let descending = matches!(
+        spec,
+        PartitionerSchema::Range {
+            ascending: false,
+            ..
+        }
+    );
 
     let mut buckets: Vec<Vec<(K, V)>> = (0..num_reduce_partitions).map(|_| vec![]).collect();
     for (k, v) in pairs {

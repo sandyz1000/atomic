@@ -25,7 +25,7 @@ impl<T: Ord> BoundedPriorityQueue<T> {
         }
     }
 
-    /// The equivalent of `++=` method in Scala Spark.
+    /// The equivalent of a Scala `++=` bulk-append method.
     pub fn merge(mut self, other: BoundedPriorityQueue<T>) -> Self {
         other
             .underlying
@@ -34,7 +34,7 @@ impl<T: Ord> BoundedPriorityQueue<T> {
         self
     }
 
-    /// The equivalent of `+=` method in Scala Spark.
+    /// The equivalent of a Scala `+=` append method.
     pub fn append(&mut self, elem: T) {
         if self.underlying.len() < self.max_size {
             self.underlying.push(elem);

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashSet, VecDeque},
     fmt::Debug,
     net::{Ipv4Addr, SocketAddrV4},
     sync::{
@@ -39,7 +39,6 @@ impl Drop for InflightGuard {
 
 use crate::{
     base::{Mutators, NativeScheduler},
-    dag::{CompletionEvent, TastEndReason},
     error::{LibResult, SchedulerError},
     job::Job,
     listener::LiveListenerBus,
@@ -65,6 +64,8 @@ pub struct DistributedScheduler {
     /// speculative re-run on a different worker; the first result wins.
     speculation_multiplier: Option<f64>,
 
+    /// Scheduler role flag taken at construction; retained as config (driver vs. worker).
+    #[allow(dead_code)]
     master: bool,
     active_jobs: Arc<DashMap<usize, Job>>,
     active_job_queue: Arc<Mutex<VecDeque<Job>>>,
@@ -91,7 +92,9 @@ const MAX_WORKER_FAILURES: u32 = 3;
 impl DistributedScheduler {
     pub fn new(max_failures: usize, master: bool) -> Self {
         let mut live_listener_bus = LiveListenerBus::new();
-        live_listener_bus.start().unwrap();
+        live_listener_bus
+            .start()
+            .expect("LiveListenerBus failed to start its event-dispatch thread");
         Self {
             mutators: Mutators::new(),
             max_failures,
@@ -159,27 +162,23 @@ impl DistributedScheduler {
             let timeout = Duration::from_millis(timeout_ms);
             loop {
                 tokio::time::sleep(interval).await;
-                let endpoints: Vec<SocketAddrV4> = sched
-                    .worker_capabilities
-                    .iter()
-                    .map(|e| *e.key())
-                    .collect();
+                let endpoints: Vec<SocketAddrV4> =
+                    sched.worker_capabilities.iter().map(|e| *e.key()).collect();
                 for endpoint in endpoints {
                     let shuffle_port = {
-                        sched.worker_capabilities
+                        sched
+                            .worker_capabilities
                             .get(&endpoint)
                             .and_then(|c| c.shuffle_server_port)
                     };
                     let healthy = if let Some(port) = shuffle_port {
-                        let url = format!("http://{}:{}/health", endpoint.ip(), port);
+                        let _url = format!("http://{}:{}/health", endpoint.ip(), port);
                         let probe = tokio::time::timeout(timeout, async {
                             // Lightweight HTTP GET via raw TCP (avoids pulling in full HTTP client)
                             let addr = format!("{}:{}", endpoint.ip(), port);
                             if let Ok(mut stream) = tokio::net::TcpStream::connect(&addr).await {
                                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                                let req = format!(
-                                    "GET /health HTTP/1.0\r\nHost: {addr}\r\n\r\n"
-                                );
+                                let req = format!("GET /health HTTP/1.0\r\nHost: {addr}\r\n\r\n");
                                 let _ = stream.write_all(req.as_bytes()).await;
                                 let mut buf = [0u8; 16];
                                 matches!(stream.read(&mut buf).await, Ok(n) if n > 0)
@@ -191,25 +190,20 @@ impl DistributedScheduler {
                         probe.unwrap_or(false)
                     } else {
                         // Fallback: try a plain TCP connect to the task port.
-                        let probe = tokio::time::timeout(
-                            timeout,
-                            tokio::net::TcpStream::connect(endpoint),
-                        )
-                        .await;
+                        let probe =
+                            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(endpoint))
+                                .await;
                         probe.is_ok_and(|r| r.is_ok())
                     };
 
                     if healthy {
                         sched.worker_failures.remove(&endpoint);
                     } else {
-                        let mut failures = sched
-                            .worker_failures
-                            .entry(endpoint)
-                            .or_insert(0);
+                        let mut failures = sched.worker_failures.entry(endpoint).or_insert(0);
                         *failures += 1;
                         let count = *failures;
                         drop(failures);
-                        if count >= MAX_WORKER_FAILURES as u32 {
+                        if count >= MAX_WORKER_FAILURES {
                             log::warn!(
                                 "heartbeat: worker {endpoint} failed {count} consecutive probes; removing"
                             );
@@ -230,15 +224,11 @@ impl DistributedScheduler {
         // Clear any stale shuffle-map outputs from this worker so failed
         // shuffle stages can be re-submitted on surviving workers.
         if let Some(tracker) = atomic_data::env::get_map_output_tracker() {
-            for entry in tracker.server_uris.iter() {
-                let shuffle_id = *entry.key();
-                for (map_id, uri_opt) in entry.value().iter().enumerate() {
-                    if let Some(uri) = uri_opt {
-                        if uri.contains(&endpoint.ip().to_string()) {
-                            tracker.unregister_map_output(shuffle_id, map_id, uri.clone());
-                        }
-                    }
-                }
+            let cleared = tracker.unregister_outputs_on_host(&endpoint.ip().to_string());
+            if cleared > 0 {
+                log::warn!(
+                    "worker {endpoint} removed: invalidated {cleared} map output(s) for recompute"
+                );
             }
         }
     }
@@ -247,12 +237,11 @@ impl DistributedScheduler {
     ///
     /// Called by the HTTP `/register` route (or directly in tests) when a new
     /// worker announces itself. Safe to call concurrently with in-flight jobs.
-    pub fn dynamically_add_worker(
-        &self,
-        endpoint: SocketAddrV4,
-        capabilities: WorkerCapabilities,
-    ) {
-        log::info!("dynamic worker registration: {endpoint} (max_tasks={})", capabilities.max_tasks);
+    pub fn dynamically_add_worker(&self, endpoint: SocketAddrV4, capabilities: WorkerCapabilities) {
+        log::info!(
+            "dynamic worker registration: {endpoint} (max_tasks={})",
+            capabilities.max_tasks
+        );
         self.register_worker(endpoint, capabilities);
     }
 
@@ -451,7 +440,11 @@ impl DistributedScheduler {
                 tokio::time::sleep(delay).await;
             }
         }
-        Err(last_err.unwrap())
+        Err(last_err.unwrap_or_else(|| {
+            SchedulerError::NoCompatibleWorker(
+                "no worker attempts were made (empty worker pool)".to_string(),
+            )
+        }))
     }
 
     /// Run a native (non-artifact) job over a set of pre-encoded partitions.
@@ -522,10 +515,7 @@ impl DistributedScheduler {
                 let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
                 let task_key = format!("{}:{}", run_id, task_id);
                 self.taskid_to_jobid.insert(task_key.clone(), run_id);
-                self.job_tasks
-                    .entry(run_id)
-                    .or_default()
-                    .insert(task_key);
+                self.job_tasks.entry(run_id).or_default().insert(task_key);
                 TaskEnvelope::new(
                     run_id,
                     stage_id,
@@ -535,7 +525,8 @@ impl DistributedScheduler {
                     format!("native-pipeline-{}-{}", partition_id, pipeline_label),
                     ops.clone(),
                     partition_data,
-                ).with_broadcasts(broadcasts.clone())
+                )
+                .with_broadcasts(broadcasts.clone())
             })
             .collect();
 
@@ -576,9 +567,7 @@ impl DistributedScheduler {
                         }
                         // Abort if the job has been cancelled.
                         if token.is_cancelled() {
-                            return Err(SchedulerError::TaskFailed(
-                                "job cancelled".to_string(),
-                            ));
+                            return Err(SchedulerError::TaskFailed("job cancelled".to_string()));
                         }
                         let dispatch_start = Instant::now();
                         let (result, worker_addr) = tokio::select! {
@@ -598,9 +587,8 @@ impl DistributedScheduler {
                             atomic_data::distributed::ResultStatus::RetryableFailure => {
                                 if retry_count < max_failures {
                                     retry_count += 1;
-                                    let delay = Duration::from_millis(
-                                        200 * (1u64 << retry_count).min(16),
-                                    );
+                                    let delay =
+                                        Duration::from_millis(200 * (1u64 << retry_count).min(16));
                                     tokio::time::sleep(delay).await;
                                     continue;
                                 }
@@ -614,10 +602,9 @@ impl DistributedScheduler {
                                 let mut guard = slot.lock();
                                 if guard.is_none() {
                                     *guard = Some(result);
-                                    sched.taskid_to_slaveid.insert(
-                                        format!("{partition_id}"),
-                                        worker_addr.to_string(),
-                                    );
+                                    sched
+                                        .taskid_to_slaveid
+                                        .insert(format!("{partition_id}"), worker_addr.to_string());
                                     completed_durations.lock().push(elapsed);
                                 }
                                 return Ok(());
@@ -642,8 +629,7 @@ impl DistributedScheduler {
                 loop {
                     tokio::time::sleep(Duration::from_millis(500)).await;
 
-                    let done_count =
-                        slots_ref.iter().filter(|s| s.lock().is_some()).count();
+                    let done_count = slots_ref.iter().filter(|s| s.lock().is_some()).count();
                     if done_count == num_partitions {
                         break;
                     }
@@ -688,20 +674,19 @@ impl DistributedScheduler {
                                 let start = Instant::now();
                                 if let Ok((result, worker_addr)) =
                                     sched.submit_native_task(&task).await
-                                {
-                                    if matches!(
+                                    && matches!(
                                         result.status,
                                         atomic_data::distributed::ResultStatus::Success
-                                    ) {
-                                        let mut guard = slot.lock();
-                                        if guard.is_none() {
-                                            *guard = Some(result);
-                                            sched.taskid_to_slaveid.insert(
-                                                format!("{partition_id}"),
-                                                worker_addr.to_string(),
-                                            );
-                                            completed_durations.lock().push(start.elapsed());
-                                        }
+                                    )
+                                {
+                                    let mut guard = slot.lock();
+                                    if guard.is_none() {
+                                        *guard = Some(result);
+                                        sched.taskid_to_slaveid.insert(
+                                            format!("{partition_id}"),
+                                            worker_addr.to_string(),
+                                        );
+                                        completed_durations.lock().push(start.elapsed());
                                     }
                                 }
                             });
@@ -744,9 +729,7 @@ impl DistributedScheduler {
 
     fn cleanup_job(&self, run_id: usize) {
         self.active_jobs.remove(&run_id);
-        self.active_job_queue
-            .lock()
-            .retain(|j| j.run_id != run_id);
+        self.active_job_queue.lock().retain(|j| j.run_id != run_id);
         if let Some((_, task_keys)) = self.job_tasks.remove(&run_id) {
             for key in &task_keys {
                 self.taskid_to_slaveid.remove(key);
@@ -774,7 +757,10 @@ impl DistributedScheduler {
     ) -> LibResult<()> {
         let mut stage_attempt = 0usize;
         loop {
-            match self.run_shuffle_map_stage_inner(shuffle_id, ops.clone(), partitions.clone()).await {
+            match self
+                .run_shuffle_map_stage_inner(shuffle_id, ops.clone(), partitions.clone())
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     stage_attempt += 1;
@@ -789,7 +775,9 @@ impl DistributedScheduler {
                     log::warn!(
                         "shuffle-map stage for shuffle_id={} failed (attempt {}): {}; \
                          cleared MapOutputTracker, retrying",
-                        shuffle_id, stage_attempt, e
+                        shuffle_id,
+                        stage_attempt,
+                        e
                     );
                     let delay = Duration::from_millis(200 * (1u64 << stage_attempt).min(16));
                     tokio::time::sleep(delay).await;
@@ -947,25 +935,6 @@ impl DistributedScheduler {
         stream.read_exact(&mut payload).await?;
         Ok((kind, payload))
     }
-
-    fn handle_completion_event(
-        event_queues: Arc<DashMap<usize, VecDeque<CompletionEvent>>>,
-        task: TaskOption,
-        reason: TastEndReason,
-        result: Box<dyn Data>,
-    ) {
-        let run_id = task.get_run_id();
-        if let Some(mut queue) = event_queues.get_mut(&run_id) {
-            queue.push_back(CompletionEvent {
-                task,
-                reason,
-                result: Some(result),
-                accum_updates: HashMap::new(),
-            });
-        } else {
-            log::debug!("ignoring completion event for distributed job");
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -984,7 +953,11 @@ impl NativeScheduler for DistributedScheduler {
 
     fn next_executor_server(&self, task: &TaskOption) -> SocketAddrV4 {
         if !task.is_pinned() {
-            let socket_addr = self.server_uris.lock().pop_back().unwrap();
+            let socket_addr = self
+                .server_uris
+                .lock()
+                .pop_back()
+                .expect("next_executor_server called with an empty worker pool");
             self.server_uris.lock().push_front(socket_addr);
             socket_addr
         } else {
@@ -995,7 +968,9 @@ impl NativeScheduler for DistributedScheduler {
                 .enumerate()
                 .find(|(_, endpoint)| *endpoint.ip() == location)
             {
-                let target_host = servers.remove(pos).unwrap();
+                let target_host = servers
+                    .remove(pos)
+                    .expect("invariant: pos was just produced by find() above");
                 servers.push_front(target_host);
                 target_host
             } else {
@@ -1043,7 +1018,10 @@ impl NativeScheduler for DistributedScheduler {
 
 impl Drop for DistributedScheduler {
     fn drop(&mut self) {
-        self.live_listener_bus.stop().unwrap();
+        // Never panic in Drop — a panic here during unwinding would abort the process.
+        if let Err(e) = self.live_listener_bus.stop() {
+            log::warn!("failed to stop live listener bus during scheduler drop: {e}");
+        }
     }
 }
 
@@ -1114,32 +1092,30 @@ pub fn start_register_server(port: u16, scheduler: Arc<DistributedScheduler>) {
                                     };
 
                                     match serde_json::from_slice::<RegisterRequest>(&body_bytes) {
-                                        Ok(reg) => {
-                                            match reg.endpoint.parse::<SocketAddrV4>() {
-                                                Ok(endpoint) => {
-                                                    sched.dynamically_add_worker(
-                                                        endpoint,
-                                                        reg.capabilities,
-                                                    );
-                                                    Response::builder()
-                                                        .status(StatusCode::OK)
-                                                        .body(Full::new(Bytes::from("registered")))
-                                                        .unwrap()
-                                                }
-                                                Err(e) => {
-                                                    log::warn!(
-                                                        "register: invalid endpoint '{}': {e}",
-                                                        reg.endpoint
-                                                    );
-                                                    Response::builder()
-                                                        .status(StatusCode::BAD_REQUEST)
-                                                        .body(Full::new(Bytes::from(
-                                                            "invalid endpoint",
-                                                        )))
-                                                        .unwrap()
-                                                }
+                                        Ok(reg) => match reg.endpoint.parse::<SocketAddrV4>() {
+                                            Ok(endpoint) => {
+                                                sched.dynamically_add_worker(
+                                                    endpoint,
+                                                    reg.capabilities,
+                                                );
+                                                Response::builder()
+                                                    .status(StatusCode::OK)
+                                                    .body(Full::new(Bytes::from("registered")))
+                                                    .unwrap()
                                             }
-                                        }
+                                            Err(e) => {
+                                                log::warn!(
+                                                    "register: invalid endpoint '{}': {e}",
+                                                    reg.endpoint
+                                                );
+                                                Response::builder()
+                                                    .status(StatusCode::BAD_REQUEST)
+                                                    .body(Full::new(Bytes::from(
+                                                        "invalid endpoint",
+                                                    )))
+                                                    .unwrap()
+                                            }
+                                        },
                                         Err(e) => {
                                             log::warn!("register: JSON parse error: {e}");
                                             Response::builder()

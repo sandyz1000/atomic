@@ -19,7 +19,7 @@
 use atomic_compute::context::Context;
 use atomic_compute::env::Config;
 use atomic_compute::task;
-use atomic_data::cache::{init_partition_cache, PartitionStore, PARTITION_CACHE};
+use atomic_data::cache::{PartitionStore, init_partition_cache};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -96,7 +96,10 @@ static COMPUTE_COUNT: AtomicUsize = AtomicUsize::new(0);
 // Serializes tests that reset and read COMPUTE_COUNT to prevent parallel interference.
 static COUNTER_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 fn counter_guard() -> std::sync::MutexGuard<'static, ()> {
-    COUNTER_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap()
+    COUNTER_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap()
 }
 
 #[task]
@@ -175,7 +178,10 @@ async fn test_transform_consistency() {
     let mut r2 = rdd.collect().unwrap();
     r1.sort();
     r2.sort();
-    assert_eq!(r1, r2, "transformed cached RDD must be stable across actions");
+    assert_eq!(
+        r1, r2,
+        "transformed cached RDD must be stable across actions"
+    );
 }
 
 // ── PartitionStore remove_rdd ────────────────────────────────────────────────
@@ -190,7 +196,10 @@ async fn test_remove_clears() {
 
     // Verify all 4 partitions are present.
     for p in 0..4 {
-        assert!(store.get::<i32>(77, p).is_some(), "partition {p} should be present before remove");
+        assert!(
+            store.get::<i32>(77, p).is_some(),
+            "partition {p} should be present before remove"
+        );
     }
 
     store.remove_rdd(77, 4);
@@ -222,7 +231,10 @@ async fn test_unpersist_clears_cache() {
 async fn test_uncached_before_action() {
     let ctx = ctx();
     let rdd = ctx.parallelize_typed(vec![1i32, 2, 3], 2).cache();
-    assert!(!rdd.is_cached(), "RDD should not be cached before any action");
+    assert!(
+        !rdd.is_cached(),
+        "RDD should not be cached before any action"
+    );
 }
 
 #[tokio::test]

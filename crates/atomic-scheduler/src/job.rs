@@ -30,7 +30,7 @@ impl Job {
 
 impl PartialOrd for Job {
     fn partial_cmp(&self, other: &Job) -> Option<Ordering> {
-        Some(other.job_id.cmp(&self.job_id))
+        Some(self.cmp(other))
     }
 }
 

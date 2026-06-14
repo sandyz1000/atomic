@@ -1,16 +1,12 @@
 mod common;
-use common::{col_as_i32, col_as_string, make_kv_batch, total_rows};
+use common::{col_as_i32, make_kv_batch, total_rows};
 
 use atomic_sql::AtomicSqlContext;
-use datafusion::arrow::array::StringArray;
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use std::fs::File;
-use std::sync::Arc;
-
 
 fn write_parquet(path: &std::path::Path, batch: RecordBatch) {
     let file = File::create(path).unwrap();
@@ -19,7 +15,6 @@ fn write_parquet(path: &std::path::Path, batch: RecordBatch) {
     writer.write(&batch).unwrap();
     writer.close().unwrap();
 }
-
 
 #[tokio::test]
 async fn test_csv_query() {
@@ -34,7 +29,11 @@ async fn test_csv_query() {
 
     let batches = ctx
         .sql("SELECT key FROM t ORDER BY key")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 3);
 }
@@ -52,7 +51,11 @@ async fn test_csv_filter() {
 
     let batches = ctx
         .sql("SELECT key FROM t WHERE value > 25 ORDER BY key")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 3); // rows 3,4,5
 }
@@ -70,11 +73,20 @@ async fn test_parquet_query() {
 
     let batches = ctx
         .sql("SELECT SUM(value) AS total FROM t")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 1);
     use datafusion::arrow::array::Int64Array;
-    let total = batches[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap().value(0);
+    let total = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
     assert_eq!(total, 60);
 }
 
@@ -91,7 +103,11 @@ async fn test_parquet_projection() {
 
     let batches = ctx
         .sql("SELECT key FROM t ORDER BY key")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(batches[0].num_columns(), 1);
     let keys = col_as_i32(&batches[0], 0);
@@ -101,7 +117,8 @@ async fn test_parquet_projection() {
 #[tokio::test]
 async fn test_deregister_query_fails() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[1], &[10])]).unwrap();
+    ctx.register_batches("t", vec![make_kv_batch(&[1], &[10])])
+        .unwrap();
     ctx.deregister_table("t").unwrap();
 
     let result = ctx.sql("SELECT * FROM t").await;
@@ -118,10 +135,19 @@ async fn test_partitioned_aggregate() {
 
     let batches = ctx
         .sql("SELECT SUM(value) AS total FROM t")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     use datafusion::arrow::array::Int64Array;
-    let total = batches[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap().value(0);
+    let total = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
     assert_eq!(total, 100);
 }
 
@@ -131,9 +157,13 @@ async fn test_parquet_roundtrip() {
     let out_dir = td.path().join("output");
 
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[10, 20], &[100, 200])]).unwrap();
+    ctx.register_batches("t", vec![make_kv_batch(&[10, 20], &[100, 200])])
+        .unwrap();
 
-    let df = ctx.sql("SELECT key, value FROM t ORDER BY key").await.unwrap();
+    let df = ctx
+        .sql("SELECT key, value FROM t ORDER BY key")
+        .await
+        .unwrap();
     let write_opts = DataFrameWriteOptions::new().with_single_file_output(false);
     df.write_parquet(out_dir.to_str().unwrap(), write_opts, None)
         .await
@@ -146,7 +176,11 @@ async fn test_parquet_roundtrip() {
         .unwrap();
     let batches = ctx2
         .sql("SELECT key FROM t2 ORDER BY key")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 2);
 }
@@ -168,10 +202,19 @@ async fn test_json_query() {
 
     let batches = ctx
         .sql("SELECT COUNT(*) AS cnt FROM t")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 1);
     use datafusion::arrow::array::Int64Array;
-    let cnt = batches[0].column(0).as_any().downcast_ref::<Int64Array>().unwrap().value(0);
+    let cnt = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
     assert_eq!(cnt, 2);
 }

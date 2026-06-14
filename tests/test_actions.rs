@@ -93,20 +93,14 @@ async fn test_min_numeric() {
 #[tokio::test]
 async fn test_max_empty() {
     let ctx = ctx();
-    let result = ctx
-        .parallelize_typed(Vec::<i32>::new(), 2)
-        .max()
-        .unwrap();
+    let result = ctx.parallelize_typed(Vec::<i32>::new(), 2).max().unwrap();
     assert_eq!(result, None);
 }
 
 #[tokio::test]
 async fn test_min_empty() {
     let ctx = ctx();
-    let result = ctx
-        .parallelize_typed(Vec::<i32>::new(), 2)
-        .min()
-        .unwrap();
+    let result = ctx.parallelize_typed(Vec::<i32>::new(), 2).min().unwrap();
     assert_eq!(result, None);
 }
 
@@ -125,10 +119,7 @@ async fn test_top_k() {
 #[tokio::test]
 async fn test_top_zero() {
     let ctx = ctx();
-    let result = ctx
-        .parallelize_typed(vec![1i32, 2, 3], 2)
-        .top(0)
-        .unwrap();
+    let result = ctx.parallelize_typed(vec![1i32, 2, 3], 2).top(0).unwrap();
     assert_eq!(result, Vec::<i32>::new());
 }
 

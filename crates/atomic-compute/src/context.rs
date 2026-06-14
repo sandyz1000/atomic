@@ -1,10 +1,10 @@
 use crate::env::{Config, DeploymentMode};
 use crate::error::{ComputeError, ComputeResult};
 use crate::executor::{Executor, Signal};
-use crate::runtimes::{Backend, ComputeEngine};
 use crate::io::ReaderConfiguration;
 use crate::rdd::typed::TypedRdd;
 use crate::rdd::{ParallelCollection, UnionRdd};
+use crate::runtimes::{Backend, ComputeEngine};
 use crate::{env, hosts};
 use atomic_data::accumulator::{Accumulator, MergeFn, make_merge_fn, next_accumulator_id};
 use atomic_data::broadcast::{BroadcastVar, next_broadcast_id};
@@ -38,6 +38,9 @@ use uuid::Uuid;
 /// `Context` in the process — a per-context counter would let concurrent jobs collide.
 static NEXT_SHUFFLE_ID: AtomicUsize = AtomicUsize::new(0);
 
+/// Driver-side accumulator registry: `accumulator_id → (current_bytes, merge_fn)`.
+type AccumulatorStore = Arc<dashmap::DashMap<usize, (Vec<u8>, Arc<MergeFn>)>>;
+
 pub struct Context {
     /// Runtime configuration — built at the entry point and passed in.
     config: Arc<Config>,
@@ -56,7 +59,7 @@ pub struct Context {
     pub(crate) broadcast_store: Arc<dashmap::DashMap<usize, Vec<u8>>>,
     /// Driver-side accumulator store: `accumulator_id → (current_bytes, merge_fn)`.
     /// Updated by `merge_accumulator_deltas` after each task completes.
-    pub(crate) accumulator_store: Arc<dashmap::DashMap<usize, (Vec<u8>, Arc<MergeFn>)>>,
+    pub(crate) accumulator_store: AccumulatorStore,
 }
 
 impl Drop for Context {
@@ -916,9 +919,9 @@ impl Context {
     ///
     /// # Arguments
     /// - `rdd`: the RDD whose shuffle dependencies should be computed on workers
-    ///          (e.g. the parent of a `ShuffledRdd`).
+    ///   (e.g. the parent of a `ShuffledRdd`).
     /// - `preceding_ops`: staged `PipelineOp`s from prior `_task` transforms that
-    ///                     should run on workers *before* the shuffle-write op.
+    ///   should run on workers *before* the shuffle-write op.
     pub fn run_pending_shuffle_stages(
         self: &Arc<Self>,
         rdd: &Arc<dyn RddBase>,
@@ -1027,7 +1030,10 @@ pub fn start_worker(config: Config) -> ! {
         let n = num_cpus::get().max(1);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let handles: Vec<_> = (0..n)
-                .map(|_| handle.spawn_blocking(|| crate::runtimes::js::JsDispatcher::with_runtime(|_| {})))
+                .map(|_| {
+                    handle
+                        .spawn_blocking(|| crate::runtimes::js::JsDispatcher::with_runtime(|_| {}))
+                })
                 .collect();
             for h in handles {
                 let _ = tokio::task::block_in_place(|| handle.block_on(h));
@@ -1047,7 +1053,7 @@ pub fn start_worker(config: Config) -> ! {
             "start_worker called without a WorkerConfig — use Config::worker(ip, port)",
         ))
         .and_then(|(port, max_tasks)| {
-            let mut executor = Executor::new(port, max_tasks);
+            let executor = Executor::new(port, max_tasks);
             // If TLS cert/key/CA are configured, upgrade to mutual TLS.
             #[cfg(feature = "tls")]
             if crate::tls::tls_is_configured(

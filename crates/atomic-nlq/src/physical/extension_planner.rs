@@ -17,7 +17,6 @@ use crate::nodes::vector_search::{VectorSearchExec, VectorSearchNode};
 use crate::openai::OpenAiClient;
 use crate::vector::provider::VectorIndexProvider;
 
-
 pub struct NlqExtensionPlanner {
     client: Arc<OpenAiClient>,
     config: Arc<NlqConfig>,
@@ -26,7 +25,8 @@ pub struct NlqExtensionPlanner {
 
 impl fmt::Debug for NlqExtensionPlanner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NlqExtensionPlanner").finish_non_exhaustive()
+        f.debug_struct("NlqExtensionPlanner")
+            .finish_non_exhaustive()
     }
 }
 
@@ -36,7 +36,11 @@ impl NlqExtensionPlanner {
         config: Arc<NlqConfig>,
         vector_indexes: Arc<DashMap<String, Arc<dyn VectorIndexProvider>>>,
     ) -> Self {
-        Self { client, config, vector_indexes }
+        Self {
+            client,
+            config,
+            vector_indexes,
+        }
     }
 }
 
@@ -89,7 +93,6 @@ impl ExtensionPlanner for NlqExtensionPlanner {
     }
 }
 
-
 pub struct NlqQueryPlanner {
     planner: DefaultPhysicalPlanner,
 }
@@ -117,6 +120,8 @@ impl QueryPlanner for NlqQueryPlanner {
         logical_plan: &LogicalPlan,
         session_state: &SessionState,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
-        self.planner.create_physical_plan(logical_plan, session_state).await
+        self.planner
+            .create_physical_plan(logical_plan, session_state)
+            .await
     }
 }

@@ -1,9 +1,11 @@
+// Shared test-fixture helpers; not every integration test uses every helper.
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use datafusion::arrow::array::{Int32Array, Int64Array, StringArray, StringViewArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-
 
 pub fn total_rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(|b| b.num_rows()).sum()
@@ -54,7 +56,6 @@ pub fn col_as_string(batch: &RecordBatch, col: usize) -> Vec<String> {
         batch.schema().field(col).data_type()
     );
 }
-
 
 /// `(id: i32, name: Utf8, dept: Utf8)` — 4 rows across 3 departments.
 pub fn make_employees_batch() -> RecordBatch {

@@ -40,11 +40,9 @@ handler: |action, payload, data| {
     };
 }
 
-
 impl_take_ordered_task!(i32);
 impl_take_ordered_task!(i64);
 impl_take_ordered_task!(u32);
 impl_take_ordered_task!(u64);
 impl_take_ordered_task!(f32);
 impl_take_ordered_task!(f64);
-

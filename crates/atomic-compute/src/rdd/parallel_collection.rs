@@ -27,7 +27,6 @@ where
 pub struct ParallelCollectionVals<T> {
     vals: Arc<RddVals>,
     splits_: Vec<Arc<Vec<T>>>,
-    num_slices: usize,
 }
 
 pub struct ParallelCollection<T> {
@@ -54,7 +53,6 @@ impl<T: Data> ParallelCollection<T> {
             rdd_vals: Arc::new(ParallelCollectionVals {
                 vals: Arc::new(RddVals::new(id)),
                 splits_: ParallelCollection::slice(data, num_slices),
-                num_slices,
             }),
         }
     }
@@ -66,7 +64,6 @@ impl<T: Data> ParallelCollection<T> {
         let splits_ = data.slice();
         let rdd_vals = ParallelCollectionVals {
             vals: Arc::new(RddVals::new(id)),
-            num_slices: splits_.len(),
             splits_,
         };
         ParallelCollection {
@@ -79,7 +76,11 @@ impl<T: Data> ParallelCollection<T> {
     where
         I: IntoIterator<Item = T>,
     {
-        assert!(num_slices >= 1, "num_slices must be at least 1, got {}", num_slices);
+        assert!(
+            num_slices >= 1,
+            "num_slices must be at least 1, got {}",
+            num_slices
+        );
         {
             let mut slice_count = 0;
             let data: Vec<_> = data.into_iter().collect();
@@ -156,7 +157,6 @@ impl<T: Data + Clone> RddBase for ParallelCollection<T> {
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
     }
-
 }
 
 impl<T: Data + Clone> Rdd for ParallelCollection<T> {

@@ -32,11 +32,16 @@ fn make_nullable_batch() -> RecordBatch {
 #[tokio::test]
 async fn test_computed_column_addition() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])]).unwrap();
+    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])])
+        .unwrap();
 
     let batches = ctx
         .sql("SELECT key + value AS total FROM t ORDER BY total")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 3);
     let totals = col_as_i32(&batches[0], 0);
@@ -46,11 +51,16 @@ async fn test_computed_column_addition() {
 #[tokio::test]
 async fn test_column_alias() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[1], &[10])]).unwrap();
+    ctx.register_batches("t", vec![make_kv_batch(&[1], &[10])])
+        .unwrap();
 
     let batches = ctx
         .sql("SELECT key AS k, value AS v FROM t")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     let schema = batches[0].schema();
     assert_eq!(schema.field(0).name(), "k");
@@ -60,11 +70,16 @@ async fn test_column_alias() {
 #[tokio::test]
 async fn test_case_when() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])]).unwrap();
+    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])])
+        .unwrap();
 
     let batches = ctx
         .sql("SELECT CASE WHEN value > 15 THEN 'big' ELSE 'small' END AS size FROM t ORDER BY key")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     let sizes = col_as_string(&batches[0], 0);
     assert_eq!(sizes, vec!["small", "big", "big"]);
@@ -73,11 +88,16 @@ async fn test_case_when() {
 #[tokio::test]
 async fn test_coalesce_replaces_null() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_nullable_batch()]).unwrap();
+    ctx.register_batches("t", vec![make_nullable_batch()])
+        .unwrap();
 
     let batches = ctx
         .sql("SELECT COALESCE(val, CAST(0 AS INT)) AS val_or_zero FROM t ORDER BY id")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     let vals = col_as_i32(&batches[0], 0);
     assert_eq!(vals, vec![10, 0, 30]);
@@ -86,11 +106,16 @@ async fn test_coalesce_replaces_null() {
 #[tokio::test]
 async fn test_is_null_filter() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_nullable_batch()]).unwrap();
+    ctx.register_batches("t", vec![make_nullable_batch()])
+        .unwrap();
 
     let batches = ctx
         .sql("SELECT id FROM t WHERE val IS NULL")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 1);
     let ids = col_as_i32(&batches[0], 0);
@@ -100,11 +125,16 @@ async fn test_is_null_filter() {
 #[tokio::test]
 async fn test_not_null_filter() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_nullable_batch()]).unwrap();
+    ctx.register_batches("t", vec![make_nullable_batch()])
+        .unwrap();
 
     let batches = ctx
         .sql("SELECT id FROM t WHERE val IS NOT NULL ORDER BY id")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 2);
 }
@@ -122,7 +152,11 @@ async fn test_string_upper_lower() {
 
     let batches = ctx
         .sql("SELECT UPPER(name) AS u, LOWER(name) AS l FROM t ORDER BY name")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     let uppers = col_as_string(&batches[0], 0);
     assert_eq!(uppers, vec!["ALICE", "BOB"]);
@@ -143,7 +177,11 @@ async fn test_string_length() {
 
     let batches = ctx
         .sql("SELECT LENGTH(name) AS len FROM t ORDER BY name")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     let lens = col_as_i32(&batches[0], 0);
     assert_eq!(lens, vec![5, 2]); // "Hello"=5, "Hi"=2 (sorted alphabetically)
@@ -152,7 +190,11 @@ async fn test_string_length() {
 #[tokio::test]
 async fn test_having_clause() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[1, 1, 2, 2, 3], &[10, 20, 30, 40, 50])]).unwrap();
+    ctx.register_batches(
+        "t",
+        vec![make_kv_batch(&[1, 1, 2, 2, 3], &[10, 20, 30, 40, 50])],
+    )
+    .unwrap();
 
     let batches = ctx
         .sql("SELECT key, SUM(value) AS total FROM t GROUP BY key HAVING SUM(value) > 50 ORDER BY key")
@@ -167,14 +209,19 @@ async fn test_having_clause() {
 #[tokio::test]
 async fn test_cte() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])]).unwrap();
+    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])])
+        .unwrap();
 
     let batches = ctx
         .sql(
             "WITH evens AS (SELECT key, value FROM t WHERE key % 2 = 0)
              SELECT key FROM evens",
         )
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 1);
     let keys = col_as_i32(&batches[0], 0);
@@ -184,11 +231,16 @@ async fn test_cte() {
 #[tokio::test]
 async fn test_window_row_number() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])]).unwrap();
+    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])])
+        .unwrap();
 
     let batches = ctx
         .sql("SELECT key, ROW_NUMBER() OVER (ORDER BY key) AS rn FROM t ORDER BY key")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 3);
     let rns = col_as_u64(&batches[0], 1);
@@ -198,7 +250,8 @@ async fn test_window_row_number() {
 #[tokio::test]
 async fn test_window_running_sum() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])]).unwrap();
+    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 3], &[10, 20, 30])])
+        .unwrap();
 
     let batches = ctx
         .sql("SELECT key, SUM(value) OVER (ORDER BY key ROWS UNBOUNDED PRECEDING) AS running FROM t ORDER BY key")
@@ -212,11 +265,16 @@ async fn test_window_running_sum() {
 #[tokio::test]
 async fn test_window_function_rank() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 2, 3], &[10, 20, 20, 30])]).unwrap();
+    ctx.register_batches("t", vec![make_kv_batch(&[1, 2, 2, 3], &[10, 20, 20, 30])])
+        .unwrap();
 
     let batches = ctx
         .sql("SELECT key, RANK() OVER (ORDER BY key) AS rnk FROM t ORDER BY key")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     assert_eq!(total_rows(&batches), 4);
     let ranks = col_as_u64(&batches[0], 1);
@@ -227,11 +285,16 @@ async fn test_window_function_rank() {
 #[tokio::test]
 async fn test_cast_int_str() {
     let ctx = AtomicSqlContext::new();
-    ctx.register_batches("t", vec![make_kv_batch(&[42], &[0])]).unwrap();
+    ctx.register_batches("t", vec![make_kv_batch(&[42], &[0])])
+        .unwrap();
 
     let batches = ctx
         .sql("SELECT CAST(key AS VARCHAR) AS s FROM t")
-        .await.unwrap().collect().await.unwrap();
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
 
     let strs = col_as_string(&batches[0], 0);
     assert_eq!(strs, vec!["42"]);

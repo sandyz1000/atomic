@@ -20,4 +20,3 @@ pub enum PartialJobError {
     #[error("failure while downcasting an object to a concrete type: {0}")]
     DowncastFailure(String),
 }
-

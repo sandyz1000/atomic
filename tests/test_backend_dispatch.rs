@@ -4,13 +4,11 @@
 //! independent of any single runtime — broadcast loading, accumulator draining, and
 //! multi-op pipeline orchestration — using only public API types.
 
-use atomic_compute::runtimes::{Backend, ComputeEngine};
 use atomic_compute::context::Context;
 use atomic_compute::env::Config;
+use atomic_compute::runtimes::{Backend, ComputeEngine};
 use atomic_compute::task;
 use atomic_compute::task_traits::UnaryTask;
-use atomic_data::accumulator::next_accumulator_id;
-use atomic_data::broadcast::{BroadcastVar, next_broadcast_id};
 use atomic_data::distributed::{
     PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
@@ -59,7 +57,10 @@ fn single_op_square_pipeline() {
     let backend = ComputeEngine::default();
     let input: Vec<i32> = vec![2, 3, 4];
     let task = envelope(
-        vec![native_op(<Square as UnaryTask<i32, i32>>::NAME, TaskAction::Map)],
+        vec![native_op(
+            <Square as UnaryTask<i32, i32>>::NAME,
+            TaskAction::Map,
+        )],
         encode(input),
     );
     let result = backend.execute("w", &task).unwrap();
@@ -109,7 +110,10 @@ fn failed_op_mid_pipeline_produces_fatal_failure() {
 fn result_envelope_has_accumulator_deltas_field() {
     let backend = ComputeEngine::default();
     let task = envelope(
-        vec![native_op(<Square as UnaryTask<i32, i32>>::NAME, TaskAction::Map)],
+        vec![native_op(
+            <Square as UnaryTask<i32, i32>>::NAME,
+            TaskAction::Map,
+        )],
         encode(vec![3i32]),
     );
     let result = backend.execute("w", &task).unwrap();
@@ -123,7 +127,10 @@ fn result_envelope_has_accumulator_deltas_field() {
 fn empty_broadcast_values_is_fine() {
     let backend = ComputeEngine::default();
     let task = envelope(
-        vec![native_op(<Square as UnaryTask<i32, i32>>::NAME, TaskAction::Map)],
+        vec![native_op(
+            <Square as UnaryTask<i32, i32>>::NAME,
+            TaskAction::Map,
+        )],
         encode(vec![5i32]),
     )
     .with_broadcasts(vec![]); // explicitly empty
@@ -149,7 +156,10 @@ async fn context_map_task_roundtrip() {
 fn result_envelope_carries_partition_id() {
     let backend = ComputeEngine::default();
     let mut task = envelope(
-        vec![native_op(<Square as UnaryTask<i32, i32>>::NAME, TaskAction::Map)],
+        vec![native_op(
+            <Square as UnaryTask<i32, i32>>::NAME,
+            TaskAction::Map,
+        )],
         encode(vec![1i32]),
     );
     task.partition_id = 7;

@@ -16,10 +16,7 @@ pub fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> Sc
     match projection {
         None => schema.clone(),
         Some(indices) => {
-            let projected: Vec<Field> = indices
-                .iter()
-                .map(|&i| schema.field(i).clone())
-                .collect();
+            let projected: Vec<Field> = indices.iter().map(|&i| schema.field(i).clone()).collect();
             Arc::new(Schema::new(projected))
         }
     }

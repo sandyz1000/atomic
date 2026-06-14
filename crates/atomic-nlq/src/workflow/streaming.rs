@@ -20,10 +20,7 @@ pub struct VisualizationSpec {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// LLM produced a plan for this round.
-    PlanCreated {
-        round: usize,
-        step_count: usize,
-    },
+    PlanCreated { round: usize, step_count: usize },
     /// A step has started execution.
     StepStarted {
         step_id: String,
@@ -49,9 +46,7 @@ pub enum AgentEvent {
         error: String,
     },
     /// All steps in a round completed; LLM is evaluating whether the query is answered.
-    RoundEvaluating {
-        round: usize,
-    },
+    RoundEvaluating { round: usize },
     /// The agent is done; the final answer and optional visualization spec are ready.
     Done {
         answer: String,
@@ -61,14 +56,9 @@ pub enum AgentEvent {
         visualization: Option<VisualizationSpec>,
     },
     /// The agent hit `max_rounds` without a definitive answer.
-    MaxRoundsReached {
-        answer: String,
-        rounds: usize,
-    },
+    MaxRoundsReached { answer: String, rounds: usize },
     /// An unrecoverable error occurred.
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 pub type AgentEventSender = mpsc::Sender<AgentEvent>;

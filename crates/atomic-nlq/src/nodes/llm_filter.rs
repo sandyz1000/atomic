@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -54,19 +53,22 @@ impl Hash for LlmFilterNode {
 
 impl PartialOrd for LlmFilterNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        (&self.prompt, &self.model, self.batch_size)
-            .partial_cmp(&(&other.prompt, &other.model, other.batch_size))
+        (&self.prompt, &self.model, self.batch_size).partial_cmp(&(
+            &other.prompt,
+            &other.model,
+            other.batch_size,
+        ))
     }
 }
 
 impl LlmFilterNode {
-    pub fn new(
-        prompt: String,
-        model: String,
-        input: LogicalPlan,
-        batch_size: usize,
-    ) -> Self {
-        Self { prompt, model, batch_size, input }
+    pub fn new(prompt: String, model: String, input: LogicalPlan, batch_size: usize) -> Self {
+        Self {
+            prompt,
+            model,
+            batch_size,
+            input,
+        }
     }
 }
 
@@ -88,7 +90,11 @@ impl UserDefinedLogicalNodeCore for LlmFilterNode {
     }
 
     fn fmt_for_explain(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "LlmFilter: model={}, prompt={:?}", self.model, self.prompt)
+        write!(
+            f,
+            "LlmFilter: model={}, prompt={:?}",
+            self.model, self.prompt
+        )
     }
 
     fn with_exprs_and_inputs(
@@ -96,7 +102,10 @@ impl UserDefinedLogicalNodeCore for LlmFilterNode {
         _exprs: Vec<Expr>,
         mut inputs: Vec<LogicalPlan>,
     ) -> DFResult<Self> {
-        Ok(Self { input: inputs.swap_remove(0), ..self.clone() })
+        Ok(Self {
+            input: inputs.swap_remove(0),
+            ..self.clone()
+        })
     }
 }
 
@@ -150,7 +159,11 @@ impl LlmFilterExec {
 
 impl DisplayAs for LlmFilterExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "LlmFilterExec: model={}, batch_size={}", self.model, self.batch_size)
+        write!(
+            f,
+            "LlmFilterExec: model={}, batch_size={}",
+            self.model, self.batch_size
+        )
     }
 }
 

@@ -17,6 +17,11 @@ type OnFail<R> = Arc<
     dyn Fn(Arc<PartialResult<R>>, Box<dyn Fn(&Error) + Send + Sync>) -> Result<()> + Send + Sync,
 >;
 
+/// Optional callback invoked with the final value when the partial result completes.
+type CompletionHandler<R> = Arc<Mutex<Option<Box<dyn Fn(R) + Send + Sync>>>>;
+/// Optional callback invoked with the failure when the partial result fails.
+type FailureHandler = Arc<Mutex<Option<Box<dyn Fn(&Error) + Send + Sync>>>>;
+
 #[derive(Clone)]
 pub struct PartialResult<R>
 where
@@ -24,8 +29,8 @@ where
 {
     final_value: Arc<Mutex<Option<R>>>,
     failure: Arc<Mutex<Option<Error>>>,
-    completion_handler: Arc<Mutex<Option<Box<dyn Fn(R) + Send + Sync>>>>,
-    failure_handler: Arc<Mutex<Option<Box<dyn Fn(&Error) + Send + Sync>>>>,
+    completion_handler: CompletionHandler<R>,
+    failure_handler: FailureHandler,
     /// The partial result initial value, which may be or not the final value.
     pub initial_value: R,
     /// Whether this is the final value or not.
@@ -144,7 +149,7 @@ where
     }
 
     /// Blocking method to wait for and return the final value.
-    pub fn get_final_value(self: Self) -> Result<R> {
+    pub fn get_final_value(self) -> Result<R> {
         let selfc = Arc::new(self);
         (selfc._get_final_value)(selfc.clone())
     }

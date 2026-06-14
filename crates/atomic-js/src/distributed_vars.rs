@@ -8,7 +8,7 @@ use std::sync::Arc;
 // Stored JS merge function `(current, delta) -> new_value`.
 // Lifetime is stripped via transmute — safe because Accumulator is always
 // used synchronously on the JS main thread (never sent across threads).
-pub(crate) struct MergeFn(ManuallyDrop<Function<'static, (JV, JV), JV>>);
+pub struct MergeFn(ManuallyDrop<Function<'static, (JV, JV), JV>>);
 
 // SAFETY: MergeFn is only used synchronously on the JS main thread.
 unsafe impl Send for MergeFn {}
@@ -99,6 +99,34 @@ impl Accumulator {
     }
 }
 
+fn json_add(a: JV, b: JV) -> std::result::Result<JV, String> {
+    match (a, b) {
+        (JV::Number(x), JV::Number(y)) => {
+            if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
+                Ok(JV::Number((xi + yi).into()))
+            } else {
+                let xf = x.as_f64().unwrap_or(0.0);
+                let yf = y.as_f64().unwrap_or(0.0);
+                let n = serde_json::Number::from_f64(xf + yf).ok_or("non-finite float")?;
+                Ok(JV::Number(n))
+            }
+        }
+        (JV::Array(mut av), JV::Array(bv)) => {
+            av.extend(bv);
+            Ok(JV::Array(av))
+        }
+        (JV::Array(mut av), single) => {
+            av.push(single);
+            Ok(JV::Array(av))
+        }
+        (JV::String(mut s), JV::String(t)) => {
+            s.push_str(&t);
+            Ok(JV::String(s))
+        }
+        _ => Err("incompatible accumulator types".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,7 +155,10 @@ mod tests {
 
     #[test]
     fn add_strings() {
-        assert_eq!(json_add(json!("hello"), json!(" world")).unwrap(), json!("hello world"));
+        assert_eq!(
+            json_add(json!("hello"), json!(" world")).unwrap(),
+            json!("hello world")
+        );
     }
 
     #[test]
@@ -140,10 +171,7 @@ mod tests {
 
     #[test]
     fn add_array_single() {
-        assert_eq!(
-            json_add(json!([1, 2]), json!(3)).unwrap(),
-            json!([1, 2, 3])
-        );
+        assert_eq!(json_add(json!([1, 2]), json!(3)).unwrap(), json!([1, 2, 3]));
     }
 
     #[test]
@@ -213,33 +241,5 @@ mod tests {
     #[test]
     fn merge_fn_send_sync() {
         _assert_send_sync::<MergeFn>();
-    }
-}
-
-fn json_add(a: JV, b: JV) -> std::result::Result<JV, String> {
-    match (a, b) {
-        (JV::Number(x), JV::Number(y)) => {
-            if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
-                Ok(JV::Number((xi + yi).into()))
-            } else {
-                let xf = x.as_f64().unwrap_or(0.0);
-                let yf = y.as_f64().unwrap_or(0.0);
-                let n = serde_json::Number::from_f64(xf + yf).ok_or("non-finite float")?;
-                Ok(JV::Number(n))
-            }
-        }
-        (JV::Array(mut av), JV::Array(bv)) => {
-            av.extend(bv);
-            Ok(JV::Array(av))
-        }
-        (JV::Array(mut av), single) => {
-            av.push(single);
-            Ok(JV::Array(av))
-        }
-        (JV::String(mut s), JV::String(t)) => {
-            s.push_str(&t);
-            Ok(JV::String(s))
-        }
-        _ => Err("incompatible accumulator types".to_string()),
     }
 }

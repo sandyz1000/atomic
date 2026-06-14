@@ -9,8 +9,8 @@ use atomic_data::rdd::Rdd;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 // StreamingContextState
@@ -94,11 +94,7 @@ impl StreamingContext {
     }
 
     /// Create a DStream that reads text lines from a TCP socket.
-    pub fn socket_text_stream(
-        self: &Arc<Self>,
-        host: &str,
-        port: u16,
-    ) -> Arc<SocketInputDStream> {
+    pub fn socket_text_stream(self: &Arc<Self>, host: &str, port: u16) -> Arc<SocketInputDStream> {
         let id = self.next_stream_id();
         let stream = Arc::new(SocketInputDStream::new(self.clone(), id, host, port));
         self.graph
@@ -125,11 +121,7 @@ impl StreamingContext {
     /// Register a `foreach_rdd` output operation on `stream`.
     ///
     /// `func` is called with the RDD and batch time (ms) for each batch.
-    pub fn foreach_rdd<T, F>(
-        self: &Arc<Self>,
-        stream: Arc<dyn DStream<T>>,
-        func: F,
-    )
+    pub fn foreach_rdd<T, F>(self: &Arc<Self>, stream: Arc<dyn DStream<T>>, func: F)
     where
         T: Data + Clone,
         F: Fn(Arc<dyn Rdd<Item = T>>, u64) + Send + Sync + 'static,
@@ -145,11 +137,7 @@ impl StreamingContext {
     ///
     /// In distributed mode, uses `Context::collect_rdd` which routes through
     /// `dispatch_pipeline` / `run_pending_shuffle_stages` as appropriate.
-    pub fn print<T>(
-        self: &Arc<Self>,
-        stream: Arc<dyn DStream<T>>,
-        num: usize,
-    )
+    pub fn print<T>(self: &Arc<Self>, stream: Arc<dyn DStream<T>>, num: usize)
     where
         T: Data + Clone + std::fmt::Debug + atomic_data::distributed::WireDecode,
         Vec<T>: atomic_data::distributed::WireDecode,
@@ -179,8 +167,7 @@ impl StreamingContext {
         stream: Arc<dyn DStream<T>>,
         prefix: impl Into<String>,
         suffix: impl Into<String>,
-    )
-    where
+    ) where
         T: Data + Clone + std::fmt::Debug + atomic_data::distributed::WireDecode,
         Vec<T>: atomic_data::distributed::WireDecode,
     {
@@ -274,7 +261,10 @@ impl StreamingContext {
         scheduler.start()?;
         *self.scheduler.lock() = Some(scheduler);
         *state = StreamingContextState::Active;
-        log::info!("StreamingContext started (batch interval: {:?})", self.batch_duration);
+        log::info!(
+            "StreamingContext started (batch interval: {:?})",
+            self.batch_duration
+        );
         Ok(())
     }
 

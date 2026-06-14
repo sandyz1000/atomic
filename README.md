@@ -358,6 +358,7 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 | | Sort-based shuffle (consolidated file + sort-merge reduce) | yes (local; distributed sorted-handler is a follow-up) |
 | | Adaptive partition coalescing | yes |
 | | Shuffle-map stage fault recovery | yes |
+| | Lineage recompute on executor loss (lost map output → `FetchFailed` → stage resubmit) | yes |
 | **SQL** | DataFusion query engine (30+ optimizer rules) | yes |
 | | Parquet, CSV, JSON readers | yes |
 | | RDD-backed table provider | yes |

@@ -171,7 +171,12 @@ impl JsContext {
     pub fn accumulator(
         &self,
         zero: serde_json::Value,
-        merge_fn: Option<napi::bindgen_prelude::Function<(serde_json::Value, serde_json::Value), serde_json::Value>>,
+        merge_fn: Option<
+            napi::bindgen_prelude::Function<
+                (serde_json::Value, serde_json::Value),
+                serde_json::Value,
+            >,
+        >,
     ) -> crate::distributed_vars::Accumulator {
         crate::distributed_vars::Accumulator::new(
             zero,

@@ -7,7 +7,7 @@ use crate::rdd::rdd_val::RddVals;
 use crate::rdd::*;
 use atomic_data::dependency::Dependency;
 use atomic_data::error::BaseError;
-use atomic_data::split::{Split};
+use atomic_data::split::Split;
 
 /// Two-parent cogroup: pairs items from `rdd1: Rdd<(K, V1)>` and `rdd2: Rdd<(K, V2)>` by key.
 ///

@@ -1,12 +1,10 @@
 pub mod error;
-pub mod tracker;
 
 pub use error::{CacheError, Result};
 
 use std::any::Any;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use dashmap::DashMap;
@@ -43,7 +41,7 @@ where
     }
     let tmp = path.with_extension("bin.tmp");
     let bytes = bincode::encode_to_vec(items, bincode::config::standard())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
     std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, path)
 }
@@ -70,9 +68,15 @@ pub const DEFAULT_PARTITION_CACHE_CAP: usize = 1024;
 // evicted value as `&dyn Any` and serialises it to disk.
 // `read` is called by `get()` on a memory miss; it deserialises the partition
 // from disk and returns it as `Box<dyn Any + Send + Sync>`.
+
+/// Serialises an LRU-evicted partition (passed as `&dyn Any`) to disk.
+type SpillWriteFn = Box<dyn Fn(&dyn Any) -> std::io::Result<()> + Send + Sync>;
+/// Reads a spilled partition back from disk on a memory miss.
+type SpillReadFn = Box<dyn Fn() -> std::io::Result<Box<dyn Any + Send + Sync>> + Send + Sync>;
+
 struct SpillEntry {
-    write: Box<dyn Fn(&dyn Any) -> std::io::Result<()> + Send + Sync>,
-    read: Box<dyn Fn() -> std::io::Result<Box<dyn Any + Send + Sync>> + Send + Sync>,
+    write: SpillWriteFn,
+    read: SpillReadFn,
 }
 
 /// A type-erased, LRU-bounded store for cached RDD partitions.
@@ -111,12 +115,8 @@ impl PartitionStore {
     /// After registration:
     /// - `put()` will write the partition to `path` when it is LRU-evicted.
     /// - `get()` will read from `path` on a memory miss (without recomputing).
-    pub fn register_spill_path<T>(
-        &self,
-        rdd_id: usize,
-        partition: usize,
-        path: PathBuf,
-    ) where
+    pub fn register_spill_path<T>(&self, rdd_id: usize, partition: usize, path: PathBuf)
+    where
         T: bincode::Encode + bincode::Decode<()> + Any + Send + Sync + 'static,
     {
         let write_path = path.clone();
@@ -181,12 +181,11 @@ impl PartitionStore {
             map.push(key, Box::new(arc.clone()))
         };
         // If the re-insert itself evicted another entry, spill it too
-        if let Some((evicted_key, evicted_val)) = evicted {
-            if evicted_key != key {
-                if let Some(ev_entry) = self.spill.get(&evicted_key) {
-                    let _ = (ev_entry.write)(evicted_val.as_ref());
-                }
-            }
+        if let Some((evicted_key, evicted_val)) = evicted
+            && evicted_key != key
+            && let Some(ev_entry) = self.spill.get(&evicted_key)
+        {
+            let _ = (ev_entry.write)(evicted_val.as_ref());
         }
 
         Some(arc)
@@ -205,13 +204,12 @@ impl PartitionStore {
     ) {
         let key = (rdd_id, partition);
         let evicted = self.map.lock().unwrap().push(key, Box::new(data));
-        if let Some((evicted_key, evicted_val)) = evicted {
-            if evicted_key != key {
-                // True LRU eviction (not a same-key replacement)
-                if let Some(entry) = self.spill.get(&evicted_key) {
-                    let _ = (entry.write)(evicted_val.as_ref());
-                }
-            }
+        // True LRU eviction (not a same-key replacement) with a registered spill handler.
+        if let Some((evicted_key, evicted_val)) = evicted
+            && evicted_key != key
+            && let Some(entry) = self.spill.get(&evicted_key)
+        {
+            let _ = (entry.write)(evicted_val.as_ref());
         }
     }
 
@@ -237,6 +235,17 @@ impl PartitionStore {
     pub fn len(&self) -> usize {
         self.map.lock().unwrap().len()
     }
+
+    /// Returns `true` if no partitions are currently cached in memory.
+    pub fn is_empty(&self) -> bool {
+        self.map.lock().unwrap().is_empty()
+    }
+}
+
+impl Default for PartitionStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Global in-memory partition cache initialised by `init_partition_cache()`.
@@ -245,102 +254,4 @@ pub static PARTITION_CACHE: OnceLock<PartitionStore> = OnceLock::new();
 /// Must be called once during `Context` startup (before any RDD is cached).
 pub fn init_partition_cache() {
     PARTITION_CACHE.get_or_init(PartitionStore::new);
-}
-
-#[derive(Debug)]
-pub enum CachePutResponse {
-    CachePutSuccess(usize),
-    CachePutFailure,
-}
-
-type CacheMap = Arc<DashMap<((usize, usize), usize), (Vec<u8>, usize)>>;
-
-// Despite the name, it is currently unbounded cache. Once done with LRU iterator, have to make this bounded.
-// Since we are storing everything as serialized objects, size estimation is as simple as getting the length of byte vector
-#[derive(Debug, Clone)]
-pub struct BoundedMemoryCache {
-    max_mbytes: usize,
-    next_key_space_id: Arc<AtomicUsize>,
-    current_bytes: usize,
-    map: CacheMap,
-}
-
-// TODO: remove all hardcoded values
-impl BoundedMemoryCache {
-    pub fn new() -> Self {
-        BoundedMemoryCache {
-            max_mbytes: 2000, // in MB
-            next_key_space_id: Arc::new(AtomicUsize::new(0)),
-            current_bytes: 0,
-            map: Arc::new(DashMap::new()),
-        }
-    }
-
-    fn new_key_space_id(&self) -> usize {
-        self.next_key_space_id.fetch_add(1, Ordering::SeqCst)
-    }
-
-    pub fn new_key_space(&self) -> KeySpace {
-        KeySpace::new(self, self.new_key_space_id())
-    }
-
-    fn get(&self, dataset_id: (usize, usize), partition: usize) -> Option<Vec<u8>> {
-        self.map
-            .get(&(dataset_id, partition))
-            .map(|entry| entry.0.clone())
-    }
-
-    fn put(
-        &self,
-        dataset_id: (usize, usize),
-        partition: usize,
-        value: Vec<u8>,
-    ) -> CachePutResponse {
-        let key = (dataset_id, partition);
-        // TODO: logging
-        let size = value.len() * 8 + 2 * 8; //this number of MB
-        if size as f64 / (1000.0 * 1000.0) > self.max_mbytes as f64 {
-            CachePutResponse::CachePutFailure
-        } else {
-            // TODO: ensure free space needs to be done and this needs to be modified
-            self.map.insert(key, (value, size));
-            CachePutResponse::CachePutSuccess(size)
-        }
-    }
-
-    fn ensure_free_space(&self, _dataset_id: u64, _space: u64) -> bool {
-        // TODO: logging
-        todo!()
-    }
-
-    fn report_entry_dropped(_data_set_id: usize, _partition: usize, _entry: (Vec<u8>, usize)) {
-        // TODO: loggging
-        todo!()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct KeySpace<'a> {
-    pub cache: &'a BoundedMemoryCache,
-    pub key_space_id: usize,
-}
-
-impl<'a> KeySpace<'a> {
-    fn new(cache: &'a BoundedMemoryCache, key_space_id: usize) -> Self {
-        KeySpace {
-            cache,
-            key_space_id,
-        }
-    }
-
-    pub fn get(&self, dataset_id: usize, partition: usize) -> Option<Vec<u8>> {
-        self.cache.get((self.key_space_id, dataset_id), partition)
-    }
-    pub fn put(&self, dataset_id: usize, partition: usize, value: Vec<u8>) -> CachePutResponse {
-        self.cache
-            .put((self.key_space_id, dataset_id), partition, value)
-    }
-    pub fn get_capacity(&self) -> usize {
-        self.cache.max_mbytes
-    }
 }

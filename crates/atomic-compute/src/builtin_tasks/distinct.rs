@@ -46,4 +46,3 @@ impl_distinct_task!(i64);
 impl_distinct_task!(u32);
 impl_distinct_task!(u64);
 impl_distinct_task!(String);
-

@@ -62,7 +62,6 @@ impl Env {
     }
 }
 
-
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -119,7 +118,6 @@ impl Default for LogConfig {
     }
 }
 
-
 /// Configuration for a worker process.
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
@@ -135,7 +133,6 @@ impl WorkerConfig {
         }
     }
 }
-
 
 /// Runtime configuration for a driver or worker process.
 ///
@@ -341,7 +338,10 @@ impl Config {
                     .ok()
                     .and_then(|s| s.parse::<u16>().ok())
                     .unwrap_or_else(|| num_cpus::get().max(1) as u16);
-            Some(WorkerConfig { port, max_concurrent_tasks })
+            Some(WorkerConfig {
+                port,
+                max_concurrent_tasks,
+            })
         } else {
             None
         };
@@ -358,12 +358,11 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<f64>().ok());
 
-        let coalesce_shuffle_threshold_bytes = std::env::var(
-            format!("{PREFIX}COALESCE_SHUFFLE_THRESHOLD_BYTES"),
-        )
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
+        let coalesce_shuffle_threshold_bytes =
+            std::env::var(format!("{PREFIX}COALESCE_SHUFFLE_THRESHOLD_BYTES"))
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
 
         let heartbeat_interval_secs = std::env::var(format!("{PREFIX}HEARTBEAT_INTERVAL_SECS"))
             .ok()
@@ -401,7 +400,10 @@ impl Config {
             shuffle_port,
             workers: vec![],
             worker,
-            log: LogConfig { log_level, log_cleanup },
+            log: LogConfig {
+                log_level,
+                log_cleanup,
+            },
             shuffle_spill_threshold,
             metrics_port,
             speculation_multiplier,
@@ -426,13 +428,15 @@ impl Config {
 
     /// Return a `ConfigBuilder` seeded from `Config::local()`.
     pub fn builder() -> ConfigBuilder {
-        ConfigBuilder { inner: Config::local() }
+        ConfigBuilder {
+            inner: Config::local(),
+        }
     }
 }
 
 /// Fluent builder for `Config`.
 ///
-/// Equivalent to Spark's `SparkConf`-style builder.  Unset fields inherit their
+/// A fluent configuration builder.  Unset fields inherit their
 /// defaults from `Config::local()`.
 ///
 /// # Example
@@ -533,7 +537,6 @@ impl ConfigBuilder {
     }
 }
 
-
 /// Initialise the shuffle infrastructure: starts the `ShuffleManager` HTTP server and
 /// populates the `SHUFFLE_CACHE` and `SHUFFLE_SERVER_URI` statics in `atomic_data::env`.
 ///
@@ -555,7 +558,7 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
         return Ok(());
     }
 
-    let mut shuffle_config = ShuffleConfig::new(
+    let shuffle_config = ShuffleConfig::new(
         config.local_ip,
         config.work_dir.clone(),
         config.shuffle_port,
@@ -564,8 +567,8 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
     #[cfg(feature = "tls")]
     {
         shuffle_config.tls_cert = config.tls_cert.clone();
-        shuffle_config.tls_key  = config.tls_key.clone();
-        shuffle_config.tls_ca   = config.tls_ca_cert.clone();
+        shuffle_config.tls_key = config.tls_key.clone();
+        shuffle_config.tls_ca = config.tls_ca_cert.clone();
     }
 
     let cache: Arc<dyn atomic_data::shuffle::cache::ShuffleCache> =

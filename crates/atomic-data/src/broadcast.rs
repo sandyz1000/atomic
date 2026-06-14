@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::distributed::{WireDecode, WireEncode};
+use crate::distributed::WireDecode;
 
 static NEXT_BROADCAST_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -52,7 +52,10 @@ where
     T: WireDecode,
 {
     pub fn new(id: usize) -> Self {
-        BroadcastVar { id, _phantom: PhantomData }
+        BroadcastVar {
+            id,
+            _phantom: PhantomData,
+        }
     }
 
     /// Read the broadcast value. Panics if the broadcast was not loaded for the current task.

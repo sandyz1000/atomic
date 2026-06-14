@@ -116,7 +116,11 @@ async fn test_cartesian_product() {
     let a = ctx.parallelize_typed(vec![1i32, 2], 1);
     let b = ctx.parallelize_typed(vec![10i32, 20], 1);
     let result = a.cartesian(b).collect().unwrap();
-    assert_eq!(result.len(), 4, "cartesian product of 2×2 should have 4 elements");
+    assert_eq!(
+        result.len(),
+        4,
+        "cartesian product of 2×2 should have 4 elements"
+    );
     assert!(result.contains(&(1, 10)));
     assert!(result.contains(&(1, 20)));
     assert!(result.contains(&(2, 10)));

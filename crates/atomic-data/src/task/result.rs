@@ -4,10 +4,10 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use crate::{
-    task_context::TaskContext,
     data::Data,
     rdd::Rdd,
     task::{Task, TaskBase},
+    task_context::TaskContext,
 };
 
 pub struct ResultTask<T: Data, U: Data, F>
@@ -35,11 +35,11 @@ where
     }
 }
 
-impl<T: Data, U: Data, F> ResultTask<T, U, F>
+impl<T: Data, U: Data, F> Clone for ResultTask<T, U, F>
 where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
 {
-    pub fn clone(&self) -> Self {
+    fn clone(&self) -> Self {
         ResultTask {
             task_id: self.task_id,
             run_id: self.run_id,
@@ -59,6 +59,7 @@ impl<T: Data, U: Data, F> ResultTask<T, U, F>
 where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         task_id: usize,
         run_id: usize,
@@ -121,7 +122,9 @@ where
     fn run(&self, id: usize) -> Result<Box<dyn Data>, Box<dyn std::error::Error>> {
         let split = self.rdd.splits()[self.partition].clone();
         let context = TaskContext::new(self.stage_id, self.partition, id);
-        let s = Box::new((self.func)((context, self.rdd.iterator(split).unwrap())));
+        // Propagate compute errors (e.g. a lost-map-output `BaseError::FetchFailed`)
+        // instead of panicking, so the scheduler can recover from lineage.
+        let s = Box::new((self.func)((context, self.rdd.iterator(split)?)));
         Ok(s)
     }
 }
@@ -138,8 +141,12 @@ pub struct ResultTaskBox {
     pub locs: Vec<Ipv4Addr>,
     pub is_pinned: bool,
     // Type-erased runner: stores a closure that runs the actual ResultTask
-    runner: Arc<dyn Fn(usize) -> Result<Box<dyn Data>, Box<dyn std::error::Error>> + Send + Sync>,
+    runner: TaskRunner,
 }
+
+/// Type-erased runner closure that executes a `ResultTask` for a given partition.
+type TaskRunner =
+    Arc<dyn Fn(usize) -> Result<Box<dyn Data>, Box<dyn std::error::Error>> + Send + Sync>;
 
 impl<T: Data, U: Data, F> From<ResultTask<T, U, F>> for ResultTaskBox
 where
