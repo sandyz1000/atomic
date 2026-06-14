@@ -36,6 +36,22 @@ fn shuffle_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap()
 }
 
+/// Shuffle ids must be unique across separate `Context` instances in one process.
+///
+/// The shuffle cache and `MAP_OUTPUT_TRACKER` are process-wide singletons keyed by
+/// shuffle id. A per-context counter (starting at 0 in each `Context`) let concurrent
+/// jobs collide on id 0,1,2…, corrupting each other's map outputs and hanging the
+/// reduce stage. `new_shuffle_id` now draws from a process-global counter.
+#[test]
+fn shuffle_ids_unique() {
+    let _g = shuffle_guard();
+    let a = ctx();
+    let b = ctx();
+    let id_a = a.new_shuffle_id();
+    let id_b = b.new_shuffle_id();
+    assert_ne!(id_a, id_b, "shuffle ids collided across contexts");
+}
+
 /// Baseline: a single first-in-process reduce_by_key must succeed.
 ///
 /// If this test also fails, the likely cause is a missing `register_shuffle_map!`

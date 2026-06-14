@@ -171,7 +171,6 @@ impl LocalScheduler {
             "pending stages and tasks: {:?}",
             jt.pending_tasks
                 .lock()
-                .await
                 .iter()
                 .map(|(k, v)| (k.id, v.iter().map(|x| x.get_task_id()).collect::<Vec<_>>()))
                 .collect::<Vec<_>>()
@@ -197,7 +196,6 @@ impl LocalScheduler {
                 );
                 jt.pending_tasks
                     .lock()
-                    .await
                     .get_mut(&stage)
                     .unwrap()
                     .remove(&evt.task);
@@ -229,7 +227,6 @@ impl LocalScheduler {
                         let m = self.get_mutators();
                         jt.failed
                             .lock()
-                            .await
                             .insert(m.fetch_from_stage_cache(evt.task.get_stage_id()));
                         fetch_failure_duration = start.elapsed();
                     }
@@ -250,7 +247,6 @@ impl LocalScheduler {
                         let m = self.get_mutators();
                         jt.failed
                             .lock()
-                            .await
                             .insert(m.fetch_from_stage_cache(evt.task.get_stage_id()));
                         fetch_failure_duration = start.elapsed();
                     }
@@ -258,14 +254,15 @@ impl LocalScheduler {
             }
         }
 
-        if !jt.failed.lock().await.is_empty()
+        if !jt.failed.lock().is_empty()
             && fetch_failure_duration.as_millis() > self.resubmit_timeout
         {
             self.update_cache_locs().await?;
-            for stage in jt.failed.lock().await.iter() {
-                self.submit_stage(stage.clone(), jt.clone()).await?;
+            let failed_stages: Vec<Stage> = jt.failed.lock().iter().cloned().collect();
+            for stage in failed_stages {
+                self.submit_stage(stage, jt.clone()).await?;
             }
-            jt.failed.lock().await.clear();
+            jt.failed.lock().clear();
         }
 
         self.mutators.event_queues.remove(&jt.run_id);

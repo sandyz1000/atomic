@@ -33,6 +33,11 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// Process-global shuffle-id counter. The shuffle cache and `MAP_OUTPUT_TRACKER` are
+/// process-wide singletons keyed by shuffle id, so ids must be unique across every
+/// `Context` in the process — a per-context counter would let concurrent jobs collide.
+static NEXT_SHUFFLE_ID: AtomicUsize = AtomicUsize::new(0);
+
 pub struct Context {
     /// Runtime configuration — built at the entry point and passed in.
     config: Arc<Config>,
@@ -43,7 +48,6 @@ pub struct Context {
     /// `fold()`, `take()` etc. execute here regardless of deployment mode.
     driver_scheduler: Arc<LocalScheduler>,
     pub(crate) next_rdd_id: Arc<AtomicUsize>,
-    pub(crate) next_shuffle_id: Arc<AtomicUsize>,
     pub(crate) address_map: Vec<SocketAddrV4>,
     pub(crate) distributed_driver: bool,
     pub(crate) work_dir: PathBuf,
@@ -64,7 +68,11 @@ impl Drop for Context {
             }
         }
         Context::driver_clean_up_directives(&self.work_dir, &self.address_map);
-        atomic_data::env::clear_shuffle_infrastructure();
+        // The shuffle infrastructure (cache, server URI, MapOutputTracker) is a
+        // process-global singleton hosted on the dedicated SHUFFLE_RT and shared by all
+        // Contexts via globally-unique shuffle ids. A single Context drop must NOT clear
+        // it — that would break concurrent Contexts. Explicit teardown is done by
+        // `shutdown()` / `stop()`.
     }
 }
 
@@ -187,7 +195,6 @@ impl Context {
             scheduler,
             driver_scheduler: local,
             next_rdd_id: Arc::new(AtomicUsize::new(0)),
-            next_shuffle_id: Arc::new(AtomicUsize::new(0)),
             address_map: vec![SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)],
             distributed_driver: false,
             work_dir: job_work_dir,
@@ -273,7 +280,6 @@ impl Context {
             scheduler,
             driver_scheduler,
             next_rdd_id: Arc::new(AtomicUsize::new(0)),
-            next_shuffle_id: Arc::new(AtomicUsize::new(0)),
             address_map,
             distributed_driver: true,
             work_dir: job_work_dir,
@@ -440,7 +446,11 @@ impl Context {
     }
 
     pub fn new_shuffle_id(&self) -> usize {
-        self.next_shuffle_id.fetch_add(1, Ordering::SeqCst)
+        // Shuffle ids must be globally unique across all `Context` instances in a process:
+        // the shuffle cache and `MAP_OUTPUT_TRACKER` are process-wide singletons keyed by
+        // shuffle id, so a per-context counter would let concurrent jobs collide on id 0,1,2…
+        // (same pattern as `NEXT_CACHED_ID` in rdd/cached.rs).
+        NEXT_SHUFFLE_ID.fetch_add(1, Ordering::SeqCst)
     }
 
     /// Create a broadcast variable.

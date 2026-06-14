@@ -8,12 +8,6 @@ fn ctx() -> Arc<Context> {
     Context::local().unwrap()
 }
 
-static SHUFFLE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-
-fn shuffle_guard() -> std::sync::MutexGuard<'static, ()> {
-    SHUFFLE_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap()
-}
-
 // ── coalesce() ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -196,7 +190,6 @@ async fn test_sort_by_ascending() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_partitions_pair_reduce() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     // Each partition emits word-count pairs; reduce_by_key sums them up.
     let data = vec![
@@ -228,7 +221,6 @@ async fn test_partitions_pair_reduce() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_repartition_shuffle_redistributes() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     // 1000 items in 2 partitions (skewed: 500 each). Repartition to 5.
     // All 5 output partitions must be non-empty and total count must be preserved.

@@ -197,14 +197,13 @@ pub trait NativeScheduler: Send + Sync {
         // let failed_stage = self.id_to_stage.lock().get(&stage_id).?.clone();
         let m = self.get_mutators();
         let failed_stage = m.fetch_from_stage_cache(stage_id);
-        jt.running.lock().await.remove(&failed_stage);
-        jt.failed.lock().await.insert(failed_stage);
+        jt.running.lock().remove(&failed_stage);
+        jt.failed.lock().insert(failed_stage);
         // TODO: logging
         m.remove_output_loc_from_stage(shuffle_id, map_id, &server_uri);
         m.unregister_map_output(shuffle_id, map_id, server_uri);
         jt.failed
             .lock()
-            .await
             .insert(m.fetch_from_shuffle_to_cache(shuffle_id));
     }
 
@@ -242,7 +241,7 @@ pub trait NativeScheduler: Send + Sync {
                     .clone();
 
                 results[rt.output_id] = Some(typed_result);
-                jt.finished.lock().await[rt.output_id] = true;
+                jt.finished.lock()[rt.output_id] = true;
                 *num_finished += 1;
             }
             TaskOption::ShuffleMapTask(smt) => {
@@ -266,7 +265,6 @@ pub trait NativeScheduler: Send + Sync {
                     "pending stages: {:?}",
                     jt.pending_tasks
                         .lock()
-                        .await
                         .iter()
                         .map(|(x, y)| (x.id, y.iter().map(|k| k.get_task_id()).collect::<Vec<_>>()))
                         .collect::<Vec<_>>()
@@ -275,7 +273,6 @@ pub trait NativeScheduler: Send + Sync {
                     "pending tasks: {:?}",
                     jt.pending_tasks
                         .lock()
-                        .await
                         .get(&stage)
                         .ok_or(SchedulerError::Other)?
                         .iter()
@@ -286,7 +283,6 @@ pub trait NativeScheduler: Send + Sync {
                     "running stages: {:?}",
                     jt.running
                         .lock()
-                        .await
                         .iter()
                         .map(|x| x.id)
                         .collect::<Vec<_>>()
@@ -295,24 +291,22 @@ pub trait NativeScheduler: Send + Sync {
                     "waiting stages: {:?}",
                     jt.waiting
                         .lock()
-                        .await
                         .iter()
                         .map(|x| x.id)
                         .collect::<Vec<_>>()
                 );
 
-                if jt.running.lock().await.contains(&stage)
+                if jt.running.lock().contains(&stage)
                     && jt
                         .pending_tasks
                         .lock()
-                        .await
                         .get(&stage)
                         .ok_or(SchedulerError::Other)?
                         .is_empty()
                 {
                     log::debug!("started registering map outputs");
                     // TODO: logging
-                    jt.running.lock().await.remove(&stage);
+                    jt.running.lock().remove(&stage);
                     if let Some(dep) = stage.shuffle_dependency {
                         log::debug!(
                             "stage output locs before register mapoutput tracker: {:?}",
@@ -337,7 +331,7 @@ pub trait NativeScheduler: Send + Sync {
                     // TODO: Cache
                     self.update_cache_locs().await?;
                     let mut newly_runnable = Vec::new();
-                    let waiting_stages: Vec<_> = jt.waiting.lock().await.iter().cloned().collect();
+                    let waiting_stages: Vec<_> = jt.waiting.lock().iter().cloned().collect();
                     for stage in waiting_stages {
                         let missing_stages = self.get_missing_parent_stages(stage.clone()).await?;
                         log::debug!(
@@ -350,10 +344,10 @@ pub trait NativeScheduler: Send + Sync {
                         }
                     }
                     for stage in &newly_runnable {
-                        jt.waiting.lock().await.remove(stage);
+                        jt.waiting.lock().remove(stage);
                     }
                     for stage in &newly_runnable {
-                        jt.running.lock().await.insert(stage.clone());
+                        jt.running.lock().insert(stage.clone());
                     }
                     for stage in newly_runnable {
                         self.submit_missing_tasks(stage, jt.clone()).await?;
@@ -374,7 +368,7 @@ pub trait NativeScheduler: Send + Sync {
         L: JobListener,
     {
         log::debug!("submitting stage #{}", stage.id);
-        if !jt.waiting.lock().await.contains(&stage) && !jt.running.lock().await.contains(&stage) {
+        if !jt.waiting.lock().contains(&stage) && !jt.running.lock().contains(&stage) {
             let missing = self.get_missing_parent_stages(stage.clone()).await?;
             log::debug!(
                 "while submitting stage #{}, missing stages: {:?}",
@@ -383,12 +377,12 @@ pub trait NativeScheduler: Send + Sync {
             );
             if missing.is_empty() {
                 self.submit_missing_tasks(stage.clone(), jt.clone()).await?;
-                jt.running.lock().await.insert(stage);
+                jt.running.lock().insert(stage);
             } else {
                 for parent in missing {
                     self.submit_stage(parent, jt.clone()).await?;
                 }
-                jt.waiting.lock().await.insert(stage);
+                jt.waiting.lock().insert(stage);
             }
         }
         Ok(())
@@ -404,7 +398,7 @@ pub trait NativeScheduler: Send + Sync {
         L: JobListener,
     {
         let m = self.get_mutators();
-        let mut pending_tasks = jt.pending_tasks.lock().await;
+        let mut pending_tasks = jt.pending_tasks.lock();
         let my_pending = pending_tasks
             .entry(stage.clone())
             .or_insert_with(BTreeSet::new);

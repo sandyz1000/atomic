@@ -10,6 +10,20 @@ use tokio::runtime::{Handle, Runtime};
 pub const THREAD_PREFIX: &str = "_ATOMIC";
 static ASYNC_RT: Lazy<Option<Runtime>> = Lazy::new(Env::build_async_executor);
 
+/// Dedicated, process-lifetime runtime that hosts the shuffle HTTP server and its
+/// status-checker task. Unlike [`ASYNC_RT`], this is always built — the shuffle server
+/// must outlive any per-job or per-test runtime that happens to be ambient when
+/// `init_shuffle` runs. Hosting the server here keeps it responsive across concurrent
+/// `Context`s whose own runtimes may be parked or torn down.
+static SHUFFLE_RT: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .thread_name("atomic-shuffle")
+        .build()
+        .expect("failed to build dedicated shuffle runtime")
+});
+
 /// Minimal env handle — only provides the async-runtime helper.
 pub struct Env;
 
@@ -530,6 +544,13 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
     use atomic_data::shuffle::config::ShuffleConfig;
     use atomic_data::shuffle::manager::ShuffleManager;
 
+    // Serialize initialisation so the check-then-set below is atomic. Without this,
+    // concurrent `Context::new` calls (e.g. parallel tests) race past the `is_some()`
+    // check and each start a ShuffleManager, leaving the cache / server URI / tracker
+    // pointing at different instances — which deadlocks the reduce-stage fetch.
+    static INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _init_guard = INIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
     if atomic_data::env::get_shuffle_server_uri().is_some() {
         return Ok(());
     }
@@ -566,8 +587,15 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
     let tracker = Arc::new(atomic_data::shuffle::MapOutputTracker::default());
     atomic_data::env::set_map_output_tracker(tracker);
 
-    let mgr = ShuffleManager::new(shuffle_config.clone(), cache)
-        .map_err(|e| format!("failed to start ShuffleManager: {e}"))?;
+    // Host the server's accept loop + status checker on the dedicated, process-lifetime
+    // runtime rather than whatever runtime is ambient here — otherwise the server dies
+    // when a per-test/per-job runtime is parked or dropped (which deadlocks concurrent
+    // reduce-stage fetches).
+    let mgr = {
+        let _guard = SHUFFLE_RT.enter();
+        ShuffleManager::new(shuffle_config.clone(), cache)
+            .map_err(|e| format!("failed to start ShuffleManager: {e}"))?
+    };
 
     let uri = mgr.get_server_uri();
     atomic_data::env::set_shuffle_server_uri(uri.clone());

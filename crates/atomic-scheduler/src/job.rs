@@ -14,7 +14,7 @@ use crate::stage::Stage;
 use atomic_data::data::Data;
 use atomic_data::task::TaskOption;
 use atomic_data::task_context::TaskContext;
-use tokio::sync::Mutex;
+use parking_lot::Mutex;
 
 #[derive(Clone, Debug)]
 pub struct Job {

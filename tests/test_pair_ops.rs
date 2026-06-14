@@ -6,15 +6,6 @@ fn ctx() -> Arc<Context> {
     Context::local().unwrap()
 }
 
-// reduce_by_key and group_by_key use the shuffle infrastructure which has process-wide
-// global state (MAP_OUTPUT_TRACKER, SHUFFLE_SERVER_URI). Serialize shuffle tests with
-// shuffle_guard() to prevent parallel tests from interfering with each other's shuffle data.
-static SHUFFLE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-
-fn shuffle_guard() -> std::sync::MutexGuard<'static, ()> {
-    SHUFFLE_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap()
-}
-
 fn word_pairs(ctx: &Arc<Context>) -> atomic_compute::rdd::typed::TypedRdd<(String, i32)> {
     ctx.parallelize_typed(
         vec![
@@ -31,7 +22,6 @@ fn word_pairs(ctx: &Arc<Context>) -> atomic_compute::rdd::typed::TypedRdd<(Strin
 // ── reduce_by_key() ───────────────────────────────────────────────────────────
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_reduce_by_key_sum() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     let mut result = word_pairs(&ctx)
         .reduce_by_key(|a, b| a + b)
@@ -50,7 +40,6 @@ async fn test_reduce_by_key_sum() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_reduce_by_key_empty() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     let result = ctx
         .parallelize_typed(Vec::<(String, i32)>::new(), 2)
@@ -64,7 +53,6 @@ async fn test_reduce_by_key_empty() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_group_by_key() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     let mut result = word_pairs(&ctx).group_by_key().collect().unwrap();
     result.sort_by_key(|(k, _)| k.clone());
@@ -154,7 +142,6 @@ async fn test_lookup_not_found() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_join_inner() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     let left = ctx.parallelize_typed(
         vec![("a".to_string(), 1i32), ("b".to_string(), 2)],
@@ -171,7 +158,6 @@ async fn test_join_inner() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_join_no_overlap() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     let left = ctx.parallelize_typed(vec![("a".to_string(), 1i32)], 1);
     let right = ctx.parallelize_typed(vec![("b".to_string(), 2i32)], 1);
@@ -181,7 +167,6 @@ async fn test_join_no_overlap() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_left_outer_join() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     let left = ctx.parallelize_typed(
         vec![("a".to_string(), 1i32), ("b".to_string(), 2)],
@@ -228,7 +213,6 @@ async fn test_range_sort_global() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sort_by_key_ascending() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     let mut result = ctx
         .parallelize_typed(
@@ -256,7 +240,6 @@ async fn test_sort_by_key_ascending() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sort_by_key_descending() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     let mut result = ctx
         .parallelize_typed(
@@ -325,7 +308,6 @@ fn bucket_by_parity(x: i32) -> (String, i32) {
 /// This is the canonical correctness benchmark for the local shuffle path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_word_count() {
-    let _g = shuffle_guard();
     let ctx = ctx();
 
     let lines = vec![
@@ -356,7 +338,6 @@ async fn test_word_count() {
 /// `reduce_by_key` after a `map` transformation (chained pipeline → shuffle).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_reduce_chained() {
-    let _g = shuffle_guard();
     let ctx = ctx();
 
     // Map: each i32 → ("bucket", value) based on even/odd
@@ -377,7 +358,6 @@ async fn test_reduce_chained() {
 /// `group_by_key` across 4 partitions — all partitions must contribute.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_group_many_partitions() {
-    let _g = shuffle_guard();
     let ctx = ctx();
 
     let pairs = vec![
@@ -413,7 +393,6 @@ async fn test_group_many_partitions() {
 /// Partitions that contribute no keys for a given bucket must not produce output.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_reduce_empty() {
-    let _g = shuffle_guard();
     let ctx = ctx();
 
     // Only 2 unique keys but 6 partitions → 4 partitions are empty.
@@ -441,7 +420,6 @@ atomic_compute::register_shuffle_map!(String, u32);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cogroup_basic() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     let rdd1 = ctx.parallelize_typed(
         vec![("a".to_string(), 1i32), ("b".to_string(), 2), ("a".to_string(), 3)],
@@ -473,7 +451,6 @@ async fn test_cogroup_basic() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cogroup_empty_sides() {
-    let _g = shuffle_guard();
     let ctx = ctx();
     let rdd1 = ctx.parallelize_typed(vec![("x".to_string(), 1i32)], 1);
     let rdd2 = ctx.parallelize_typed(vec![("y".to_string(), 2i32)], 1);
