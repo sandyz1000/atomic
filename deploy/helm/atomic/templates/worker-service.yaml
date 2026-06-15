@@ -1,0 +1,22 @@
+# Headless Service: its DNS name resolves to the A records of all worker pods.
+# The driver is pointed at `dns:<this-service>:<taskPort>` so it discovers every
+# worker and picks up pods as the StatefulSet scales.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "atomic.workerService" . }}
+  labels:
+    {{- include "atomic.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    {{- include "atomic.workerSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: task
+      port: {{ .Values.worker.taskPort }}
+      targetPort: task
+    - name: shuffle
+      port: {{ .Values.worker.shufflePort }}
+      targetPort: shuffle

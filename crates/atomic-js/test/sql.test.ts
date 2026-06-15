@@ -11,12 +11,14 @@ import os from "node:os";
 import path from "node:path";
 
 let SqlContext: typeof import("../index.js").SqlContext;
+let Context: typeof import("../index.js").Context;
 let moduleLoaded = false;
 
 beforeAll(() => {
   try {
     const m = require("../index.js");
     SqlContext = m.SqlContext;
+    Context = m.Context;
     moduleLoaded = true;
   } catch {
     // Module not built yet — skip all tests gracefully.
@@ -187,5 +189,57 @@ describe("DataFrame", () => {
     const rows1 = ctx.sql("SELECT id FROM t WHERE value > 25").collect();
     const rows2 = ctx.sql("SELECT id FROM t WHERE value > 25").collect();
     expect(rows1).toEqual(rows2);
+  });
+});
+
+// ── RDD → SQL bridge + Arrow output ───────────────────────────────────────────
+
+describe("registerRdd / toArrow", () => {
+  it("registers an RDD as a queryable table", () => {
+    if (!moduleLoaded) return;
+    const sc = new Context(2);
+    const rdd = sc.parallelize([
+      { id: 1, val: 2.5 },
+      { id: 2, val: 3.25 },
+      { id: 3, val: 1.5 },
+    ]);
+    const ctx = new SqlContext();
+    ctx.registerRdd("data", rdd, { id: "int64", val: "float64" });
+
+    const rows = ctx
+      .sql("SELECT id, val FROM data WHERE val > 2.0 ORDER BY id")
+      .collect() as any[];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].id).toBe(1);
+    expect(rows[1].val).toBeCloseTo(3.25);
+  });
+
+  it("aggregates over a registered RDD", () => {
+    if (!moduleLoaded) return;
+    const sc = new Context(2);
+    const rdd = sc.parallelize([
+      { k: "a", n: 10 },
+      { k: "b", n: 20 },
+      { k: "a", n: 5 },
+    ]);
+    const ctx = new SqlContext();
+    ctx.registerRdd("t", rdd, { k: "utf8", n: "int64" });
+    const rows = ctx
+      .sql("SELECT k, SUM(n) AS total FROM t GROUP BY k ORDER BY k")
+      .collect() as any[];
+    expect(rows).toEqual([
+      { k: "a", total: 15 },
+      { k: "b", total: 20 },
+    ]);
+  });
+
+  it("toArrow() returns non-empty Arrow IPC bytes", () => {
+    if (!moduleLoaded) return;
+    const ctx = makeCsvCtx();
+    const buf = ctx.sql("SELECT id, value FROM t ORDER BY id").toArrow();
+    expect(Buffer.isBuffer(buf)).toBe(true);
+    expect(buf.length).toBeGreaterThan(0);
+    // Arrow IPC stream starts with the "continuation" marker 0xFFFFFFFF.
+    expect(buf.readUInt32LE(0)).toBe(0xffffffff);
   });
 });

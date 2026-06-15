@@ -103,6 +103,29 @@ impl StreamingContext {
         stream
     }
 
+    /// Create a DStream that consumes message payloads (as UTF-8 strings) from
+    /// Kafka topics. Requires the `kafka` feature.
+    #[cfg(feature = "kafka")]
+    pub fn kafka_stream(
+        self: &Arc<Self>,
+        brokers: &str,
+        group_id: &str,
+        topics: &[&str],
+    ) -> Arc<crate::dstream::kafka::KafkaInputDStream> {
+        let id = self.next_stream_id();
+        let stream = Arc::new(crate::dstream::kafka::KafkaInputDStream::new(
+            self.clone(),
+            id,
+            brokers,
+            group_id,
+            topics,
+        ));
+        self.graph
+            .lock()
+            .add_input_stream(stream.clone() as Arc<dyn InputStreamBase>);
+        stream
+    }
+
     /// Create a DStream that watches a local directory for new text files.
     pub fn text_file_stream(
         self: &Arc<Self>,

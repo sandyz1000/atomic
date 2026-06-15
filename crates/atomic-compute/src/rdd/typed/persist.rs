@@ -124,14 +124,20 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
 
         let store = CheckpointStore::from_uri(dir.as_ref());
         let ctx = self.context.clone();
-        let rdd_id = self.rdd.get_rdd_id();
+        // Allocate the CheckpointRdd's id up front and key the written partitions
+        // by it — `CheckpointRdd::compute` reads back under this same id. (Using
+        // the source RDD's id here would write to a path the reader never looks
+        // at, so every read-back would miss its file.)
+        let checkpoint_id = ctx.new_rdd_id();
         let partitions = self.collect_partitions()?;
         let num_partitions = partitions.len();
 
         for (idx, data) in partitions.iter().enumerate() {
             match &store {
                 CheckpointStore::Local(base) => {
-                    let path = base.join(format!("{rdd_id}")).join(format!("{idx}.bin"));
+                    let path = base
+                        .join(format!("{checkpoint_id}"))
+                        .join(format!("{idx}.bin"));
                     disk_write_partition(&path, data)
                         .map_err(|e| BaseError::Other(format!("checkpoint write failed: {e}")))?;
                 }
@@ -143,13 +149,13 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
                         .map_err(|e| BaseError::Other(format!("checkpoint encode: {e}")))?;
                     let b64 =
                         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-                    let key = format!("{prefix}/{rdd_id}/{idx}.bin");
+                    let key = format!("{prefix}/{checkpoint_id}/{idx}.bin");
                     write_text(bucket, &key, b64).map_err(|e| BaseError::Other(e))?;
                 }
             }
         }
 
-        let checkpoint_rdd = Arc::new(CheckpointRdd::new(ctx.new_rdd_id(), store, num_partitions));
+        let checkpoint_rdd = Arc::new(CheckpointRdd::new(checkpoint_id, store, num_partitions));
         Ok(TypedRdd::new(checkpoint_rdd as RddRef<T>, ctx))
     }
 }

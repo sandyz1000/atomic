@@ -1,0 +1,11 @@
+[package]
+name = "graph"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "graph"
+path = "src/main.rs"
+
+[dependencies]
+atomic-graph.workspace = true

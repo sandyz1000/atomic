@@ -1,0 +1,15 @@
+[package]
+name = "streaming"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "streaming"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute.workspace = true
+atomic-streaming.workspace = true
+atomic-data.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true

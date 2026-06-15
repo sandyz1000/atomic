@@ -1,0 +1,73 @@
+{{- $isJob := eq .Values.driver.kind "Job" -}}
+# The driver runs the same image with no --worker flag. It discovers workers via
+# the headless Service DNS (see driver.args in values.yaml).
+{{- if $isJob }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "atomic.fullname" . }}-driver
+  labels:
+    {{- include "atomic.labels" . | nindent 4 }}
+    app.kubernetes.io/component: driver
+spec:
+  backoffLimit: 2
+  template:
+{{- else }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "atomic.fullname" . }}-driver
+  labels:
+    {{- include "atomic.labels" . | nindent 4 }}
+    app.kubernetes.io/component: driver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "atomic.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: driver
+  template:
+{{- end }}
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "atomic.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: driver
+    spec:
+      serviceAccountName: {{ include "atomic.serviceAccountName" . }}
+      restartPolicy: {{ if $isJob }}Never{{ else }}Always{{ end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: driver
+          image: {{ include "atomic.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.command }}
+          command: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            {{- toYaml .Values.driver.args | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "atomic.fullname" . }}-env
+          env:
+            {{- range $k, $v := .Values.driver.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.driver.resources | nindent 12 }}
+          {{- if .Values.tls.enabled }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/atomic/tls
+              readOnly: true
+          {{- end }}
+      {{- if .Values.tls.enabled }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+      {{- end }}

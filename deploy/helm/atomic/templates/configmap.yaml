@@ -1,0 +1,20 @@
+# Shared ATOMIC_* environment for driver and workers. WORKER_DNS / WORKER_TASK_PORT
+# are referenced by the driver's args (`dns:$(WORKER_DNS):$(WORKER_TASK_PORT)`).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "atomic.fullname" . }}-env
+  labels:
+    {{- include "atomic.labels" . | nindent 4 }}
+data:
+  WORKER_DNS: {{ include "atomic.workerService" . | quote }}
+  WORKER_TASK_PORT: "{{ .Values.worker.taskPort }}"
+  ATOMIC_SHUFFLE_PORT: "{{ .Values.worker.shufflePort }}"
+  {{- if .Values.metrics.enabled }}
+  ATOMIC_METRICS_PORT: "{{ .Values.worker.shufflePort }}"
+  {{- end }}
+  {{- if .Values.tls.enabled }}
+  ATOMIC_TLS_CA_CERT: "/etc/atomic/tls/ca.crt"
+  ATOMIC_TLS_CERT: "/etc/atomic/tls/tls.crt"
+  ATOMIC_TLS_KEY: "/etc/atomic/tls/tls.key"
+  {{- end }}

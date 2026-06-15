@@ -130,3 +130,49 @@ where
         ctx.parallelize_typed(sorted, num_partitions)
     }
 }
+
+impl<T> TypedRdd<T>
+where
+    T: Data + Clone + WireEncode + WireDecode,
+    Vec<T>: WireEncode + WireDecode,
+{
+    /// Distributed sort of a non-pair RDD by a **registered** key-value task.
+    ///
+    /// The closure-based [`sort_by`](TypedRdd::sort_by) must collect to the driver
+    /// because a `Fn(&T) -> K` cannot be shipped. `sort_by_task` instead takes a
+    /// `#[task]`-registered function that pairs each element with its sort key
+    /// (`T -> (K, T)`); that op ships by id, so the sort runs as a range-partitioned
+    /// shuffle with no full-dataset driver collect — the same path as
+    /// [`sort_by_key`](TypedRdd::sort_by_key).
+    ///
+    /// Register the `(K, T)` shuffle with `register_sort_shuffle_map!(K, T)` for a
+    /// globally-ordered distributed result.
+    ///
+    /// ```ignore
+    /// #[task] fn by_len(s: String) -> (usize, String) { (s.len(), s) }
+    /// atomic_compute::register_sort_shuffle_map!(usize, String);
+    /// let sorted = rdd.sort_by_task(ByLen, true).collect()?;
+    /// ```
+    pub fn sort_by_task<F, K>(self, key_value_task: F, ascending: bool) -> TypedRdd<T>
+    where
+        F: UnaryTask<T, (K, T)>,
+        K: Data
+            + Ord
+            + Eq
+            + std::hash::Hash
+            + Clone
+            + WireEncode
+            + WireDecode
+            + bincode::Encode
+            + bincode::Decode<()>,
+        T: bincode::Encode + bincode::Decode<()>,
+        (K, T): Data + Clone + WireEncode + WireDecode,
+        Vec<(K, T)>: WireEncode + WireDecode,
+        Vec<K>: WireDecode,
+        Vec<(K, Vec<T>)>: WireEncode,
+    {
+        self.map_task(key_value_task)
+            .sort_by_key(ascending)
+            .values()
+    }
+}

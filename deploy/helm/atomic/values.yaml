@@ -1,0 +1,71 @@
+# Default values for the Atomic chart.
+
+image:
+  repository: myrepo/atomic
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# The single binary's role is chosen by args; the chart sets them per workload.
+# `command` lets you override the entrypoint if your image differs.
+command: []
+
+worker:
+  # Number of worker pods. The HPA (if enabled) overrides this at runtime.
+  replicas: 3
+  # TCP port the worker listens on for TaskEnvelopes (matches Dockerfile EXPOSE).
+  taskPort: 10001
+  # HTTP port for the shuffle server + /health (used by readiness probe & driver heartbeat).
+  shufflePort: 9090
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  # Extra ATOMIC_* env vars applied to workers.
+  env: {}
+
+driver:
+  # "Job" for a batch program that exits, or "Deployment" for a long-running service.
+  kind: Job
+  # Args passed to the driver. `$(WORKER_DNS)` is injected from the worker headless
+  # Service so the driver discovers workers by DNS and picks up scale-up live.
+  args:
+    - "--workers"
+    - "dns:$(WORKER_DNS):$(WORKER_TASK_PORT)"
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  env: {}
+
+# Horizontal autoscaling of workers. Atomic's dynamic-allocation + DNS discovery
+# picks up pods that scale in/out automatically.
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# mTLS between workers (requires the binary built with the `tls` feature). When
+# enabled, mount a secret with ca.crt / tls.crt / tls.key and set the ATOMIC_TLS_* paths.
+tls:
+  enabled: false
+  secretName: ""
+
+# Prometheus scrape annotations on worker pods.
+metrics:
+  enabled: true
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

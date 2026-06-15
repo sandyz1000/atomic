@@ -29,6 +29,85 @@ pub trait CustomPartitioner: Send + Sync {
     fn get_partition_for_key(&self, key: &dyn Any) -> usize;
 }
 
+/// A `CustomPartitioner` that can be **shipped to workers** by name instead of by
+/// closure. Register it with `atomic_compute::register_partitioner!(MyType)` so
+/// the worker can reconstruct it for distributed `partition_by_named`.
+///
+/// The only state shipped over the wire is `num_partitions`; the worker rebuilds
+/// the partitioner with [`create`](NamedPartitioner::create). A named partitioner
+/// must therefore be fully determined by its partition count (for richer config,
+/// use a `Range` partitioner whose bounds are serialized, or stay local).
+///
+/// ```ignore
+/// struct ModPartitioner { n: usize }
+/// impl CustomPartitioner for ModPartitioner {
+///     fn num_partitions(&self) -> usize { self.n }
+///     fn get_partition_for_key(&self, key: &dyn Any) -> usize {
+///         (*key.downcast_ref::<i64>().unwrap() as usize) % self.n
+///     }
+/// }
+/// impl NamedPartitioner for ModPartitioner {
+///     const NAME: &'static str = "mod";
+///     fn create(n: usize) -> Self { ModPartitioner { n } }
+/// }
+/// atomic_compute::register_partitioner!(ModPartitioner);
+/// ```
+pub trait NamedPartitioner: CustomPartitioner + 'static {
+    /// Stable, unique name used to dispatch this partitioner on workers.
+    const NAME: &'static str;
+    /// Reconstruct the partitioner from just its partition count.
+    fn create(num_partitions: usize) -> Self
+    where
+        Self: Sized;
+}
+
+/// A statically-typed partitioner — the `Any`-free alternative to implementing
+/// [`CustomPartitioner`] directly.
+///
+/// `Partitioner` itself is stored in the type-erased dependency DAG, so its
+/// [`get_partition`](Partitioner::get_partition) seam must accept `&dyn Any`.
+/// `TypedPartitioner` keeps that erasure out of *user* code: implement
+/// [`partition`](TypedPartitioner::partition) with a concrete `Key` and the
+/// blanket impl below performs the single, localized downcast.
+///
+/// ```
+/// use atomic_data::partitioner::TypedPartitioner;
+/// struct ModPartitioner { n: usize }
+/// impl TypedPartitioner for ModPartitioner {
+///     type Key = i64;
+///     fn num_partitions(&self) -> usize { self.n }
+///     fn partition(&self, key: &i64) -> usize { key.rem_euclid(self.n as i64) as usize }
+/// }
+/// ```
+pub trait TypedPartitioner: Send + Sync + 'static {
+    /// The concrete key type this partitioner operates on.
+    type Key: 'static;
+    /// Number of output partitions.
+    fn num_partitions(&self) -> usize;
+    /// Map a typed key to a partition index in `0..num_partitions()`.
+    fn partition(&self, key: &Self::Key) -> usize;
+}
+
+/// The one place the partitioner key is downcast: bridges any [`TypedPartitioner`]
+/// into the erased [`CustomPartitioner`] the DAG stores. User partitioners that
+/// implement `TypedPartitioner` get `CustomPartitioner` for free and never touch
+/// `Any`. (A type may implement `TypedPartitioner` *or* `CustomPartitioner`
+/// directly, not both — coherence forbids overlap.)
+impl<P: TypedPartitioner> CustomPartitioner for P {
+    fn num_partitions(&self) -> usize {
+        TypedPartitioner::num_partitions(self)
+    }
+    fn get_partition_for_key(&self, key: &dyn Any) -> usize {
+        let k = key.downcast_ref::<P::Key>().unwrap_or_else(|| {
+            panic!(
+                "TypedPartitioner: key is not {}",
+                std::any::type_name::<P::Key>()
+            )
+        });
+        self.partition(k)
+    }
+}
+
 /// Type-erased function mapping a key (`&dyn Any`) to a partition index.
 pub type PartitionFn = Arc<dyn Fn(&dyn Any) -> usize + Send + Sync>;
 
@@ -60,6 +139,10 @@ pub enum Partitioner {
     /// User-defined partitioner supplied via `TypedRdd::partition_by()`.
     Custom {
         num_partitions: usize,
+        /// Registry name when built from a [`NamedPartitioner`], enabling the worker
+        /// to reconstruct it for distributed shuffles. `None` for closure-based
+        /// custom partitioners, which degrade to hash partitioning on workers.
+        name: Option<String>,
         get_partition_fn: PartitionFn,
     },
 }
@@ -118,11 +201,28 @@ impl Partitioner {
     }
 
     /// Build a `Partitioner` from any type that implements `CustomPartitioner`.
+    ///
+    /// The resulting partitioner has no registry name, so it degrades to hash
+    /// partitioning in distributed mode. Use [`from_named`](Partitioner::from_named)
+    /// for a partitioner that ships correctly to workers.
     pub fn from_custom<P: CustomPartitioner + 'static>(p: P) -> Self {
         let p = Arc::new(p);
         let n = p.num_partitions();
         Partitioner::Custom {
             num_partitions: n,
+            name: None,
+            get_partition_fn: Arc::new(move |key| p.get_partition_for_key(key)),
+        }
+    }
+
+    /// Build a `Partitioner` from a [`NamedPartitioner`], tagging it with the
+    /// registry name so workers can reconstruct it. `num_partitions` is the only
+    /// state shipped; the worker rebuilds via `P::create(num_partitions)`.
+    pub fn from_named<P: NamedPartitioner>(num_partitions: usize) -> Self {
+        let p = Arc::new(P::create(num_partitions));
+        Partitioner::Custom {
+            num_partitions,
+            name: Some(P::NAME.to_string()),
             get_partition_fn: Arc::new(move |key| p.get_partition_for_key(key)),
         }
     }
@@ -200,8 +300,13 @@ impl Partitioner {
                 ascending: *ascending,
                 bounds_bytes: bounds_bytes.clone(),
             },
-            Partitioner::Custom { num_partitions, .. } => PartitionerSchema::Custom {
+            Partitioner::Custom {
+                num_partitions,
+                name,
+                ..
+            } => PartitionerSchema::Custom {
                 num_parts: *num_partitions,
+                name: name.clone(),
             },
         }
     }
@@ -225,6 +330,9 @@ pub enum PartitionerSchema {
     },
     Custom {
         num_parts: usize,
+        /// Registry name of a [`NamedPartitioner`], if this came from
+        /// `partition_by_named`. `None` → degrades to hash on the worker.
+        name: Option<String>,
     },
 }
 
@@ -240,7 +348,16 @@ impl PartitionerSchema {
             }
             | PartitionerSchema::Custom {
                 num_parts: num_partitions,
+                ..
             } => *num_partitions,
+        }
+    }
+
+    /// The registry name of a named custom partitioner, if any.
+    pub fn custom_name(&self) -> Option<&str> {
+        match self {
+            PartitionerSchema::Custom { name: Some(n), .. } => Some(n.as_str()),
+            _ => None,
         }
     }
 

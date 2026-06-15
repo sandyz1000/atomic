@@ -570,4 +570,95 @@ declare namespace AtomicJs {
       mergeMsg: (msgA: number, msgB: number) => number
     ): Graph;
   }
+
+  /** A row from a SQL result — column name to value. */
+  type Row = Record<string, unknown>;
+
+  /** Arrow type strings accepted by {@link SqlContext.registerRdd}. */
+  type ArrowType =
+    | "int8" | "int16" | "int32" | "int64"
+    | "uint8" | "uint16" | "uint32" | "uint64"
+    | "float32" | "float64" | "double"
+    | "bool" | "boolean"
+    | "utf8" | "string" | "str";
+
+  /**
+   * SQL query engine (DataFusion) over CSV/Parquet/JSON files and RDDs.
+   *
+   * @example
+   * ```typescript
+   * import { Context, SqlContext } from '@atomic-compute/js';
+   * const sc = new Context(2);
+   * const rdd = sc.parallelize([{ id: 1, val: 2.5 }, { id: 2, val: 3.0 }]);
+   * const ctx = new SqlContext();
+   * ctx.registerRdd('data', rdd, { id: 'int64', val: 'float64' });
+   * const rows = ctx.sql('SELECT * FROM data WHERE val > 2.0').collect();
+   * ```
+   */
+  class SqlContext {
+    constructor();
+
+    /** Parse and execute a SQL query, returning a lazy {@link DataFrame}. */
+    sql(query: string): DataFrame;
+
+    /** Register a CSV file or directory as a named table. */
+    registerCsv(name: string, path: string): void;
+
+    /** Register a Parquet file or directory as a named table. */
+    registerParquet(name: string, path: string): void;
+
+    /** Register a JSONL file or directory as a named table. */
+    registerJson(name: string, path: string): void;
+
+    /**
+     * Register an {@link RDD} of row objects as a named table (RDD→SQL bridge).
+     *
+     * @param name   - Table name to use in SQL queries.
+     * @param rdd    - RDD whose row objects become table rows.
+     * @param schema - Map of column name to Arrow type.
+     */
+    registerRdd(name: string, rdd: RDD<Row>, schema: Record<string, ArrowType>): void;
+
+    /** Remove a previously registered table from the catalog. */
+    deregisterTable(name: string): void;
+  }
+
+  /** A lazy structured result produced by {@link SqlContext.sql}. */
+  class DataFrame {
+    /** Execute and return all rows as objects. */
+    collect(): Row[];
+
+    /** Execute and return the result as Arrow IPC stream bytes (read with `tableFromIPC`). */
+    toArrow(): Buffer;
+
+    /** Execute and print a formatted table (default 20 rows). */
+    show(): void;
+
+    /** Execute and print the first `n` rows. */
+    showLimit(n: number): void;
+
+    /** Execute and return the row count. */
+    count(): number;
+
+    /** Filter rows by a SQL boolean expression. */
+    filter(expr: string): DataFrame;
+
+    /** Keep only the named columns. */
+    select(columns: string[]): DataFrame;
+
+    /** Keep at most `n` rows. */
+    limit(n: number): DataFrame;
+
+    /** Sort by a column (ascending unless `ascending` is `false`). */
+    sort(col: string, ascending?: boolean): DataFrame;
+
+    /** Return the result schema as a column → Arrow-type map. */
+    schema(): Record<string, string>;
+
+    /** Write the result to Parquet files at `path`. */
+    writeParquet(path: string): void;
+
+    /** Write the result to CSV files at `path`. */
+    writeCsv(path: string): void;
+  }
 }

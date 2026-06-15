@@ -15,10 +15,11 @@ pub mod tls;
 
 pub mod __macro_support {
     pub use crate::task_registry::{
-        ShuffleKeyEntry, ShuffleMapEntry, SortShuffleMapEntry, TaskEntry,
+        PartitionerEntry, ShuffleKeyEntry, ShuffleMapEntry, SortShuffleMapEntry, TaskEntry,
     };
     pub use crate::task_traits::{BinaryTask, UnaryTask};
     pub use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
+    pub use atomic_data::partitioner::{NamedPartitioner, Partitioner, TypedPartitioner};
     pub use inventory;
 }
 
@@ -70,6 +71,23 @@ macro_rules! register_sort_shuffle_map {
         $crate::__macro_support::inventory::submit!($crate::__macro_support::SortShuffleMapEntry {
             type_id: || concat!(stringify!($K), "::", stringify!($V)),
             handler: $crate::shuffle_map::sort_shuffle_map_handler::<$K, $V>,
+        });
+    };
+}
+
+/// Register a [`NamedPartitioner`](atomic_data::partitioner::NamedPartitioner) so
+/// distributed `partition_by_named` can ship it to workers by name (no closure
+/// serialization). Place this once in the binary, like `register_shuffle_map!`.
+///
+/// ```rust,ignore
+/// atomic_compute::register_partitioner!(ModPartitioner);
+/// ```
+#[macro_export]
+macro_rules! register_partitioner {
+    ($P:ty) => {
+        $crate::__macro_support::inventory::submit!($crate::__macro_support::PartitionerEntry {
+            name: || <$P as $crate::__macro_support::NamedPartitioner>::NAME,
+            factory: |n| $crate::__macro_support::Partitioner::from_named::<$P>(n),
         });
     };
 }

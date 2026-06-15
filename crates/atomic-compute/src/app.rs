@@ -1,9 +1,35 @@
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4, ToSocketAddrs};
 use std::sync::Arc;
 
 use crate::context::{Context, start_worker};
 use crate::env::Config;
 use crate::error::{ComputeError, ComputeResult};
+
+/// A `dns:<host>:<port>` worker spec, retained so the driver can re-resolve the
+/// headless Service periodically and pick up pods that scaled in/out.
+#[derive(Debug, Clone)]
+pub struct WorkerDns {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Resolve a DNS hostname to the IPv4 worker endpoints behind it (e.g. the A
+/// records of a Kubernetes headless Service). Non-fatal: an empty result just
+/// means no workers are reachable yet.
+pub fn resolve_worker_dns(host: &str, port: u16) -> Vec<SocketAddrV4> {
+    match (host, port).to_socket_addrs() {
+        Ok(addrs) => addrs
+            .filter_map(|a| match a {
+                std::net::SocketAddr::V4(v4) => Some(v4),
+                std::net::SocketAddr::V6(_) => None,
+            })
+            .collect(),
+        Err(e) => {
+            log::warn!("worker DNS resolution failed for {host}:{port}: {e}");
+            vec![]
+        }
+    }
+}
 
 /// The role this binary plays at runtime.
 #[derive(Debug, Clone)]
@@ -88,11 +114,14 @@ impl AtomicApp {
         let worker_addrs = Self::worker_addresses(&args);
         let local_ip = Self::parse_local_ip(&args);
 
-        let config = if worker_addrs.is_empty() {
+        let mut config = if worker_addrs.is_empty() {
             Config::local()
         } else {
             Config::distributed_driver(local_ip, worker_addrs)
         };
+        // If discovery was via `dns:host:port`, keep the spec so the driver can
+        // re-resolve it and pick up workers that scale in/out (K8s autoscaling).
+        config.worker_dns = Self::worker_dns(&args).map(|d| (d.host, d.port));
 
         let ctx = Context::new_with_config(config)?;
         Ok(AtomicApp {
@@ -130,20 +159,67 @@ impl AtomicApp {
     }
 
     /// Parse `--workers host:port,...` into a `Vec<SocketAddrV4>`.
+    ///
+    /// Each comma-separated token is either a literal `ip:port` or a
+    /// `dns:<host>:<port>` spec. A `dns:` token is resolved to every IPv4 A
+    /// record behind `<host>` (e.g. the pods of a Kubernetes headless Service),
+    /// each paired with `<port>`.
     pub fn worker_addresses(args: &[String]) -> Vec<SocketAddrV4> {
         args.windows(2)
             .find(|w| w[0] == "--workers")
             .map(|w| {
                 w[1].split(',')
-                    .filter_map(|addr| {
-                        let mut parts = addr.rsplitn(2, ':');
-                        let port = parts.next()?.parse::<u16>().ok()?;
-                        let ip = parts.next()?.parse::<Ipv4Addr>().ok()?;
-                        Some(SocketAddrV4::new(ip, port))
-                    })
+                    .flat_map(Self::resolve_worker_token)
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Resolve a single `--workers` token to zero or more endpoints.
+    fn resolve_worker_token(token: &str) -> Vec<SocketAddrV4> {
+        if let Some(rest) = token.strip_prefix("dns:") {
+            let mut parts = rest.rsplitn(2, ':');
+            match (
+                parts.next().and_then(|p| p.parse::<u16>().ok()),
+                parts.next(),
+            ) {
+                (Some(port), Some(host)) => resolve_worker_dns(host, port),
+                _ => vec![],
+            }
+        } else {
+            let mut parts = token.rsplitn(2, ':');
+            match (
+                parts.next().and_then(|p| p.parse::<u16>().ok()),
+                parts.next().and_then(|ip| ip.parse::<Ipv4Addr>().ok()),
+            ) {
+                (Some(port), Some(ip)) => vec![SocketAddrV4::new(ip, port)],
+                _ => vec![],
+            }
+        }
+    }
+
+    /// Extract a `dns:<host>:<port>` worker spec from `--workers`, if present, so
+    /// the driver can re-resolve it for live discovery. The first `dns:` token wins.
+    pub fn worker_dns(args: &[String]) -> Option<WorkerDns> {
+        let value = args
+            .windows(2)
+            .find(|w| w[0] == "--workers")
+            .map(|w| w[1].as_str())?;
+        for token in value.split(',') {
+            if let Some(rest) = token.strip_prefix("dns:") {
+                let mut parts = rest.rsplitn(2, ':');
+                if let (Some(port), Some(host)) = (
+                    parts.next().and_then(|p| p.parse::<u16>().ok()),
+                    parts.next(),
+                ) {
+                    return Some(WorkerDns {
+                        host: host.to_string(),
+                        port,
+                    });
+                }
+            }
+        }
+        None
     }
 
     /// Parse `--local-ip ADDR`, falling back to `127.0.0.1`.
@@ -161,4 +237,46 @@ macro_rules! app {
     () => {
         $crate::app::AtomicApp::build()
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(workers: &str) -> Vec<String> {
+        vec!["bin".into(), "--workers".into(), workers.into()]
+    }
+
+    #[test]
+    fn literal_addresses_parse() {
+        let got = AtomicApp::worker_addresses(&args("127.0.0.1:10001,10.0.0.5:10002"));
+        assert_eq!(
+            got,
+            vec![
+                SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 10001),
+                SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 5), 10002),
+            ]
+        );
+    }
+
+    #[test]
+    fn dns_spec_extracted() {
+        let got = AtomicApp::worker_dns(&args("dns:atomic-workers:10001")).unwrap();
+        assert_eq!(got.host, "atomic-workers");
+        assert_eq!(got.port, 10001);
+    }
+
+    #[test]
+    fn literals_have_no_dns() {
+        assert!(AtomicApp::worker_dns(&args("127.0.0.1:10001")).is_none());
+    }
+
+    #[test]
+    fn dns_applies_port() {
+        // `localhost` resolves to a loopback A record on supported hosts; we only
+        // assert the port is applied, which holds regardless of address count.
+        for addr in resolve_worker_dns("localhost", 9999) {
+            assert_eq!(addr.port(), 9999);
+        }
+    }
 }

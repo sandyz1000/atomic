@@ -155,6 +155,13 @@ pub struct Config {
     pub shuffle_port: Option<u16>,
     /// Remote worker addresses (distributed-driver only).
     pub workers: Vec<SocketAddrV4>,
+    /// `(host, port)` of a DNS name to periodically re-resolve for live worker
+    /// discovery (e.g. a Kubernetes headless Service). When `Some`, the driver
+    /// re-resolves it every `heartbeat_interval_secs` and registers any newly
+    /// appeared endpoints via `dynamically_add_worker`. `None` (default) means
+    /// the worker set is fixed at startup. Set by `AtomicApp` from
+    /// `--workers dns:<host>:<port>`.
+    pub worker_dns: Option<(String, u16)>,
     /// Worker-specific settings; `Some` only for worker processes.
     pub worker: Option<WorkerConfig>,
     /// Logging configuration.
@@ -212,6 +219,7 @@ impl Config {
             mode: DeploymentMode::Local,
             shuffle_port: None,
             workers: vec![],
+            worker_dns: None,
             worker: None,
             log: LogConfig::default(),
             shuffle_spill_threshold: None,
@@ -236,6 +244,7 @@ impl Config {
             mode: DeploymentMode::Distributed,
             shuffle_port: None,
             workers,
+            worker_dns: None,
             worker: None,
             log: LogConfig::default(),
             shuffle_spill_threshold: None,
@@ -260,6 +269,7 @@ impl Config {
             mode: DeploymentMode::Distributed,
             shuffle_port: None,
             workers: vec![],
+            worker_dns: None,
             worker: Some(WorkerConfig::new(port)),
             log: LogConfig::default(),
             shuffle_spill_threshold: None,
@@ -399,6 +409,7 @@ impl Config {
             mode,
             shuffle_port,
             workers: vec![],
+            worker_dns: None,
             worker,
             log: LogConfig {
                 log_level,

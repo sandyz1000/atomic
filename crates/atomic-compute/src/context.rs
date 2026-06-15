@@ -263,6 +263,17 @@ impl Context {
             scheduler.start_heartbeat(config.heartbeat_interval_secs, config.heartbeat_timeout_ms);
         });
 
+        // Live worker discovery: when workers were given as `dns:host:port`
+        // (a K8s headless Service), periodically re-resolve and register any
+        // newly-appeared endpoints so pod scale-up is picked up automatically.
+        if let Some((host, port)) = config.worker_dns.clone() {
+            let interval = config.heartbeat_interval_secs.max(10);
+            let disc_sched = Arc::clone(&scheduler);
+            env::Env::run_in_async_rt(move || {
+                Context::start_worker_discovery(disc_sched, host, port, interval);
+            });
+        }
+
         // Start self-registration endpoint so workers can join dynamically.
         if let Some(port) = config.register_port {
             env::Env::run_in_async_rt(|| {
@@ -318,6 +329,46 @@ impl Context {
         // signals on completion. Workers stay alive for subsequent driver runs
         // and must be stopped explicitly (Ctrl-C or a dedicated stop command).
         clean_up_work_dir(work_dir, true);
+    }
+
+    /// Periodically re-resolve `host:port` (a DNS name, e.g. a K8s headless
+    /// Service) and register any endpoints that have appeared since the last
+    /// tick. Workers that vanish are pruned by the heartbeat loop, so this only
+    /// handles scale-up. Spawned on the ambient Tokio runtime; never returns.
+    fn start_worker_discovery(
+        scheduler: Arc<DistributedScheduler>,
+        host: String,
+        port: u16,
+        interval_secs: u64,
+    ) {
+        tokio::spawn(async move {
+            let interval = Duration::from_secs(interval_secs);
+            loop {
+                tokio::time::sleep(interval).await;
+                let resolved = crate::app::resolve_worker_dns(&host, port);
+                for endpoint in resolved {
+                    if scheduler.is_worker_registered(&endpoint) {
+                        continue;
+                    }
+                    // Handshake is a short blocking TCP round-trip — keep it off
+                    // the async worker threads.
+                    let caps = tokio::task::spawn_blocking(move || {
+                        Context::request_worker_capabilities(endpoint)
+                    })
+                    .await;
+                    match caps {
+                        Ok(Ok(capabilities)) => {
+                            log::info!("discovery: new worker {endpoint} via DNS {host}:{port}");
+                            scheduler.dynamically_add_worker(endpoint, capabilities);
+                        }
+                        Ok(Err(e)) => {
+                            log::debug!("discovery: {endpoint} not ready yet: {e}");
+                        }
+                        Err(e) => log::warn!("discovery: handshake task panicked: {e}"),
+                    }
+                }
+            }
+        });
     }
 
     fn request_worker_capabilities(endpoint: SocketAddrV4) -> ComputeResult<WorkerCapabilities> {

@@ -24,6 +24,14 @@ atomic-data = { workspace = true }
 uuid = { version = "1.6.1" }
 num_cpus = { workspace = true }
 
+# Optional Kafka source (KafkaInputDStream). Off by default — enabling it pulls in
+# librdkafka (built from source via cmake). Build with `--features kafka`.
+rdkafka = { version = "0.36", optional = true, features = ["cmake-build"] }
+
+[features]
+default = []
+# Enables `StreamingContext::kafka_stream` + `KafkaInputDStream`.
+kafka = ["dep:rdkafka"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

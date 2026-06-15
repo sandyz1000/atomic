@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+
+use crate::rdd::JsRdd;
 
 use datafusion::arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
@@ -149,6 +152,40 @@ impl JsDataFrame {
         let batches = run_sql_async(self.inner.clone().collect())
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(batches_to_json_rows(&batches))
+    }
+
+    /// Execute the query and return the result as Arrow IPC stream bytes.
+    ///
+    /// The returned `Buffer` is an Arrow IPC *stream* — read it on the JS side
+    /// with `apache-arrow`'s `tableFromIPC(buffer)`. Mirrors `to_arrow()` in the
+    /// Python bindings (which returns a PyArrow Table).
+    ///
+    /// ```js
+    /// import { tableFromIPC } from "apache-arrow";
+    /// const table = tableFromIPC(df.toArrow());
+    /// ```
+    #[napi]
+    pub fn to_arrow(&self) -> Result<Buffer> {
+        use datafusion::arrow::ipc::writer::StreamWriter;
+
+        let batches = run_sql_async(self.inner.clone().collect())
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+
+        let mut buf: Vec<u8> = Vec::new();
+        if let Some(first) = batches.first() {
+            let schema = first.schema();
+            let mut writer = StreamWriter::try_new(&mut buf, &schema)
+                .map_err(|e| Error::from_reason(e.to_string()))?;
+            for batch in &batches {
+                writer
+                    .write(batch)
+                    .map_err(|e| Error::from_reason(e.to_string()))?;
+            }
+            writer
+                .finish()
+                .map_err(|e| Error::from_reason(e.to_string()))?;
+        }
+        Ok(Buffer::from(buf))
     }
 
     /// Execute and print a formatted table to stdout (default: 20 rows).
@@ -404,6 +441,35 @@ impl JsSqlContext {
         .map_err(|e| Error::from_reason(e.to_string()))
     }
 
+    /// Register an `Rdd` as a named SQL table (the RDD→SQL bridge).
+    ///
+    /// The RDD's rows (JS objects) are materialized into an Arrow table using the
+    /// supplied `schema` (column name → Arrow type string), then registered so SQL
+    /// can query them. Mirrors `SqlContext.register_rdd` in the Python bindings.
+    ///
+    /// @param name - Table name to use in SQL queries.
+    /// @param rdd - The RDD whose rows become table rows.
+    /// @param schema - Map of column name to Arrow type (e.g. `{ id: "int64", val: "float64" }`).
+    ///
+    /// ```js
+    /// const rdd = ctx.parallelize([{ id: 1, val: 2.5 }, { id: 2, val: 3.0 }]);
+    /// sqlCtx.registerRdd("data", rdd, { id: "int64", val: "float64" });
+    /// const df = sqlCtx.sql("SELECT * FROM data WHERE val > 2.0");
+    /// ```
+    #[napi]
+    pub fn register_rdd(
+        &self,
+        name: String,
+        rdd: &JsRdd,
+        schema: HashMap<String, String>,
+    ) -> Result<()> {
+        let rows = rdd.collect_rows()?;
+        let batches = json_rows_to_batches(&rows, &schema)?;
+        self.inner
+            .register_partitioned_batches(&name, vec![batches])
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
     /// Remove a previously registered table from the catalog.
     #[napi]
     pub fn deregister_table(&self, name: String) -> Result<()> {
@@ -411,4 +477,139 @@ impl JsSqlContext {
             .deregister_table(&name)
             .map_err(|e| Error::from_reason(e.to_string()))
     }
+}
+
+/// Parse an Arrow type string into a DataFusion `DataType`.
+fn parse_arrow_type(s: &str) -> Result<DataType> {
+    Ok(match s.to_lowercase().as_str() {
+        "int8" => DataType::Int8,
+        "int16" => DataType::Int16,
+        "int32" => DataType::Int32,
+        "int64" => DataType::Int64,
+        "uint8" => DataType::UInt8,
+        "uint16" => DataType::UInt16,
+        "uint32" => DataType::UInt32,
+        "uint64" => DataType::UInt64,
+        "float32" => DataType::Float32,
+        "float64" | "double" => DataType::Float64,
+        "bool" | "boolean" => DataType::Boolean,
+        "utf8" | "string" | "str" => DataType::Utf8,
+        other => {
+            return Err(Error::from_reason(format!(
+                "unsupported Arrow type: {other}. Supported: int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8"
+            )));
+        }
+    })
+}
+
+/// Convert JSON object rows into a single Arrow `RecordBatch` per the schema.
+fn json_rows_to_batches(
+    rows: &[serde_json::Value],
+    schema: &HashMap<String, String>,
+) -> Result<Vec<RecordBatch>> {
+    use datafusion::arrow::array::{
+        ArrayRef, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
+        Int32Builder, Int64Builder, StringBuilder, UInt8Builder, UInt16Builder, UInt32Builder,
+        UInt64Builder,
+    };
+    use datafusion::arrow::datatypes::{Field, Schema};
+
+    if rows.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let columns: Vec<(String, DataType)> = schema
+        .iter()
+        .map(|(k, v)| Ok((k.clone(), parse_arrow_type(v)?)))
+        .collect::<Result<_>>()?;
+
+    let fields: Vec<Field> = columns
+        .iter()
+        .map(|(name, dt)| Field::new(name, dt.clone(), true))
+        .collect();
+    let arrow_schema = Arc::new(Schema::new(fields));
+
+    let mut col_arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
+    for (col_name, col_type) in &columns {
+        // Each column reads `row[col_name]` from every JSON object row.
+        macro_rules! build_int {
+            ($builder_ty:ty, $cast:expr) => {{
+                let mut b = <$builder_ty>::new();
+                for row in rows {
+                    match row.get(col_name).and_then(serde_json::Value::as_i64) {
+                        Some(v) => b.append_value($cast(v)),
+                        None => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish()) as ArrayRef
+            }};
+        }
+        macro_rules! build_uint {
+            ($builder_ty:ty, $cast:expr) => {{
+                let mut b = <$builder_ty>::new();
+                for row in rows {
+                    match row.get(col_name).and_then(serde_json::Value::as_u64) {
+                        Some(v) => b.append_value($cast(v)),
+                        None => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish()) as ArrayRef
+            }};
+        }
+        let array: ArrayRef = match col_type {
+            DataType::Int8 => build_int!(Int8Builder, |v| v as i8),
+            DataType::Int16 => build_int!(Int16Builder, |v| v as i16),
+            DataType::Int32 => build_int!(Int32Builder, |v| v as i32),
+            DataType::Int64 => build_int!(Int64Builder, |v| v),
+            DataType::UInt8 => build_uint!(UInt8Builder, |v| v as u8),
+            DataType::UInt16 => build_uint!(UInt16Builder, |v| v as u16),
+            DataType::UInt32 => build_uint!(UInt32Builder, |v| v as u32),
+            DataType::UInt64 => build_uint!(UInt64Builder, |v| v),
+            DataType::Float32 => {
+                let mut b = Float32Builder::new();
+                for row in rows {
+                    match row.get(col_name).and_then(serde_json::Value::as_f64) {
+                        Some(v) => b.append_value(v as f32),
+                        None => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish())
+            }
+            DataType::Float64 => {
+                let mut b = Float64Builder::new();
+                for row in rows {
+                    match row.get(col_name).and_then(serde_json::Value::as_f64) {
+                        Some(v) => b.append_value(v),
+                        None => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish())
+            }
+            DataType::Boolean => {
+                let mut b = BooleanBuilder::new();
+                for row in rows {
+                    match row.get(col_name).and_then(serde_json::Value::as_bool) {
+                        Some(v) => b.append_value(v),
+                        None => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish())
+            }
+            _ => {
+                let mut b = StringBuilder::new();
+                for row in rows {
+                    match row.get(col_name).and_then(serde_json::Value::as_str) {
+                        Some(v) => b.append_value(v),
+                        None => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish())
+            }
+        };
+        col_arrays.push(array);
+    }
+
+    let batch = RecordBatch::try_new(arrow_schema, col_arrays)
+        .map_err(|e| Error::from_reason(e.to_string()))?;
+    Ok(vec![batch])
 }

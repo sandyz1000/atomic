@@ -1,0 +1,33 @@
+[package]
+name = "atomic-structured"
+version.workspace = true
+edition.workspace = true
+
+# Spark-style micro-batch Structured Streaming: DataFrame/SQL continuous queries
+# on top of atomic-streaming's batch loop + atomic-sql (DataFusion). Kept in its
+# own crate so atomic-streaming stays DataFusion-free and edits here don't
+# recompile the DStream engine.
+
+[dependencies]
+atomic-streaming = { workspace = true }
+atomic-sql = { workspace = true }
+atomic-compute = { workspace = true }
+atomic-data = { workspace = true }
+datafusion = { workspace = true }
+tokio = { workspace = true }
+bincode = { workspace = true }
+parking_lot = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []
+# Kafka source/sink (4c) — pulls librdkafka via atomic-streaming's kafka feature.
+kafka = ["atomic-streaming/kafka"]
+
+[lib]
+name = "atomic_structured"
+path = "src/lib.rs"
+doctest = false

@@ -167,6 +167,44 @@ pub static SORT_SHUFFLE_MAP_REGISTRY: Lazy<HashMap<&'static str, ShuffleMapHandl
             .collect()
     });
 
+/// A compile-time named-partitioner factory, registered by
+/// `register_partitioner!(P)` for a `P: NamedPartitioner`.
+///
+/// Lets distributed `partition_by_named` ship a user partitioner by **name**
+/// (no closure serialization): the driver puts the name in the shuffle's
+/// `PartitionerSchema::Custom`, and the worker rebuilds the partitioner via this
+/// factory — mirroring how `#[task]` ships compute by op_id.
+pub struct PartitionerEntry {
+    /// The partitioner's stable registry name (`<P as NamedPartitioner>::NAME`).
+    pub name: fn() -> &'static str,
+    /// Reconstructs the partitioner from its partition count.
+    pub factory: fn(usize) -> atomic_data::partitioner::Partitioner,
+}
+
+inventory::collect!(PartitionerEntry);
+
+/// Global compile-time named-partitioner registry — built once from all
+/// `register_partitioner!(P)` calls linked into the binary. Keyed by `P::NAME`.
+pub static PARTITIONER_REGISTRY: Lazy<
+    HashMap<&'static str, fn(usize) -> atomic_data::partitioner::Partitioner>,
+> = Lazy::new(|| {
+    inventory::iter::<PartitionerEntry>
+        .into_iter()
+        .map(|entry| ((entry.name)(), entry.factory))
+        .collect()
+});
+
+/// Reconstruct a registered named partitioner, or `None` if its name was never
+/// registered in this binary (the caller then falls back to hash partitioning).
+pub fn lookup_partitioner(
+    name: &str,
+    num_partitions: usize,
+) -> Option<atomic_data::partitioner::Partitioner> {
+    PARTITIONER_REGISTRY
+        .get(name)
+        .map(|factory| factory(num_partitions))
+}
+
 /// Maps a concrete `(K, V)` `TypeId` to its stable shuffle dispatch key.
 ///
 /// Used by the driver (in `rdd/typed.rs`) to look up the key when building a

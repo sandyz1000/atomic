@@ -1,0 +1,16 @@
+apiVersion: v2
+name: atomic
+description: |
+  Atomic distributed compute — one image runs both driver and worker roles.
+  Workers are a horizontally-scalable StatefulSet behind a headless Service; the
+  driver discovers them by DNS (`--workers dns:<svc>:<port>`). Compile-time task
+  dispatch + the REGISTRY_FINGERPRINT handshake guarantee every pod from the same
+  image runs byte-identical task code.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/atomic
+keywords:
+  - distributed-computing
+  - rdd
+  - dataframe

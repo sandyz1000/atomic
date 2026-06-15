@@ -1,0 +1,90 @@
+# Workers run the same image as the driver, with `--worker --port <taskPort>`.
+# A StatefulSet (not a Deployment) gives each worker a stable pod DNS name, which
+# the shuffle server relies on for fetches across the cluster.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "atomic.fullname" . }}-worker
+  labels:
+    {{- include "atomic.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  serviceName: {{ include "atomic.workerService" . }}
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.worker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "atomic.workerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "atomic.workerSelectorLabels" . | nindent 8 }}
+      annotations:
+        {{- with .Values.podAnnotations }}{{- toYaml . | nindent 8 }}{{- end }}
+        {{- if .Values.metrics.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.worker.shufflePort }}"
+        prometheus.io/path: "/metrics"
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "atomic.serviceAccountName" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "atomic.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.command }}
+          command: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          args:
+            - "--worker"
+            - "--port"
+            - "{{ .Values.worker.taskPort }}"
+          ports:
+            - name: task
+              containerPort: {{ .Values.worker.taskPort }}
+            - name: shuffle
+              containerPort: {{ .Values.worker.shufflePort }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "atomic.fullname" . }}-env
+          env:
+            {{- range $k, $v := .Values.worker.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          # Readiness/liveness hit the shuffle server's /health endpoint.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: shuffle
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: task
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          {{- if .Values.tls.enabled }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/atomic/tls
+              readOnly: true
+          {{- end }}
+      {{- if .Values.tls.enabled }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+      {{- end }}

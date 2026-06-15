@@ -1,0 +1,14 @@
+[package]
+name = "sql"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "sql"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute.workspace = true
+atomic-sql.workspace = true
+datafusion.workspace = true
+tokio.workspace = true

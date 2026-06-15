@@ -215,6 +215,11 @@ impl DistributedScheduler {
         });
     }
 
+    /// Whether `endpoint` is currently in the active worker pool.
+    pub fn is_worker_registered(&self, endpoint: &SocketAddrV4) -> bool {
+        self.worker_capabilities.contains_key(endpoint)
+    }
+
     /// Remove a worker from the active pool and clean up its state.
     pub fn remove_worker(&self, endpoint: SocketAddrV4) {
         self.worker_capabilities.remove(&endpoint);

@@ -64,4 +64,6 @@ module.exports = {
   BroadcastVar: nativeBinding.BroadcastVar,
   Accumulator: nativeBinding.Accumulator,
   Graph: nativeBinding.JsGraph,
+  SqlContext: nativeBinding.JsSqlContext,
+  DataFrame: nativeBinding.JsDataFrame,
 };

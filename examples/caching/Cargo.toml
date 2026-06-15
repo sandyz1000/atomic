@@ -1,0 +1,14 @@
+[package]
+name = "caching"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "caching"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute.workspace = true
+atomic-data.workspace = true
+tempfile.workspace = true
+tokio.workspace = true

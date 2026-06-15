@@ -25,8 +25,9 @@ pub fn shuffle_map_handler<K, V>(
     shuffle_id: usize,
     map_partition_id: usize,
     num_reduce_partitions: usize,
-    // Hash partitioner handler ignores the spec (always FxHash); the sorted handler consumes it.
-    _spec: &PartitionerSchema,
+    // Plain hashing ignores the spec; a named custom partitioner (from
+    // `partition_by_named`) is reconstructed from it and used instead.
+    spec: &PartitionerSchema,
 ) -> Result<(), String>
 where
     K: atomic_data::data::Data + Clone + Hash + bincode::Encode + bincode::Decode<()> + WireDecode,
@@ -36,13 +37,25 @@ where
     let pairs: Vec<(K, V)> = Vec::<(K, V)>::decode_wire(data)
         .map_err(|e| format!("shuffle_map_handler: decode input: {e}"))?;
 
-    // FxHasher is deterministic across processes (no random seed).
+    // If the shuffle carried a registered named partitioner, rebuild and use it;
+    // otherwise partition by FxHash (deterministic across processes, no seed).
+    let custom = spec
+        .custom_name()
+        .and_then(|name| crate::task_registry::lookup_partitioner(name, num_reduce_partitions));
+
     let mut buckets: Vec<Vec<(K, V)>> = (0..num_reduce_partitions).map(|_| vec![]).collect();
 
     for (k, v) in pairs {
-        let mut hasher = FxHasher::default();
-        k.hash(&mut hasher);
-        let bucket = (hasher.finish() as usize) % num_reduce_partitions;
+        let bucket = match &custom {
+            Some(p) => p
+                .get_partition(&k as &dyn std::any::Any)
+                .min(num_reduce_partitions.saturating_sub(1)),
+            None => {
+                let mut hasher = FxHasher::default();
+                k.hash(&mut hasher);
+                (hasher.finish() as usize) % num_reduce_partitions
+            }
+        };
         buckets[bucket].push((k, v));
     }
 

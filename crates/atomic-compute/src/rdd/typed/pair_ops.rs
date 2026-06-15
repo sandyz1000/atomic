@@ -110,6 +110,24 @@ where
         self.combine_by_key_with_partitioner(|v| v, |_, v| v, |c, _| c, p, None)
     }
 
+    /// Re-partition using a registered [`NamedPartitioner`] — the distributed-capable
+    /// counterpart to [`partition_by`](Self::partition_by).
+    ///
+    /// Because the partitioner is shipped to workers by name (it must be registered
+    /// with `atomic_compute::register_partitioner!(P)`), the custom partitioning is
+    /// applied on the workers rather than degrading to hash. `partitioner`'s only
+    /// shipped state is its partition count; the worker rebuilds it via `P::create`.
+    pub fn partition_by_named<P>(self, partitioner: P) -> TypedRdd<(K, V)>
+    where
+        P: atomic_data::partitioner::NamedPartitioner,
+        V: bincode::Encode + bincode::Decode<()>,
+        K: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        let p = Partitioner::from_named::<P>(partitioner.num_partitions());
+        self.combine_by_key_with_partitioner(|v| v, |_, v| v, |c, _| c, p, None)
+    }
+
     /// Internal: `combine_by_key` with an explicit `Partitioner` instead of hash.
     pub(crate) fn combine_by_key_with_partitioner<C, CC, MV, MC>(
         self,

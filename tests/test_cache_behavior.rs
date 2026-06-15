@@ -295,3 +295,26 @@ async fn test_diskonly_correct() {
     result.sort();
     assert_eq!(result, data);
 }
+
+// ── checkpoint round-trip ─────────────────────────────────────────────────────
+
+/// `checkpoint(dir)` must write partitions under the same id the returned
+/// `CheckpointRdd` reads back from. A regression guard: the write path keyed
+/// partitions by the *source* RDD's id while the read path used the new
+/// `CheckpointRdd` id, so every read-back missed its file and the job hung.
+#[tokio::test]
+async fn test_checkpoint_roundtrip() {
+    let ctx = ctx();
+    let dir = tempfile::tempdir().unwrap();
+    let data: Vec<i32> = (1..=8).collect();
+
+    let checkpointed = ctx
+        .parallelize_typed(data.clone(), 3)
+        .checkpoint(dir.path().to_string_lossy().as_ref())
+        .unwrap();
+
+    // Lineage is truncated — the returned RDD reads straight from disk.
+    let mut result = checkpointed.collect().unwrap();
+    result.sort();
+    assert_eq!(result, data);
+}

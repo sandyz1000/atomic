@@ -112,6 +112,16 @@ impl JsRdd {
         }
     }
 
+    /// Collect rows without `&mut` — used internally (e.g. SQL registration).
+    /// Mirrors [`collect`](JsRdd::collect) but borrows shared.
+    pub(crate) fn collect_rows(&self) -> Result<Vec<serde_json::Value>> {
+        if self.context.is_distributed() && self.staged.is_some() {
+            self.dispatch_and_collect()
+        } else {
+            Ok(self.elements.clone())
+        }
+    }
+
     /// Dispatch staged pipeline and decode result bytes.
     fn dispatch_and_collect(&self) -> Result<Vec<serde_json::Value>> {
         let staged = self
