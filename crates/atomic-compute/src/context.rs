@@ -465,6 +465,14 @@ impl Context {
         }
     }
 
+    /// Drop a distributed RDD's cache locations so the next job over it recomputes
+    /// (the worker byte caches reclaim their memory via LRU). No-op in local mode.
+    pub fn invalidate_distributed_cache(&self, rdd_id: usize) {
+        if let atomic_scheduler::Schedulers::Distributed(sched) = &self.scheduler {
+            sched.invalidate_rdd_cache(rdd_id);
+        }
+    }
+
     /// Gracefully stop this context.
     ///
     /// In distributed mode, sends a `ShutDownGracefully` signal to every registered worker.

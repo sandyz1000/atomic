@@ -15,10 +15,27 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
     /// - `MemoryAndDisk` / `DiskOnly`: accepted but fall back to memory semantics unless `T`
     ///   implements `bincode::Encode + bincode::Decode<()>`. For actual disk spill, call
     ///   `persist_with_disk(level)` instead.
-    pub fn persist(self, level: StorageLevel) -> Self {
+    pub fn persist(mut self, level: StorageLevel) -> Self {
         let ctx = self.context.clone();
+        let distributed = ctx.is_distributed();
+        // Capture the staged pipeline before consuming `self` so distributed caching
+        // can append a terminal `Cache` op to it (local mode keeps using CachedRdd).
+        let staged = self.staged.take();
         let cached = Arc::new(CachedRdd::new_with_level(self.into_rdd(), level));
-        TypedRdd::new(cached as RddRef<T>, ctx)
+        let cache_id = cached.rdd_id();
+        let mut out = TypedRdd::new(cached as RddRef<T>, ctx);
+        if distributed && let Some(mut sp) = staged {
+            // The first action over this RDD runs the pipeline and caches each
+            // partition's bytes on its worker under `cache_id` (see runtimes/native.rs).
+            sp.ops.push(PipelineOp {
+                op_id: String::new(),
+                action: TaskAction::Cache { rdd_id: cache_id },
+                runtime: TaskRuntime::Native,
+                payload: vec![],
+            });
+            out.staged = Some(sp);
+        }
+        out
     }
 
     /// Persist with real disk spill for `MemoryAndDisk` and `DiskOnly` levels.
@@ -87,11 +104,14 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
     /// After `unpersist()` the next action on the returned RDD will recompute all
     /// partitions from scratch.  Mirrors a conventional `unpersist()` operation.
     pub fn unpersist(self) -> Self {
+        let rdd_id = self.rdd.get_rdd_id();
         if let Some(store) = atomic_data::cache::PARTITION_CACHE.get() {
-            let rdd_id = self.rdd.get_rdd_id();
             let n = self.rdd.number_of_splits();
             store.remove_rdd(rdd_id, n);
         }
+        // Distributed: drop cache locations so future jobs recompute (worker byte
+        // caches reclaim memory via LRU).
+        self.context.invalidate_distributed_cache(rdd_id);
         self
     }
 

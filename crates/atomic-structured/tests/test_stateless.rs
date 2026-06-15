@@ -49,7 +49,6 @@ fn once_runs_one_batch() {
 
     let q = StreamingDataFrame::read_stream(source)
         .sql(FILTER_SQL)
-        .write_stream()
         .output_mode(OutputMode::Append)
         .trigger(Trigger::Once)
         .format(sink.clone())
@@ -77,7 +76,6 @@ fn streams_filtered_rows() {
 
     let q = StreamingDataFrame::read_stream(source)
         .sql(FILTER_SQL)
-        .write_stream()
         .trigger(Trigger::ProcessingTime(Duration::from_millis(50)))
         .format(sink.clone())
         .start(&ssc)
@@ -102,7 +100,6 @@ fn file_sink_writes_parquet() {
 
     let q = StreamingDataFrame::read_stream(source)
         .sql(FILTER_SQL)
-        .write_stream()
         .trigger(Trigger::Once)
         .format(Arc::new(FileSink::new(dir.path())))
         .start(&ssc)

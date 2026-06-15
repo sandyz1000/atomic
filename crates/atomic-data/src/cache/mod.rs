@@ -255,3 +255,121 @@ pub static PARTITION_CACHE: OnceLock<PartitionStore> = OnceLock::new();
 pub fn init_partition_cache() {
     PARTITION_CACHE.get_or_init(PartitionStore::new);
 }
+
+/// LRU-bounded **byte** cache of cached RDD partitions held on a worker.
+///
+/// Unlike [`PartitionStore`] (which stores typed `Arc<Vec<T>>` for the local-mode
+/// cache), workers operate on rkyv-encoded bytes and don't know `T`, so distributed
+/// caching stores the raw partition bytes keyed by `(rdd_id, partition)`. Written by
+/// a `TaskAction::Cache` op and read back when a later task's `cache_source` matches.
+pub struct WorkerPartitionCache {
+    inner: Mutex<LruCache<(usize, usize), Vec<u8>>>,
+}
+
+impl WorkerPartitionCache {
+    pub fn new() -> Self {
+        Self::with_cap(DEFAULT_PARTITION_CACHE_CAP)
+    }
+
+    pub fn with_cap(cap: usize) -> Self {
+        let cap = NonZeroUsize::new(cap).unwrap_or(NonZeroUsize::MIN);
+        WorkerPartitionCache {
+            inner: Mutex::new(LruCache::new(cap)),
+        }
+    }
+
+    /// Store a partition's bytes, evicting the LRU entry if at capacity.
+    pub fn put(&self, rdd_id: usize, partition: usize, bytes: Vec<u8>) {
+        self.inner.lock().unwrap().put((rdd_id, partition), bytes);
+    }
+
+    /// Fetch a partition's bytes (promotes it in the LRU), or `None` on a miss.
+    pub fn get(&self, rdd_id: usize, partition: usize) -> Option<Vec<u8>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(&(rdd_id, partition))
+            .cloned()
+    }
+
+    pub fn contains(&self, rdd_id: usize, partition: usize) -> bool {
+        self.inner.lock().unwrap().contains(&(rdd_id, partition))
+    }
+
+    /// Drop every cached partition for an RDD (used by `unpersist`).
+    pub fn remove_rdd(&self, rdd_id: usize) {
+        let mut guard = self.inner.lock().unwrap();
+        let keys: Vec<(usize, usize)> = guard
+            .iter()
+            .map(|(k, _)| *k)
+            .filter(|(r, _)| *r == rdd_id)
+            .collect();
+        for k in keys {
+            guard.pop(&k);
+        }
+    }
+
+    /// Number of cached partitions (for tests/metrics).
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for WorkerPartitionCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Global worker-side byte cache for distributed RDD caching.
+pub static WORKER_PARTITION_CACHE: OnceLock<WorkerPartitionCache> = OnceLock::new();
+
+/// Accessor that lazily initialises the worker byte cache on first use.
+pub fn worker_partition_cache() -> &'static WorkerPartitionCache {
+    WORKER_PARTITION_CACHE.get_or_init(WorkerPartitionCache::new)
+}
+
+#[cfg(test)]
+mod worker_cache_tests {
+    use super::WorkerPartitionCache;
+
+    #[test]
+    fn put_get_contains() {
+        let cache = WorkerPartitionCache::new();
+        assert!(!cache.contains(1, 0));
+        cache.put(1, 0, vec![10, 20]);
+        cache.put(1, 1, vec![30]);
+        assert!(cache.contains(1, 0));
+        assert_eq!(cache.get(1, 0), Some(vec![10, 20]));
+        assert_eq!(cache.get(1, 1), Some(vec![30]));
+        assert_eq!(cache.get(1, 2), None);
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn remove_rdd_drops_all() {
+        let cache = WorkerPartitionCache::new();
+        cache.put(1, 0, vec![1]);
+        cache.put(1, 1, vec![2]);
+        cache.put(2, 0, vec![3]);
+        cache.remove_rdd(1);
+        assert!(!cache.contains(1, 0));
+        assert!(!cache.contains(1, 1));
+        assert!(cache.contains(2, 0)); // other RDDs untouched
+    }
+
+    #[test]
+    fn evicts_at_capacity() {
+        let cache = WorkerPartitionCache::with_cap(2);
+        cache.put(1, 0, vec![1]);
+        cache.put(1, 1, vec![2]);
+        cache.put(1, 2, vec![3]); // evicts LRU (1,0)
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains(1, 0));
+        assert!(cache.contains(1, 2));
+    }
+}

@@ -19,13 +19,17 @@ bincode = { workspace = true }
 parking_lot = { workspace = true }
 log = { workspace = true }
 
+# Kafka source/sink (4c) — optional, behind the `kafka` feature.
+rdkafka = { version = "0.36", optional = true, features = ["cmake-build"] }
+serde_json = { workspace = true, optional = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 
 [features]
 default = []
-# Kafka source/sink (4c) — pulls librdkafka via atomic-streaming's kafka feature.
-kafka = ["atomic-streaming/kafka"]
+# Kafka source/sink (KafkaSource/KafkaSink) — pulls librdkafka (vendored via cmake).
+kafka = ["dep:rdkafka", "dep:serde_json", "atomic-streaming/kafka"]
 
 [lib]
 name = "atomic_structured"

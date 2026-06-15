@@ -65,6 +65,15 @@ impl OpDispatcher for NativeDispatcher {
                     }
                 }
             }
+            TaskAction::Cache { rdd_id } => {
+                // Terminal identity op: store this partition's bytes for later reuse.
+                atomic_data::cache::worker_partition_cache().put(
+                    *rdd_id,
+                    partition_id,
+                    data.to_vec(),
+                );
+                Ok(data.to_vec())
+            }
             _ => match TASK_REGISTRY.get(op.op_id.as_str()) {
                 None => {
                     let registered: Vec<&str> = TASK_REGISTRY.keys().copied().collect();
@@ -123,15 +132,50 @@ impl Default for ComputeEngine {
 
 impl Backend for ComputeEngine {
     fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> ComputeResult<TaskResultEnvelope> {
+        // Locality read: load this partition's input from the worker cache when
+        // `cache_source` is set, else use the shipped `data`. A miss is a failure the
+        // driver recovers from by recomputing the partition (see scheduler 6c).
+        let mut data = match task.cache_source {
+            Some(rdd_id) => {
+                match atomic_data::cache::worker_partition_cache().get(rdd_id, task.partition_id) {
+                    Some(bytes) => bytes,
+                    None => {
+                        return Ok(TaskResultEnvelope::fatal_failure(
+                            task.run_id,
+                            task.stage_id,
+                            task.task_id,
+                            task.attempt_id,
+                            task.partition_id,
+                            worker_id.to_string(),
+                            format!("cache miss: rdd {rdd_id} partition {}", task.partition_id),
+                        ));
+                    }
+                }
+            }
+            None => task.data.clone(),
+        };
+
         if task.ops.is_empty() {
+            // A pure cache serve (cache_source + no ops) returns the cached bytes;
+            // a genuinely empty pipeline is an error.
+            if task.cache_source.is_some() {
+                return Ok(TaskResultEnvelope::ok(
+                    task.run_id,
+                    task.stage_id,
+                    task.task_id,
+                    task.attempt_id,
+                    task.partition_id,
+                    worker_id.to_string(),
+                    data,
+                    None,
+                ));
+            }
             return Err(ComputeError::UnknownOperation("empty pipeline".to_string()));
         }
 
         if !task.broadcast_values.is_empty() {
             broadcast::load_broadcast_values(&task.broadcast_values);
         }
-
-        let mut data = task.data.clone();
 
         for op in &task.ops {
             log::info!(
@@ -175,6 +219,16 @@ impl Backend for ComputeEngine {
             .then(atomic_data::env::get_shuffle_server_uri)
             .flatten();
 
+        // Report partitions cached by any `Cache` op so the driver can record locality.
+        let cached_partitions: Vec<(usize, usize)> = task
+            .ops
+            .iter()
+            .filter_map(|op| match op.action {
+                TaskAction::Cache { rdd_id } => Some((rdd_id, task.partition_id)),
+                _ => None,
+            })
+            .collect();
+
         Ok(TaskResultEnvelope::ok(
             task.run_id,
             task.stage_id,
@@ -185,7 +239,8 @@ impl Backend for ComputeEngine {
             data,
             shuffle_server_uri,
         )
-        .with_accumulator_deltas(acc_deltas))
+        .with_accumulator_deltas(acc_deltas)
+        .with_cached_partitions(cached_partitions))
     }
 }
 
@@ -250,5 +305,52 @@ mod tests {
         let backend = ComputeEngine::default();
         let task = make_task("no.such.op", TaskAction::Map, TaskRuntime::Native, vec![]);
         assert!(backend.execute("w", &task).is_ok());
+    }
+
+    #[test]
+    fn cache_op_stores_reports() {
+        let backend = ComputeEngine::default();
+        let data = vec![1u8, 2, 3, 4];
+        // A Cache op is an identity pass-through that stores the partition bytes and
+        // reports (rdd_id, partition_id) for driver-side locality registration.
+        let task = make_task(
+            "",
+            TaskAction::Cache { rdd_id: 9001 },
+            TaskRuntime::Native,
+            data.clone(),
+        );
+        let result = backend.execute("w", &task).unwrap();
+
+        assert_eq!(result.status, ResultStatus::Success);
+        assert_eq!(result.data, data); // identity pass-through
+        assert_eq!(result.cached_partitions, vec![(9001, 0)]);
+
+        let cache = atomic_data::cache::worker_partition_cache();
+        assert!(cache.contains(9001, 0));
+        assert_eq!(cache.get(9001, 0), Some(data));
+    }
+
+    #[test]
+    fn cache_source_serves_bytes() {
+        let backend = ComputeEngine::default();
+        let cached = vec![7u8, 8, 9];
+        atomic_data::cache::worker_partition_cache().put(9100, 0, cached.clone());
+
+        // No ops + cache_source = a pure locality serve from the worker cache.
+        let task =
+            TaskEnvelope::new(1, 2, 3, 0, 0, "t".into(), vec![], vec![]).with_cache_source(9100);
+        let result = backend.execute("w", &task).unwrap();
+        assert_eq!(result.status, ResultStatus::Success);
+        assert_eq!(result.data, cached);
+    }
+
+    #[test]
+    fn cache_source_miss_fails() {
+        let backend = ComputeEngine::default();
+        let task =
+            TaskEnvelope::new(1, 2, 3, 0, 0, "t".into(), vec![], vec![]).with_cache_source(9199); // never populated
+        let result = backend.execute("w", &task).unwrap();
+        assert_eq!(result.status, ResultStatus::FatalFailure);
+        assert!(result.error.unwrap().contains("cache miss"));
     }
 }

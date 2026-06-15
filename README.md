@@ -328,6 +328,24 @@ atomic ship --workers user@10.0.0.101,user@10.0.0.102
 
 The `ship` command verifies the remote host against `~/.ssh/known_hosts`, uploads via SFTP, verifies the SHA-256 checksum on the remote, and renames atomically. No Docker, no registry, no Kubernetes required.
 
+### Or deploy on Kubernetes (Helm)
+
+The same-binary model maps cleanly onto K8s: **one image** runs both roles, and the
+`REGISTRY_FINGERPRINT` handshake matches the immutable-image rolling-update invariant. Workers are a
+horizontally-scalable `StatefulSet` behind a headless `Service`; the driver discovers them by DNS.
+
+```bash
+docker build -f deploy/Dockerfile --build-arg BIN=my_app -t myrepo/atomic:0.1 .
+helm install demo deploy/helm/atomic \
+  --set image.repository=myrepo/atomic --set image.tag=0.1 --set worker.replicas=3
+# optional: worker autoscaling (DNS re-resolution picks up new pods automatically)
+helm upgrade demo deploy/helm/atomic --set autoscaling.enabled=true
+```
+
+The chart includes the worker StatefulSet, headless Service, driver Job/Deployment, ConfigMap,
+optional `HorizontalPodAutoscaler`, optional mTLS, and `/health` + `/metrics` probes. See
+[deploy/README.md](deploy/README.md). Kubernetes is an *option*, not a requirement.
+
 ---
 
 ## Feature Matrix
@@ -347,15 +365,17 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 | | `flat_map_values`, `map_partitions_to_pair` | yes |
 | | `repartition_shuffle(n)` — element-level redistribution | yes |
 | | `sort_by_key` — distributed (sample → range partition → local sort) | yes |
+| | `sort_by_task` — distributed non-pair sort via a registered key task | yes |
 | | `fold_by_key`, `aggregate_by_key`, `subtract_by_key` | yes |
 | | `tree_reduce`, `tree_aggregate` | yes |
 | | `to_local_iterator`, `collect_as_map`, `count_approx` | yes |
 | | `to_debug_string` (DAG lineage printer) | yes |
-| | Custom partitioner (`partition_by`) | yes |
+| | Custom partitioner — local (`partition_by`) + distributed (`partition_by_named` / `register_partitioner!` / `TypedPartitioner`) | yes |
 | | `cache`, `persist`, `unpersist`, `checkpoint` | yes |
 | | `MemoryAndDisk` / `DiskOnly` storage levels | yes |
+| | Distributed RDD cache + locality scheduling (serve cached partitions from holding worker) | yes |
 | **Shuffle** | Hash shuffle + disk spill | yes |
-| | Sort-based shuffle (consolidated file + sort-merge reduce) | yes (local; distributed sorted-handler is a follow-up) |
+| | Sort-based shuffle — consolidated file + **lazy k-way sort-merge** reduce; distributed via `register_sort_shuffle_map!` | yes |
 | | Adaptive partition coalescing | yes |
 | | Shuffle-map stage fault recovery | yes |
 | | Lineage recompute on executor loss (lost map output → `FetchFailed` → stage resubmit) | yes |
@@ -367,8 +387,13 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 | **Streaming** | Micro-batch DStream (`StreamingContext`) — Rust + Python + JS | yes |
 | | `map`, `filter`, `flat_map`, `reduce_by_key`, `join`, `update_state_by_key` | yes |
 | | Checkpoint (bincode, atomic write) | yes |
-| | Kafka source | planned |
-| | Event-time watermarking | planned |
+| | Structured Streaming (`atomic-structured`) — continuous SQL/DataFrame queries | yes |
+| | Tumbling event-time windows + watermark + late-data drop | yes |
+| | Output modes: Append / Update / Complete | yes |
+| | State store with checkpoint + recovery | yes |
+| | Kafka source/sink | yes (`kafka` feature; DStream + Structured) |
+| | Sinks: memory / console / file (parquet) / Kafka | yes |
+| | Distributed streaming receivers; sliding/session windows; stream-stream joins | not yet |
 | **Graph** | `Graph<VD,ED>` + Pregel engine — Rust | yes |
 | | `Graph(vertices, edges)` + 6 algorithms — Python + JS | yes |
 | | PageRank, SSSP, SCC, LabelPropagation, TriangleCount, CC | yes |
@@ -382,6 +407,8 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 | | Mutual TLS (`tls` feature, rustls) | yes |
 | | Prometheus `/metrics` endpoint | yes |
 | | Dynamic worker heartbeat + removal | yes |
+| | Kubernetes — Dockerfile + Helm chart (worker StatefulSet, headless Service, HPA, mTLS) | yes |
+| | DNS worker discovery (`--workers dns:<svc>:<port>`) + live re-resolution for autoscaling | yes |
 | | `atomic build` (musl static binary) | yes |
 | | `atomic ship` (SSH/SFTP, host-key verified) | yes |
 | | S3 I/O for Python + JS bindings (`s3` feature) | yes |
@@ -434,7 +461,8 @@ The `ship` command verifies the remote host against `~/.ssh/known_hosts`, upload
 | `atomic-compute` | Execution runtime — context, executor, `NativeBackend`, RDD implementations |
 | `atomic-scheduler` | `LocalScheduler` (thread-pool) + `DistributedScheduler` (TCP, speculative, heartbeat) |
 | `atomic-sql` | SQL layer — `AtomicSqlContext`, `DataFrame`, RDD-backed DataFusion table providers |
-| `atomic-streaming` | Micro-batch streaming — `StreamingContext`, `DStream`, `JobScheduler` |
+| `atomic-streaming` | Micro-batch streaming — `StreamingContext`, `DStream`, `JobScheduler`, Kafka source (`kafka` feature) |
+| `atomic-structured` | Structured Streaming — continuous SQL/DataFrame queries, event-time windows, watermark, state store, sinks (on DataFusion + the streaming batch loop) |
 | `atomic-graph` | Graph processing — `Graph<VD,ED>`, Pregel engine, built-in algorithms |
 | `atomic-nlq` | Natural language query — LLM-native DataFusion plan nodes, `LlmBatchingRule` |
 | `atomic-py` | Python bindings (maturin/PyO3) — full RDD + SQL API, Arrow integration |
@@ -458,8 +486,8 @@ already know. Here is the unvarnished trade-off — including where the incumben
 | Closure safety | Runtime serialization failures | Compile-time — "does it build?" = "does it dispatch?" |
 | Deployment | JVM on every node + cluster manager | Static musl binary, SSH upload |
 | SQL optimizer | Catalyst (10yr+, highly mature) | DataFusion (excellent, newer) |
-| Streaming | Structured Streaming + Kafka, exactly-once | Micro-batch; no Kafka yet |
-| Kubernetes | Full operator | Not yet |
+| Streaming | Structured Streaming + Kafka, exactly-once, distributed | Micro-batch + Structured Streaming (windows, watermark, output modes); Kafka source/sink (feature-gated); driver-local, at-least-once |
+| Kubernetes | Full operator | Dockerfile + Helm chart + DNS discovery (no CRD operator) |
 | Ecosystem | Delta Lake, MLflow, hundreds of connectors | Early |
 | NLQ / LLM | Plugin / prompt wrapper | First-class plan nodes |
 | Stability | Exabyte-tested | Early-stage; strong test suite |
@@ -469,9 +497,11 @@ The remaining gap versus mature JVM engines is **feature coverage, not language 
 large shuffles and complex joins need sort-merge join, broadcast join, adaptive join-strategy
 selection, and skew handling — all of which are tractable in Rust and planned (see
 [ROADMAP.md](ROADMAP.md)). Atomic already has shuffle hash joins, disk-spilling shuffle, adaptive
-partition coalescing, and range-partitioned distributed sort. Kafka-scale streaming is the other
-open area. Choose Atomic if you want to avoid the JVM stack entirely, run the same job in three
-languages, and accept being an early adopter.
+partition coalescing, range-partitioned distributed sort, distributed RDD caching with locality
+scheduling, a Kafka source/sink, and Structured Streaming (event-time windows, watermark, output
+modes). The remaining streaming gap versus mature JVM engines is **distributed** streaming
+(receivers run driver-local today) and exactly-once delivery. Choose Atomic if you want to avoid the
+JVM stack entirely, run the same job in three languages, and accept being an early adopter.
 
 ---
 
@@ -551,11 +581,11 @@ See [docs/getting-started.md](docs/getting-started.md), [docs/configuration.md](
 
 ## Status
 
-**Beta** — all core features are implemented and tested. The test suite covers local execution, distributed TCP dispatch, shuffle, streaming, graph, and SQL. Production readiness depends on your risk tolerance and workload:
+**Beta** — all core features are implemented and tested. The test suite covers local execution, distributed TCP dispatch, shuffle, streaming, structured streaming, graph, and SQL. Production readiness depends on your risk tolerance and workload:
 
-- yes **Ready**: Local-mode jobs, SQL analytics (DataFusion), graph algorithms, Python/JS prototyping, musl static binary deployment
-- ⚠️ **Early adopter**: Distributed mode on real workloads — core is solid, but cluster management (K8s) and streaming sources (Kafka) are missing
-- no **Not yet**: Kafka streaming, Kubernetes operator, event-time watermarking
+- ✅ **Ready**: Local-mode jobs, SQL analytics (DataFusion), graph algorithms, Python/JS prototyping, musl static binary deployment, Kubernetes deployment (Helm)
+- ⚠️ **Early adopter**: Distributed mode on real workloads — core is solid (shuffle joins, fault recovery, distributed cache + locality, speculation), and Kafka + Structured Streaming + K8s now exist, but they are newer and the distributed integration tests run behind the `--ignored` CI job
+- ⛔ **Not yet**: Distributed streaming receivers (Structured Streaming runs driver-local), exactly-once streaming, sliding/session windows, a Kubernetes CRD operator, Delta/Iceberg table formats
 
 ---
 

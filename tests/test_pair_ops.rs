@@ -266,6 +266,51 @@ async fn test_sort_by_key_descending() {
     );
 }
 
+/// The sort-shuffle k-way merge must emit globally-ordered output straight from
+/// `collect()` (no client re-sort), and the lazy merge must drive a streaming
+/// consumer like `count()`. Reverse-ordered input across 4 partitions forces a
+/// real multi-run merge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sort_shuffle_globally_ordered() {
+    let ctx = ctx();
+    let data: Vec<(i32, i32)> = (0..40).rev().map(|k| (k, k * 10)).collect();
+
+    let asc: Vec<i32> = ctx
+        .parallelize_typed(data.clone(), 4)
+        .sort_by_key(true)
+        .collect()
+        .unwrap()
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert!(
+        asc.windows(2).all(|w| w[0] <= w[1]),
+        "ascending not globally ordered: {asc:?}"
+    );
+    assert_eq!((asc.first(), asc.last()), (Some(&0), Some(&39)));
+
+    let desc: Vec<i32> = ctx
+        .parallelize_typed(data.clone(), 4)
+        .sort_by_key(false)
+        .collect()
+        .unwrap()
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert!(
+        desc.windows(2).all(|w| w[0] >= w[1]),
+        "descending not globally ordered: {desc:?}"
+    );
+
+    // Lazy consumer: count() pulls the merge without materializing the output.
+    let n = ctx
+        .parallelize_typed(data, 4)
+        .sort_by_key(true)
+        .count()
+        .unwrap();
+    assert_eq!(n, 40);
+}
+
 // ── key_by() ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -294,6 +339,8 @@ async fn test_key_by() {
 
 // Register the shuffle handler for (String, i32) at binary scope.
 atomic_compute::register_shuffle_map!(String, i32);
+// (i32, i32) is used by the sort-shuffle ordering test.
+atomic_compute::register_shuffle_map!(i32, i32);
 
 // Tasks used by Phase 2A shuffle tests.
 #[task]

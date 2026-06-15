@@ -184,6 +184,10 @@ pub enum TaskAction {
         shuffle_id: usize,
         num_output_partitions: usize,
     },
+    /// Terminal identity op that caches this partition's bytes on the worker under
+    /// `(rdd_id, partition_id)`, so a later job can be scheduled here and served from
+    /// cache instead of recomputing. Emitted by a distributed `.cache()` / `persist()`.
+    Cache { rdd_id: usize },
 }
 
 /// Metadata carried in `PipelineOp.payload` for a Python UDF step.
@@ -252,6 +256,11 @@ pub struct TaskEnvelope {
     /// Workers deserialize these into the task-local `BroadcastRegistry` before running ops.
     /// Empty vec means no broadcasts for this task.
     pub broadcast_values: Vec<(usize, Vec<u8>)>,
+    /// When `Some(rdd_id)`, the worker loads this partition's input from its local
+    /// cache (`WORKER_PARTITION_CACHE[(rdd_id, partition_id)]`) instead of `data` — a
+    /// locality-scheduled read of a previously-cached partition. A miss is a failure
+    /// the driver recovers from by recomputing the partition.
+    pub cache_source: Option<usize>,
 }
 
 impl TaskEnvelope {
@@ -277,7 +286,14 @@ impl TaskEnvelope {
             ops,
             data,
             broadcast_values: vec![],
+            cache_source: None,
         }
+    }
+
+    /// Mark this task to load its input from the worker's partition cache under `rdd_id`.
+    pub fn with_cache_source(mut self, rdd_id: usize) -> Self {
+        self.cache_source = Some(rdd_id);
+        self
     }
 
     /// Attach broadcast variable payloads to this envelope.
@@ -306,6 +322,9 @@ pub struct TaskResultEnvelope {
     /// Accumulator deltas collected during task execution: `(accumulator_id, rkyv-encoded delta)`.
     /// The driver merges these into the driver-side accumulator values after the task completes.
     pub accumulator_deltas: Vec<(usize, Vec<u8>)>,
+    /// Partitions this task cached on its worker: `(rdd_id, partition_id)` pairs (one per
+    /// `TaskAction::Cache` op). The driver registers these into `cache_locs` for locality.
+    pub cached_partitions: Vec<(usize, usize)>,
 }
 
 impl TaskResultEnvelope {
@@ -333,6 +352,7 @@ impl TaskResultEnvelope {
             worker_id,
             shuffle_server_uri,
             accumulator_deltas: vec![],
+            cached_partitions: vec![],
         }
     }
 
@@ -361,6 +381,7 @@ impl TaskResultEnvelope {
             worker_id,
             shuffle_server_uri,
             accumulator_deltas: vec![],
+            cached_partitions: vec![],
         }
     }
 
@@ -386,12 +407,19 @@ impl TaskResultEnvelope {
             worker_id,
             shuffle_server_uri: None,
             accumulator_deltas: vec![],
+            cached_partitions: vec![],
         }
     }
 
     /// Attach accumulator deltas to a successful result (called by NativeBackend).
     pub fn with_accumulator_deltas(mut self, deltas: Vec<(usize, Vec<u8>)>) -> Self {
         self.accumulator_deltas = deltas;
+        self
+    }
+
+    /// Attach the partitions this task cached on its worker (called by NativeBackend).
+    pub fn with_cached_partitions(mut self, cached: Vec<(usize, usize)>) -> Self {
+        self.cached_partitions = cached;
         self
     }
 }
@@ -578,7 +606,8 @@ mod tests {
             | TaskAction::Reduce
             | TaskAction::Aggregate
             | TaskAction::Collect
-            | TaskAction::ShuffleMap { .. } => true,
+            | TaskAction::ShuffleMap { .. }
+            | TaskAction::Cache { .. } => true,
         };
     }
 

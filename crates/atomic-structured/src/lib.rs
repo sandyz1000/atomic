@@ -20,15 +20,21 @@
 
 pub mod errors;
 pub mod frame;
+#[cfg(feature = "kafka")]
+pub mod kafka;
 pub mod query;
 pub mod sink;
 pub mod source;
+pub mod state;
+pub mod watermark;
+pub mod windowed;
 
 pub use errors::{StructuredError, StructuredResult};
-pub use frame::StreamingDataFrame;
+pub use frame::{StreamWriter, StreamingDataFrame, WindowedBuilder};
 pub use query::StreamingQuery;
 pub use sink::Sink;
 pub use source::StreamSource;
+pub use state::{Agg, AggKind};
 
 use std::time::Duration;
 

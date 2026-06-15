@@ -1,5 +1,6 @@
-//! The running query: a `Runner` (per-batch engine), the `OutputOperation` that
-//! wires it into the streaming context, and the user-facing `StreamingQuery` handle.
+//! Execution glue: the `BatchEngine` abstraction (stateless or windowed), the
+//! `OutputOperation` that runs an engine + sink per batch, and the user-facing
+//! `StreamingQuery` handle.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,6 +9,7 @@ use atomic_sql::context::AtomicSqlContext;
 use atomic_streaming::context::StreamingContext;
 use atomic_streaming::dstream::{OutputOperation, StreamingJob};
 use atomic_streaming::errors::StreamingError;
+use datafusion::arrow::record_batch::RecordBatch;
 
 use crate::errors::{StructuredError, StructuredResult};
 use crate::sink::Sink;
@@ -16,36 +18,38 @@ use crate::source::StreamSource;
 // Output-op ids for structured queries live in their own high range.
 static NEXT_OP_ID: AtomicUsize = AtomicUsize::new(0xA000_0000);
 
-pub(crate) fn next_op_id() -> usize {
+fn next_op_id() -> usize {
     NEXT_OP_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Per-batch execution engine: register the batch as `input`, run the query,
-/// emit the result to the sink. Shared (`Arc`) by the output op.
-pub(crate) struct Runner {
+/// Computes the rows to emit for one micro-batch. Stateless and windowed engines
+/// both implement this; the output op is agnostic to which.
+pub(crate) trait BatchEngine: Send + Sync {
+    fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>>;
+}
+
+/// Stateless engine (4a): register the batch as `input`, run the SQL, emit the
+/// result rows directly.
+pub(crate) struct StatelessEngine {
     pub(crate) sql_ctx: AtomicSqlContext,
     pub(crate) runtime: tokio::runtime::Runtime,
     pub(crate) source: Arc<dyn StreamSource>,
-    pub(crate) sink: Arc<dyn Sink>,
     pub(crate) query: String,
 }
 
-impl Runner {
-    /// Run one micro-batch. Stateless (4a): empty input yields empty output.
-    pub(crate) fn process_batch(&self, epoch: u64) -> StructuredResult<()> {
+impl BatchEngine for StatelessEngine {
+    fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
         let batches = self.source.next_batch(epoch);
         if batches.iter().map(|b| b.num_rows()).sum::<usize>() == 0 {
-            return Ok(());
+            return Ok(vec![]);
         }
-
-        // Re-register the per-batch input table (drop the previous batch's first).
         let _ = self.sql_ctx.deregister_table("input");
         self.sql_ctx
             .register_batches("input", batches)
             .map_err(|e| StructuredError::Sql(e.to_string()))?;
 
         let query = self.query.clone();
-        let out = self.runtime.block_on(async {
+        self.runtime.block_on(async {
             let df = self
                 .sql_ctx
                 .sql(&query)
@@ -54,20 +58,35 @@ impl Runner {
             df.collect()
                 .await
                 .map_err(|e| StructuredError::Sql(e.to_string()))
-        })?;
+        })
+    }
+}
 
+/// Pairs an engine with a sink — the unit run once per micro-batch.
+pub(crate) struct QueryRunner {
+    engine: Arc<dyn BatchEngine>,
+    sink: Arc<dyn Sink>,
+}
+
+impl QueryRunner {
+    pub(crate) fn new(engine: Arc<dyn BatchEngine>, sink: Arc<dyn Sink>) -> Arc<Self> {
+        Arc::new(QueryRunner { engine, sink })
+    }
+
+    pub(crate) fn run_batch(&self, epoch: u64) -> StructuredResult<()> {
+        let out = self.engine.process(epoch)?;
         self.sink.add_batch(epoch, &out)
     }
 }
 
-/// `OutputOperation` that runs the query's `Runner` once per batch.
+/// `OutputOperation` that runs the query once per batch via its `QueryRunner`.
 pub(crate) struct QueryOutputOp {
-    runner: Arc<Runner>,
+    runner: Arc<QueryRunner>,
     op_id: usize,
 }
 
 impl QueryOutputOp {
-    pub(crate) fn new(runner: Arc<Runner>) -> Self {
+    pub(crate) fn new(runner: Arc<QueryRunner>) -> Self {
         QueryOutputOp {
             runner,
             op_id: next_op_id(),
@@ -80,7 +99,7 @@ impl OutputOperation for QueryOutputOp {
         let runner = self.runner.clone();
         Some(StreamingJob::new(time_ms, self.op_id, move || {
             runner
-                .process_batch(time_ms)
+                .run_batch(time_ms)
                 .map_err(|e| StreamingError::Internal(e.to_string()))
         }))
     }
@@ -90,15 +109,14 @@ impl OutputOperation for QueryOutputOp {
 pub struct StreamingQuery {
     ssc: Option<Arc<StreamingContext>>,
     source: Arc<dyn StreamSource>,
-    runner: Arc<Runner>,
+    runner: Arc<QueryRunner>,
 }
 
 impl StreamingQuery {
-    /// For a context-driven (ProcessingTime) query: holds the running context.
     pub(crate) fn running(
         ssc: Arc<StreamingContext>,
         source: Arc<dyn StreamSource>,
-        runner: Arc<Runner>,
+        runner: Arc<QueryRunner>,
     ) -> Self {
         StreamingQuery {
             ssc: Some(ssc),
@@ -107,8 +125,7 @@ impl StreamingQuery {
         }
     }
 
-    /// For a `Trigger::Once` query that already ran its single batch.
-    pub(crate) fn completed(source: Arc<dyn StreamSource>, runner: Arc<Runner>) -> Self {
+    pub(crate) fn completed(source: Arc<dyn StreamSource>, runner: Arc<QueryRunner>) -> Self {
         StreamingQuery {
             ssc: None,
             source,
@@ -135,6 +152,6 @@ impl StreamingQuery {
 
     /// Run one batch synchronously (used by `Trigger::Once`).
     pub(crate) fn run_once(&self) -> StructuredResult<()> {
-        self.runner.process_batch(0)
+        self.runner.run_batch(0)
     }
 }

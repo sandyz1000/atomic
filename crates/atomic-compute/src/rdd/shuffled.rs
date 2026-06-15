@@ -10,6 +10,7 @@ use atomic_data::partitioner::Partitioner;
 use atomic_data::shuffle::fetcher::ShuffleFetcher;
 use atomic_data::split::{ShuffledRddSplit, Split};
 use bincode::{Decode, Encode};
+use itertools::Itertools;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -243,34 +244,47 @@ where
                 vec![coalesced_id]
             };
 
-        // Sort-shuffle reduce: the map side wrote sorted runs; merge them by key and coalesce
-        // equal keys via the aggregator. Ordering is driven by the stored comparator closure
-        // (K is only `Hash`-bound here, so we cannot use `Ord`/`BinaryHeap` directly).
+        // Sort-shuffle reduce: the map side wrote sorted runs (in `comparator` order),
+        // and range partitions are themselves key-ordered, so a single **lazy** k-way
+        // merge over all runs yields a globally-ordered stream — no full re-sort.
+        //
+        // The merged output is never materialized: `kmerge_by` keeps only an
+        // O(#runs) heap and `coalesce` looks one element ahead, so a streaming
+        // consumer (`fold`, `count`, `save_as_text_file`, …) holds just the fetched
+        // input runs plus that small working set, instead of the previous
+        // "concatenate every run → re-sort → build full output Vec" (which peaked at
+        // input + a second sorted copy + the sort's scratch). (K is only `Hash`-bound,
+        // so ordering is driven by the stored comparator rather than `Ord`.)
         if let Some(cmp) = &self.comparator {
-            let mut merged: Vec<(K, C)> = Vec::new();
+            let mut runs: Vec<std::vec::IntoIter<(K, C)>> = Vec::new();
             for orig_id in original_ids {
-                let runs = Handle::current()
+                let fetched = Handle::current()
                     .block_on(self.fetcher.fetch_runs::<K, C>(self.shuffle_id, orig_id))
                     .map_err(BaseError::from)?;
-                for run in runs {
-                    merged.extend(run);
-                }
+                runs.extend(fetched.into_iter().map(IntoIterator::into_iter));
             }
-            merged.sort_by(|a, b| cmp(&a.0, &b.0));
-            let mut out: Vec<(K, C)> = Vec::with_capacity(merged.len());
-            for (k, c) in merged {
-                match out.last_mut() {
-                    Some(last) if cmp(&last.0, &k) == std::cmp::Ordering::Equal => {
-                        (self.aggregator.merge_combiners)(&mut last.1, c);
+
+            let cmp_merge = cmp.clone();
+            let cmp_coalesce = cmp.clone();
+            let merge_combiners = self.aggregator.merge_combiners.clone();
+            let merged = runs
+                .into_iter()
+                .kmerge_by(move |a: &(K, C), b: &(K, C)| {
+                    cmp_merge(&a.0, &b.0) == std::cmp::Ordering::Less
+                })
+                .coalesce(move |mut acc: (K, C), next: (K, C)| {
+                    if cmp_coalesce(&acc.0, &next.0) == std::cmp::Ordering::Equal {
+                        merge_combiners(&mut acc.1, next.1);
+                        Ok(acc)
+                    } else {
+                        Err((acc, next))
                     }
-                    _ => out.push((k, c)),
-                }
-            }
+                });
             log::debug!(
-                "time taken for sort-merge fetch {}",
+                "sort-merge (lazy k-way) prepared in {}",
                 start.elapsed().as_millis()
             );
-            return Ok(Box::new(out.into_iter()));
+            return Ok(Box::new(merged));
         }
 
         let mut combiners: HashMap<K, C> = HashMap::new();

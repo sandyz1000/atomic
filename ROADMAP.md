@@ -22,6 +22,12 @@ Atomic's roadmap mirrors Spark's path from research prototype to production syst
 | NLQ | `atomic-nlq` fully wired — `LlmFilterExec`, `LlmMapExec`, `EmbedExec`, `VectorSearchExec`, `LlmBatchingRule` |
 | Security | Mutual TLS via `rustls` (`tls` feature, opt-in) for task TCP **and** shuffle HTTP (`ShuffleManager` hyper server via `tokio-rustls`); `atomic-cli` SSH/SFTP deploy with host-key + SHA-256 verification |
 | Observability | Prometheus `/metrics` endpoint |
+| Kubernetes | `deploy/Dockerfile` (single image, both roles) + Helm chart (worker `StatefulSet`, headless `Service`, driver `Job`/`Deployment`, `ConfigMap`, optional `HorizontalPodAutoscaler`, optional mTLS, `/health`+`/metrics` probes); DNS worker discovery (`--workers dns:<svc>:<port>`) with live re-resolution feeding `dynamically_add_worker` for autoscaling |
+| Distributed correctness | Named custom-partitioner registry (`register_partitioner!` / `partition_by_named`) + `TypedPartitioner` (Any-free); `sort_by_task` (distributed non-pair sort); lazy k-way sort-merge reduce (bounded-memory streaming output) |
+| Distributed cache + locality | `TaskAction::Cache` writes partition bytes to a worker `WORKER_PARTITION_CACHE`; driver registers `cache_locs`; later jobs serve from cache **pinned to the holding worker** (`plan_cache_dispatch` + `cache_source`); worker death / `unpersist()` invalidate locations → recompute |
+| Streaming (Kafka) | `KafkaInputDStream` + `StreamingContext::kafka_stream` (`kafka` feature, vendored librdkafka) |
+| Structured Streaming | `atomic-structured` crate — continuous SQL/DataFrame queries on the batch loop; tumbling event-time windows, watermark + late-data drop, mergeable aggregates (count/sum/min/max/avg), Append/Update/Complete output modes, state store with checkpoint + recovery; sinks: memory/console/file(parquet)/Kafka |
+| Bindings parity | `atomic-js` SQL parity with `atomic-py` — `registerRdd` (RDD→SQL), `toArrow` (Arrow IPC), `SqlContext`/`DataFrame` exported |
 | CI / Release | GitHub Actions: local tests, distributed tests (dynamic ports, no sequential mutex), lint; PyPI wheels (maturin + OIDC); npm bindings (napi-rs) |
 | Persistence | `MemoryAndDisk` lazy eviction — `PartitionStore` spills to disk on LRU eviction via type-erased write/read closures registered at persist time; first compute deferred to action time |
 | Shared variables | Python/JS accumulators accept optional user-defined `merge_fn` callable (Python lambda or JS function) in addition to built-in numeric merge |
@@ -32,11 +38,16 @@ Atomic's roadmap mirrors Spark's path from research prototype to production syst
 
 ## Known Gaps
 
-Verified against the current codebase. These are partial implementations or missing features within otherwise-complete subsystems.
+Verified against the current codebase. These are partial implementations or missing features within otherwise-complete subsystems. Each has a scoped design note where the work is non-trivial.
 
 | Gap | What's Missing | Approach |
 | --- | --- | --- |
-| Streaming distributed receivers | `ReceiverTracker` is a local stub; no Kafka or Kinesis input DStream | Implement `KafkaInputDStream` via `rdkafka`; wire `ReceiverTracker` to place receivers across workers |
+| Distributed streaming receivers | Structured Streaming + DStream sources run **driver-local**; `ReceiverTracker` doesn't place receivers across workers | Needs distributed-streaming execution first; receivers then dispatch as long-running worker tasks reporting blocks back. See `notes/structured-streaming-design.md` |
+| Exactly-once streaming | Delivery is at-least-once (offsets committed after sink write) | Idempotent/transactional sinks (file with deterministic part names, Kafka txn) |
+| Sliding / session windows, stream-stream joins, multiple watermarks | Only tumbling event-time windows + one watermark | Extend the windowed engine; documented out-of-scope for 4a–4c |
+| Distributed-cache LRU-evict miss | A serve read that misses because the holder *evicted* (not died) fails the job rather than transparently recomputing | Per-task recompute fallback (re-plan as `Recompute` on miss). Worker **death** already recomputes |
+| Sort-shuffle input-side memory bound | Reduce **output** is lazily streamed; fetched input runs are still held in memory | Chunked streaming per-run fetch (builds on `get_slice` ranged reads) |
+| Distributed `sort_by` (non-pair, closure) | Closure `sort_by` still driver-collects; `sort_by_task` (registered key) is the distributed path | Inherent to closure serialization; use `sort_by_task` |
 
 ---
 
@@ -44,12 +55,13 @@ Verified against the current codebase. These are partial implementations or miss
 
 New capabilities worth building after gap closure:
 
+- **Distributed Structured Streaming** — run the streaming query across workers (prerequisite for distributed receivers); see `notes/structured-streaming-design.md`
 - **Web dashboard** — job/stage timeline UI (Spark History Server–style); Prometheus + Grafana is the current recommendation
-- **Kafka / Kinesis sources** — follow-on from the streaming distributed receivers gap
+- **Kinesis source** — follow-on from the Kafka source
 - **GCS / Azure Blob connectors** — S3 covers AWS; GCS and Azure parity for multi-cloud
 - **`mapWithState`** — arbitrary stateful streaming beyond `updateStateByKey`
-- **`atomic-sql` streaming** — streaming SQL queries via DataFusion's streaming APIs
-- **Worker auto-scaling** — hooks into AWS ASG, GKE node pools for elastic clusters
+- **Broadcast join / sort-merge join / skew handling** — for very large shuffles and complex joins
+- **Kubernetes CRD operator** — beyond the Helm chart, a controller for declarative cluster management
 - **`atomic-nlq` CI integration test** — end-to-end test requiring `OPENAI_API_KEY` in CI
 - **Streaming NLQ** — NLQ queries over micro-batch DStreams
 

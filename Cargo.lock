@@ -905,6 +905,8 @@ dependencies = [
  "datafusion",
  "log",
  "parking_lot",
+ "rdkafka",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
