@@ -227,3 +227,89 @@ fn recovers_from_checkpoint() {
         .expect("missing cell");
     assert_eq!(win0_a.2, 5, "checkpoint did not restore prior count");
 }
+
+// ── C1: Sliding windows ───────────────────────────────────────────────────────
+
+/// W=10ms S=5ms: each event fans out to ceil(W/S)=2 overlapping windows.
+/// t=7 → [0,10) and [5,15); t=12 → [5,15) and [10,20).
+/// Window [5,15) receives both events.
+#[test]
+fn test_sliding_overlaps() {
+    let source = Arc::new(QueueSource::from_batches(
+        schema(),
+        vec![vec![batch(&[7, 12], &["a", "a"], &[1, 1])]],
+    ));
+    let sink = Arc::new(MemorySink::new());
+    let ssc = streaming_ctx();
+
+    StreamingDataFrame::read_stream(source)
+        .window("ts", Duration::from_millis(10))
+        .slide(Duration::from_millis(5))
+        .group_by(&["user"])
+        .aggregate(aggs())
+        .write_stream()
+        .output_mode(OutputMode::Update)
+        .format(sink.clone())
+        .trigger(Trigger::Once)
+        .start(&ssc)
+        .unwrap();
+
+    let mut r = rows(&sink);
+    r.sort_by_key(|(ws, _, _, _)| *ws);
+
+    // Each of the three covering windows must appear.
+    assert!(
+        r.iter().any(|(ws, _, cnt, _)| *ws == 0 && *cnt == 1),
+        "window [0,10)"
+    );
+    assert!(
+        r.iter().any(|(ws, _, cnt, _)| *ws == 5 && *cnt == 2),
+        "window [5,15) both events"
+    );
+    assert!(
+        r.iter().any(|(ws, _, cnt, _)| *ws == 10 && *cnt == 1),
+        "window [10,20)"
+    );
+}
+
+/// A late event (past watermark) is dropped in sliding mode just as in tumbling.
+/// Batch 1: t=20 (wm → 20).  Batch 2: t=3 (windows [0,5),[0,10) both have end ≤ 20 → late).
+#[test]
+fn test_sliding_late_drop() {
+    let source = Arc::new(QueueSource::from_batches(
+        schema(),
+        vec![
+            vec![batch(&[20], &["a"], &[1])],
+            vec![batch(&[3], &["a"], &[99])], // late: covering windows close before wm=20
+        ],
+    ));
+    let sink = Arc::new(MemorySink::new());
+    let ssc = streaming_ctx();
+
+    let q = StreamingDataFrame::read_stream(source)
+        .with_watermark("ts", Duration::from_millis(0))
+        .window("ts", Duration::from_millis(10))
+        .slide(Duration::from_millis(5))
+        .group_by(&["user"])
+        .aggregate(aggs())
+        .write_stream()
+        .output_mode(OutputMode::Update)
+        .trigger(Trigger::ProcessingTime(Duration::from_millis(50)))
+        .format(sink.clone())
+        .start(&ssc)
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    q.stop();
+
+    let r = rows(&sink);
+    // t=3 covers windows [0,5) end=5 and [0,10) end=10 (actually wait: W=10ms S=5ms)
+    // t=3: k_min = (3-10)/5_floor + 1 = -2+1 = -1 → filter(>=0): k=0
+    //        k_max = 3/5 = 0 → only window k=0 → [0, 10)
+    // With wm=20, window [0,10) end=10 <= 20 → late → amount=99 must NOT appear.
+    let sum_99: Vec<_> = r.iter().filter(|(_, _, _, total)| *total == 99.0).collect();
+    assert!(
+        sum_99.is_empty(),
+        "late row (total=99) must be dropped, got {:?}",
+        r
+    );
+}

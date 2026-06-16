@@ -2,27 +2,28 @@
   "name": "@atomic-compute/js",
   "version": "0.1.0",
   "description": "Spark-like distributed RDD API for Node.js and TypeScript, backed by the Atomic Rust engine via napi-rs",
-  "main": "index.js",
+  "main": "dist/index.js",
   "types": "index.d.ts",
   "scripts": {
-    "build": "napi build --platform --release --manifest-path ../../Cargo.toml",
-    "build:debug": "napi build --platform --manifest-path ../../Cargo.toml",
-    "type-check": "tsc --noEmit",
+    "build": "napi build --platform --release --no-js --manifest-path ../../Cargo.toml && tsc",
+    "build:debug": "napi build --platform --no-js --manifest-path ../../Cargo.toml && tsc",
+    "prepare": "tsc",
+    "type-check": "tsc --project tsconfig.typecheck.json",
     "test": "vitest run",
     "prepublishOnly": "npm run build"
   },
   "exports": {
     ".": {
       "types": "./index.d.ts",
-      "require": "./index.js"
+      "require": "./dist/index.js"
     }
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.6.2",
+    "@napi-rs/cli": "^3.7.2",
     "@types/node": "^25.8.0",
-    "tsx": "^4.19.0",
+    "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "vitest": "^2.0.0"
+    "vitest": "^4.1.9"
   },
   "keywords": [
     "compute",

@@ -84,6 +84,33 @@ ssc.foreach_rdd(stream, |rdd, batch_time_ms| {
 });
 ```
 
+### `KafkaDirectDStream` — driver-controlled offset consumption (`kafka` feature)
+
+Spark's "Direct" model: the driver polls Kafka for high-water marks each batch, computes per-partition offset ranges, and dispatches one-shot consume tasks to workers via the normal `TaskEnvelope` pipeline. No long-running background receiver threads; the driver owns exactly which offsets each batch reads.
+
+**Advantages over `KafkaInputDStream`:**
+
+- **Replayable** — offsets are checkpointed; on restart or worker loss the same range is re-consumed (at-least-once delivery).
+- **Locality** — consistent hashing pins each Kafka partition to a preferred worker so the rdkafka metadata cache stays warm across batches.
+- **No block manager** — consume is an ordinary staged pipeline task.
+
+```rust
+// Cargo.toml: atomic-streaming = { ..., features = ["kafka"] }
+
+let stream = ssc.direct_kafka_stream(
+    "localhost:9092",       // brokers
+    &["events"],            // topics
+    Some(500),              // max_records_per_partition_per_batch (None = unlimited)
+);
+ssc.foreach_rdd(stream, |rdd, batch_time_ms| {
+    // rdd is RDD<String> of raw Kafka message payloads for this batch
+    let count = rdd.count().unwrap_or(0);
+    println!("batch {batch_time_ms}: {count} Kafka messages");
+});
+```
+
+Offsets are checkpointed in `StreamingContext`'s checkpoint dir as `(topic, partition) → end_offset` and restored on `StreamingContext::from_checkpoint`. Set a checkpoint dir before `ssc.start()` to enable exactly-once restart semantics.
+
 ### `FileInputDStream` — directory watcher
 
 Scans a directory each batch and returns lines from files modified since the

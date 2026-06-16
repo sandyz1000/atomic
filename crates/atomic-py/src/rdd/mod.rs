@@ -3,12 +3,25 @@ use std::sync::Arc;
 use atomic_compute::context::Context;
 use atomic_data::distributed::{PipelineOp, PythonUdfPayload, TaskAction, TaskRuntime};
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyBytes, PyList};
 
 mod actions;
+mod errors;
 mod pair_ops;
 mod sort;
 mod transforms;
+
+use errors::PyUdfStageError;
+
+/// Verify that `f` survives the same pickle round-trip distributed-mode staging
+/// performs. Distributed `Context` construction requires real reachable workers,
+/// so this is the only way to exercise `pickle_fn`'s round-trip check from a test
+/// without standing up a live cluster.
+#[pyfunction(name = "_verify_picklable")]
+pub(crate) fn verify_picklable(py: Python<'_>, f: Py<PyAny>) -> PyResult<()> {
+    PyRdd::pickle_fn(py, &f)?;
+    Ok(())
+}
 
 struct StagedPyPipeline {
     source_partitions: Vec<Vec<u8>>,
@@ -52,15 +65,22 @@ impl PyRdd {
         }
     }
 
-    /// Pickle a callable using cloudpickle (if available) or stdlib pickle.
-    ///
-    /// cloudpickle is required for lambdas and closures; the worker subprocess
-    /// already prefers it.  Stdlib pickle only works for top-level named functions.
+    /// Pickle a callable using cloudpickle (if available) or stdlib pickle, then
+    /// verify it round-trips through `loads` before returning.  A UDF that pickles
+    /// but refuses to load (captures an open file, a C-extension handle, a thread
+    /// lock, …) is caught here at staging time rather than failing on every worker.
     fn pickle_fn(py: Python, f: &Py<PyAny>) -> PyResult<Vec<u8>> {
         let pickle =
             PyModule::import(py, "cloudpickle").or_else(|_| PyModule::import(py, "pickle"))?;
-        let bytes_obj: Bound<'_, PyAny> = pickle.call_method1("dumps", (f.bind(py),))?;
-        Ok(bytes_obj.extract::<Vec<u8>>()?)
+        let bytes: Vec<u8> = pickle.call_method1("dumps", (f.bind(py),))?.extract()?;
+        pickle
+            .call_method1("loads", (PyBytes::new(py, &bytes),))
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    PyUdfStageError::Unpicklable(e.to_string()).to_string(),
+                )
+            })?;
+        Ok(bytes)
     }
 
     /// Wrap an element-level function `f` into a partition-level function.

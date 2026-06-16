@@ -36,3 +36,7 @@ skills-lock.json
 .memsearch
 
 .claude
+
+__pycache__
+
+*.node

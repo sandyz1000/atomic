@@ -17,7 +17,7 @@ type VertexId = i64;
 /// returns a list of `[targetId, message]` pairs.
 type PregelSendFn<'a> = Function<'a, FnArgs<(f64, f64, f64, f64, f64)>, Vec<Vec<f64>>>;
 
-#[napi]
+#[napi(js_name = "Graph")]
 pub struct JsGraph {
     inner: Graph<f64, f64>,
 }

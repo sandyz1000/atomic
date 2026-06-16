@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use context::PyContext;
 use distributed_vars::{PyAccumulator, PyBroadcastVar};
 use graph::PyGraph;
-use rdd::PyRdd;
+use rdd::{PyRdd, verify_picklable};
 use sql::{PyDataFrame, PySqlContext};
 use streaming::{PyBatchQueue, PyDStream, PyStreamingContext};
 
@@ -48,7 +48,7 @@ use streaming::{PyBatchQueue, PyDStream, PyStreamingContext};
 /// g = atomic_compute.Graph([(1, 1.0), (2, 1.0)], [(1, 2, 1.0)])
 /// ranks = g.page_rank()
 /// ```
-#[pymodule]
+#[pymodule(name = "atomic_compute")]
 fn atomic(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyContext>()?;
     m.add_class::<PyRdd>()?;
@@ -60,5 +60,6 @@ fn atomic(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStreamingContext>()?;
     m.add_class::<PyDStream>()?;
     m.add_class::<PyBatchQueue>()?;
+    m.add_function(wrap_pyfunction!(verify_picklable, m)?)?;
     Ok(())
 }

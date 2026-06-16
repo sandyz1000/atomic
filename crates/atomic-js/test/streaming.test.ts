@@ -8,12 +8,12 @@
  */
 import { describe, it, expect, beforeAll } from "vitest";
 
-let StreamingContext: typeof import("../index.js").StreamingContext;
+let StreamingContext: typeof import("..").StreamingContext;
 let moduleLoaded = false;
 
 beforeAll(() => {
   try {
-    const m = require("../index.js");
+    const m = require("..");
     StreamingContext = m.StreamingContext;
     moduleLoaded = true;
   } catch {

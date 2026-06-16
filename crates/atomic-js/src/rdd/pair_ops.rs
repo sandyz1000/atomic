@@ -19,7 +19,7 @@ impl JsRdd {
                 g.get(k)[1].push(p[1]); } \
                 return o.map(k => g.get(k)); }"
                 .to_string();
-            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map)?;
+            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
             let partials = self.dispatch_and_collect()?;
 
             let mut groups: HashMap<String, (JsonValue, Vec<JsonValue>)> = HashMap::new();
@@ -108,7 +108,7 @@ impl JsRdd {
                  else {{ g.set(k, [p[0], p[1]]); o.push(k); }} }} \
                  return o.map(k => g.get(k)); }}"
             );
-            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map)?;
+            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
             let partials = self.dispatch_and_collect()?;
 
             let mut accum: HashMap<String, (JsonValue, JsonValue)> = HashMap::new();

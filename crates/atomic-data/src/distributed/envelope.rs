@@ -97,6 +97,11 @@ pub enum TaskAction {
     /// is in `PipelineOp.payload` (bincode-encoded `KafkaConsumePayload`).
     #[cfg(feature = "kafka")]
     KafkaConsume,
+    /// File-split source op. The worker opens `path`, optionally seeks to `start_byte`,
+    /// reads lines up to `end_byte` (or EOF), and returns them as rkyv-encoded `Vec<String>`.
+    /// All config is in the task `data` (bincode-encoded `FileSplitPayload`); `op.payload`
+    /// is empty.
+    ReadFileSplit,
 }
 
 /// Metadata carried in `PipelineOp.payload` for a Python UDF step.
@@ -151,6 +156,29 @@ pub struct KafkaConsumePayload {
     pub end_offset: i64,
     /// Upper bound on messages consumed regardless of offset gap.
     pub max_records: usize,
+}
+
+/// Config for one file-split read op shipped as `data` in a task envelope.
+///
+/// The worker opens `path`, seeks to `start_byte`, reads UTF-8 lines up to
+/// `end_byte` (exclusive, or EOF when `None`), and returns them rkyv-encoded
+/// as `Vec<String>`.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    bincode::Encode,
+    bincode::Decode,
+)]
+pub struct FileSplitPayload {
+    pub path: String,
+    /// Byte offset to seek to before reading (0 = beginning of file).
+    pub start_byte: u64,
+    /// Exclusive end byte; `None` means read to EOF.
+    pub end_byte: Option<u64>,
 }
 
 /// Result status codes for task execution.

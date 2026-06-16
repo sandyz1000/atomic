@@ -1,3 +1,4 @@
+use crate::dstream::distributed_source::{DistributedFileSource, DistributedInputDStream};
 use crate::dstream::input::{FileInputDStream, QueueInputDStream, SocketInputDStream};
 use crate::dstream::mapped::ForEachDStream;
 use crate::dstream::{DStream, DStreamGraph, InputStreamBase, OutputOperation};
@@ -164,6 +165,28 @@ impl StreamingContext {
     ) -> Arc<FileInputDStream> {
         let id = self.next_stream_id();
         let stream = Arc::new(FileInputDStream::new(self.clone(), id, directory, true));
+        self.graph
+            .lock()
+            .add_input_stream(stream.clone() as Arc<dyn InputStreamBase>);
+        stream
+    }
+
+    /// Create a DStream that reads files from a directory using the Direct pull model.
+    ///
+    /// Each file in `directory` becomes one partition task dispatched to a worker (or
+    /// executed in-process in local mode).  New files appearing in subsequent batches are
+    /// picked up automatically.  If a dispatch fails (e.g. worker death), the uncommitted
+    /// files are automatically re-planned on the next batch — at-least-once delivery.
+    ///
+    /// Unlike [`text_file_stream`] (which runs on the driver thread), this uses
+    /// `Context::dispatch_pipeline` so it integrates with the distributed scheduler.
+    pub fn distributed_file_stream(
+        self: &Arc<Self>,
+        directory: impl Into<PathBuf>,
+    ) -> Arc<DistributedInputDStream<DistributedFileSource>> {
+        let id = self.next_stream_id();
+        let source = DistributedFileSource::new(directory.into());
+        let stream = Arc::new(DistributedInputDStream::new(self.clone(), id, source));
         self.graph
             .lock()
             .add_input_stream(stream.clone() as Arc<dyn InputStreamBase>);

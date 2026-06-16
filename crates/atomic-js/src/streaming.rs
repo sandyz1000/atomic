@@ -171,7 +171,7 @@ enum JsDStreamInner {
 }
 
 /// A lazy handle to a DStream transform chain (Node.js).
-#[napi]
+#[napi(js_name = "DStream")]
 pub struct JsDStream {
     inner: Arc<JsDStreamInner>,
     pub(crate) is_pair: bool,
@@ -321,7 +321,7 @@ impl JsDStream {
 }
 
 /// Queue handle for injecting test batches into a `testQueueStream`.
-#[napi]
+#[napi(js_name = "BatchQueue")]
 pub struct JsBatchQueue {
     queue: Arc<Mutex<VecDeque<Vec<JV>>>>,
 }
@@ -841,7 +841,7 @@ fn key_str(val: &JV) -> Result<String> {
 /// ssc.runOneBatch();
 /// // results === [2, 4, 6]
 /// ```
-#[napi]
+#[napi(js_name = "StreamingContext")]
 pub struct JsStreamingContext {
     batch_secs: f64,
     output_ops: Vec<OutputOp>,

@@ -21,7 +21,7 @@ use crate::rdd::JsRdd;
 ///   .collect();
 /// // [6, 8]
 /// ```
-#[napi]
+#[napi(js_name = "Context")]
 pub struct JsContext {
     pub(crate) inner: Arc<atomic_compute::context::Context>,
     default_parallelism: usize,

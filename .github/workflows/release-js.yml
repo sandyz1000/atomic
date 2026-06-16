@@ -11,11 +11,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macOS arm64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            node-arch: arm64
+          # Linux x86_64 glibc
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             node-arch: x64
+          # Linux x86_64 musl (static / Alpine)
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            node-arch: x64
+          # Linux arm64 glibc
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            node-arch: arm64
+          # Linux arm64 musl
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
             node-arch: arm64
 
     steps:
@@ -32,10 +46,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Cross-compilation for aarch64-linux requires a linker.
-      - name: Install cross-compilation linker (Linux aarch64)
+      # musl targets require musl-libc headers and cross-linker.
+      - name: Install musl tools (Linux musl targets)
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get install -y musl-tools
+
+      # arm64-linux glibc cross-compilation requires a cross-linker.
+      - name: Install cross-compilation linker (Linux aarch64-gnu)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      # arm64-linux musl also needs aarch64 musl cross-toolchain.
+      - name: Install cross-compilation linker (Linux aarch64-musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
 
       - name: Install JS dependencies
         working-directory: crates/atomic-js
@@ -72,6 +96,10 @@ jobs:
       - name: Install JS dependencies
         working-directory: crates/atomic-js
         run: npm install
+
+      - name: Compile TypeScript loader
+        working-directory: crates/atomic-js
+        run: npm run prepare
 
       - name: Download all binding artifacts
         uses: actions/download-artifact@v4

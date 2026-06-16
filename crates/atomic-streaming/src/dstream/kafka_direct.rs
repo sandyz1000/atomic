@@ -471,6 +471,70 @@ pub fn build_staged_pipeline(
     (source_partitions, ops)
 }
 
+// ── DistributedSource impl for DirectKafkaInputDStream ───────────────────────
+
+impl crate::dstream::distributed_source::DistributedSource for DirectKafkaInputDStream {
+    type Item = String;
+
+    fn plan_batch(
+        &self,
+        _batch_time_ms: u64,
+    ) -> Vec<crate::dstream::distributed_source::SourcePartitionTask> {
+        use crate::dstream::distributed_source::SourcePartitionTask;
+        use atomic_data::distributed::{PipelineOp, TaskAction, TaskRuntime};
+
+        self.fetch_offset_ranges()
+            .into_iter()
+            .map(|r| {
+                let payload = KafkaConsumePayload {
+                    brokers: self.brokers.clone(),
+                    topic: r.topic.clone(),
+                    partition: r.partition,
+                    start_offset: r.start_offset,
+                    end_offset: r.end_offset,
+                    max_records: self.max_records_per_partition,
+                };
+                let partition_bytes = bincode::encode_to_vec(&payload, bincode::config::standard())
+                    .unwrap_or_default();
+                SourcePartitionTask {
+                    op: PipelineOp {
+                        op_id: String::new(),
+                        action: TaskAction::KafkaConsume,
+                        runtime: TaskRuntime::Native,
+                        payload: vec![],
+                    },
+                    partition_bytes,
+                    descriptor: format!("{}/{}", r.topic, r.partition),
+                }
+            })
+            .collect()
+    }
+
+    fn commit(&self, tasks: &[crate::dstream::distributed_source::SourcePartitionTask]) {
+        let mut tracker = self.offset_tracker.lock();
+        for task in tasks {
+            if let Ok((payload, _)) = bincode::decode_from_slice::<KafkaConsumePayload, _>(
+                &task.partition_bytes,
+                bincode::config::standard(),
+            ) {
+                tracker.commit(&payload.topic, payload.partition, payload.end_offset);
+            }
+        }
+    }
+
+    fn decode_results(&self, raw_batches: Vec<Vec<u8>>) -> Vec<String> {
+        use atomic_data::distributed::WireDecode;
+        raw_batches
+            .into_iter()
+            .flat_map(|bytes| {
+                Vec::<String>::decode_wire(&bytes)
+                    .inspect_err(|e| log::warn!("KafkaSource decode: {e}"))
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

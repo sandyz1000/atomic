@@ -11,12 +11,12 @@
  */
 import { describe, it, expect, beforeAll } from "vitest";
 
-let Graph: typeof import("../index.js").Graph;
+let Graph: typeof import("..").Graph;
 let moduleLoaded = false;
 
 beforeAll(() => {
   try {
-    const m = require("../index.js");
+    const m = require("..");
     Graph = m.Graph;
     moduleLoaded = true;
   } catch {

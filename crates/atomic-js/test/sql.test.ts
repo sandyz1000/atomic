@@ -10,13 +10,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-let SqlContext: typeof import("../index.js").SqlContext;
-let Context: typeof import("../index.js").Context;
+let SqlContext: typeof import("..").SqlContext;
+let Context: typeof import("..").Context;
 let moduleLoaded = false;
 
 beforeAll(() => {
   try {
-    const m = require("../index.js");
+    const m = require("..");
     SqlContext = m.SqlContext;
     Context = m.Context;
     moduleLoaded = true;

@@ -11,9 +11,11 @@ use atomic_streaming::dstream::OutputOperation;
 
 use crate::errors::{StructuredError, StructuredResult};
 use crate::query::{BatchEngine, QueryOutputOp, QueryRunner, StatelessEngine, StreamingQuery};
+use crate::session_window::{SessionEngine, SessionSpec};
 use crate::sink::Sink;
 use crate::source::StreamSource;
 use crate::state::{Agg, ensure_mergeable};
+use crate::stream_join::{JoinType, StreamJoinEngine, StreamJoinSpec};
 use crate::windowed::{WindowedEngine, WindowedSpec};
 use crate::{OutputMode, Trigger};
 
@@ -44,13 +46,52 @@ impl StreamingDataFrame {
         StreamWriter::new(self.source, Plan::Stateless(query.into()), self.watermark)
     }
 
+    /// Session window on `time_col` with inactivity `gap`.  Events within `gap` of each
+    /// other coalesce into one session; a wider gap starts a new session.
+    pub fn session_window(self, time_col: &str, gap: Duration) -> SessionBuilder {
+        SessionBuilder {
+            source: self.source,
+            watermark: self.watermark,
+            time_col: time_col.to_string(),
+            gap_ms: gap.as_millis() as u64,
+            group_cols: Vec::new(),
+            aggs: Vec::new(),
+        }
+    }
+
+    /// Stream-stream equi-join on `left_key` = `right_key`, bounded by `time_bound`.
+    /// Returns a `StreamWriter` directly (output mode is always Append for joins).
+    pub fn join_stream(
+        self,
+        right: Arc<dyn StreamSource>,
+        left_key: &str,
+        right_key: &str,
+        join_type: JoinType,
+        time_bound: Duration,
+    ) -> StreamWriter {
+        StreamWriter::new(
+            self.source,
+            Plan::Join {
+                right,
+                left_key: left_key.to_string(),
+                right_key: right_key.to_string(),
+                join_type,
+                time_bound_ms: time_bound.as_millis() as u64,
+                watermark: self.watermark.clone(),
+            },
+            self.watermark,
+        )
+    }
+
     /// Windowed path: tumbling event-time window of `size` on the epoch-ms `time_col`.
+    /// Chain `.slide(step)` on the returned builder for a sliding window.
     pub fn window(self, time_col: &str, size: Duration) -> WindowedBuilder {
         WindowedBuilder {
             source: self.source,
             watermark: self.watermark,
             time_col: time_col.to_string(),
             window_size_ms: size.as_millis() as u64,
+            slide_ms: None,
             group_cols: Vec::new(),
             aggs: Vec::new(),
         }
@@ -63,11 +104,19 @@ pub struct WindowedBuilder {
     watermark: Option<(String, u64)>,
     time_col: String,
     window_size_ms: u64,
+    slide_ms: Option<u64>,
     group_cols: Vec<String>,
     aggs: Vec<Agg>,
 }
 
 impl WindowedBuilder {
+    /// Sliding step for overlapping windows.  Must be < `size`; omitting this
+    /// gives a tumbling window (slide == size).
+    pub fn slide(mut self, step: Duration) -> Self {
+        self.slide_ms = Some(step.as_millis() as u64);
+        self
+    }
+
     /// Grouping key columns (in addition to the window).
     pub fn group_by(mut self, cols: &[&str]) -> Self {
         self.group_cols = cols.iter().map(|s| s.to_string()).collect();
@@ -87,6 +136,42 @@ impl WindowedBuilder {
             Plan::Windowed {
                 time_col: self.time_col,
                 window_size_ms: self.window_size_ms,
+                slide_ms: self.slide_ms,
+                group_cols: self.group_cols,
+                aggs: self.aggs,
+            },
+            self.watermark,
+        )
+    }
+}
+
+/// Builds a session window aggregation query.
+pub struct SessionBuilder {
+    source: Arc<dyn StreamSource>,
+    watermark: Option<(String, u64)>,
+    time_col: String,
+    gap_ms: u64,
+    group_cols: Vec<String>,
+    aggs: Vec<Agg>,
+}
+
+impl SessionBuilder {
+    pub fn group_by(mut self, cols: &[&str]) -> Self {
+        self.group_cols = cols.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    pub fn aggregate(mut self, aggs: Vec<Agg>) -> Self {
+        self.aggs = aggs;
+        self
+    }
+
+    pub fn write_stream(self) -> StreamWriter {
+        StreamWriter::new(
+            self.source,
+            Plan::Session {
+                time_col: self.time_col,
+                gap_ms: self.gap_ms,
                 group_cols: self.group_cols,
                 aggs: self.aggs,
             },
@@ -100,6 +185,22 @@ enum Plan {
     Windowed {
         time_col: String,
         window_size_ms: u64,
+        slide_ms: Option<u64>,
+        group_cols: Vec<String>,
+        aggs: Vec<Agg>,
+    },
+    Join {
+        right: Arc<dyn StreamSource>,
+        left_key: String,
+        right_key: String,
+        join_type: JoinType,
+        time_bound_ms: u64,
+        /// Watermark hint — same value passed to StreamWriter; used to set up WatermarkTracker.
+        watermark: Option<(String, u64)>,
+    },
+    Session {
+        time_col: String,
+        gap_ms: u64,
         group_cols: Vec<String>,
         aggs: Vec<Agg>,
     },
@@ -181,6 +282,7 @@ impl StreamWriter {
             Plan::Windowed {
                 time_col,
                 window_size_ms,
+                slide_ms,
                 group_cols,
                 aggs,
             } => {
@@ -188,6 +290,7 @@ impl StreamWriter {
                 let spec = WindowedSpec {
                     time_col,
                     window_size_ms,
+                    slide_ms,
                     watermark_delay_ms: self.watermark.as_ref().map(|(_, d)| *d),
                     group_cols,
                     aggs,
@@ -196,6 +299,62 @@ impl StreamWriter {
                 Arc::new(WindowedEngine::new(
                     sql_ctx,
                     runtime,
+                    self.source.clone(),
+                    spec,
+                    self.checkpoint_dir,
+                )?)
+            }
+            Plan::Join {
+                right,
+                left_key,
+                right_key,
+                join_type,
+                time_bound_ms,
+                watermark,
+            } => {
+                let left_schema = self.source.schema();
+                let right_schema = right.schema();
+                let left_time_col = watermark
+                    .as_ref()
+                    .map(|(c, _)| c.clone())
+                    .unwrap_or_default();
+                let right_time_col = left_time_col.clone();
+                let watermark_delay_ms = watermark.as_ref().map(|(_, d)| *d).unwrap_or(0);
+                let spec = StreamJoinSpec {
+                    left_key_col: left_key,
+                    right_key_col: right_key,
+                    join_type,
+                    time_bound_ms,
+                    left_time_col,
+                    right_time_col,
+                    left_schema,
+                    right_schema,
+                    watermark_delay_ms,
+                };
+                right.start();
+                Arc::new(StreamJoinEngine::new(
+                    self.source.clone(),
+                    right,
+                    spec,
+                    self.checkpoint_dir,
+                )?)
+            }
+            Plan::Session {
+                time_col,
+                gap_ms,
+                group_cols,
+                aggs,
+            } => {
+                ensure_mergeable(&aggs)?;
+                let spec = SessionSpec {
+                    time_col,
+                    gap_ms,
+                    watermark_delay_ms: self.watermark.as_ref().map(|(_, d)| *d),
+                    group_cols,
+                    aggs,
+                    mode: self.mode,
+                };
+                Arc::new(SessionEngine::new(
                     self.source.clone(),
                     spec,
                     self.checkpoint_dir,

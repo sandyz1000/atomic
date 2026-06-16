@@ -5,12 +5,12 @@
  */
 import { describe, it, expect, beforeAll } from "vitest";
 
-let Context: typeof import("../index.js").Context;
+let Context: typeof import("..").Context;
 let moduleLoaded = false;
 
 beforeAll(() => {
   try {
-    const m = require("../index.js");
+    const m = require("..");
     Context = m.Context;
     moduleLoaded = true;
   } catch {

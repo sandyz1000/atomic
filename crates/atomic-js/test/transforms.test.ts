@@ -11,14 +11,14 @@ import { describe, it, expect, beforeAll } from "vitest";
 
 // Dynamic require so that the test file is parseable even when the native
 // module is absent — the beforeAll guard skips the suite in that case.
-let Context: typeof import("../index.js").Context;
-let BroadcastVar: typeof import("../index.js").BroadcastVar;
-let Accumulator: typeof import("../index.js").Accumulator;
+let Context: typeof import("..").Context;
+let BroadcastVar: typeof import("..").BroadcastVar;
+let Accumulator: typeof import("..").Accumulator;
 let moduleLoaded = false;
 
 beforeAll(() => {
   try {
-    const m = require("../index.js");
+    const m = require("..");
     Context = m.Context;
     BroadcastVar = m.BroadcastVar;
     Accumulator = m.Accumulator;

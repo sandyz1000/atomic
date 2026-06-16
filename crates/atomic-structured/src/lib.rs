@@ -23,18 +23,21 @@ pub mod frame;
 #[cfg(feature = "kafka")]
 pub mod kafka;
 pub mod query;
+pub mod session_window;
 pub mod sink;
 pub mod source;
 pub mod state;
+pub mod stream_join;
 pub mod watermark;
 pub mod windowed;
 
 pub use errors::{StructuredError, StructuredResult};
-pub use frame::{StreamWriter, StreamingDataFrame, WindowedBuilder};
+pub use frame::{SessionBuilder, StreamWriter, StreamingDataFrame, WindowedBuilder};
 pub use query::StreamingQuery;
 pub use sink::Sink;
 pub use source::StreamSource;
 pub use state::{Agg, AggKind};
+pub use stream_join::JoinType;
 
 use std::time::Duration;
 

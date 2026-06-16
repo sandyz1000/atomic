@@ -8,9 +8,11 @@ use napi_derive::napi;
 use serde_json::Value as JsonValue;
 
 mod actions;
+mod errors;
 mod pair_ops;
 mod sort;
 mod transforms;
+mod with_context;
 
 struct StagedJsPipeline {
     source_partitions: Vec<Vec<u8>>,
@@ -31,7 +33,7 @@ struct StagedJsPipeline {
 ///   .collect();
 /// // [6, 8]
 /// ```
-#[napi]
+#[napi(js_name = "Rdd")]
 pub struct JsRdd {
     pub(crate) elements: Vec<JsonValue>,
     pub(crate) num_partitions: usize,
@@ -54,7 +56,9 @@ impl JsRdd {
     }
 
     fn fn_to_source<A: JsValuesTupleIntoVec, R>(f: &Function<'_, A, R>) -> Result<String> {
-        f.coerce_to_string()?.into_utf8()?.into_owned()
+        let src = f.coerce_to_string()?.into_utf8()?.into_owned()?;
+        errors::reject_native_source(&src)?;
+        Ok(src)
     }
 
     fn encode_source_partitions(&self) -> Result<Vec<Vec<u8>>> {
@@ -74,11 +78,16 @@ impl JsRdd {
         Ok(partitions)
     }
 
-    fn stage_js_udf(&mut self, fn_source: String, action: TaskAction) -> Result<()> {
+    fn stage_js_udf(
+        &mut self,
+        fn_source: String,
+        action: TaskAction,
+        context_json: Option<String>,
+    ) -> Result<()> {
         let payload_struct = JsUdfPayload {
             fn_source,
             zero_json: String::new(),
-            context_json: None,
+            context_json,
         };
         let payload = serde_json::to_vec(&payload_struct)
             .map_err(|e| Error::from_reason(format!("JsUdfPayload encode: {e}")))?;

@@ -86,6 +86,17 @@ impl OpDispatcher for NativeDispatcher {
                         })?;
                 kafka_consume_handler(&payload)
             }
+            TaskAction::ReadFileSplit => {
+                // Per-partition config shipped in `data` (bincode-encoded FileSplitPayload);
+                // `op.payload` is empty.
+                let payload: atomic_data::distributed::FileSplitPayload =
+                    bincode::decode_from_slice(data, bincode::config::standard())
+                        .map(|(p, _)| p)
+                        .map_err(|e| {
+                            ComputeError::InvalidPayload(format!("ReadFileSplit data decode: {e}"))
+                        })?;
+                file_split_handler(&payload)
+            }
             _ => match TASK_REGISTRY.get(op.op_id.as_str()) {
                 None => {
                     let registered: Vec<&str> = TASK_REGISTRY.keys().copied().collect();
@@ -326,6 +337,53 @@ pub(crate) fn kafka_consume_handler(
     rkyv::to_bytes::<rkyv::rancor::Error>(&messages)
         .map(|b| b.to_vec())
         .map_err(|e| ComputeError::InvalidPayload(format!("KafkaConsume rkyv encode: {e}")))
+}
+
+/// Worker-side file-split read: open `path`, seek to `start_byte`, read UTF-8 lines
+/// up to `end_byte` (exclusive, or EOF when `None`), return rkyv-encoded `Vec<String>`.
+pub(crate) fn file_split_handler(
+    payload: &atomic_data::distributed::FileSplitPayload,
+) -> ComputeResult<Vec<u8>> {
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+
+    let file = std::fs::File::open(&payload.path).map_err(|e| {
+        ComputeError::InvalidPayload(format!("ReadFileSplit open {:?}: {e}", payload.path))
+    })?;
+
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+    let end = payload.end_byte.unwrap_or(file_len);
+
+    let mut reader = BufReader::new(file);
+    if payload.start_byte > 0 {
+        reader
+            .seek(SeekFrom::Start(payload.start_byte))
+            .map_err(|e| ComputeError::InvalidPayload(format!("ReadFileSplit seek: {e}")))?;
+    }
+
+    // Wrap in a Take so we stop reading at end_byte even mid-line.
+    let bytes_to_read = end.saturating_sub(payload.start_byte);
+    let mut bounded = BufReader::new(reader.take(bytes_to_read));
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = bounded
+            .read_line(&mut line)
+            .map_err(|e| ComputeError::InvalidPayload(format!("ReadFileSplit read: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        lines.push(
+            line.trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_string(),
+        );
+    }
+
+    rkyv::to_bytes::<rkyv::rancor::Error>(&lines)
+        .map(|b| b.to_vec())
+        .map_err(|e| ComputeError::InvalidPayload(format!("ReadFileSplit rkyv encode: {e}")))
 }
 
 #[cfg(test)]

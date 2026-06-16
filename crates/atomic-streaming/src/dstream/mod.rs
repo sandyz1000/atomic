@@ -1,3 +1,4 @@
+pub mod distributed_source;
 pub mod input;
 #[cfg(feature = "kafka")]
 pub mod kafka;

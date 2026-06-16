@@ -136,7 +136,7 @@ fn batches_to_json_rows(batches: &[RecordBatch]) -> Vec<serde_json::Value> {
 /// const df = ctx.sql("SELECT id, value FROM t WHERE value > 10");
 /// const rows = df.collect();  // Array<Record<string, unknown>>
 /// ```
-#[napi]
+#[napi(js_name = "DataFrame")]
 pub struct JsDataFrame {
     inner: DFDataFrame,
     session: Arc<SessionContext>,
@@ -355,7 +355,7 @@ impl JsDataFrame {
 /// const df = ctx.sql("SELECT id, SUM(amount) FROM orders GROUP BY id");
 /// const rows = df.collect();
 /// ```
-#[napi]
+#[napi(js_name = "SqlContext")]
 pub struct JsSqlContext {
     inner: Arc<AtomicSqlContext>,
     session: Arc<SessionContext>,

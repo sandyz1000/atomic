@@ -1,0 +1,4 @@
+dist/
+# dist/index.js (compiled from index.ts) is the authoritative loader. `napi build` runs
+# with --no-js so it no longer emits a root index.js; this entry guards against a stray one.
+index.js

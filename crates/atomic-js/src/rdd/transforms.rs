@@ -19,6 +19,7 @@ impl JsRdd {
                     Self::fn_to_source(&f)?
                 ),
                 TaskAction::Map,
+                None,
             )?;
             return Ok(self.take_as_new());
         }
@@ -44,6 +45,7 @@ impl JsRdd {
                     Self::fn_to_source(&f)?
                 ),
                 TaskAction::Filter,
+                None,
             )?;
             return Ok(self.take_as_new());
         }
@@ -70,6 +72,7 @@ impl JsRdd {
                     Self::fn_to_source(&f)?
                 ),
                 TaskAction::FlatMap,
+                None,
             )?;
             return Ok(self.take_as_new());
         }
@@ -97,6 +100,7 @@ impl JsRdd {
                     Self::fn_to_source(&f)?
                 ),
                 TaskAction::Map,
+                None,
             )?;
             return Ok(self.take_as_new());
         }
@@ -132,6 +136,7 @@ impl JsRdd {
                     Self::fn_to_source(&f)?
                 ),
                 TaskAction::FlatMap,
+                None,
             )?;
             return Ok(self.take_as_new());
         }
@@ -168,6 +173,7 @@ impl JsRdd {
                     Self::fn_to_source(&f)?
                 ),
                 TaskAction::Map,
+                None,
             )?;
             return Ok(self.take_as_new());
         }

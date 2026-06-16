@@ -10,8 +10,9 @@ use std::sync::Arc;
 
 use atomic_sql::context::AtomicSqlContext;
 use datafusion::arrow::array::{
-    Array, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
+    Array, Float32Array, Float64Array, Int32Array, Int64Array, StringArray, UInt64Array,
 };
+use datafusion::arrow::compute::take as arrow_take;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
@@ -28,6 +29,8 @@ use crate::watermark::WatermarkTracker;
 pub(crate) struct WindowedSpec {
     pub time_col: String,
     pub window_size_ms: u64,
+    /// `None` = tumbling (slide == size). `Some(s)` where `s < window_size_ms` = sliding.
+    pub slide_ms: Option<u64>,
     pub watermark_delay_ms: Option<u64>,
     pub group_cols: Vec<String>,
     pub aggs: Vec<Agg>,
@@ -110,12 +113,21 @@ impl WindowedEngine {
     }
 
     /// The per-batch partial-aggregate SQL built from the spec.
+    ///
+    /// For tumbling windows: computes `window_start` in SQL via integer division.
+    /// For sliding windows: the `window_start` column was pre-expanded by
+    /// `expand_for_sliding` and is referenced directly.
     fn partial_sql(&self) -> String {
         let s = &self.spec;
-        let win = format!(
-            "({} / {}) * {}",
-            s.time_col, s.window_size_ms, s.window_size_ms
-        );
+        let is_sliding = s.slide_ms.map_or(false, |sl| sl < s.window_size_ms);
+        let win = if is_sliding {
+            "window_start".to_string()
+        } else {
+            format!(
+                "({} / {}) * {}",
+                s.time_col, s.window_size_ms, s.window_size_ms
+            )
+        };
         let mut sel = vec![format!("{win} AS window_start")];
         sel.extend(s.group_cols.iter().cloned());
         for (i, agg) in s.aggs.iter().enumerate() {
@@ -129,11 +141,68 @@ impl WindowedEngine {
             grp.join(", ")
         )
     }
+
+    /// For sliding windows: expand each row into one row per covering window,
+    /// prepending a `window_start` column.  Tumbling callers skip this step.
+    fn expand_for_sliding(&self, batches: Vec<RecordBatch>) -> StructuredResult<Vec<RecordBatch>> {
+        let size = self.spec.window_size_ms as i64;
+        let slide = self.spec.slide_ms.unwrap_or(self.spec.window_size_ms) as i64;
+
+        let mut expanded: Vec<RecordBatch> = Vec::new();
+        for batch in &batches {
+            let schema = batch.schema();
+            let time_idx = schema.index_of(&self.spec.time_col).map_err(|e| {
+                StructuredError::Sql(format!(
+                    "time column '{}' not found: {e}",
+                    self.spec.time_col
+                ))
+            })?;
+            let time_arr = batch.column(time_idx);
+
+            // Build (row_index, window_start) pairs.
+            let mut row_windows: Vec<(u64, i64)> = Vec::new();
+            for row in 0..batch.num_rows() {
+                if let Some(t) = read_i64(time_arr.as_ref(), row) {
+                    for ws in covering_windows(t, size, slide) {
+                        row_windows.push((row as u64, ws));
+                    }
+                }
+            }
+            if row_windows.is_empty() {
+                continue;
+            }
+
+            let n = row_windows.len();
+            let ws_col: Arc<dyn Array> = Arc::new(Int64Array::from(
+                row_windows.iter().map(|(_, ws)| *ws).collect::<Vec<_>>(),
+            ));
+            let indices =
+                UInt64Array::from(row_windows.iter().map(|(ri, _)| *ri).collect::<Vec<_>>());
+
+            let mut cols: Vec<Arc<dyn Array>> = Vec::with_capacity(1 + batch.num_columns());
+            cols.push(ws_col);
+            for col_arr in batch.columns() {
+                let taken = arrow_take(col_arr.as_ref(), &indices, None)
+                    .map_err(|e| StructuredError::Sql(format!("sliding expand: {e}")))?;
+                cols.push(taken);
+            }
+
+            let mut fields = vec![Field::new("window_start", DataType::Int64, false)];
+            fields.extend(schema.fields().iter().map(|f| f.as_ref().clone()));
+            let new_schema = Arc::new(Schema::new(fields));
+            let _ = n; // length captured in arrays
+            expanded.push(
+                RecordBatch::try_new(new_schema, cols)
+                    .map_err(|e| StructuredError::Sql(format!("sliding batch: {e}")))?,
+            );
+        }
+        Ok(expanded)
+    }
 }
 
 // ── Arrow read helpers ────────────────────────────────────────────────────────
 
-fn read_i64(arr: &dyn Array, row: usize) -> Option<i64> {
+pub(crate) fn read_i64(arr: &dyn Array, row: usize) -> Option<i64> {
     if arr.is_null(row) {
         return None;
     }
@@ -163,7 +232,7 @@ fn read_f64(arr: &dyn Array, row: usize) -> Option<f64> {
     }
 }
 
-fn read_group(arr: &dyn Array, row: usize) -> GroupVal {
+pub(crate) fn read_group(arr: &dyn Array, row: usize) -> GroupVal {
     if arr.is_null(row) {
         return GroupVal::Null;
     }
@@ -174,6 +243,20 @@ fn read_group(arr: &dyn Array, row: usize) -> GroupVal {
     } else {
         GroupVal::Null
     }
+}
+
+/// All window starts (multiples of `slide`) that cover event time `t_ms` in a window of `size_ms`.
+///
+/// A window with start `ws` covers `t` iff `ws <= t < ws + size`.
+/// Equivalently: `t - size < ws <= t`, ws is a multiple of slide.
+fn covering_windows(t_ms: i64, size_ms: i64, slide_ms: i64) -> Vec<i64> {
+    // k_min = floor((t - W) / S) + 1, k_max = floor(t / S)
+    let k_min = (t_ms - size_ms).div_euclid(slide_ms) + 1;
+    let k_max = t_ms.div_euclid(slide_ms);
+    (k_min..=k_max)
+        .filter(|&k| k >= 0)
+        .map(|k| k * slide_ms)
+        .collect()
 }
 
 /// Maximum value of the epoch-ms `col` across `batches`, if any.
@@ -356,10 +439,21 @@ impl BatchEngine for WindowedEngine {
 
         let batch_max = batch_max_ms(&batches, &self.spec.time_col);
 
+        // For sliding windows: expand each row into one row per covering window.
+        let is_sliding = self
+            .spec
+            .slide_ms
+            .map_or(false, |sl| sl < self.spec.window_size_ms);
+        let sql_batches = if is_sliding {
+            self.expand_for_sliding(batches)?
+        } else {
+            batches
+        };
+
         // Compute per-window partials via SQL.
         let _ = self.sql_ctx.deregister_table("input");
         self.sql_ctx
-            .register_batches("input", batches)
+            .register_batches("input", sql_batches)
             .map_err(|e| StructuredError::Sql(e.to_string()))?;
         let sql = self.partial_sql();
         let partials = self.runtime.block_on(async {
