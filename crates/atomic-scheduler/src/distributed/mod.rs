@@ -1,0 +1,587 @@
+use std::{
+    collections::{BTreeSet, HashSet, VecDeque},
+    fmt::Debug,
+    net::{Ipv4Addr, SocketAddrV4},
+    sync::{
+        Arc,
+        atomic::{AtomicI16, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use atomic_data::{
+    data::Data,
+    dependency::ShuffleDependencyBox,
+    distributed::WorkerCapabilities,
+    partial::{ApproximateEvaluator, result::PartialResult},
+    rdd::Rdd,
+    task::TaskOption,
+    task_context::TaskContext,
+};
+use dashmap::DashMap;
+use parking_lot::Mutex;
+
+use crate::{
+    base::{Mutators, NativeScheduler},
+    error::{LibResult, SchedulerError},
+    job::Job,
+    listener::LiveListenerBus,
+    stage::Stage,
+};
+
+mod cache_dispatch;
+mod job_runner;
+mod shuffle_stage;
+mod transport;
+mod worker_pool;
+
+pub use cache_dispatch::CacheDispatch;
+pub use worker_pool::InflightGuard;
+
+/// Consecutive TCP-level failure count per worker before removal.
+pub(crate) const MAX_WORKER_FAILURES: u32 = 3;
+
+#[derive(Clone, Default)]
+pub struct DistributedScheduler {
+    pub(crate) mutators: Mutators,
+    pub(crate) max_failures: usize,
+    pub(crate) attempt_id: Arc<AtomicUsize>,
+
+    /// Per-worker capability declarations — keyed by endpoint.
+    pub(crate) worker_capabilities: Arc<DashMap<SocketAddrV4, WorkerCapabilities>>,
+    /// Number of tasks currently in-flight to each worker.
+    pub(crate) inflight: Arc<DashMap<SocketAddrV4, Arc<AtomicI16>>>,
+    /// Consecutive TCP-level failure count per worker — reset on success, triggers removal at MAX_WORKER_FAILURES.
+    pub(crate) worker_failures: Arc<DashMap<SocketAddrV4, u32>>,
+    /// Per-task timeout. `None` means no timeout (useful in tests / local mode).
+    pub(crate) task_timeout: Option<Duration>,
+    /// Speculative execution multiplier.
+    pub(crate) speculation_multiplier: Option<f64>,
+
+    /// Scheduler role flag taken at construction; retained as config (driver vs. worker).
+    #[allow(dead_code)]
+    pub(crate) master: bool,
+    pub(crate) active_jobs: Arc<DashMap<usize, Job>>,
+    pub(crate) active_job_queue: Arc<Mutex<VecDeque<Job>>>,
+    pub(crate) taskid_to_jobid: Arc<DashMap<String, usize>>,
+    pub(crate) taskid_to_slaveid: Arc<DashMap<String, String>>,
+    pub(crate) job_tasks: Arc<DashMap<usize, HashSet<String>>>,
+    /// Per-job cancellation tokens — cancelled when `cancel_job()` is called.
+    pub(crate) job_cancel_tokens: Arc<DashMap<usize, tokio_util::sync::CancellationToken>>,
+
+    /// Fingerprint of the driver's compiled task registry.
+    pub(crate) driver_fingerprint: u64,
+
+    /// Registered worker endpoints, round-robined for task dispatch.
+    pub(crate) server_uris: Arc<Mutex<VecDeque<SocketAddrV4>>>,
+
+    /// Per-RDD cached partition holders, keyed by full worker endpoint.
+    pub(crate) cache_endpoints: Arc<DashMap<usize, Vec<Vec<SocketAddrV4>>>>,
+
+    pub(crate) scheduler_lock: Arc<Mutex<bool>>,
+    pub(crate) live_listener_bus: LiveListenerBus,
+}
+
+impl DistributedScheduler {
+    pub fn new(max_failures: usize, master: bool) -> Self {
+        let mut live_listener_bus = LiveListenerBus::new();
+        live_listener_bus
+            .start()
+            .expect("LiveListenerBus failed to start its event-dispatch thread");
+        Self {
+            mutators: Mutators::new(),
+            max_failures,
+            attempt_id: Arc::new(AtomicUsize::new(0)),
+            worker_capabilities: Arc::new(DashMap::new()),
+            inflight: Arc::new(DashMap::new()),
+            worker_failures: Arc::new(DashMap::new()),
+            task_timeout: Some(Duration::from_secs(300)),
+            speculation_multiplier: None,
+            master,
+            active_jobs: Arc::new(DashMap::new()),
+            active_job_queue: Arc::new(Mutex::new(VecDeque::new())),
+            taskid_to_jobid: Arc::new(DashMap::new()),
+            taskid_to_slaveid: Arc::new(DashMap::new()),
+            job_tasks: Arc::new(DashMap::new()),
+            server_uris: Arc::new(Mutex::new(VecDeque::new())),
+            cache_endpoints: Arc::new(DashMap::new()),
+            scheduler_lock: Arc::new(Mutex::new(false)),
+            live_listener_bus,
+            job_cancel_tokens: Arc::new(DashMap::new()),
+            driver_fingerprint: 0,
+        }
+    }
+
+    /// Cancel a running job by its `run_id`.
+    pub fn cancel_job(&self, run_id: usize) -> Result<(), SchedulerError> {
+        if let Some(token) = self.job_cancel_tokens.get(&run_id) {
+            token.cancel();
+            Ok(())
+        } else {
+            Err(SchedulerError::TaskFailed(format!(
+                "job {run_id} not found or already completed"
+            )))
+        }
+    }
+
+    /// Set the driver's registry fingerprint for worker mismatch detection at registration.
+    pub fn with_driver_fingerprint(mut self, fp: u64) -> Self {
+        self.driver_fingerprint = fp;
+        self
+    }
+
+    /// Total number of tasks currently dispatched to workers and not yet completed.
+    pub fn total_inflight(&self) -> i64 {
+        self.inflight
+            .iter()
+            .map(|e| e.value().load(Ordering::SeqCst) as i64)
+            .sum()
+    }
+
+    /// Block (with a bounded timeout) until no tasks are in-flight, polling every
+    /// `poll_interval`. Returns `true` if drained, `false` if the timeout elapsed.
+    pub fn drain(&self, timeout: Duration, poll_interval: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.total_inflight() > 0 {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(poll_interval);
+        }
+        true
+    }
+
+    /// Enable speculative execution with the given multiplier.
+    pub fn with_speculation(mut self, multiplier: f64) -> Self {
+        self.speculation_multiplier = Some(multiplier);
+        self
+    }
+
+    pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
+        self: Arc<Self>,
+        func: Arc<F>,
+        final_rdd: Arc<dyn Rdd<Item = T>>,
+        evaluator: E,
+        timeout: Duration,
+    ) -> LibResult<PartialResult<R>>
+    where
+        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
+        R: Clone + Debug + Send + Sync + 'static,
+    {
+        let _ = (self, func, final_rdd, evaluator, timeout);
+        Err(SchedulerError::UnsupportedOperation(
+            "distributed approximate jobs require the local scheduler",
+        ))
+    }
+
+    pub fn run_job<T: Data, U: Data + Clone, F>(
+        self: Arc<Self>,
+        func: Arc<F>,
+        final_rdd: Arc<dyn Rdd<Item = T>>,
+        partitions: Vec<usize>,
+        allow_local: bool,
+    ) -> LibResult<Vec<U>>
+    where
+        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+    {
+        let _ = (self, func, final_rdd, partitions, allow_local);
+        Err(SchedulerError::UnsupportedOperation(
+            "use run_native_job for distributed execution",
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl NativeScheduler for DistributedScheduler {
+    fn submit_task<T: Data, U: Data, F>(
+        &self,
+        task: TaskOption,
+        _id_in_job: usize,
+        _target_executor: SocketAddrV4,
+    ) where
+        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+    {
+        let _ = (task, _id_in_job, _target_executor);
+        log::debug!("legacy submit_task ignored; use run_native_job");
+    }
+
+    fn next_executor_server(&self, task: &TaskOption) -> SocketAddrV4 {
+        if !task.is_pinned() {
+            let socket_addr = self
+                .server_uris
+                .lock()
+                .pop_back()
+                .expect("next_executor_server called with an empty worker pool");
+            self.server_uris.lock().push_front(socket_addr);
+            socket_addr
+        } else {
+            let servers = &mut *self.server_uris.lock();
+            let location: Ipv4Addr = task.preferred_locations()[0];
+            if let Some((pos, _)) = servers
+                .iter()
+                .enumerate()
+                .find(|(_, endpoint)| *endpoint.ip() == location)
+            {
+                let target_host = servers
+                    .remove(pos)
+                    .expect("invariant: pos was just produced by find() above");
+                servers.push_front(target_host);
+                target_host
+            } else {
+                unreachable!()
+            }
+        }
+    }
+
+    async fn update_cache_locs(&self) -> LibResult<()> {
+        // Cache locations are populated incrementally as workers report cached
+        // partitions (`register_cache_locs`); do not wipe them between jobs.
+        Ok(())
+    }
+
+    async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependencyBox>) -> LibResult<Stage> {
+        let stage = self
+            .mutators
+            .shuffle_to_map_stage
+            .get(&shuf.get_shuffle_id());
+        match stage {
+            Some(stage) => Ok(stage.clone()),
+            None => {
+                let stage = self
+                    .new_stage(shuf.get_rdd_base(), Some(shuf.clone()))
+                    .await?;
+                self.mutators
+                    .shuffle_to_map_stage
+                    .insert(shuf.get_shuffle_id(), stage.clone());
+                Ok(stage)
+            }
+        }
+    }
+
+    async fn get_missing_parent_stages(&self, stage: Stage) -> LibResult<Vec<Stage>> {
+        let mut missing: BTreeSet<Stage> = BTreeSet::new();
+        let mut visited: HashSet<usize> = HashSet::new();
+        self.visit_missing_parent(&mut missing, &mut visited, stage.get_rdd())
+            .await?;
+        Ok(missing.into_iter().collect())
+    }
+
+    fn get_mutators(&self) -> Mutators {
+        self.mutators.clone()
+    }
+}
+
+impl Drop for DistributedScheduler {
+    fn drop(&mut self) {
+        if let Err(e) = self.live_listener_bus.stop() {
+            log::warn!("failed to stop live listener bus during scheduler drop: {e}");
+        }
+    }
+}
+
+/// JSON body sent by a worker to `POST /register`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct RegisterRequest {
+    /// The worker's own task-listener endpoint (IP:port) as a string, e.g. `"10.0.0.1:10001"`.
+    pub endpoint: String,
+    /// The worker's capability declaration.
+    pub capabilities: atomic_data::distributed::WorkerCapabilities,
+}
+
+/// Start an HTTP listener that accepts worker self-registration on `POST /register`.
+pub fn start_register_server(port: u16, scheduler: Arc<DistributedScheduler>) {
+    tokio::spawn(async move {
+        use http_body_util::{BodyExt, Full};
+        use hyper::body::Bytes;
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Method, Request, Response, StatusCode};
+
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("register server: failed to bind on port {port}: {e}");
+                return;
+            }
+        };
+
+        log::info!("worker registration endpoint listening on http://0.0.0.0:{port}/register");
+
+        loop {
+            let Ok((stream, _peer)) = listener.accept().await else {
+                continue;
+            };
+            let io = hyper_util::rt::TokioIo::new(stream);
+            let sched = Arc::clone(&scheduler);
+
+            tokio::spawn(async move {
+                let _ = http1::Builder::new()
+                    .serve_connection(
+                        io,
+                        service_fn(move |req: Request<hyper::body::Incoming>| {
+                            let sched = Arc::clone(&sched);
+                            async move {
+                                let resp = if req.method() == Method::POST
+                                    && req.uri().path() == "/register"
+                                {
+                                    let body_bytes = match req.collect().await {
+                                        Ok(collected) => collected.to_bytes(),
+                                        Err(e) => {
+                                            log::warn!("register: failed to read body: {e}");
+                                            return Ok::<_, std::convert::Infallible>(
+                                                Response::builder()
+                                                    .status(StatusCode::BAD_REQUEST)
+                                                    .body(Full::new(Bytes::from("bad request")))
+                                                    .unwrap(),
+                                            );
+                                        }
+                                    };
+
+                                    match serde_json::from_slice::<RegisterRequest>(&body_bytes) {
+                                        Ok(reg) => match reg.endpoint.parse::<SocketAddrV4>() {
+                                            Ok(endpoint) => {
+                                                sched.dynamically_add_worker(
+                                                    endpoint,
+                                                    reg.capabilities,
+                                                );
+                                                Response::builder()
+                                                    .status(StatusCode::OK)
+                                                    .body(Full::new(Bytes::from("registered")))
+                                                    .unwrap()
+                                            }
+                                            Err(e) => {
+                                                log::warn!(
+                                                    "register: invalid endpoint '{}': {e}",
+                                                    reg.endpoint
+                                                );
+                                                Response::builder()
+                                                    .status(StatusCode::BAD_REQUEST)
+                                                    .body(Full::new(Bytes::from(
+                                                        "invalid endpoint",
+                                                    )))
+                                                    .unwrap()
+                                            }
+                                        },
+                                        Err(e) => {
+                                            log::warn!("register: JSON parse error: {e}");
+                                            Response::builder()
+                                                .status(StatusCode::BAD_REQUEST)
+                                                .body(Full::new(Bytes::from("invalid JSON")))
+                                                .unwrap()
+                                        }
+                                    }
+                                } else {
+                                    Response::builder()
+                                        .status(StatusCode::NOT_FOUND)
+                                        .body(Full::new(Bytes::from("not found")))
+                                        .unwrap()
+                                };
+                                Ok::<_, std::convert::Infallible>(resp)
+                            }
+                        }),
+                    )
+                    .await;
+            });
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atomic_data::distributed::{
+        PipelineOp, ResultStatus, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope,
+        TaskResultEnvelope, TaskRuntime, TransportFrameKind, WireDecode, WireEncode,
+        encode_transport_frame, parse_transport_header,
+    };
+
+    #[test]
+    fn drain_idle() {
+        let sched = DistributedScheduler::new(4, true);
+        assert_eq!(sched.total_inflight(), 0);
+        assert!(sched.drain(Duration::from_millis(100), Duration::from_millis(5)));
+    }
+
+    #[test]
+    fn drain_timeout() {
+        let sched = DistributedScheduler::new(4, true);
+        let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31099);
+        sched.inflight.insert(addr, Arc::new(AtomicI16::new(1)));
+        assert_eq!(sched.total_inflight(), 1);
+        assert!(!sched.drain(Duration::from_millis(50), Duration::from_millis(5)));
+    }
+
+    #[test]
+    fn register_worker_adds() {
+        let scheduler = DistributedScheduler::new(4, true);
+        let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31001);
+        scheduler.register_worker(
+            addr,
+            WorkerCapabilities::new("native-1".to_string(), 2, vec![]),
+        );
+        let selected = scheduler.next_executor().expect("should select worker");
+        assert_eq!(selected, addr);
+    }
+
+    #[test]
+    fn plan_serve_cached() {
+        use atomic_data::distributed::{PipelineOp, TaskAction, TaskRuntime};
+        let sched = DistributedScheduler::new(4, true);
+        let ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
+        sched.register_cache_locs(&[(700, 0), (700, 1)], ip);
+
+        let cache_op = PipelineOp {
+            op_id: String::new(),
+            action: TaskAction::Cache { rdd_id: 700 },
+            runtime: TaskRuntime::Native,
+            payload: vec![],
+        };
+        let map_op = PipelineOp {
+            op_id: "m".into(),
+            action: TaskAction::Map,
+            runtime: TaskRuntime::Native,
+            payload: vec![],
+        };
+        let ops = vec![map_op.clone(), cache_op];
+
+        match sched.plan_cache_dispatch(&ops, 2) {
+            CacheDispatch::Serve {
+                rdd_id,
+                post_ops,
+                locs,
+            } => {
+                assert_eq!(rdd_id, 700);
+                assert!(post_ops.is_empty());
+                assert_eq!(locs, vec![ip, ip]);
+            }
+            other => panic!("expected Serve, got {other:?}"),
+        }
+        assert_eq!(sched.plan_cache_dispatch(&ops, 3), CacheDispatch::Recompute);
+        assert_eq!(
+            sched.plan_cache_dispatch(std::slice::from_ref(&map_op), 2),
+            CacheDispatch::Recompute
+        );
+    }
+
+    #[test]
+    fn worker_death_clears_cache() {
+        let sched = DistributedScheduler::new(4, true);
+        let dead = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
+        let live = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
+        sched.register_cache_locs(&[(800, 0), (800, 1)], dead);
+        sched.register_cache_locs(&[(800, 1)], live);
+
+        sched.remove_worker(dead);
+
+        let locs = sched.cache_endpoints.clone();
+        let entry = locs.get(&800).unwrap();
+        assert!(entry[0].is_empty(), "dead worker's sole copy removed");
+        assert_eq!(entry[1], vec![live], "replica on live worker survives");
+    }
+
+    #[test]
+    fn unpersist_clears_rdd() {
+        let sched = DistributedScheduler::new(4, true);
+        sched.register_cache_locs(
+            &[(801, 0)],
+            SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001),
+        );
+        assert!(sched.cache_endpoints.contains_key(&801));
+        sched.invalidate_rdd_cache(801);
+        assert!(!sched.cache_endpoints.contains_key(&801));
+    }
+
+    #[test]
+    fn cache_locs_grow_sparse() {
+        let scheduler = DistributedScheduler::new(4, true);
+        let ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 7), 11007);
+        scheduler.register_cache_locs(&[(500, 2), (500, 0)], ip);
+        let locs = scheduler.cache_endpoints.clone();
+        let entry = locs.get(&500).expect("rdd 500 registered");
+        assert_eq!(entry.len(), 3);
+        assert_eq!(entry[2], vec![ip]);
+        assert_eq!(entry[0], vec![ip]);
+        assert!(entry[1].is_empty());
+        drop(entry);
+        scheduler.register_cache_locs(&[(500, 2)], ip);
+        assert_eq!(locs.get(&500).unwrap()[2], vec![ip]);
+    }
+
+    #[test]
+    fn next_executor_round_robins() {
+        let scheduler = DistributedScheduler::new(4, true);
+        let addr1 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31011);
+        let addr2 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31012);
+        scheduler.register_worker(addr1, WorkerCapabilities::new("w1".to_string(), 1, vec![]));
+        scheduler.register_worker(addr2, WorkerCapabilities::new("w2".to_string(), 1, vec![]));
+        let first = scheduler.next_executor().unwrap();
+        let second = scheduler.next_executor().unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn submit_task_roundtrip() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let scheduler = DistributedScheduler::new(4, true);
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind");
+        let endpoint = listener.local_addr().expect("local addr");
+        let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, endpoint.port());
+        scheduler.register_worker(
+            endpoint,
+            WorkerCapabilities::new("w1".to_string(), 1, vec![]),
+        );
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut header = [0_u8; TRANSPORT_HEADER_LEN];
+            socket.read_exact(&mut header).await.expect("read header");
+            let (kind, payload_len) = parse_transport_header(&header).expect("parse header");
+            assert_eq!(kind, TransportFrameKind::TaskEnvelope);
+            let mut payload = vec![0_u8; payload_len];
+            socket.read_exact(&mut payload).await.expect("read payload");
+            let task = TaskEnvelope::decode_wire(&payload).expect("decode task");
+            assert_eq!(task.ops[0].op_id, "mycrate::double");
+            let response = TaskResultEnvelope::ok(
+                task.run_id,
+                task.stage_id,
+                task.task_id,
+                task.attempt_id,
+                task.partition_id,
+                "worker-1".to_string(),
+                vec![42],
+                None,
+            );
+            let resp_bytes = response.encode_wire().expect("encode response");
+            let frame = encode_transport_frame(TransportFrameKind::TaskResultEnvelope, &resp_bytes);
+            socket.write_all(&frame).await.expect("write response");
+        });
+
+        let task = TaskEnvelope::new(
+            1,
+            2,
+            3,
+            0,
+            0,
+            "trace-1".to_string(),
+            vec![PipelineOp {
+                op_id: "mycrate::double".to_string(),
+                action: TaskAction::Map,
+                runtime: TaskRuntime::Native,
+                payload: vec![],
+            }],
+            vec![1, 2, 3],
+        );
+        let result = scheduler
+            .submit_task_to_worker(&task, endpoint)
+            .await
+            .expect("submit");
+        assert_eq!(result.status, ResultStatus::Success);
+        assert_eq!(result.data, vec![42]);
+        server.await.expect("server join");
+    }
+}

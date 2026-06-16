@@ -5807,6 +5807,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "indexmap",
+ "inventory",
  "libc",
  "once_cell",
  "portable-atomic",
