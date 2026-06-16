@@ -10,25 +10,22 @@
 ///   atomic-worker --port 10001 --local-ip 192.168.1.5
 use atomic_compute::context::start_worker;
 use atomic_compute::env::Config;
+use clap::Parser;
 use std::net::Ipv4Addr;
 
+#[derive(Parser)]
+#[command(about = "Atomic standalone worker — listens for task envelopes over TCP")]
+struct Cli {
+    /// Port to listen on.
+    #[arg(long)]
+    port: u16,
+
+    /// Local IP to bind/advertise.
+    #[arg(long, default_value = "127.0.0.1")]
+    local_ip: Ipv4Addr,
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
-    let port: u16 = args
-        .windows(2)
-        .find(|w| w[0] == "--port")
-        .and_then(|w| w[1].parse().ok())
-        .unwrap_or_else(|| {
-            eprintln!("Usage: atomic-worker --port N [--local-ip ADDR]");
-            std::process::exit(1);
-        });
-
-    let local_ip: Ipv4Addr = args
-        .windows(2)
-        .find(|w| w[0] == "--local-ip")
-        .and_then(|w| w[1].parse().ok())
-        .unwrap_or(Ipv4Addr::LOCALHOST);
-
-    start_worker(Config::worker(local_ip, port));
+    let cli = Cli::parse();
+    start_worker(Config::worker(cli.local_ip, cli.port));
 }

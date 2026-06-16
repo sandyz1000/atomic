@@ -314,7 +314,8 @@ impl<T: Data> TypedRdd<T> {
                         .into_iter()
                         .map(|item| format!("{item}\n"))
                         .collect();
-                    write_text(&s3uri.bucket, &key, content).map_err(|e| BaseError::Other(e))?;
+                    write_text(&s3uri.bucket, &key, content)
+                        .map_err(|e| BaseError::Other(e.to_string()))?;
                 }
                 return Ok(());
             }

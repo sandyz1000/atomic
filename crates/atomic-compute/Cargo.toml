@@ -54,6 +54,7 @@ aws-credential-types = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
+rdkafka = { version = "0.36", optional = true, features = ["cmake-build"] }
 
 [features]
 # Embedded PyO3 thread-pool — each worker thread acquires the GIL per task.
@@ -65,5 +66,7 @@ s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types", "base64"]
 # Enable TLS (mutual TLS) for driver↔worker TCP communication.
 # Requires cert/key/CA paths set in Config::tls_cert/tls_key/tls_ca_cert.
 tls = ["tokio-rustls", "rustls", "rustls-pemfile", "atomic-data/tls"]
+# Enables TaskAction::KafkaConsume dispatch on workers (pulls in librdkafka via cmake).
+kafka = ["dep:rdkafka", "atomic-data/kafka"]
 
 [dev-dependencies]

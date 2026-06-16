@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use atomic_compute::context::Context;
+use atomic_streaming::dstream::kafka_direct::{OffsetRange, OffsetTracker, build_staged_pipeline};
 use datafusion::arrow::array::{Array, BooleanArray, Float64Array, Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -158,7 +160,250 @@ impl Sink for KafkaSink {
     }
 }
 
-// ── JSON ⇄ Arrow ──────────────────────────────────────────────────────────────
+/// A structured-streaming source over Kafka using the Direct (pull-based) model.
+///
+/// Each `next_batch` call polls Kafka metadata for high-water marks, builds
+/// per-partition `OffsetRange`s, and — in distributed mode — dispatches one
+/// `KafkaConsume` task per range to a worker via `Context::dispatch_pipeline`
+/// (the same staged-pipeline mechanism as `DirectKafkaInputDStream`). In local
+/// mode it consumes directly on the calling thread.
+///
+/// Offsets advance only in `post_batch_commit`, which the engine calls after
+/// the sink has successfully written the batch (at-least-once delivery).
+pub struct KafkaDirectSource {
+    schema: SchemaRef,
+    brokers: String,
+    topics: Vec<String>,
+    max_records_per_partition: usize,
+    /// `Some` to dispatch consume tasks through the distributed scheduler;
+    /// `None` to consume locally on the calling thread.
+    ctx: Option<Arc<Context>>,
+    offset_tracker: Mutex<OffsetTracker>,
+    /// Ranges consumed by the most recent `next_batch`, pending commit.
+    pending_ranges: Mutex<Vec<OffsetRange>>,
+}
+
+impl KafkaDirectSource {
+    /// Build a Direct-model source. Each message payload must be a JSON object
+    /// whose fields match `schema`.
+    ///
+    /// `ctx`: pass the streaming `Context` to dispatch consume tasks to workers
+    /// when it is distributed; `next_batch` consumes locally when `ctx` is local
+    /// or `None`.
+    pub fn new(
+        schema: SchemaRef,
+        brokers: &str,
+        topics: &[&str],
+        max_records_per_partition: usize,
+        ctx: Option<Arc<Context>>,
+    ) -> Self {
+        KafkaDirectSource {
+            schema,
+            brokers: brokers.to_string(),
+            topics: topics.iter().map(|s| s.to_string()).collect(),
+            max_records_per_partition,
+            ctx,
+            offset_tracker: Mutex::new(OffsetTracker::default()),
+            pending_ranges: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Restore offset state from a previous checkpoint map (called on recovery).
+    pub fn restore_offsets(&self, saved: std::collections::HashMap<(String, i32), i64>) {
+        self.offset_tracker.lock().restore(saved);
+    }
+
+    /// Snapshot current committed offsets for checkpointing.
+    pub fn offset_snapshot(&self) -> std::collections::HashMap<(String, i32), i64> {
+        self.offset_tracker.lock().snapshot()
+    }
+
+    fn fetch_offset_ranges(&self) -> Vec<OffsetRange> {
+        let consumer: BaseConsumer = match ClientConfig::new()
+            .set("bootstrap.servers", &self.brokers)
+            .set("group.id", "atomic-structured-direct-meta")
+            .set("enable.auto.commit", "false")
+            .create()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("KafkaDirectSource: metadata consumer create failed: {e}");
+                return vec![];
+            }
+        };
+
+        let mut ranges = Vec::new();
+        let tracker = self.offset_tracker.lock();
+
+        for topic in &self.topics {
+            let metadata =
+                match consumer.fetch_metadata(Some(topic.as_str()), Duration::from_secs(10)) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        log::error!("KafkaDirectSource: fetch_metadata({topic}) failed: {e}");
+                        continue;
+                    }
+                };
+
+            for tm in metadata.topics() {
+                for pm in tm.partitions() {
+                    let part = pm.id();
+                    let start = tracker.start_for(topic, part);
+
+                    let hwm = match consumer.fetch_watermarks(topic, part, Duration::from_secs(5)) {
+                        Ok((_lo, hi)) => hi,
+                        Err(e) => {
+                            log::warn!(
+                                "KafkaDirectSource: fetch_watermarks({topic}/{part}) failed: {e}"
+                            );
+                            continue;
+                        }
+                    };
+
+                    if hwm <= start {
+                        continue;
+                    }
+
+                    let end = (start + self.max_records_per_partition as i64).min(hwm);
+                    ranges.push(OffsetRange {
+                        topic: topic.clone(),
+                        partition: part,
+                        start_offset: start,
+                        end_offset: end,
+                    });
+                }
+            }
+        }
+        ranges
+    }
+
+    /// Consume one offset range on the calling thread (local-mode path).
+    fn consume_range_local(&self, range: &OffsetRange) -> Vec<String> {
+        let consumer: BaseConsumer = match ClientConfig::new()
+            .set("bootstrap.servers", &self.brokers)
+            .set("group.id", "atomic-structured-direct-local")
+            .set("enable.auto.commit", "false")
+            .set("auto.offset.reset", "none")
+            .create()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("KafkaDirectSource local consume: consumer create failed: {e}");
+                return vec![];
+            }
+        };
+
+        let mut tpl = rdkafka::TopicPartitionList::new();
+        if tpl
+            .add_partition_offset(
+                &range.topic,
+                range.partition,
+                rdkafka::Offset::Offset(range.start_offset),
+            )
+            .is_err()
+            || consumer.assign(&tpl).is_err()
+        {
+            return vec![];
+        }
+
+        let mut msgs = Vec::new();
+        let poll_timeout = Duration::from_millis(500);
+        loop {
+            if msgs.len() >= self.max_records_per_partition {
+                break;
+            }
+            match consumer.poll(poll_timeout) {
+                Some(Ok(msg)) => {
+                    if msg.offset() >= range.end_offset {
+                        break;
+                    }
+                    let text = msg
+                        .payload()
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_default();
+                    msgs.push(text);
+                }
+                Some(Err(e)) => log::warn!("KafkaDirectSource local poll: {e}"),
+                None => break,
+            }
+        }
+        msgs
+    }
+
+    /// Dispatch one consume task per range to the distributed scheduler and
+    /// collect the resulting messages.
+    fn consume_ranges_distributed(
+        &self,
+        ctx: &Arc<Context>,
+        ranges: &[OffsetRange],
+    ) -> Vec<String> {
+        use atomic_data::distributed::WireDecode;
+
+        let (source_partitions, ops) =
+            build_staged_pipeline(&self.brokers, ranges, self.max_records_per_partition);
+        let raw = match ctx.dispatch_pipeline(source_partitions, ops) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("KafkaDirectSource: dispatch_pipeline failed: {e}");
+                return vec![];
+            }
+        };
+
+        let mut messages = Vec::new();
+        for bytes in raw {
+            match Vec::<String>::decode_wire(&bytes) {
+                Ok(msgs) => messages.extend(msgs),
+                Err(e) => log::error!("KafkaDirectSource: result decode failed: {e}"),
+            }
+        }
+        messages
+    }
+}
+
+impl StreamSource for KafkaDirectSource {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn next_batch(&self, _time_ms: u64) -> Vec<RecordBatch> {
+        let ranges = self.fetch_offset_ranges();
+        if ranges.is_empty() {
+            return vec![];
+        }
+
+        let messages = match &self.ctx {
+            Some(ctx) if ctx.is_distributed() => self.consume_ranges_distributed(ctx, &ranges),
+            _ => ranges
+                .iter()
+                .flat_map(|r| self.consume_range_local(r))
+                .collect(),
+        };
+
+        *self.pending_ranges.lock() = ranges;
+
+        let rows: Vec<serde_json::Value> = messages
+            .iter()
+            .filter_map(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .filter(serde_json::Value::is_object)
+            .collect();
+
+        match json_to_batch(&self.schema, &rows) {
+            Ok(Some(b)) => vec![b],
+            _ => vec![],
+        }
+    }
+
+    fn post_batch_commit(&self, _epoch: u64) {
+        let ranges = self.pending_ranges.lock().split_off(0);
+        if ranges.is_empty() {
+            return;
+        }
+        let mut tracker = self.offset_tracker.lock();
+        for r in &ranges {
+            tracker.commit(&r.topic, r.partition, r.end_offset);
+        }
+    }
+}
 
 /// Convert JSON-object `rows` into one Arrow batch per `schema`. Returns `None`
 /// when there are no rows. Supports Int64 / Float64 / Utf8 / Boolean columns.

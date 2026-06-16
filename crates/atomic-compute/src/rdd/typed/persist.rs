@@ -170,7 +170,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
                     let b64 =
                         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
                     let key = format!("{prefix}/{checkpoint_id}/{idx}.bin");
-                    write_text(bucket, &key, b64).map_err(|e| BaseError::Other(e))?;
+                    write_text(bucket, &key, b64).map_err(|e| BaseError::Other(e.to_string()))?;
                 }
             }
         }

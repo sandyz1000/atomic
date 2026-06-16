@@ -71,4 +71,3 @@ New capabilities worth building after gap closure:
 
 - Kerberos / SASL authentication
 - HDFS connector (S3 covers the primary cloud use case)
-- Docker or WASM backends

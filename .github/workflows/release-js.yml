@@ -1,10 +1,7 @@
 name: Release — JavaScript (npm)
 
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+  workflow_dispatch: # disabled — re-enable by restoring push/tags triggers
 
 jobs:
   build-bindings:
@@ -19,12 +16,6 @@ jobs:
             node-arch: x64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            node-arch: arm64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            node-arch: x64
-          - os: macos-latest
-            target: aarch64-apple-darwin
             node-arch: arm64
 
     steps:

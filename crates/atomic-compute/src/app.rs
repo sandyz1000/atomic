@@ -83,6 +83,12 @@ impl AtomicApp {
     ///     AppRole::Driver       => { /* job logic */ }
     /// }
     /// ```
+    // Deliberately not `clap`: this scans the *embedding* user program's full argv for a
+    // handful of recognized flags and ignores everything else by design — a user program
+    // built with `AtomicApp::build()` is free to define its own CLI on top of `--worker` /
+    // `--workers` / `--local-ip`. `clap::Parser` owns the entire CLI surface of a binary and
+    // rejects unrecognized flags, which would break that coexistence. Leaf binaries that own
+    // their whole CLI (e.g. `atomic-worker`, `integration/cli.rs`) use `clap` instead.
     pub async fn build() -> ComputeResult<Self> {
         let args: Vec<String> = std::env::args().collect();
 

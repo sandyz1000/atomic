@@ -210,6 +210,10 @@ impl ShuffleManager {
         let (s, r) = cb_channel::bounded::<LibResult<()>>(1);
 
         tokio::spawn(async move {
+            // Hold the start-up sender for the lifetime of the accept loop so the
+            // channel stays open while the caller waits on `r` below; dropping it
+            // early would disconnect `r` and spuriously report a start failure.
+            let _startup_sender = s;
             conn.set_nonblocking(true)
                 .map_err(|_| ShuffleError::FailedToStart)?;
             let listener =
@@ -253,7 +257,6 @@ impl ShuffleManager {
             }
 
             #[allow(unreachable_code)]
-            let _ = s.send(Err(ShuffleError::FailedToStart));
             Err::<(), _>(ShuffleError::FailedToStart)
         });
 

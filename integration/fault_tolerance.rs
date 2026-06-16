@@ -18,7 +18,12 @@
 use atomic_compute::context::{Context, start_worker};
 use atomic_compute::env::Config;
 use atomic_compute::task;
+use clap::Parser;
 use std::net::Ipv4Addr;
+
+#[path = "cli.rs"]
+mod cli;
+use cli::IntegrationCli;
 
 #[task]
 fn double_i32(x: i32) -> i32 {
@@ -31,25 +36,15 @@ fn add_i32(a: i32, b: i32) -> i32 {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let cli = IntegrationCli::parse();
     let _ = env_logger::try_init();
 
-    if args.iter().any(|a| a == "--worker") {
-        let port: u16 = args
-            .windows(2)
-            .find(|w| w[0] == "--port")
-            .and_then(|w| w[1].parse().ok())
-            .expect("--worker requires --port N");
+    if cli.worker {
+        let port = cli.port.expect("--worker requires --port N");
         let config = Config::worker(Ipv4Addr::LOCALHOST, port);
         start_worker(config);
-    } else if args.iter().any(|a| a == "--driver") {
-        let workers: Vec<std::net::SocketAddrV4> = args
-            .windows(2)
-            .find(|w| w[0] == "--workers")
-            .map(|w| w[1].split(',').filter_map(|s| s.parse().ok()).collect())
-            .unwrap_or_default();
-
-        let config = Config::distributed_driver(Ipv4Addr::LOCALHOST, workers);
+    } else if cli.driver {
+        let config = Config::distributed_driver(Ipv4Addr::LOCALHOST, cli.workers);
         if let Err(e) = run_driver(config) {
             eprintln!("driver error: {e}");
             std::process::exit(1);

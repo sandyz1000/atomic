@@ -74,6 +74,18 @@ impl OpDispatcher for NativeDispatcher {
                 );
                 Ok(data.to_vec())
             }
+            #[cfg(feature = "kafka")]
+            TaskAction::KafkaConsume => {
+                // The per-partition consume config is shipped in `source_partitions[i]`
+                // (i.e. `data`), not in `op.payload` (which is empty for KafkaConsume).
+                let payload: atomic_data::distributed::KafkaConsumePayload =
+                    bincode::decode_from_slice(data, bincode::config::standard())
+                        .map(|(p, _)| p)
+                        .map_err(|e| {
+                            ComputeError::InvalidPayload(format!("KafkaConsume data decode: {e}"))
+                        })?;
+                kafka_consume_handler(&payload)
+            }
             _ => match TASK_REGISTRY.get(op.op_id.as_str()) {
                 None => {
                     let registered: Vec<&str> = TASK_REGISTRY.keys().copied().collect();
@@ -140,14 +152,14 @@ impl Backend for ComputeEngine {
                 match atomic_data::cache::worker_partition_cache().get(rdd_id, task.partition_id) {
                     Some(bytes) => bytes,
                     None => {
-                        return Ok(TaskResultEnvelope::fatal_failure(
+                        return Ok(TaskResultEnvelope::cache_miss(
                             task.run_id,
                             task.stage_id,
                             task.task_id,
                             task.attempt_id,
                             task.partition_id,
                             worker_id.to_string(),
-                            format!("cache miss: rdd {rdd_id} partition {}", task.partition_id),
+                            rdd_id,
                         ));
                     }
                 }
@@ -242,6 +254,78 @@ impl Backend for ComputeEngine {
         .with_accumulator_deltas(acc_deltas)
         .with_cached_partitions(cached_partitions))
     }
+}
+
+/// Worker-side Kafka Direct consume: assign+seek to offset range, poll to end, return messages.
+///
+/// Returns rkyv-encoded `Vec<String>`.  Each message payload is decoded as UTF-8; invalid bytes
+/// are replaced with the Unicode replacement character so the pipeline is never aborted by one
+/// bad message.
+#[cfg(feature = "kafka")]
+pub(crate) fn kafka_consume_handler(
+    payload: &atomic_data::distributed::KafkaConsumePayload,
+) -> ComputeResult<Vec<u8>> {
+    use rdkafka::Offset as RdOffset;
+    use rdkafka::TopicPartitionList;
+    use rdkafka::config::ClientConfig;
+    use rdkafka::consumer::{BaseConsumer, Consumer};
+    use rdkafka::message::Message;
+    use std::time::Duration;
+
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", &payload.brokers)
+        .set("group.id", "atomic-direct-consumer")
+        .set("enable.auto.commit", "false")
+        .set("auto.offset.reset", "none")
+        .create()
+        .map_err(|e| ComputeError::InvalidPayload(format!("Kafka consumer create: {e}")))?;
+
+    let mut tpl = TopicPartitionList::new();
+    tpl.add_partition_offset(
+        &payload.topic,
+        payload.partition,
+        RdOffset::Offset(payload.start_offset),
+    )
+    .map_err(|e| ComputeError::InvalidPayload(format!("Kafka assign+seek: {e}")))?;
+    consumer
+        .assign(&tpl)
+        .map_err(|e| ComputeError::InvalidPayload(format!("Kafka assign: {e}")))?;
+
+    let mut messages: Vec<String> = Vec::new();
+    let poll_timeout = Duration::from_millis(500);
+    loop {
+        if messages.len() >= payload.max_records {
+            break;
+        }
+        match consumer.poll(poll_timeout) {
+            Some(Ok(msg)) => {
+                let offset = msg.offset();
+                if offset >= payload.end_offset {
+                    break;
+                }
+                let text = msg
+                    .payload()
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                messages.push(text);
+            }
+            Some(Err(e)) => {
+                log::warn!(
+                    "KafkaConsume poll error (topic={} part={}): {e}",
+                    payload.topic,
+                    payload.partition
+                );
+            }
+            None => {
+                // poll timeout — no more messages in the window
+                break;
+            }
+        }
+    }
+
+    rkyv::to_bytes::<rkyv::rancor::Error>(&messages)
+        .map(|b| b.to_vec())
+        .map_err(|e| ComputeError::InvalidPayload(format!("KafkaConsume rkyv encode: {e}")))
 }
 
 #[cfg(test)]
@@ -345,12 +429,12 @@ mod tests {
     }
 
     #[test]
-    fn cache_source_miss_fails() {
+    fn cache_source_miss_returns_cache_miss_status() {
         let backend = ComputeEngine::default();
         let task =
             TaskEnvelope::new(1, 2, 3, 0, 0, "t".into(), vec![], vec![]).with_cache_source(9199); // never populated
         let result = backend.execute("w", &task).unwrap();
-        assert_eq!(result.status, ResultStatus::FatalFailure);
-        assert!(result.error.unwrap().contains("cache miss"));
+        assert_eq!(result.status, ResultStatus::CacheMiss);
+        assert!(result.error.unwrap().contains("cache evicted"));
     }
 }

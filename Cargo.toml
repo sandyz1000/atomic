@@ -34,10 +34,24 @@ path = "integration/multi_stage.rs"
 name = "integration_fault_tolerance"
 path = "integration/fault_tolerance.rs"
 
+[[bin]]
+name = "integration_cache_locality"
+path = "integration/cache_locality.rs"
+
+[[bin]]
+name = "integration_named_partitioner"
+path = "integration/named_partitioner.rs"
+
+[[bin]]
+name = "integration_sort_by_task"
+path = "integration/sort_by_task.rs"
+
 [dependencies]
 atomic-compute = { workspace = true }
+atomic-data = { workspace = true }
 serde_json = { workspace = true }
 env_logger = { workspace = true }
+clap = { workspace = true }
 
 [dev-dependencies]
 atomic-compute = { workspace = true }

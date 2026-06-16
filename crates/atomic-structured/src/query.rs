@@ -26,6 +26,11 @@ fn next_op_id() -> usize {
 /// both implement this; the output op is agnostic to which.
 pub(crate) trait BatchEngine: Send + Sync {
     fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>>;
+
+    /// Called after the sink has successfully written the batch's output.
+    /// Forwards to the source so it can advance any tracked read position
+    /// (e.g. Kafka offsets) only once delivery is confirmed. Default no-op.
+    fn post_commit(&self, _epoch: u64) {}
 }
 
 /// Stateless engine (4a): register the batch as `input`, run the SQL, emit the
@@ -38,6 +43,10 @@ pub(crate) struct StatelessEngine {
 }
 
 impl BatchEngine for StatelessEngine {
+    fn post_commit(&self, epoch: u64) {
+        self.source.post_batch_commit(epoch);
+    }
+
     fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
         let batches = self.source.next_batch(epoch);
         if batches.iter().map(|b| b.num_rows()).sum::<usize>() == 0 {
@@ -75,7 +84,9 @@ impl QueryRunner {
 
     pub(crate) fn run_batch(&self, epoch: u64) -> StructuredResult<()> {
         let out = self.engine.process(epoch)?;
-        self.sink.add_batch(epoch, &out)
+        self.sink.add_batch(epoch, &out)?;
+        self.engine.post_commit(epoch);
+        Ok(())
     }
 }
 

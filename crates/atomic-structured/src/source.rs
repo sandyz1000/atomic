@@ -22,6 +22,13 @@ pub trait StreamSource: Send + Sync {
 
     /// Stop background work and release resources. Default no-op.
     fn stop(&self) {}
+
+    /// Called after the sink has successfully written the batch for `epoch`.
+    /// Sources that track an external read position (e.g. `KafkaDirectSource`
+    /// offsets) advance their committed position here — this gives at-least-once
+    /// delivery (re-read on failure before this call, never silently skipped).
+    /// Default no-op.
+    fn post_batch_commit(&self, _epoch: u64) {}
 }
 
 /// A deterministic in-memory queue of pre-built batches. The primary test source:

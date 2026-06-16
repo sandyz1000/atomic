@@ -329,6 +329,10 @@ impl WindowedEngine {
 }
 
 impl BatchEngine for WindowedEngine {
+    fn post_commit(&self, epoch: u64) {
+        self.source.post_batch_commit(epoch);
+    }
+
     fn process(&self, _epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
         let batches = self.source.next_batch(_epoch);
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();

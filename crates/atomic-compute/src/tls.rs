@@ -65,9 +65,9 @@ pub mod tls_impl {
     /// Build a `rustls::ServerConfig` for mutual TLS.
     ///
     /// - `cert_path`: PEM file containing the server certificate chain.
-    /// - `key_path`:  PEM file containing the server's PKCS#8 private key.
-    /// - `ca_path`:   PEM file containing the cluster CA certificate used to
-    ///                verify client (driver) certificates.
+    /// - `key_path`: PEM file containing the server's PKCS#8 private key.
+    /// - `ca_path`: PEM file containing the cluster CA certificate used to
+    ///   verify client (driver) certificates.
     pub fn make_server_config(
         cert_path: &Path,
         key_path: &Path,
@@ -92,9 +92,9 @@ pub mod tls_impl {
     /// Build a `rustls::ClientConfig` for mutual TLS.
     ///
     /// - `cert_path`: PEM file containing the client (driver) certificate chain.
-    /// - `key_path`:  PEM file containing the client's PKCS#8 private key.
-    /// - `ca_path`:   PEM file containing the cluster CA certificate used to
-    ///                verify server (worker) certificates.
+    /// - `key_path`: PEM file containing the client's PKCS#8 private key.
+    /// - `ca_path`: PEM file containing the cluster CA certificate used to
+    ///   verify server (worker) certificates.
     pub fn make_client_config(
         cert_path: &Path,
         key_path: &Path,

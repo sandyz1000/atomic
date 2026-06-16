@@ -55,6 +55,9 @@ pub enum ComputeError {
     #[error("configuration failure: {0}")]
     GetOrCreateConfig(&'static str),
 
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(#[from] crate::env::ConfigError),
+
     #[error("partitioner not set")]
     LackingPartitioner,
 

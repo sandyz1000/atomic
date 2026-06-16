@@ -126,6 +126,37 @@ impl StreamingContext {
         stream
     }
 
+    /// Create a Direct Kafka DStream using the pull-based Direct model (not receivers).
+    ///
+    /// Per batch the driver polls Kafka metadata for high-water marks, builds per-partition
+    /// offset ranges, and dispatches one-shot consume tasks to workers (or consumes locally).
+    ///
+    /// * `max_records_per_partition` — cap on records per Kafka partition per batch for
+    ///   backpressure. `None` uses the default (10 000).
+    ///
+    /// Requires the `kafka` feature.
+    #[cfg(feature = "kafka")]
+    pub fn direct_kafka_stream(
+        self: &Arc<Self>,
+        brokers: &str,
+        topics: &[&str],
+        max_records_per_partition: Option<usize>,
+    ) -> Arc<crate::dstream::kafka_direct::DirectKafkaInputDStream> {
+        let id = self.next_stream_id();
+        let max = max_records_per_partition.unwrap_or(10_000);
+        let stream = Arc::new(crate::dstream::kafka_direct::DirectKafkaInputDStream::new(
+            self.clone(),
+            id,
+            brokers,
+            topics,
+            max,
+        ));
+        self.graph
+            .lock()
+            .add_input_stream(stream.clone() as Arc<dyn InputStreamBase>);
+        stream
+    }
+
     /// Create a DStream that watches a local directory for new text files.
     pub fn text_file_stream(
         self: &Arc<Self>,

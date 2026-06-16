@@ -8,6 +8,9 @@ use crate::{
     rdd::{Rdd, RddBase},
 };
 
+/// A simple index-only split. Implements `Split` and `Clone` so it can be used
+/// directly as `Box<dyn Split>` wherever no extra split metadata is needed.
+#[derive(Clone)]
 pub struct SplitStruct {
     pub index: usize,
 }
@@ -18,6 +21,16 @@ pub trait Split: DynClone + Send {
 }
 
 dyn_clone::clone_trait_object!(Split);
+
+impl Split for SplitStruct {
+    fn get_index(&self) -> usize {
+        self.index
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct PrefLoc(u32);

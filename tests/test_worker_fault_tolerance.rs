@@ -149,7 +149,7 @@ async fn test_worker_tcp_removal() {
 
     // Submit will fail on TCP — scheduler should retry and eventually remove worker.
     // We use max_failures=3 so after 3 retries the worker is gone.
-    let result = sched.submit_native_task(&task).await;
+    let result = sched.submit_native_task(&task, None).await;
     assert!(
         result.is_err(),
         "expected error when worker is unreachable, got Ok"
@@ -225,7 +225,7 @@ async fn test_exponential_backoff() {
     );
 
     let start = Instant::now();
-    let _ = sched.submit_native_task(&task).await;
+    let _ = sched.submit_native_task(&task, None).await;
     let elapsed = start.elapsed();
 
     // Backoff: 100ms (attempt 0→1) + 200ms (attempt 1→2) = at least 300ms.

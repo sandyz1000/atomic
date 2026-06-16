@@ -9,6 +9,7 @@ python = []                                                    # enables TaskRun
 javascript = []                                                # enables TaskRuntime::JavaScript
 udf = ["python", "javascript"]
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile"]
+kafka = []                                                     # enables TaskAction::KafkaConsume
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }

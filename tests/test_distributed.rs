@@ -39,6 +39,35 @@ fn fault_tolerance_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration_fault_tolerance"))
 }
 
+fn cache_locality_bin() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration_cache_locality"))
+}
+
+fn named_partitioner_bin() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration_named_partitioner"))
+}
+
+fn sort_by_task_bin() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration_sort_by_task"))
+}
+
+/// Spawns the driver as a non-blocking child so the caller can interleave
+/// actions (e.g. killing a worker) while the driver process is still running.
+fn spawn_driver(bin: &std::path::Path, workers: &[u16]) -> Child {
+    let worker_list = workers
+        .iter()
+        .map(|p| format!("127.0.0.1:{p}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    Command::new(bin)
+        .args(["--driver", "--workers", &worker_list])
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn driver {}: {e}", bin.display()))
+}
+
 fn spawn_worker(bin: &std::path::Path, port: u16) -> Child {
     Command::new(bin)
         .args(["--worker", "--port", &port.to_string()])
@@ -246,4 +275,238 @@ fn distributed_fault_tolerance_one_dead_worker() {
         let n = v.as_i64().unwrap();
         assert!(n % 2 == 0, "doubled value {n} is not even");
     }
+}
+
+// ── Test 5: distributed cache locality ────────────────────────────────────────
+
+/// Builds a `value -> call_id` map from the `[[value, call_id], ...]` JSON array
+/// produced by `integration_cache_locality`.
+fn call_id_map(arr: &[serde_json::Value]) -> std::collections::HashMap<i64, i64> {
+    arr.iter()
+        .map(|pair| (pair[0].as_i64().unwrap(), pair[1].as_i64().unwrap()))
+        .collect()
+}
+
+/// With no worker failures, a cached RDD's second action must be served
+/// entirely from the holding workers' caches — every call id is unchanged.
+#[test]
+#[ignore = "requires pre-built integration binary and free TCP ports"]
+fn distributed_cache_no_recompute() {
+    let bin = cache_locality_bin();
+    let port_a = free_port();
+    let port_b = free_port();
+    let mut worker_a = spawn_worker(&bin, port_a);
+    let mut worker_b = spawn_worker(&bin, port_b);
+    wait_for_port(port_a, Duration::from_secs(10));
+    wait_for_port(port_b, Duration::from_secs(10));
+
+    let driver_out = run_driver(&bin, &[port_a, port_b]);
+    worker_a.kill().ok();
+    worker_a.wait().ok();
+    worker_b.kill().ok();
+    worker_b.wait().ok();
+
+    assert!(
+        driver_out.status.success(),
+        "cache_locality driver failed:\nstderr: {}",
+        String::from_utf8_lossy(&driver_out.stderr)
+    );
+
+    let out: serde_json::Value = serde_json::from_slice(&driver_out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from cache_locality: {e}\nstdout: {}",
+            String::from_utf8_lossy(&driver_out.stdout)
+        )
+    });
+
+    let first = call_id_map(out["first"].as_array().expect("first must be array"));
+    let second = call_id_map(out["second"].as_array().expect("second must be array"));
+    assert_eq!(first.len(), 4);
+    assert_eq!(
+        second, first,
+        "no worker died — every value must keep its call id (cache hit, no recompute)"
+    );
+}
+
+/// Killing a worker between the two actions must invalidate only the
+/// partitions it held: those get a new call id (recomputed on a survivor)
+/// while the surviving worker's own partitions keep their call id (cache hit).
+#[test]
+#[ignore = "requires pre-built integration binary and free TCP ports"]
+fn distributed_cache_recompute_on_worker_death() {
+    let bin = cache_locality_bin();
+    let port_a = free_port();
+    let port_b = free_port();
+    let mut worker_a = spawn_worker(&bin, port_a);
+    let mut worker_b = spawn_worker(&bin, port_b);
+    wait_for_port(port_a, Duration::from_secs(10));
+    wait_for_port(port_b, Duration::from_secs(10));
+
+    let driver = spawn_driver(&bin, &[port_a, port_b]);
+
+    // Let the first collect complete, then kill worker B mid-sleep so the
+    // second collect must recompute B's partitions on the survivor.
+    std::thread::sleep(Duration::from_millis(700));
+    worker_b.kill().ok();
+    worker_b.wait().ok();
+
+    let output = driver
+        .wait_with_output()
+        .expect("driver process did not exit");
+    worker_a.kill().ok();
+    worker_a.wait().ok();
+
+    assert!(
+        output.status.success(),
+        "cache_locality driver failed after worker death:\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let out: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from cache_locality: {e}\nstdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+
+    let first = call_id_map(out["first"].as_array().expect("first must be array"));
+    let second = call_id_map(out["second"].as_array().expect("second must be array"));
+    assert_eq!(first.len(), 4);
+    assert_eq!(
+        second.len(),
+        4,
+        "result must still be correct despite the dead worker"
+    );
+
+    let mut unchanged = 0;
+    let mut changed = 0;
+    for (k, v1) in &first {
+        let v2 = second
+            .get(k)
+            .unwrap_or_else(|| panic!("value {k} missing from second collect"));
+        if v1 == v2 {
+            unchanged += 1;
+        } else {
+            changed += 1;
+        }
+    }
+    assert!(
+        unchanged > 0,
+        "expected at least one partition served from cache on the surviving worker"
+    );
+    assert!(
+        changed > 0,
+        "expected at least one partition recomputed after its holder died"
+    );
+}
+
+// ── Test 6: distributed named partitioner ─────────────────────────────────────
+
+/// A `NamedPartitioner` must ship to the worker by name and be honored exactly:
+/// 3 output partitions, each containing only keys congruent to its index mod 3.
+#[test]
+#[ignore = "requires pre-built integration binary and free TCP ports"]
+fn distributed_named_partitioner_buckets() {
+    let port = free_port();
+    let bin = named_partitioner_bin();
+    let mut worker = spawn_worker(&bin, port);
+    wait_for_port(port, Duration::from_secs(10));
+
+    let driver_out = run_driver(&bin, &[port]);
+    worker.kill().ok();
+    worker.wait().ok();
+
+    assert!(
+        driver_out.status.success(),
+        "named_partitioner driver failed:\nstderr: {}",
+        String::from_utf8_lossy(&driver_out.stderr)
+    );
+
+    let out: serde_json::Value = serde_json::from_slice(&driver_out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from named_partitioner: {e}\nstdout: {}",
+            String::from_utf8_lossy(&driver_out.stdout)
+        )
+    });
+
+    let parts = out["partitions"]
+        .as_array()
+        .expect("partitions must be array");
+    assert_eq!(
+        parts.len(),
+        3,
+        "expected 3 output partitions — named partitioner must ship to the worker, not degrade to hash"
+    );
+    for (p, bucket) in parts.iter().enumerate() {
+        for pair in bucket.as_array().expect("bucket must be array") {
+            let k = pair[0].as_i64().unwrap();
+            assert_eq!(
+                k.rem_euclid(3) as usize,
+                p,
+                "key {k} landed in partition {p}, expected {}",
+                k.rem_euclid(3)
+            );
+        }
+    }
+}
+
+// ── Test 7: distributed sort_by_task ──────────────────────────────────────────
+
+/// `sort_by_task` on a non-pair RDD must produce globally-ordered, non-overlapping
+/// partitions across real worker processes with no client-side re-sort.
+#[test]
+#[ignore = "requires pre-built integration binary and free TCP ports"]
+fn distributed_sort_by_task_ordered() {
+    let port = free_port();
+    let bin = sort_by_task_bin();
+    let mut worker = spawn_worker(&bin, port);
+    wait_for_port(port, Duration::from_secs(10));
+
+    let driver_out = run_driver(&bin, &[port]);
+    worker.kill().ok();
+    worker.wait().ok();
+
+    assert!(
+        driver_out.status.success(),
+        "sort_by_task driver failed:\nstderr: {}",
+        String::from_utf8_lossy(&driver_out.stderr)
+    );
+
+    let out: serde_json::Value = serde_json::from_slice(&driver_out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from sort_by_task: {e}\nstdout: {}",
+            String::from_utf8_lossy(&driver_out.stdout)
+        )
+    });
+
+    let parts = out["partitions"]
+        .as_array()
+        .expect("partitions must be array");
+    let mut prev_max: Option<i64> = None;
+    let mut total = 0usize;
+    for part in parts {
+        let vals: Vec<i64> = part
+            .as_array()
+            .expect("partition must be array")
+            .iter()
+            .map(|v| v.as_i64().unwrap())
+            .collect();
+        total += vals.len();
+        for w in vals.windows(2) {
+            assert!(w[0] <= w[1], "partition not internally sorted: {vals:?}");
+        }
+        if let (Some(pm), Some(&first)) = (prev_max, vals.first()) {
+            assert!(
+                pm <= first,
+                "partition boundaries overlap: prev_max={pm} first={first}"
+            );
+        }
+        if let Some(&last) = vals.last() {
+            prev_max = Some(last);
+        }
+    }
+    assert_eq!(
+        total, 10,
+        "expected all 10 elements present across partitions"
+    );
 }

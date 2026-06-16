@@ -3,6 +3,7 @@ use bincode::Encode;
 use crate::aggregator::Aggregator;
 use crate::data::Data;
 use crate::distributed::{PipelineOp, WireEncode};
+use crate::error::BaseResult;
 // use crate::env;
 use crate::partitioner::Partitioner;
 use crate::rdd::RddBase;
@@ -152,7 +153,7 @@ pub struct ShuffleDependencyBox {
     ///
     /// Used by the driver in distributed mode to build the shuffle-map `TaskEnvelope`
     /// sent to workers. Captures the typed parent RDD so encoding is exact.
-    pub encode_partitions: Arc<dyn Fn() -> Result<Vec<Vec<u8>>, String> + Send + Sync>,
+    pub encode_partitions: Arc<dyn Fn() -> BaseResult<Vec<Vec<u8>>> + Send + Sync>,
     /// Pipeline ops that must run on workers *before* the ShuffleMap op.
     ///
     /// Non-empty when a staged pipeline (from `map_task`/`flat_map_task`) precedes
@@ -422,17 +423,14 @@ impl ShuffleDependencyBox {
         let cloned = Arc::clone(&dep);
 
         let enc_rdd = dep.rdd.clone();
-        let encode_partitions: Arc<dyn Fn() -> Result<Vec<Vec<u8>>, String> + Send + Sync> =
+        let encode_partitions: Arc<dyn Fn() -> BaseResult<Vec<Vec<u8>>> + Send + Sync> =
             Arc::new(move || {
                 enc_rdd
                     .splits()
                     .iter()
                     .map(|split| {
-                        let items: Vec<(K, V)> = enc_rdd
-                            .compute(split.clone())
-                            .map_err(|e| format!("encode partition: {e}"))?
-                            .collect();
-                        items.encode_wire().map_err(|e| format!("encode wire: {e}"))
+                        let items: Vec<(K, V)> = enc_rdd.compute(split.clone())?.collect();
+                        items.encode_wire()
                     })
                     .collect()
             });

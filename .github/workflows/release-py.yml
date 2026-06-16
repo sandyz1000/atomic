@@ -1,10 +1,7 @@
 name: Release — Python (PyPI)
 
 on:
-  push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+  workflow_dispatch: # disabled — re-enable by restoring push/tags triggers
 
 jobs:
   build-wheels:
@@ -18,10 +15,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-          - os: macos-latest
-            target: x86_64-apple-darwin
-          - os: macos-latest
-            target: aarch64-apple-darwin
 
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +67,7 @@ jobs:
       url: https://pypi.org/p/atomic
 
     permissions:
-      id-token: write  # required for trusted publishing (OIDC)
+      id-token: write # required for trusted publishing (OIDC)
 
     steps:
       - name: Download all wheel artifacts

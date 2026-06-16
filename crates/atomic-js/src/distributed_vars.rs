@@ -71,7 +71,8 @@ impl Accumulator {
         if let Some(f) = &self.merge_fn {
             *guard = f.call(guard.clone(), delta)?;
         } else {
-            *guard = json_add(guard.clone(), delta).map_err(napi::Error::from_reason)?;
+            *guard = json_add(guard.clone(), delta)
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
         }
         Ok(())
     }
@@ -99,7 +100,17 @@ impl Accumulator {
     }
 }
 
-fn json_add(a: JV, b: JV) -> std::result::Result<JV, String> {
+/// Errors from [`json_add`], the default `Accumulator.add` merge logic.
+#[derive(Debug, thiserror::Error)]
+enum JsonMergeError {
+    #[error("non-finite float")]
+    NonFiniteFloat,
+
+    #[error("incompatible accumulator types")]
+    IncompatibleTypes,
+}
+
+fn json_add(a: JV, b: JV) -> std::result::Result<JV, JsonMergeError> {
     match (a, b) {
         (JV::Number(x), JV::Number(y)) => {
             if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
@@ -107,7 +118,8 @@ fn json_add(a: JV, b: JV) -> std::result::Result<JV, String> {
             } else {
                 let xf = x.as_f64().unwrap_or(0.0);
                 let yf = y.as_f64().unwrap_or(0.0);
-                let n = serde_json::Number::from_f64(xf + yf).ok_or("non-finite float")?;
+                let n =
+                    serde_json::Number::from_f64(xf + yf).ok_or(JsonMergeError::NonFiniteFloat)?;
                 Ok(JV::Number(n))
             }
         }
@@ -123,7 +135,7 @@ fn json_add(a: JV, b: JV) -> std::result::Result<JV, String> {
             s.push_str(&t);
             Ok(JV::String(s))
         }
-        _ => Err("incompatible accumulator types".to_string()),
+        _ => Err(JsonMergeError::IncompatibleTypes),
     }
 }
 

@@ -79,7 +79,7 @@ impl PyAccumulator {
             *guard = pythonobj_to_json(py, &result)?;
         } else {
             *guard = json_add(guard.clone(), delta_val)
-                .map_err(pyo3::exceptions::PyValueError::new_err)?;
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         }
         Ok(())
     }
@@ -169,7 +169,20 @@ fn json_to_python(py: Python<'_>, val: serde_json::Value) -> PyResult<Py<PyAny>>
     }
 }
 
-fn json_add(a: serde_json::Value, b: serde_json::Value) -> Result<serde_json::Value, String> {
+/// Errors from [`json_add`], the default `Accumulator.add` merge logic.
+#[derive(Debug, thiserror::Error)]
+enum JsonMergeError {
+    #[error("non-finite float after add")]
+    NonFiniteFloat,
+
+    #[error("Accumulator.add: incompatible types (both must be numeric, list, or string)")]
+    IncompatibleTypes,
+}
+
+fn json_add(
+    a: serde_json::Value,
+    b: serde_json::Value,
+) -> Result<serde_json::Value, JsonMergeError> {
     match (a, b) {
         (serde_json::Value::Number(x), serde_json::Value::Number(y)) => {
             // Prefer integer; fall back to float.
@@ -179,7 +192,7 @@ fn json_add(a: serde_json::Value, b: serde_json::Value) -> Result<serde_json::Va
                 let xf = x.as_f64().unwrap_or(0.0);
                 let yf = y.as_f64().unwrap_or(0.0);
                 let n =
-                    serde_json::Number::from_f64(xf + yf).ok_or("non-finite float after add")?;
+                    serde_json::Number::from_f64(xf + yf).ok_or(JsonMergeError::NonFiniteFloat)?;
                 Ok(serde_json::Value::Number(n))
             }
         }
@@ -195,9 +208,6 @@ fn json_add(a: serde_json::Value, b: serde_json::Value) -> Result<serde_json::Va
             s.push_str(&t);
             Ok(serde_json::Value::String(s))
         }
-        _ => Err(
-            "Accumulator.add: incompatible types (both must be numeric, list, or string)"
-                .to_string(),
-        ),
+        _ => Err(JsonMergeError::IncompatibleTypes),
     }
 }

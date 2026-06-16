@@ -107,6 +107,7 @@ impl Context {
     /// For a worker process, use [`start_worker`] instead — it takes a `Config`
     /// and never returns.
     pub fn new_with_config(config: Config) -> ComputeResult<Arc<Self>> {
+        config.validate()?;
         match config.mode {
             DeploymentMode::Distributed => {
                 let ctx = Context::init_distributed_driver(config)?;
@@ -475,10 +476,23 @@ impl Context {
 
     /// Gracefully stop this context.
     ///
-    /// In distributed mode, sends a `ShutDownGracefully` signal to every registered worker.
-    /// Clears the global shuffle infrastructure so a new context can be started in the same
-    /// process.  In local mode this is a no-op (local threads finish naturally on drop).
+    /// In distributed mode, first waits (bounded by `config.drain_timeout_ms`) for
+    /// any in-flight tasks to finish, then sends a `ShutDownGracefully` signal to
+    /// every registered worker. Clears the global shuffle infrastructure so a new
+    /// context can be started in the same process. In local mode this is a no-op
+    /// (local threads finish naturally on drop).
     pub fn stop(&self) {
+        if let Schedulers::Distributed(sched) = &self.scheduler {
+            let timeout = Duration::from_millis(self.config.drain_timeout_ms);
+            if !sched.drain(timeout, Duration::from_millis(50)) {
+                log::warn!(
+                    "Context::stop: {} task(s) still in-flight after {:?} drain timeout; \
+                     proceeding with shutdown",
+                    sched.total_inflight(),
+                    timeout,
+                );
+            }
+        }
         if !self.config.workers.is_empty() {
             Context::drop_executors(&self.config.workers);
         }
@@ -500,6 +514,22 @@ impl Context {
         Vec<T>: WireDecode,
     {
         use crate::rdd::TypedRdd;
+        // If the RDD carries a pre-built staged pipeline (e.g. DirectKafkaBatchRdd) and
+        // we are in distributed mode, dispatch it directly instead of wrapping in TypedRdd
+        // (which would create staged=None and fall back to local execution).
+        if matches!(self.scheduler, Schedulers::Distributed(_))
+            && let Some((partitions, ops)) = rdd.extract_staged_pipeline()
+        {
+            let raw = self.dispatch_pipeline(partitions, ops)?;
+            let mut out: Vec<T> = Vec::new();
+            for bytes in raw {
+                let decoded = Vec::<T>::decode_wire(&bytes).map_err(|e| {
+                    ComputeError::InvalidPayload(format!("collect_rdd decode: {e}"))
+                })?;
+                out.extend(decoded);
+            }
+            return Ok(out);
+        }
         Ok(TypedRdd::new(rdd, self.clone()).collect()?)
     }
 
@@ -582,12 +612,18 @@ impl Context {
 
     /// Merge incoming accumulator deltas from a completed task result into driver-side values.
     /// Called by the scheduler after each successful task.
+    ///
+    /// A delta that fails to decode (stale worker binary, transport corruption) is logged
+    /// and dropped rather than panicking the driver — the accumulator simply keeps its
+    /// last-known-good value instead of crashing the whole job.
     pub fn merge_accumulator_deltas(&self, deltas: &[(usize, Vec<u8>)]) {
         for (id, delta_bytes) in deltas {
             if let Some(mut entry) = self.accumulator_store.get_mut(id) {
                 let merge_fn = entry.value().1.clone();
-                let new_bytes = merge_fn(entry.value().0.clone(), delta_bytes.clone());
-                entry.value_mut().0 = new_bytes;
+                match merge_fn(entry.value().0.clone(), delta_bytes.clone()) {
+                    Ok(new_bytes) => entry.value_mut().0 = new_bytes,
+                    Err(e) => log::error!("accumulator id={id}: dropping bad delta: {e}"),
+                }
             }
         }
     }
@@ -997,8 +1033,8 @@ impl Context {
             if let Dependency::Shuffle(shuffle_dep) = dep {
                 // Encode the parent RDD partitions (the shuffle map input).
                 // The typed closure on ShuffleDependencyBox rkyv-encodes Vec<(K,V)> per partition.
-                let parent_partitions =
-                    (shuffle_dep.encode_partitions)().map_err(ComputeError::InvalidPayload)?;
+                let parent_partitions = (shuffle_dep.encode_partitions)()
+                    .map_err(|e| ComputeError::InvalidPayload(e.to_string()))?;
 
                 // Build the shuffle-map op. The payload carries the dispatch key (for the
                 // SHUFFLE_MAP_REGISTRY lookup) plus the serializable partitioner spec, so the
@@ -1112,7 +1148,8 @@ pub fn start_worker(config: Config) -> ! {
             "start_worker called without a WorkerConfig — use Config::worker(ip, port)",
         ))
         .and_then(|(port, max_tasks)| {
-            let executor = Executor::new(port, max_tasks);
+            #[cfg_attr(not(feature = "tls"), allow(unused_mut))]
+            let mut executor = Executor::new(port, max_tasks);
             // If TLS cert/key/CA are configured, upgrade to mutual TLS.
             #[cfg(feature = "tls")]
             if crate::tls::tls_is_configured(

@@ -45,6 +45,19 @@ pub trait RddBase: Send + Sync {
     fn is_pinned(&self) -> bool {
         false
     }
+
+    /// Extract a pre-built staged pipeline carried by this RDD, if any.
+    ///
+    /// `TypedRdd` overrides this to propagate its `StagedPipeline` through the
+    /// streaming layer (which receives `Arc<dyn Rdd<Item=T>>`). All other RDDs
+    /// return `None`.
+    ///
+    /// Returns `(source_partition_bytes, ops)` when present.
+    fn extract_staged_pipeline(
+        &self,
+    ) -> Option<(Vec<Vec<u8>>, Vec<crate::distributed::PipelineOp>)> {
+        None
+    }
 }
 
 // Rdd containing methods associated with processing

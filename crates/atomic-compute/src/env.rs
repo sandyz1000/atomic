@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::{Handle, Runtime};
 
 pub const THREAD_PREFIX: &str = "_ATOMIC";
+/// Default bound (ms) for `Context::stop()` to wait for in-flight distributed
+/// tasks to drain before proceeding with shutdown.
+pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 30_000;
 static ASYNC_RT: Lazy<Option<Runtime>> = Lazy::new(Env::build_async_executor);
 
 /// Dedicated, process-lifetime runtime that hosts the shuffle HTTP server and its
@@ -208,6 +211,33 @@ pub struct Config {
     /// bucket per reduce partition. `None` (default) falls back to the
     /// `ATOMIC_SORT_SHUFFLE_THRESHOLD` env var, otherwise 200.
     pub sort_shuffle_threshold: Option<usize>,
+    /// Bounded wait (ms) for in-flight distributed tasks to finish when
+    /// `Context::stop()` is called. Default: 30000 (30s). The shutdown proceeds
+    /// after the timeout regardless — workers are long-running daemons and an
+    /// abandoned task is simply recomputed on the next job.
+    pub drain_timeout_ms: u64,
+}
+
+/// Errors raised by [`Config::validate`].
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("worker config requires a non-zero listening port")]
+    ZeroWorkerPort,
+
+    #[error(
+        "distributed driver requires at least one worker (`workers`) or \
+         a `worker_dns` discovery target"
+    )]
+    NoWorkers,
+
+    #[error("TLS requires tls_ca_cert, tls_cert, and tls_key together; only {0} set")]
+    PartialTls(String),
+
+    #[error("{name} does not exist or is not a file: {path}")]
+    TlsFileMissing { name: String, path: String },
+
+    #[error("{0} must not be 0")]
+    ZeroPort(String),
 }
 
 impl Config {
@@ -233,6 +263,7 @@ impl Config {
             tls_key: None,
             register_port: None,
             sort_shuffle_threshold: None,
+            drain_timeout_ms: DEFAULT_DRAIN_TIMEOUT_MS,
         }
     }
 
@@ -258,6 +289,7 @@ impl Config {
             tls_key: None,
             register_port: None,
             sort_shuffle_threshold: None,
+            drain_timeout_ms: DEFAULT_DRAIN_TIMEOUT_MS,
         }
     }
 
@@ -283,6 +315,7 @@ impl Config {
             tls_key: None,
             register_port: None,
             sort_shuffle_threshold: None,
+            drain_timeout_ms: DEFAULT_DRAIN_TIMEOUT_MS,
         }
     }
 
@@ -402,6 +435,11 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<usize>().ok());
 
+        let drain_timeout_ms = std::env::var(format!("{PREFIX}DRAIN_TIMEOUT_MS"))
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_DRAIN_TIMEOUT_MS);
+
         // In env-var mode, workers come from hosts.conf — resolved by the caller.
         Config {
             local_ip,
@@ -426,6 +464,7 @@ impl Config {
             tls_key,
             register_port,
             sort_shuffle_threshold,
+            drain_timeout_ms,
         }
     }
 
@@ -435,6 +474,61 @@ impl Config {
 
     pub fn is_distributed(&self) -> bool {
         self.mode == DeploymentMode::Distributed
+    }
+
+    /// Validate configuration invariants before `Context::new_with_config` acts on them.
+    ///
+    /// Catches misconfiguration up front (no reachable workers configured, a worker
+    /// with no listening port, a partial TLS cert/key/CA triple, a TLS file that
+    /// doesn't exist) instead of failing deep inside connection or handshake code
+    /// with a less direct error.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.mode == DeploymentMode::Distributed {
+            if let Some(worker) = &self.worker {
+                if worker.port == 0 {
+                    return Err(ConfigError::ZeroWorkerPort);
+                }
+            } else if self.workers.is_empty() && self.worker_dns.is_none() {
+                return Err(ConfigError::NoWorkers);
+            }
+        }
+
+        let tls_fields = [
+            ("tls_ca_cert", &self.tls_ca_cert),
+            ("tls_cert", &self.tls_cert),
+            ("tls_key", &self.tls_key),
+        ];
+        let tls_set: Vec<&str> = tls_fields
+            .iter()
+            .filter(|(_, v)| v.is_some())
+            .map(|(name, _)| *name)
+            .collect();
+        if !tls_set.is_empty() && tls_set.len() < tls_fields.len() {
+            return Err(ConfigError::PartialTls(tls_set.join(", ")));
+        }
+        for (name, path) in tls_fields
+            .iter()
+            .filter_map(|(n, v)| v.as_ref().map(|p| (n, p)))
+        {
+            if !path.is_file() {
+                return Err(ConfigError::TlsFileMissing {
+                    name: name.to_string(),
+                    path: path.display().to_string(),
+                });
+            }
+        }
+
+        for (name, port) in [
+            ("shuffle_port", self.shuffle_port),
+            ("metrics_port", self.metrics_port),
+            ("register_port", self.register_port),
+        ] {
+            if port == Some(0) {
+                return Err(ConfigError::ZeroPort(name.to_string()));
+            }
+        }
+
+        Ok(())
     }
 
     /// Return a `ConfigBuilder` seeded from `Config::local()`.
@@ -542,6 +636,12 @@ impl ConfigBuilder {
         self
     }
 
+    /// Bounded wait (ms) for in-flight distributed tasks to drain on `Context::stop()`.
+    pub fn drain_timeout_ms(mut self, ms: u64) -> Self {
+        self.inner.drain_timeout_ms = ms;
+        self
+    }
+
     /// Consume the builder and return the final `Config`.
     pub fn build(self) -> Config {
         self.inner
@@ -569,7 +669,8 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
         return Ok(());
     }
 
-    let shuffle_config = ShuffleConfig::new(
+    #[cfg_attr(not(feature = "tls"), allow(unused_mut))]
+    let mut shuffle_config = ShuffleConfig::new(
         config.local_ip,
         config.work_dir.clone(),
         config.shuffle_port,
@@ -618,20 +719,72 @@ pub fn init_shuffle(config: &Config) -> Result<(), Box<dyn std::error::Error + S
     // When TLS is active, build and store a client-side TLS connector so that
     // ShuffleFetcher can fetch from https:// shuffle server URIs.
     #[cfg(feature = "tls")]
-    if shuffle_config.tls_enabled() {
-        if let (Some(cert), Some(key), Some(ca)) =
+    if shuffle_config.tls_enabled()
+        && let (Some(cert), Some(key), Some(ca)) =
             (&config.tls_cert, &config.tls_key, &config.tls_ca_cert)
-        {
-            use crate::tls::tls_impl::{TlsConnector, make_client_config};
-            match make_client_config(cert, key, ca) {
-                Ok(client_cfg) => {
-                    let connector = Arc::new(TlsConnector::from(client_cfg));
-                    atomic_data::env::set_shuffle_tls_connector(connector);
-                }
-                Err(e) => log::warn!("Failed to build shuffle TLS connector: {e}"),
+    {
+        use crate::tls::tls_impl::{TlsConnector, make_client_config};
+        match make_client_config(cert, key, ca) {
+            Ok(client_cfg) => {
+                let connector = Arc::new(TlsConnector::from(client_cfg));
+                atomic_data::env::set_shuffle_tls_connector(connector);
             }
+            Err(e) => log::warn!("Failed to build shuffle TLS connector: {e}"),
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod config_validate_tests {
+    use super::*;
+
+    #[test]
+    fn local_config_is_valid() {
+        assert!(Config::local().validate().is_ok());
+    }
+
+    #[test]
+    fn distributed_driver_needs_workers() {
+        let config = Config::distributed_driver(Ipv4Addr::LOCALHOST, vec![]);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn distributed_driver_with_dns_is_valid() {
+        let mut config = Config::distributed_driver(Ipv4Addr::LOCALHOST, vec![]);
+        config.worker_dns = Some(("workers.svc".to_string(), 10001));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn worker_rejects_zero_port() {
+        let mut config = Config::worker(Ipv4Addr::LOCALHOST, 10001);
+        config.worker.as_mut().unwrap().port = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_metrics_port() {
+        let mut config = Config::local();
+        config.metrics_port = Some(0);
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_partial_tls_triple() {
+        let mut config = Config::local();
+        config.tls_cert = Some(PathBuf::from("/tmp/does-not-matter.pem"));
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_missing_tls_file() {
+        let mut config = Config::local();
+        config.tls_ca_cert = Some(PathBuf::from("/nonexistent/ca.pem"));
+        config.tls_cert = Some(PathBuf::from("/nonexistent/cert.pem"));
+        config.tls_key = Some(PathBuf::from("/nonexistent/key.pem"));
+        assert!(config.validate().is_err());
+    }
 }

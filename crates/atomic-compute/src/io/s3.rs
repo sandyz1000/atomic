@@ -33,6 +33,20 @@ pub mod s3_impl {
         Client::new(&cfg)
     }
 
+    /// Errors from [`write_text`]. The other functions in this module (`list_keys`,
+    /// `read_lines`) are best-effort and log-and-degrade instead of returning `Result`,
+    /// matching their existing fallback-to-empty-result contract.
+    #[derive(Debug, thiserror::Error)]
+    pub enum S3Error {
+        #[error("S3 put_object error for s3://{bucket}/{key}: {source}")]
+        PutObject {
+            bucket: String,
+            key: String,
+            #[source]
+            source: Box<dyn std::error::Error + Send + Sync>,
+        },
+    }
+
     /// List all object keys under `bucket/prefix`. Returns at most 1000 keys per page
     /// (AWS default); for large prefixes this paginates automatically.
     pub fn list_keys(bucket: &str, prefix: &str) -> Vec<String> {
@@ -92,7 +106,7 @@ pub mod s3_impl {
     }
 
     /// Upload text content to `s3://bucket/key`.
-    pub fn write_text(bucket: &str, key: &str, content: String) -> Result<(), String> {
+    pub fn write_text(bucket: &str, key: &str, content: String) -> Result<(), S3Error> {
         let bucket = bucket.to_owned();
         let key = key.to_owned();
         run_sync(async move {
@@ -104,7 +118,11 @@ pub mod s3_impl {
                 .body(content.into_bytes().into())
                 .send()
                 .await
-                .map_err(|e| format!("S3 put_object error for s3://{bucket}/{key}: {e}"))
+                .map_err(|e| S3Error::PutObject {
+                    bucket: bucket.clone(),
+                    key: key.clone(),
+                    source: Box::new(e),
+                })
                 .map(|_| ())
         })
     }

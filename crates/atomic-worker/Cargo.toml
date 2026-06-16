@@ -21,3 +21,4 @@ atomic-compute = { workspace = true, features = ["embedded-runtime"] }
 tokio = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
+clap = { workspace = true }

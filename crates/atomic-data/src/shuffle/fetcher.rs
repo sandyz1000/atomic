@@ -231,16 +231,14 @@ impl ShuffleFetcher {
         // When TLS is compiled in and the URI scheme is https, use the global
         // TLS connector (set by init_shuffle when TLS is configured).
         #[cfg(feature = "tls")]
-        if is_https {
-            if let Some(connector) = crate::env::get_shuffle_tls_connector() {
-                let domain = rustls::pki_types::ServerName::try_from(host.to_owned())
-                    .map_err(|_| ShuffleError::FailedFetchOp)?;
-                let tls_stream = connector
-                    .connect(domain, stream)
-                    .await
-                    .map_err(|_| ShuffleError::FailedFetchOp)?;
-                return Self::do_http_request(TokioIo::new(tls_stream), uri).await;
-            }
+        if is_https && let Some(connector) = crate::env::get_shuffle_tls_connector() {
+            let domain = rustls::pki_types::ServerName::try_from(host.to_owned())
+                .map_err(|_| ShuffleError::FailedFetchOp)?;
+            let tls_stream = connector
+                .connect(domain, stream)
+                .await
+                .map_err(|_| ShuffleError::FailedFetchOp)?;
+            return Self::do_http_request(TokioIo::new(tls_stream), uri).await;
         }
 
         Self::do_http_request(TokioIo::new(stream), uri).await

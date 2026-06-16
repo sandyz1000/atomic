@@ -69,6 +69,21 @@ let stream = ssc.socket_text_stream("localhost", 9999);
 
 Start a test server: `nc -lk 9999`
 
+### `KafkaInputDStream` — Kafka topic consumer (`kafka` feature)
+
+Requires the `kafka` feature (vendored librdkafka). Polls one or more Kafka topics in a background thread; each batch drains the buffer into a `RDD<String>` of raw message payloads. Offsets are committed by the consumer group (auto-commit, at-least-once).
+
+```rust
+// Cargo.toml: atomic-streaming = { ..., features = ["kafka"] }
+
+let stream = ssc.kafka_stream("localhost:9092", "my-group", &["events"]);
+ssc.foreach_rdd(stream, |rdd, batch_time_ms| {
+    // rdd is RDD<String> of raw Kafka message payloads
+    let count = rdd.count().unwrap_or(0);
+    println!("batch {batch_time_ms}: {count} Kafka messages");
+});
+```
+
 ### `FileInputDStream` — directory watcher
 
 Scans a directory each batch and returns lines from files modified since the
@@ -89,12 +104,12 @@ Register them before calling `ssc.start()`.
 
 These wrap the parent RDD in the corresponding `atomic-compute` RDD type each batch:
 
-| Method | Description |
-| --- | --- |
-| `MappedDStream::new(id, parent, f)` | Apply `f` to each element |
-| `FlatMappedDStream::new(id, parent, f)` | Apply `f` and flatten |
+| Method                                   | Description                               |
+| ---------------------------------------- | ----------------------------------------- |
+| `MappedDStream::new(id, parent, f)`      | Apply `f` to each element                 |
+| `FlatMappedDStream::new(id, parent, f)`  | Apply `f` and flatten                     |
 | `FilteredDStream::new(id, parent, pred)` | Keep elements where `pred` returns `true` |
-| `TransformedDStream::new(id, parent, f)` | Apply an arbitrary `Rdd → Rdd` function |
+| `TransformedDStream::new(id, parent, f)` | Apply an arbitrary `Rdd → Rdd` function   |
 
 ### Window
 
@@ -204,11 +219,12 @@ ssc.await_termination_or_timeout(Duration::from_secs(60))?; // with timeout
 
 ## Known limitations
 
-- **No distributed receivers.** `ReceiverTracker` is a local stub; Kafka and
-  Kinesis sources are not implemented.
+- **Driver-local sources.** All input sources (socket, file, Kafka) run a background thread in the driver process. Distributed receiver placement (running consumers on worker nodes) depends on distributed streaming execution, which is not yet implemented.
 - **Local execution only.** All streaming computation runs on the driver's
   `Arc<Context>`. Distributed worker dispatch for streaming stages is not wired.
-- **No event-time watermarking.** All windowing is processing-time based.
+- **No event-time watermarking.** All windowing is processing-time based. For
+  event-time windows with watermark and late-data handling, use `atomic-structured`.
+- **At-least-once delivery.** Kafka offsets are auto-committed; exactly-once requires idempotent sinks or transactional producers (not implemented).
 
 ---
 

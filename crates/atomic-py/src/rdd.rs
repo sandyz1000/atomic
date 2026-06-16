@@ -1107,7 +1107,7 @@ impl PyRdd {
                 .collect();
             let key = format!("{}/part-0", s3uri.key.trim_end_matches('/'));
             write_text(&s3uri.bucket, &key, content)
-                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
+                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
             return Ok(());
         }
         #[cfg(not(feature = "s3"))]

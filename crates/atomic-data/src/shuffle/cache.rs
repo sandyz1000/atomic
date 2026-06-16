@@ -2,6 +2,8 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::error::{BaseError, BaseResult};
+
 /// Reserved `reduce_id` sentinel for the consolidated DATA blob of the sort-shuffle layout.
 /// A map task writing the consolidated layout stores its single data blob under
 /// `(shuffle_id, map_id, SHUFFLE_DATA_KEY)`. Never used as a real reduce-partition id.
@@ -81,7 +83,7 @@ pub fn write_consolidated(
     shuffle_id: usize,
     map_id: usize,
     encoded_buckets: &[Vec<u8>],
-) -> Result<(), String> {
+) -> BaseResult<()> {
     let mut data = Vec::new();
     let mut index: Vec<u64> = Vec::with_capacity(encoded_buckets.len() + 1);
     index.push(0);
@@ -90,7 +92,7 @@ pub fn write_consolidated(
         index.push(data.len() as u64);
     }
     let index_bytes = bincode::encode_to_vec(&index, bincode::config::standard())
-        .map_err(|e| format!("write_consolidated: encode index: {e}"))?;
+        .map_err(|e| BaseError::Other(format!("write_consolidated: encode index: {e}")))?;
     cache.insert((shuffle_id, map_id, SHUFFLE_DATA_KEY), data);
     cache.insert((shuffle_id, map_id, SHUFFLE_INDEX_KEY), index_bytes);
     Ok(())

@@ -57,7 +57,7 @@ pub enum CacheDispatch {
     Serve {
         rdd_id: usize,
         post_ops: Vec<PipelineOp>,
-        locs: Vec<Ipv4Addr>,
+        locs: Vec<SocketAddrV4>,
     },
 }
 
@@ -98,6 +98,13 @@ pub struct DistributedScheduler {
     /// Registered worker endpoints, round-robined for task dispatch.
     server_uris: Arc<Mutex<VecDeque<SocketAddrV4>>>,
 
+    /// Per-RDD cached partition holders, keyed by full worker endpoint (host **and**
+    /// port). Distinct from `Mutators.cache_locs` (host-only `Ipv4Addr`, consumed only
+    /// by the legacy/unused `get_preferred_locs` DAG path) so that cache-locality
+    /// dispatch is correct when multiple workers share a host IP (e.g. local
+    /// multi-worker test clusters, or co-located pods in production).
+    cache_endpoints: Arc<DashMap<usize, Vec<Vec<SocketAddrV4>>>>,
+
     scheduler_lock: Arc<Mutex<bool>>,
     live_listener_bus: LiveListenerBus,
 }
@@ -127,6 +134,7 @@ impl DistributedScheduler {
             taskid_to_slaveid: Arc::new(DashMap::new()),
             job_tasks: Arc::new(DashMap::new()),
             server_uris: Arc::new(Mutex::new(VecDeque::new())),
+            cache_endpoints: Arc::new(DashMap::new()),
             scheduler_lock: Arc::new(Mutex::new(false)),
             live_listener_bus,
             job_cancel_tokens: Arc::new(DashMap::new()),
@@ -154,6 +162,30 @@ impl DistributedScheduler {
     pub fn with_driver_fingerprint(mut self, fp: u64) -> Self {
         self.driver_fingerprint = fp;
         self
+    }
+
+    /// Total number of tasks currently dispatched to workers and not yet completed.
+    pub fn total_inflight(&self) -> i64 {
+        self.inflight
+            .iter()
+            .map(|e| e.value().load(Ordering::SeqCst) as i64)
+            .sum()
+    }
+
+    /// Block (with a bounded timeout) until no tasks are in-flight, polling every
+    /// `poll_interval`. Returns `true` if drained, `false` if the timeout elapsed
+    /// with tasks still outstanding — callers proceed with shutdown regardless,
+    /// since workers are long-running daemons and an abandoned task is simply
+    /// recomputed on the next job.
+    pub fn drain(&self, timeout: Duration, poll_interval: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.total_inflight() > 0 {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(poll_interval);
+        }
+        true
     }
 
     /// Enable speculative execution with the given multiplier.
@@ -250,11 +282,11 @@ impl DistributedScheduler {
         let TaskAction::Cache { rdd_id } = ops[idx].action else {
             return CacheDispatch::Recompute;
         };
-        let Some(entry) = self.mutators.cache_locs.get(&rdd_id) else {
+        let Some(entry) = self.cache_endpoints.get(&rdd_id) else {
             return CacheDispatch::Recompute;
         };
         // Every partition must have at least one holding worker.
-        let locs: Vec<Ipv4Addr> = (0..num_partitions)
+        let locs: Vec<SocketAddrV4> = (0..num_partitions)
             .map(|p| entry.get(p).and_then(|v| v.first().copied()))
             .collect::<Option<Vec<_>>>()
             .map_or(Vec::new(), |v| v);
@@ -268,39 +300,39 @@ impl DistributedScheduler {
         }
     }
 
-    /// A registered worker whose IP is `ip` (cache locality), or the next
-    /// capacity-based worker if none matches (e.g. the holder went away).
-    fn pick_preferred_worker(&self, ip: Ipv4Addr) -> LibResult<SocketAddrV4> {
+    /// The registered worker at `endpoint` (exact host **and** port match for cache
+    /// locality), or the next capacity-based worker if it's gone (e.g. the holder died).
+    fn pick_preferred_worker(&self, endpoint: SocketAddrV4) -> LibResult<SocketAddrV4> {
         {
             let servers = self.server_uris.lock();
-            if let Some(addr) = servers.iter().find(|a| *a.ip() == ip).copied() {
+            if let Some(addr) = servers.iter().find(|a| **a == endpoint).copied() {
                 return Ok(addr);
             }
         }
         self.next_executor_with_capacity()
     }
 
-    /// Record that `ip` now holds the given `(rdd_id, partition)` cached partitions,
-    /// so `get_preferred_locs` can co-locate later tasks with the cache.
-    pub fn register_cache_locs(&self, cached: &[(usize, usize)], ip: Ipv4Addr) {
+    /// Record that `endpoint` now holds the given `(rdd_id, partition)` cached
+    /// partitions, so `plan_cache_dispatch` can pin later reads to it.
+    pub fn register_cache_locs(&self, cached: &[(usize, usize)], endpoint: SocketAddrV4) {
         for &(rdd_id, part) in cached {
-            let mut entry = self.mutators.cache_locs.entry(rdd_id).or_default();
+            let mut entry = self.cache_endpoints.entry(rdd_id).or_default();
             if entry.len() <= part {
                 entry.resize(part + 1, Vec::new());
             }
-            if !entry[part].contains(&ip) {
-                entry[part].push(ip);
+            if !entry[part].contains(&endpoint) {
+                entry[part].push(endpoint);
             }
         }
     }
 
-    /// Forget every cache location held by `ip` — the worker is gone, so its cached
-    /// partitions no longer exist. Affected partitions lose their holder, so
+    /// Forget every cache location held by `endpoint` — the worker is gone, so its
+    /// cached partitions no longer exist. Affected partitions lose their holder, so
     /// `plan_cache_dispatch` falls back to `Recompute` for them.
-    fn invalidate_cache_for_host(&self, ip: Ipv4Addr) {
-        for mut entry in self.mutators.cache_locs.iter_mut() {
+    fn invalidate_cache_for_worker(&self, endpoint: SocketAddrV4) {
+        for mut entry in self.cache_endpoints.iter_mut() {
             for locs in entry.value_mut().iter_mut() {
-                locs.retain(|a| *a != ip);
+                locs.retain(|a| *a != endpoint);
             }
         }
     }
@@ -308,7 +340,7 @@ impl DistributedScheduler {
     /// Forget all cache locations for `rdd_id` (used by `unpersist`); the next job
     /// over it recomputes.
     pub fn invalidate_rdd_cache(&self, rdd_id: usize) {
-        self.mutators.cache_locs.remove(&rdd_id);
+        self.cache_endpoints.remove(&rdd_id);
     }
 
     /// Remove a worker from the active pool and clean up its state.
@@ -319,7 +351,7 @@ impl DistributedScheduler {
         self.worker_failures.remove(&endpoint);
         // Cached partitions on the dead worker are gone — forget their locations so
         // the next job recomputes them instead of dispatching a doomed cache read.
-        self.invalidate_cache_for_host(*endpoint.ip());
+        self.invalidate_cache_for_worker(endpoint);
         // Clear any stale shuffle-map outputs from this worker so failed
         // shuffle stages can be re-submitted on surviving workers.
         if let Some(tracker) = atomic_data::env::get_map_output_tracker() {
@@ -417,9 +449,15 @@ impl DistributedScheduler {
     /// Unified capability check. For regular ops, `cap` is the `op_id`.
     /// For shuffle ops, `cap` is `"shuffle:<shuffle_key>"`.
     ///
-    /// An empty `registered_ops` list means "accept all" for backwards compatibility
-    /// with workers that predate capability advertising.
+    /// An empty `cap` means the op (e.g. `TaskAction::Cache`) is handled by the
+    /// scheduler/worker runtime directly and never looked up in `TASK_REGISTRY`,
+    /// so it requires no capability. An empty `registered_ops` list means "accept
+    /// all" for backwards compatibility with workers that predate capability
+    /// advertising.
     fn worker_has_capability(&self, endpoint: &SocketAddrV4, cap: &str) -> bool {
+        if cap.is_empty() {
+            return true;
+        }
         self.worker_capabilities
             .get(endpoint)
             .map(|c| c.registered_ops.is_empty() || c.registered_ops.iter().any(|o| o == cap))
@@ -429,12 +467,20 @@ impl DistributedScheduler {
     /// Resolve the required capability string for a pipeline op.
     ///
     /// Regular ops use their `op_id`. `ShuffleMap` ops use `"shuffle:<key>"` where
-    /// `<key>` is the stringify-based type key embedded in the op payload.
+    /// `<key>` is the stringify-based type key — the first field of the
+    /// bincode-encoded `ShuffleMapPayload` (`atomic-compute`'s `shuffle_map.rs`).
+    /// `atomic-scheduler` has no dependency on that struct, so it decodes only the
+    /// leading `String` field directly; bincode writes struct fields back-to-back
+    /// with no struct-level framing, so this is byte-identical to decoding the
+    /// full struct and reading `.type_id`.
     fn required_capability(op: &PipelineOp) -> String {
         use atomic_data::distributed::TaskAction;
         match &op.action {
             TaskAction::ShuffleMap { .. } => {
-                let key = std::str::from_utf8(&op.payload).unwrap_or("<invalid-utf8>");
+                let key: String =
+                    bincode::decode_from_slice(&op.payload, bincode::config::standard())
+                        .map(|(s, _)| s)
+                        .unwrap_or_else(|_| "<invalid-payload>".to_string());
                 format!("shuffle:{key}")
             }
             _ => op.op_id.clone(),
@@ -451,14 +497,14 @@ impl DistributedScheduler {
     pub async fn submit_native_task(
         &self,
         task: &TaskEnvelope,
-        preferred: Option<Ipv4Addr>,
+        preferred: Option<SocketAddrV4>,
     ) -> LibResult<(TaskResultEnvelope, SocketAddrV4)> {
         let mut last_err = None;
         'retry: for attempt in 0..=self.max_failures {
             // First attempt honors the locality hint (the worker holding a cached
             // partition); retries fall back to capacity-based round-robin.
             let target = match (attempt, preferred) {
-                (0, Some(ip)) => self.pick_preferred_worker(ip)?,
+                (0, Some(endpoint)) => self.pick_preferred_worker(endpoint)?,
                 _ => self.next_executor_with_capacity()?,
             };
 
@@ -614,13 +660,26 @@ impl DistributedScheduler {
         // If this pipeline's cached RDD is already materialized on workers, serve it
         // from cache (pinned to holders) instead of recomputing.
         let plan = self.plan_cache_dispatch(&ops, num_partitions);
-        let cache_holder_ips: Arc<Vec<Option<Ipv4Addr>>> = Arc::new(match &plan {
-            CacheDispatch::Serve { locs, .. } => locs.iter().map(|ip| Some(*ip)).collect(),
-            CacheDispatch::Recompute => vec![None; num_partitions],
-        });
+        let cache_holder_ips: Vec<Arc<Mutex<Option<SocketAddrV4>>>> = match &plan {
+            CacheDispatch::Serve { locs, .. } => locs
+                .iter()
+                .map(|addr| Arc::new(Mutex::new(Some(*addr))))
+                .collect(),
+            CacheDispatch::Recompute => (0..num_partitions)
+                .map(|_| Arc::new(Mutex::new(None)))
+                .collect(),
+        };
+
+        // For cache-serve plans, also build the full recompute envelope so that a
+        // `CacheMiss` response (LRU eviction on the holder) can fall back to recompute
+        // without failing the job. `None` for Recompute plans (no fallback needed).
+        struct PartitionTask {
+            primary: TaskEnvelope,
+            fallback: Option<TaskEnvelope>,
+        }
 
         // Build one TaskEnvelope per partition and register with job tracking.
-        let tasks: Vec<TaskEnvelope> = partitions
+        let tasks: Vec<PartitionTask> = partitions
             .into_iter()
             .enumerate()
             .map(|(partition_id, partition_data)| {
@@ -630,32 +689,56 @@ impl DistributedScheduler {
                 self.taskid_to_jobid.insert(task_key.clone(), run_id);
                 self.job_tasks.entry(run_id).or_default().insert(task_key);
                 let trace = format!("native-pipeline-{}-{}", partition_id, pipeline_label);
-                let env = match &plan {
+                match &plan {
                     CacheDispatch::Serve {
                         rdd_id, post_ops, ..
-                    } => TaskEnvelope::new(
-                        run_id,
-                        stage_id,
-                        task_id,
-                        attempt_id,
-                        partition_id,
-                        trace,
-                        post_ops.clone(),
-                        Vec::new(),
-                    )
-                    .with_cache_source(*rdd_id),
-                    CacheDispatch::Recompute => TaskEnvelope::new(
-                        run_id,
-                        stage_id,
-                        task_id,
-                        attempt_id,
-                        partition_id,
-                        trace,
-                        ops.clone(),
-                        partition_data,
-                    ),
-                };
-                env.with_broadcasts(broadcasts.clone())
+                    } => {
+                        let primary = TaskEnvelope::new(
+                            run_id,
+                            stage_id,
+                            task_id,
+                            attempt_id,
+                            partition_id,
+                            trace.clone(),
+                            post_ops.clone(),
+                            Vec::new(),
+                        )
+                        .with_cache_source(*rdd_id)
+                        .with_broadcasts(broadcasts.clone());
+                        // Fallback: full recompute pipeline with the original data.
+                        let fb_task_id = self.get_mutators().get_next_task_id();
+                        let fb_attempt = self.attempt_id.fetch_add(1, Ordering::SeqCst);
+                        let fallback = TaskEnvelope::new(
+                            run_id,
+                            stage_id,
+                            fb_task_id,
+                            fb_attempt,
+                            partition_id,
+                            format!("{trace}-recompute"),
+                            ops.clone(),
+                            partition_data,
+                        )
+                        .with_broadcasts(broadcasts.clone());
+                        PartitionTask {
+                            primary,
+                            fallback: Some(fallback),
+                        }
+                    }
+                    CacheDispatch::Recompute => PartitionTask {
+                        primary: TaskEnvelope::new(
+                            run_id,
+                            stage_id,
+                            task_id,
+                            attempt_id,
+                            partition_id,
+                            trace,
+                            ops.clone(),
+                            partition_data,
+                        )
+                        .with_broadcasts(broadcasts.clone()),
+                        fallback: None,
+                    },
+                }
             })
             .collect();
 
@@ -672,20 +755,29 @@ impl DistributedScheduler {
         // Durations of completed tasks — used to compute the median for straggler detection.
         let completed_durations: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
 
+        // Arc-wrap the fallback tasks so the dispatch futures can take ownership on CacheMiss.
+        let fallback_tasks: Arc<Vec<Mutex<Option<TaskEnvelope>>>> = Arc::new(
+            tasks
+                .iter()
+                .map(|pt| Mutex::new(pt.fallback.clone()))
+                .collect(),
+        );
+
         // `DistributedScheduler` is `Clone` and all fields are `Arc<...>`, so cloning
         // is cheap and gives a fully functional scheduler for `tokio::spawn` futures.
         let handles: Vec<tokio::task::JoinHandle<LibResult<()>>> = tasks
             .iter()
             .enumerate()
-            .map(|(partition_id, task)| {
-                let task = task.clone();
+            .map(|(partition_id, pt)| {
+                let mut task = pt.primary.clone();
                 let slot = slots[partition_id].clone();
                 let start_times = start_times.clone();
                 let completed_durations = completed_durations.clone();
+                let fallback_tasks = fallback_tasks.clone();
                 let max_failures = self.max_failures;
                 let sched = self.clone();
                 let token = cancel_token.clone();
-                let holder_ip = cache_holder_ips[partition_id];
+                let holder_ip_cell = cache_holder_ips[partition_id].clone();
 
                 tokio::spawn(async move {
                     *start_times[partition_id].lock() = Some(Instant::now());
@@ -699,6 +791,7 @@ impl DistributedScheduler {
                         if token.is_cancelled() {
                             return Err(SchedulerError::TaskFailed("job cancelled".to_string()));
                         }
+                        let holder_ip = *holder_ip_cell.lock();
                         let dispatch_start = Instant::now();
                         let (result, worker_addr) = tokio::select! {
                             _ = token.cancelled() => {
@@ -728,12 +821,31 @@ impl DistributedScheduler {
                                     }),
                                 ));
                             }
+                            atomic_data::distributed::ResultStatus::CacheMiss => {
+                                // The holder evicted this partition under LRU pressure. Invalidate
+                                // the stale cache loc and re-dispatch the full recompute pipeline.
+                                if let Some(fb) = fallback_tasks[partition_id].lock().take() {
+                                    log::warn!(
+                                        "cache evict-miss: rdd partition {partition_id}; \
+                                         falling back to recompute"
+                                    );
+                                    sched.invalidate_cache_for_worker(worker_addr);
+                                    *holder_ip_cell.lock() = None;
+                                    task = fb;
+                                    continue;
+                                }
+                                return Err(SchedulerError::TaskFailed(
+                                    result
+                                        .error
+                                        .unwrap_or_else(|| "cache miss, no fallback".to_string()),
+                                ));
+                            }
                             atomic_data::distributed::ResultStatus::Success => {
                                 let mut guard = slot.lock();
                                 if guard.is_none() {
                                     sched.register_cache_locs(
                                         &result.cached_partitions,
-                                        *worker_addr.ip(),
+                                        worker_addr,
                                     );
                                     *guard = Some(result);
                                     sched
@@ -755,8 +867,9 @@ impl DistributedScheduler {
             let slots_ref = slots.clone();
             let start_times_ref = start_times.clone();
             let completed_durations_ref = completed_durations.clone();
-            let spec_tasks = tasks.clone();
-            let cache_holder_ips_spec = cache_holder_ips.clone();
+            let spec_tasks: Vec<TaskEnvelope> = tasks.iter().map(|pt| pt.primary.clone()).collect();
+            let cache_holder_ips_spec: Vec<Arc<Mutex<Option<SocketAddrV4>>>> =
+                cache_holder_ips.iter().map(Arc::clone).collect();
             let sched = self.clone();
 
             tokio::spawn(async move {
@@ -799,7 +912,7 @@ impl DistributedScheduler {
                             let task = spec_tasks[partition_id].clone();
                             let slot = slots_ref[partition_id].clone();
                             let completed_durations = completed_durations_ref.clone();
-                            let holder_ip = cache_holder_ips_spec[partition_id];
+                            let holder_ip = *cache_holder_ips_spec[partition_id].lock();
                             let sched = sched.clone();
 
                             log::debug!(
@@ -819,7 +932,7 @@ impl DistributedScheduler {
                                     if guard.is_none() {
                                         sched.register_cache_locs(
                                             &result.cached_partitions,
-                                            *worker_addr.ip(),
+                                            worker_addr,
                                         );
                                         *guard = Some(result);
                                         sched.taskid_to_slaveid.insert(
@@ -959,7 +1072,8 @@ impl DistributedScheduler {
                 loop {
                     let (result, _worker) = self.submit_native_task(&task, None).await?;
                     match result.status {
-                        atomic_data::distributed::ResultStatus::FatalFailure => {
+                        atomic_data::distributed::ResultStatus::FatalFailure
+                        | atomic_data::distributed::ResultStatus::CacheMiss => {
                             return Err(SchedulerError::TaskFailed(
                                 result
                                     .error
@@ -1290,6 +1404,22 @@ mod tests {
     };
 
     #[test]
+    fn drain_returns_true_when_idle() {
+        let sched = DistributedScheduler::new(4, true);
+        assert_eq!(sched.total_inflight(), 0);
+        assert!(sched.drain(Duration::from_millis(100), Duration::from_millis(5)));
+    }
+
+    #[test]
+    fn drain_times_out_with_stuck_task() {
+        let sched = DistributedScheduler::new(4, true);
+        let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31099);
+        sched.inflight.insert(addr, Arc::new(AtomicI16::new(1)));
+        assert_eq!(sched.total_inflight(), 1);
+        assert!(!sched.drain(Duration::from_millis(50), Duration::from_millis(5)));
+    }
+
+    #[test]
     fn register_worker_adds_to_server_list() {
         let scheduler = DistributedScheduler::new(4, true);
         let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31001);
@@ -1305,7 +1435,7 @@ mod tests {
     fn plans_serve_when_cached() {
         use atomic_data::distributed::{PipelineOp, TaskAction, TaskRuntime};
         let sched = DistributedScheduler::new(4, true);
-        let ip = Ipv4Addr::new(10, 0, 0, 1);
+        let ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
         sched.register_cache_locs(&[(700, 0), (700, 1)], ip);
 
         let cache_op = PipelineOp {
@@ -1347,14 +1477,14 @@ mod tests {
     #[test]
     fn worker_death_invalidates_cache() {
         let sched = DistributedScheduler::new(4, true);
-        let dead = Ipv4Addr::new(10, 0, 0, 1);
-        let live = Ipv4Addr::new(10, 0, 0, 2);
+        let dead = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
+        let live = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
         sched.register_cache_locs(&[(800, 0), (800, 1)], dead);
         sched.register_cache_locs(&[(800, 1)], live); // partition 1 replicated
 
-        sched.remove_worker(SocketAddrV4::new(dead, 10001));
+        sched.remove_worker(dead);
 
-        let locs = sched.get_mutators().cache_locs;
+        let locs = sched.cache_endpoints.clone();
         let entry = locs.get(&800).unwrap();
         assert!(entry[0].is_empty(), "dead worker's sole copy removed");
         assert_eq!(entry[1], vec![live], "replica on live worker survives");
@@ -1363,19 +1493,22 @@ mod tests {
     #[test]
     fn unpersist_clears_cache() {
         let sched = DistributedScheduler::new(4, true);
-        sched.register_cache_locs(&[(801, 0)], Ipv4Addr::new(10, 0, 0, 1));
-        assert!(sched.get_mutators().cache_locs.contains_key(&801));
+        sched.register_cache_locs(
+            &[(801, 0)],
+            SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001),
+        );
+        assert!(sched.cache_endpoints.contains_key(&801));
         sched.invalidate_rdd_cache(801);
-        assert!(!sched.get_mutators().cache_locs.contains_key(&801));
+        assert!(!sched.cache_endpoints.contains_key(&801));
     }
 
     #[test]
     fn cache_locs_register_grows() {
         let scheduler = DistributedScheduler::new(4, true);
-        let ip = Ipv4Addr::new(10, 0, 0, 7);
+        let ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 7), 11007);
         // Reporting partition 2 first must grow the per-rdd Vec to fit it.
         scheduler.register_cache_locs(&[(500, 2), (500, 0)], ip);
-        let locs = scheduler.get_mutators().cache_locs;
+        let locs = scheduler.cache_endpoints.clone();
         let entry = locs.get(&500).expect("rdd 500 registered");
         assert_eq!(entry.len(), 3);
         assert_eq!(entry[2], vec![ip]);

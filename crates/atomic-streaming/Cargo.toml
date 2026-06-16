@@ -30,8 +30,9 @@ rdkafka = { version = "0.36", optional = true, features = ["cmake-build"] }
 
 [features]
 default = []
-# Enables `StreamingContext::kafka_stream` + `KafkaInputDStream`.
-kafka = ["dep:rdkafka"]
+# Enables `StreamingContext::kafka_stream` + `KafkaInputDStream` +
+# `StreamingContext::direct_kafka_stream` + `DirectKafkaInputDStream`.
+kafka = ["dep:rdkafka", "atomic-data/kafka"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

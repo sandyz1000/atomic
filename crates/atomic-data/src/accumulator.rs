@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::distributed::{WireDecode, WireEncode};
+use crate::error::BaseResult;
 
 static NEXT_ACCUMULATOR_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -71,8 +72,13 @@ where
 }
 
 /// A type-erased merge function: takes `(current_bytes, delta_bytes)` and returns
-/// merged bytes.  Registered once per accumulator at `Context::accumulator()` time.
-pub type MergeFn = Box<dyn Fn(Vec<u8>, Vec<u8>) -> Vec<u8> + Send + Sync>;
+/// merged bytes, or an error if the delta could not be decoded/re-encoded.
+/// Registered once per accumulator at `Context::accumulator()` time.
+///
+/// A delta arrives over the network from a worker, so a malformed payload (stale
+/// binary, transport corruption) must be a recoverable error on the driver, not a
+/// panic that takes down the whole process.
+pub type MergeFn = Box<dyn Fn(Vec<u8>, Vec<u8>) -> BaseResult<Vec<u8>> + Send + Sync>;
 
 /// Type-safe helper to build a `MergeFn` from a user-supplied `Fn(T, T) -> T`.
 pub fn make_merge_fn<T, F>(merge: F) -> MergeFn
@@ -81,9 +87,8 @@ where
     F: Fn(T, T) -> T + Send + Sync + 'static,
 {
     Box::new(move |cur_bytes: Vec<u8>, delta_bytes: Vec<u8>| {
-        let cur = T::decode_wire(&cur_bytes).expect("accumulator merge: decode current");
-        let delta = T::decode_wire(&delta_bytes).expect("accumulator merge: decode delta");
-        let merged = merge(cur, delta);
-        merged.encode_wire().expect("accumulator merge: encode")
+        let cur = T::decode_wire(&cur_bytes)?;
+        let delta = T::decode_wire(&delta_bytes)?;
+        merge(cur, delta).encode_wire()
     })
 }

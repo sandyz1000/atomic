@@ -20,6 +20,11 @@ pub struct ShuffleMapPayload {
 /// bincode-encoded `Vec<(K, V)>` to `SHUFFLE_CACHE`.
 ///
 /// Register this for a specific `(K, V)` pair with [`register_shuffle_map!`].
+///
+/// Returns `Result<(), String>`, not a typed error: this function is assigned to the
+/// `ShuffleMapHandlerFn` `fn`-pointer type (`task_registry.rs`), the dispatch ABI shared by
+/// every `register_shuffle_map!(K, V)` instantiation across the binary. `NativeDispatcher`
+/// converts the string into a proper `ComputeError` immediately on return (`runtimes/native.rs`).
 pub fn shuffle_map_handler<K, V>(
     data: &[u8],
     shuffle_id: usize,
@@ -78,7 +83,8 @@ where
             shuffle_id,
             map_partition_id,
             &encoded,
-        )?;
+        )
+        .map_err(|e| e.to_string())?;
     } else {
         // Legacy per-bucket layout: one entry per reduce partition.
         for (reduce_id, bytes) in encoded.into_iter().enumerate() {
@@ -163,7 +169,8 @@ where
             shuffle_id,
             map_partition_id,
             &encoded,
-        )?;
+        )
+        .map_err(|e| e.to_string())?;
     } else {
         for (reduce_id, bytes) in encoded.into_iter().enumerate() {
             cache.insert((shuffle_id, map_partition_id, reduce_id), bytes);

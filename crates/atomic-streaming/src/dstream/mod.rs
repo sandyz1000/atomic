@@ -1,6 +1,8 @@
 pub mod input;
 #[cfg(feature = "kafka")]
 pub mod kafka;
+#[cfg(feature = "kafka")]
+pub mod kafka_direct;
 pub mod mapped;
 pub mod pair;
 pub mod shuffle;

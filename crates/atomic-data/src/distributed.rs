@@ -188,6 +188,12 @@ pub enum TaskAction {
     /// `(rdd_id, partition_id)`, so a later job can be scheduled here and served from
     /// cache instead of recomputing. Emitted by a distributed `.cache()` / `persist()`.
     Cache { rdd_id: usize },
+    /// Kafka Direct source op (requires `kafka` feature). The worker `assign`+`seek`s to
+    /// the given offset range and polls until `end_offset`, returning the messages as
+    /// `rkyv`-encoded `Vec<String>`. `data` in the TaskEnvelope is ignored; all config
+    /// is in `PipelineOp.payload` (bincode-encoded `KafkaConsumePayload`).
+    #[cfg(feature = "kafka")]
+    KafkaConsume,
 }
 
 /// Metadata carried in `PipelineOp.payload` for a Python UDF step.
@@ -222,12 +228,46 @@ pub struct JsUdfPayload {
     pub context_json: Option<String>,
 }
 
+/// Config for one Kafka Direct consume op shipped inside `PipelineOp.payload`.
+///
+/// The worker creates a one-shot consumer, assigns to `(topic, partition)`,
+/// seeks to `start_offset`, polls until it reaches `end_offset` or `max_records`
+/// (whichever comes first), then closes the consumer and returns the messages.
+#[cfg(feature = "kafka")]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    bincode::Encode,
+    bincode::Decode,
+)]
+pub struct KafkaConsumePayload {
+    pub brokers: String,
+    pub topic: String,
+    /// Kafka partition index (0-based).
+    pub partition: i32,
+    /// Inclusive start offset (`assign`+`seek` here).
+    pub start_offset: i64,
+    /// Exclusive end offset — stop before consuming this offset.
+    pub end_offset: i64,
+    /// Upper bound on messages consumed regardless of offset gap.
+    pub max_records: usize,
+}
+
 /// Result status codes for task execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub enum ResultStatus {
     Success,
     RetryableFailure,
     FatalFailure,
+    /// The worker holds a `cache_source` request for an RDD partition that was
+    /// evicted from its `WORKER_PARTITION_CACHE` (LRU pressure, not worker death).
+    /// The driver recovers by re-dispatching the full recompute pipeline for this
+    /// partition and removing the stale `cache_locs` entry.
+    CacheMiss,
 }
 
 /// The wire envelope sent from driver to worker for every distributed task.
@@ -404,6 +444,36 @@ impl TaskResultEnvelope {
             status: ResultStatus::FatalFailure,
             data: Vec::new(),
             error: Some(error),
+            worker_id,
+            shuffle_server_uri: None,
+            accumulator_deltas: vec![],
+            cached_partitions: vec![],
+        }
+    }
+
+    /// The worker's `WORKER_PARTITION_CACHE` entry for this partition was evicted
+    /// (LRU pressure). The driver should re-dispatch a full recompute task.
+    pub fn cache_miss(
+        run_id: usize,
+        stage_id: usize,
+        task_id: usize,
+        attempt_id: usize,
+        partition_id: usize,
+        worker_id: String,
+        rdd_id: usize,
+    ) -> Self {
+        Self {
+            version: WIRE_SCHEMA_V1,
+            run_id,
+            stage_id,
+            task_id,
+            attempt_id,
+            partition_id,
+            status: ResultStatus::CacheMiss,
+            data: Vec::new(),
+            error: Some(format!(
+                "cache evicted: rdd {rdd_id} partition {partition_id}"
+            )),
             worker_id,
             shuffle_server_uri: None,
             accumulator_deltas: vec![],
@@ -608,6 +678,8 @@ mod tests {
             | TaskAction::Collect
             | TaskAction::ShuffleMap { .. }
             | TaskAction::Cache { .. } => true,
+            #[cfg(feature = "kafka")]
+            TaskAction::KafkaConsume => true,
         };
     }
 

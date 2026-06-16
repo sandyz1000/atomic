@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] — K8s, Structured Streaming, Kafka, Distributed Cache, Distributed Correctness
+
+### New crate: `atomic-structured`
+
+Spark Structured Streaming–style continuous SQL/DataFrame queries on the micro-batch
+loop. Three delivery phases:
+
+- **4a (stateless)** — per-batch SQL transform over an `input` table. Zero state
+  carryover between batches. `OutputMode::Append`.
+- **4b (windowed)** — tumbling event-time windows with watermark + late-data drop.
+  Mergeable aggregates (`count`, `sum`, `min`, `max`, `avg`). `OutputMode::Append`
+  for finalized windows and `OutputMode::Update` for partial updates.
+- **4c (complete + Kafka + recovery)** — `OutputMode::Complete` emits the full state
+  table every batch. Kafka source/sink (`kafka` feature). Checkpoint + recovery: the
+  state store is serialized with bincode and written atomically after each batch;
+  `StreamingQuery::restore(dir)` replays it on restart.
+
+**Sinks:** `MemorySink` (test), `ConsoleSink` (stdout), `FileSink` (Parquet per
+batch), `KafkaSink` (`kafka` feature).
+
+**Sources:** `QueueSource` (test), `KafkaSource` (`kafka` feature).
+
+**State store** — bincode-serialized `BTreeMap<group_key, aggregate_cells>` written
+to `{checkpoint_dir}/state.bin` on each batch; loaded on recovery.
+
+### New feature: Kubernetes deployment
+
+- **`deploy/Dockerfile`** — single multi-stage image; one binary handles both driver
+  and worker roles (`--worker`/driver mode read at launch).
+- **Helm chart** (`deploy/helm/atomic/`) — worker `StatefulSet` + headless `Service`,
+  optional driver `Job` or `Deployment`, `ConfigMap` for env vars, optional
+  `HorizontalPodAutoscaler`, optional mTLS `Secret`, `/health` + `/metrics` probes.
+- **`--workers dns:<svc>:<port>`** — DNS worker discovery. `start_worker_discovery`
+  resolves the headless service every 10 s and calls `dynamically_add_worker` so the
+  scheduler tracks new pods added by HPA autoscaling.
+
+### New feature: Kafka streaming source/sink
+
+`atomic-streaming` crate gains `KafkaInputDStream` (`kafka` feature, vendored
+librdkafka). `StreamingContext::kafka_stream(brokers, group_id, topics)` returns a
+`DStream<String>` over Kafka topics at-least-once; the structured crate's `KafkaSource`
+and `KafkaSink` add Arrow-typed integration for Structured Streaming.
+
+### New feature: distributed RDD caching + locality scheduling
+
+A distributed `.cache()` / `.persist()` now actually pins partition bytes on workers:
+
+- **`TaskAction::Cache { rdd_id }`** — terminal pipeline op; the worker stores the
+  output bytes in `WORKER_PARTITION_CACHE` (process-global LRU `DashMap`) and reports
+  `(rdd_id, partition)` in `TaskResultEnvelope.cached_partitions`.
+- **`plan_cache_dispatch`** — pure decision function on the driver; when all partitions
+  of a source `CachedRdd` are in `Mutators.cache_locs`, it builds per-partition
+  `cache_source` envelopes.
+- **Locality pinning** — `pick_preferred_worker` routes each cache-source task to the
+  worker holding that partition; falls back to round-robin on no match.
+- **Fault handling** — `remove_worker` invalidates that host's `cache_locs` entries;
+  the next job recomputes from lineage on a surviving worker. `unpersist()` clears
+  `cache_locs[rdd_id]` on the driver.
+- **Local mode unchanged** — `PartitionStore` + `CachedRdd` path is untouched.
+
+### New feature: distributed correctness improvements
+
+- **Named custom-partitioner registry** (`register_partitioner!` macro +
+  `partition_by_named(name, n)`) — ship a named partitioner to workers by string ID;
+  workers look it up in the static registry. Enables custom partitioners in fully
+  distributed pipelines.
+- **`TypedPartitioner<K>`** — blanket impl over any `CustomPartitioner` that avoids
+  `&dyn Any` downcasts; `PartitionerSpec::from_named` resolves to a `TypedPartitioner`
+  on workers.
+- **`sort_by_task`** — distributed non-pair sort keyed by a registered `#[task]`
+  function. Avoids the closure serialization limitation of `sort_by`.
+- **Lazy k-way sort-merge reduce** — `ShuffledRdd::compute` merges pre-sorted runs
+  on demand via `itertools::kmerge_by` + `coalesce`; the merged output is never fully
+  materialised in memory. Verified globally-ordered by `sort_shuffle_globally_ordered`.
+
+### New feature: `atomic-js` SQL parity
+
+`atomic-js` reaches full SQL parity with `atomic-py`:
+
+- `SqlContext.registerRdd(name, rdd)` — register a live `JsRdd` as a SQL table
+  (`RddTableProvider`).
+- `DataFrame.toArrow()` — returns collected results as Arrow IPC bytes.
+- `SqlContext` and `DataFrame` fully exported from `index.js`.
+
+### Bug fixes
+
+- **`checkpoint()` rdd_id mismatch** — partitions were written under the source RDD's
+  id but read back under the new `CheckpointRdd`'s id (always a file-not-found miss).
+  Fixed by allocating `checkpoint_id = ctx.new_rdd_id()` before the write loop and
+  keying written files by `checkpoint_id`.
+
+---
+
 ## [Unreleased] — Binary Version Safety + Code Quality
 
 ### New features
