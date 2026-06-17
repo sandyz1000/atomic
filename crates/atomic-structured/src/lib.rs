@@ -18,6 +18,7 @@
 //! query.await_termination()?;
 //! ```
 
+pub mod distributed_state;
 pub mod errors;
 pub mod frame;
 #[cfg(feature = "kafka")]

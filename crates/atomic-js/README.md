@@ -400,10 +400,16 @@ atomic ship --workers user@host1,user@host2
 - **V8 runtime** — Workers run JavaScript in a V8 engine embedded via `deno_core`. ES2020 is
   fully supported. Node.js built-in modules (`fs`, `path`, `require`, etc.) are not available
   inside worker functions because workers run in an isolated V8 context, not Node.js.
-- **Function serialization** — Functions are captured via `Function.prototype.toString()`. The
-  source string is sent to workers. Closures that capture variables from outer scopes work when
-  running in local mode, but the captured values are not serialized for distributed execution.
-  Pass configuration by injecting it into the data or using `[key, value]` pairs.
+- **Function serialization** — Functions are captured via `Function.prototype.toString()` and the
+  source string is sent to workers, so a bare closure must be pure over its arguments: variables
+  captured from an outer scope are `undefined` on the worker in distributed mode. To send captured
+  state across the wire, use the `*WithContext` variants (`mapWithContext`, `filterWithContext`,
+  `flatMapWithContext`, `foldWithContext`, `reduceWithContext`, and the pair-op equivalents), which
+  take `(ctx, (x, ctx) => …)` and serialize `ctx` alongside the function.
+- **Native functions rejected at stage time** — A native or bound function (e.g. `map(Math.sqrt)`)
+  stringifies to `function sqrt() { [native code] }`, which is not a valid expression on the worker.
+  The binding rejects these when the op is staged, with a message to wrap them in an arrow function
+  (`map(x => Math.sqrt(x))`), instead of failing mid-job on the worker.
 - **TypeScript compatibility** — When using `tsx`, `ts-node`, or compiling with `tsc`, TypeScript
   is transpiled to JavaScript before functions are captured. The V8 worker runtime only receives
   valid JavaScript, so TypeScript type annotations have no effect on workers.

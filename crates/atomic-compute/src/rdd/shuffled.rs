@@ -1,22 +1,62 @@
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use crate::task_registry::SHUFFLE_KEY_REGISTRY;
-use atomic_data::aggregator::Aggregator;
+use atomic_data::aggregator::{Aggregator, MergeCombinersFn};
 use atomic_data::data::Data;
-use atomic_data::dependency::{Dependency, ShuffleDependency, ShuffleDependencyBox};
+use atomic_data::dependency::{Dependency, KeyComparator, ShuffleDependency, ShuffleDependencyBox};
 use atomic_data::distributed::WireEncode;
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
-use atomic_data::shuffle::fetcher::ShuffleFetcher;
+use atomic_data::shuffle::fetcher::{ShuffleFetcher, SpilledRunIter};
 use atomic_data::split::{ShuffledRddSplit, Split};
 use bincode::{Decode, Encode};
 use itertools::Itertools;
 use std::any::TypeId;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::runtime::Handle;
+
+/// Reduce-side fetch switches from in-memory runs to disk-spilled lazy runs once
+/// a reduce partition draws from more than this many map outputs (wide shuffles).
+/// Override with `ATOMIC_REDUCE_SPILL_THRESHOLD_RUNS`.
+static REDUCE_SPILL_THRESHOLD_RUNS: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("ATOMIC_REDUCE_SPILL_THRESHOLD_RUNS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(64)
+});
+
+/// Lazy k-way sort-merge of pre-sorted `runs` (any run iterator type), combining
+/// equal-key neighbours with `merge_combiners`. The merged output is never
+/// materialized: `kmerge_by` keeps an O(#runs) heap and `coalesce` looks one
+/// element ahead, so a streaming consumer holds only that working set.
+fn lazy_sort_merge<K, C, I>(
+    runs: Vec<I>,
+    cmp: KeyComparator<K>,
+    merge_combiners: MergeCombinersFn<C>,
+) -> Box<dyn Iterator<Item = (K, C)>>
+where
+    K: 'static,
+    C: 'static,
+    I: Iterator<Item = (K, C)> + 'static,
+{
+    let cmp_merge = cmp.clone();
+    let merged = runs
+        .into_iter()
+        .kmerge_by(move |a: &(K, C), b: &(K, C)| cmp_merge(&a.0, &b.0) == Ordering::Less)
+        .coalesce(move |mut acc: (K, C), next: (K, C)| {
+            if cmp(&acc.0, &next.0) == Ordering::Equal {
+                merge_combiners(&mut acc.1, next.1);
+                Ok(acc)
+            } else {
+                Err((acc, next))
+            }
+        });
+    Box::new(merged)
+}
 
 pub struct ShuffledRdd<K, V, C>
 where
@@ -256,6 +296,33 @@ where
         // input + a second sorted copy + the sort's scratch). (K is only `Hash`-bound,
         // so ordering is driven by the stored comparator rather than `Ord`.)
         if let Some(cmp) = &self.comparator {
+            let merge_combiners = self.aggregator.merge_combiners.clone();
+
+            // Wide shuffle: stream each run from a temp file so the full input is
+            // never resident — only the k-way-merge working set. The run count is
+            // the number of map outputs registered for this shuffle.
+            let run_count = atomic_data::env::get_map_output_tracker()
+                .and_then(|t| t.server_uris.get(&self.shuffle_id).map(|e| e.value().len()))
+                .unwrap_or(0);
+            if run_count > *REDUCE_SPILL_THRESHOLD_RUNS {
+                let mut runs: Vec<SpilledRunIter<K, C>> = Vec::new();
+                for orig_id in original_ids {
+                    let fetched = Handle::current()
+                        .block_on(
+                            self.fetcher
+                                .fetch_runs_spilled::<K, C>(self.shuffle_id, orig_id),
+                        )
+                        .map_err(BaseError::from)?;
+                    runs.extend(fetched);
+                }
+                log::debug!(
+                    "sort-merge (lazy k-way, {} disk-spilled runs) prepared in {}",
+                    runs.len(),
+                    start.elapsed().as_millis()
+                );
+                return Ok(lazy_sort_merge(runs, cmp.clone(), merge_combiners));
+            }
+
             let mut runs: Vec<std::vec::IntoIter<(K, C)>> = Vec::new();
             for orig_id in original_ids {
                 let fetched = Handle::current()
@@ -263,28 +330,11 @@ where
                     .map_err(BaseError::from)?;
                 runs.extend(fetched.into_iter().map(IntoIterator::into_iter));
             }
-
-            let cmp_merge = cmp.clone();
-            let cmp_coalesce = cmp.clone();
-            let merge_combiners = self.aggregator.merge_combiners.clone();
-            let merged = runs
-                .into_iter()
-                .kmerge_by(move |a: &(K, C), b: &(K, C)| {
-                    cmp_merge(&a.0, &b.0) == std::cmp::Ordering::Less
-                })
-                .coalesce(move |mut acc: (K, C), next: (K, C)| {
-                    if cmp_coalesce(&acc.0, &next.0) == std::cmp::Ordering::Equal {
-                        merge_combiners(&mut acc.1, next.1);
-                        Ok(acc)
-                    } else {
-                        Err((acc, next))
-                    }
-                });
             log::debug!(
                 "sort-merge (lazy k-way) prepared in {}",
                 start.elapsed().as_millis()
             );
-            return Ok(Box::new(merged));
+            return Ok(lazy_sort_merge(runs, cmp.clone(), merge_combiners));
         }
 
         let mut combiners: HashMap<K, C> = HashMap::new();

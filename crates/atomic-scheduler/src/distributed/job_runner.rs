@@ -8,7 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use atomic_data::distributed::{PipelineOp, TaskEnvelope, TaskResultEnvelope};
+use atomic_data::distributed::{
+    PipelineOp, StateMergePayload, TaskAction, TaskEnvelope, TaskResultEnvelope,
+};
 use parking_lot::Mutex;
 
 use crate::{
@@ -30,6 +32,33 @@ impl DistributedScheduler {
             }
         }
         self.next_executor_with_capacity()
+    }
+
+    /// Worker for stateful-streaming shard `state_id` / `shard` index.
+    ///
+    /// Preferred path: if `state_id` is registered in `state_locs` and that worker
+    /// is still live, route there (report-back affinity — the same mechanism as
+    /// `cache_endpoints`). This survives worker-set changes because only the shards
+    /// whose worker is removed lose their `state_locs` entry and fall through.
+    ///
+    /// Fallback: modulo placement for the first batch or after a dead-worker eviction.
+    pub(crate) fn pin_state_shard(
+        &self,
+        shard: usize,
+        state_id: Option<u64>,
+    ) -> Option<SocketAddrV4> {
+        if let Some(ep) = state_id.and_then(|id| self.state_locs.get(&id).map(|e| *e)) {
+            let servers = self.server_uris.lock();
+            if servers.iter().any(|s| *s == ep) {
+                return Some(ep);
+            }
+            // Worker is no longer registered: fall through to modulo.
+        }
+        let servers = self.server_uris.lock();
+        if servers.is_empty() {
+            return None;
+        }
+        servers.get(shard % servers.len()).copied()
     }
 
     /// Submit a single `TaskEnvelope` to a worker, retrying up to `max_failures` times.
@@ -190,6 +219,29 @@ impl DistributedScheduler {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         self.job_cancel_tokens.insert(run_id, cancel_token.clone());
 
+        // Distributed stateful-streaming merge: each partition is one state shard.
+        // For report-back affinity (G1), decode the per-partition state_id before the
+        // partitions vec is consumed, so `pin_state_shard` can look up registered locs.
+        let is_merge_state = ops
+            .iter()
+            .any(|o| matches!(o.action, TaskAction::MergeState { .. }));
+
+        let state_ids_per_partition: Vec<Option<u64>> = if is_merge_state {
+            partitions
+                .iter()
+                .map(|p| {
+                    bincode::decode_from_slice::<StateMergePayload, _>(
+                        p,
+                        bincode::config::standard(),
+                    )
+                    .ok()
+                    .map(|(payload, _)| payload.state_id)
+                })
+                .collect()
+        } else {
+            vec![None; num_partitions]
+        };
+
         let plan = self.plan_cache_dispatch(&ops, num_partitions);
         let cache_holder_ips: Vec<Arc<Mutex<Option<SocketAddrV4>>>> = match &plan {
             CacheDispatch::Serve { locs, .. } => locs
@@ -197,7 +249,14 @@ impl DistributedScheduler {
                 .map(|addr| Arc::new(Mutex::new(Some(*addr))))
                 .collect(),
             CacheDispatch::Recompute => (0..num_partitions)
-                .map(|_| Arc::new(Mutex::new(None)))
+                .map(|p| {
+                    let pin = if is_merge_state {
+                        self.pin_state_shard(p, state_ids_per_partition[p])
+                    } else {
+                        None
+                    };
+                    Arc::new(Mutex::new(pin))
+                })
                 .collect(),
         };
 
@@ -363,6 +422,15 @@ impl DistributedScheduler {
                                         &result.cached_partitions,
                                         worker_addr,
                                     );
+                                    // G1: Register state affinity for MergeState tasks so
+                                    // subsequent batches route each shard to the worker that
+                                    // holds its in-memory state (report-back pattern).
+                                    if !result.held_state_ids.is_empty() {
+                                        sched.register_state_locs(
+                                            &result.held_state_ids,
+                                            worker_addr,
+                                        );
+                                    }
                                     *guard = Some(result);
                                     sched
                                         .taskid_to_slaveid
@@ -449,6 +517,12 @@ impl DistributedScheduler {
                                             &result.cached_partitions,
                                             worker_addr,
                                         );
+                                        if !result.held_state_ids.is_empty() {
+                                            sched.register_state_locs(
+                                                &result.held_state_ids,
+                                                worker_addr,
+                                            );
+                                        }
                                         *guard = Some(result);
                                         sched.taskid_to_slaveid.insert(
                                             format!("{partition_id}"),

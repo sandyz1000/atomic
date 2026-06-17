@@ -119,7 +119,7 @@ impl WindowedEngine {
     /// `expand_for_sliding` and is referenced directly.
     fn partial_sql(&self) -> String {
         let s = &self.spec;
-        let is_sliding = s.slide_ms.map_or(false, |sl| sl < s.window_size_ms);
+        let is_sliding = s.slide_ms.is_some_and(|sl| sl < s.window_size_ms);
         let win = if is_sliding {
             "window_start".to_string()
         } else {
@@ -329,7 +329,7 @@ impl WindowedEngine {
     }
 
     /// Build the emission `RecordBatch` from a set of `(key, state)` cells.
-    fn emit_batch(
+    pub(crate) fn emit_batch(
         &self,
         cells: &[(StateKey, Vec<AggState>)],
     ) -> StructuredResult<Vec<RecordBatch>> {
@@ -409,48 +409,41 @@ impl WindowedEngine {
             .map_err(|e| StructuredError::Sql(e.to_string()))?;
         Ok(vec![batch])
     }
-}
 
-impl BatchEngine for WindowedEngine {
-    fn post_commit(&self, epoch: u64) {
-        self.source.post_batch_commit(epoch);
+    /// The windowed spec (window size, mode, aggs) — read by `DistributedStateEngine`
+    /// to build merge params and the output schema.
+    pub(crate) fn spec(&self) -> &WindowedSpec {
+        &self.spec
     }
 
-    fn process(&self, _epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
-        let batches = self.source.next_batch(_epoch);
+    /// Driver-side per-batch work shared by the local and distributed engines: read
+    /// the source batch, compute per-window partials via SQL, drop windows already
+    /// finalized (late), and advance the watermark. The caller applies these
+    /// partials to a state store (local `Mutex<StateStore>` for [`WindowedEngine`];
+    /// sharded worker stores for `DistributedStateEngine`) and emits.
+    pub(crate) fn compute_partials(&self, epoch: u64) -> StructuredResult<BatchPartials> {
+        let batches = self.source.next_batch(epoch);
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-
-        // Watermark before this batch — used to detect late windows.
         let wm_before = self.watermark.lock().current();
-
         if total_rows == 0 {
-            // No new data: only Complete mode re-emits the whole store.
-            if self.spec.mode == OutputMode::Complete {
-                let cells: Vec<(StateKey, Vec<AggState>)> = self
-                    .state
-                    .lock()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                return self.emit_batch(&cells);
-            }
-            return Ok(vec![]);
+            return Ok(BatchPartials {
+                cells: vec![],
+                wm_after: wm_before,
+                had_data: false,
+            });
         }
 
         let batch_max = batch_max_ms(&batches, &self.spec.time_col);
-
-        // For sliding windows: expand each row into one row per covering window.
         let is_sliding = self
             .spec
             .slide_ms
-            .map_or(false, |sl| sl < self.spec.window_size_ms);
+            .is_some_and(|sl| sl < self.spec.window_size_ms);
         let sql_batches = if is_sliding {
             self.expand_for_sliding(batches)?
         } else {
             batches
         };
 
-        // Compute per-window partials via SQL.
         let _ = self.sql_ctx.deregister_table("input");
         self.sql_ctx
             .register_batches("input", sql_batches)
@@ -467,40 +460,86 @@ impl BatchEngine for WindowedEngine {
                 .map_err(|e| StructuredError::Sql(e.to_string()))
         })?;
 
-        // Merge partials into the store, skipping windows already finalized (late).
+        // Drop windows already finalized before this batch (late data).
         let size = self.spec.window_size_ms;
-        let mut changed: Vec<StateKey> = Vec::new();
-        {
-            let mut store = self.state.lock();
-            for b in &partials {
-                for row in 0..b.num_rows() {
-                    let (key, partial) = self.read_partial_row(b, row)?;
-                    let window_end = key.window_start_ms + size;
-                    if matches!(wm_before, Some(w) if window_end <= w) {
-                        continue; // late: window already closed
-                    }
-                    store.merge(key.clone(), partial);
-                    changed.push(key);
+        let mut cells: Vec<(StateKey, Vec<AggState>)> = Vec::new();
+        for b in &partials {
+            for row in 0..b.num_rows() {
+                let (key, partial) = self.read_partial_row(b, row)?;
+                let window_end = key.window_start_ms + size;
+                if matches!(wm_before, Some(w) if window_end <= w) {
+                    continue;
                 }
+                cells.push((key, partial));
             }
         }
 
-        // Advance the watermark.
         if let Some(m) = batch_max {
             self.watermark.lock().observe_max(m);
         }
         let wm_after = self.watermark.lock().current();
+        Ok(BatchPartials {
+            cells,
+            wm_after,
+            had_data: true,
+        })
+    }
+}
+
+/// Result of [`WindowedEngine::compute_partials`]: this batch's late-filtered
+/// partials plus the post-batch watermark.
+pub(crate) struct BatchPartials {
+    /// `(window-key, per-aggregate partial)` cells to merge into the state store.
+    pub cells: Vec<(StateKey, Vec<AggState>)>,
+    /// Watermark after observing this batch's max event time.
+    pub wm_after: Option<u64>,
+    /// Whether the source produced any rows this batch.
+    pub had_data: bool,
+}
+
+impl BatchEngine for WindowedEngine {
+    fn post_commit(&self, epoch: u64) {
+        self.source.post_batch_commit(epoch);
+    }
+
+    fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
+        let size = self.spec.window_size_ms;
+        let bp = self.compute_partials(epoch)?;
+
+        if !bp.had_data {
+            // No new data: only Complete mode re-emits the whole store.
+            if self.spec.mode == OutputMode::Complete {
+                let cells: Vec<(StateKey, Vec<AggState>)> = self
+                    .state
+                    .lock()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                return self.emit_batch(&cells);
+            }
+            return Ok(vec![]);
+        }
+
+        // Merge this batch's partials into the local store; track touched keys.
+        let mut touched: Vec<StateKey> = Vec::with_capacity(bp.cells.len());
+        {
+            let mut store = self.state.lock();
+            for (key, partial) in &bp.cells {
+                store.merge(key.clone(), partial.clone());
+                touched.push(key.clone());
+            }
+        }
 
         // Emit per output mode.
         let emitted = match self.spec.mode {
             OutputMode::Update => {
                 let store = self.state.lock();
-                changed
+                touched
                     .iter()
                     .filter_map(|k| store.get(k).map(|v| (k.clone(), v.clone())))
                     .collect::<Vec<_>>()
             }
-            OutputMode::Append => match wm_after {
+            OutputMode::Append => match bp.wm_after {
                 Some(w) => self.state.lock().evict_final(w, size),
                 None => vec![],
             },

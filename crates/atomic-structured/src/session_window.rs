@@ -26,7 +26,11 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
 
+use atomic_compute::context::Context;
+use atomic_data::distributed::{PipelineOp, StateMergePayload, TaskAction, TaskRuntime};
+
 use crate::OutputMode;
+use crate::distributed_state::{MODE_APPEND, mode_code, shard_of};
 use crate::errors::{StructuredError, StructuredResult};
 use crate::query::BatchEngine;
 use crate::source::StreamSource;
@@ -34,9 +38,12 @@ use crate::state::{Agg, AggKind, AggState, GroupVal};
 use crate::watermark::WatermarkTracker;
 use crate::windowed::{read_group, read_i64};
 
+/// One extracted event: its grouping-key values, event time, and per-aggregate partials.
+type SessionEvent = (Vec<GroupVal>, i64, Vec<AggState>);
+
 // ── Session state ─────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, bincode::Encode, bincode::Decode)]
 struct Session {
     start_ms: i64,
     end_ms: i64,
@@ -73,6 +80,7 @@ impl Session {
     }
 }
 
+#[derive(bincode::Encode, bincode::Decode)]
 struct SessionStore {
     map: HashMap<Vec<GroupVal>, Vec<Session>>,
 }
@@ -178,10 +186,7 @@ impl SessionEngine {
         })
     }
 
-    fn extract_events(
-        &self,
-        batch: &RecordBatch,
-    ) -> StructuredResult<Vec<(Vec<GroupVal>, i64, Vec<AggState>)>> {
+    fn extract_events(&self, batch: &RecordBatch) -> StructuredResult<Vec<SessionEvent>> {
         let schema = batch.schema();
         let time_idx = schema
             .index_of(&self.spec.time_col)
@@ -344,25 +349,23 @@ impl SessionEngine {
             .map_err(|e| StructuredError::Sql(format!("session emit: {e}")))?;
         Ok(vec![batch])
     }
-}
 
-impl BatchEngine for SessionEngine {
-    fn post_commit(&self, epoch: u64) {
-        self.source.post_batch_commit(epoch);
-    }
-
-    fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
+    /// Driver-side per-batch work shared by the local and distributed session
+    /// engines: read the batch, extract `(group, time, partial)` events, drop
+    /// events whose session is already closed before this batch (late), and advance
+    /// the watermark. The caller absorbs the events into a store (local for
+    /// [`SessionEngine`], sharded for `DistributedSessionEngine`) and emits.
+    fn compute_events(&self, epoch: u64) -> StructuredResult<SessionBatch> {
         let batches = self.source.next_batch(epoch);
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-
-        if total_rows == 0 {
-            if self.spec.mode == OutputMode::Update {
-                return self.emit_batch(&self.store.lock().all_sessions());
-            }
-            return Ok(vec![]);
-        }
-
         let wm_before = self.watermark.lock().current();
+        if total_rows == 0 {
+            return Ok(SessionBatch {
+                events: vec![],
+                wm_after: wm_before,
+                had_data: false,
+            });
+        }
 
         let batch_max = {
             let mut m: Option<u64> = None;
@@ -385,21 +388,56 @@ impl BatchEngine for SessionEngine {
         let wm_after = self.watermark.lock().current();
         let gap = self.spec.gap_ms as i64;
 
+        let mut events: Vec<SessionEvent> = Vec::new();
+        for b in &batches {
+            for (group, t, partial) in self.extract_events(b)? {
+                if matches!(wm_before, Some(wm) if t + gap <= wm as i64) {
+                    continue;
+                }
+                events.push((group, t, partial));
+            }
+        }
+        Ok(SessionBatch {
+            events,
+            wm_after,
+            had_data: true,
+        })
+    }
+}
+
+/// Result of [`SessionEngine::compute_events`]: this batch's late-filtered events
+/// plus the post-batch watermark.
+struct SessionBatch {
+    events: Vec<SessionEvent>,
+    wm_after: Option<u64>,
+    had_data: bool,
+}
+
+impl BatchEngine for SessionEngine {
+    fn post_commit(&self, epoch: u64) {
+        self.source.post_batch_commit(epoch);
+    }
+
+    fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
+        let gap = self.spec.gap_ms as i64;
+        let sb = self.compute_events(epoch)?;
+
+        if !sb.had_data {
+            if self.spec.mode == OutputMode::Update {
+                return self.emit_batch(&self.store.lock().all_sessions());
+            }
+            return Ok(vec![]);
+        }
+
         {
             let mut store = self.store.lock();
-            for b in &batches {
-                for (group, t, partial) in self.extract_events(b)? {
-                    // Drop events whose session is already closed by the pre-batch watermark.
-                    if matches!(wm_before, Some(wm) if t + gap <= wm as i64) {
-                        continue;
-                    }
-                    store.absorb(group, t, partial, gap);
-                }
+            for (group, t, partial) in sb.events {
+                store.absorb(group, t, partial, gap);
             }
         }
 
         let emitted: Vec<(Vec<GroupVal>, Session)> = match self.spec.mode {
-            OutputMode::Append => match wm_after {
+            OutputMode::Append => match sb.wm_after {
                 Some(wm) => self.store.lock().drain_final(gap, wm as i64),
                 None => vec![],
             },
@@ -412,5 +450,161 @@ impl BatchEngine for SessionEngine {
         };
 
         self.emit_batch(&emitted)
+    }
+}
+
+// ── Distributed session state (Part 3 / D4) ─────────────────────────────────────
+
+/// Registered name of the session state-merge function.
+pub(crate) const SESSION_MERGE_FN: &str = "atomic_structured::session_v1";
+
+/// Per-shard merge/emit config for session windows.
+#[derive(bincode::Encode, bincode::Decode)]
+struct SessionMergeParams {
+    watermark_ms: Option<u64>,
+    gap_ms: u64,
+    mode: u8,
+}
+
+/// Registered session state-merge: absorb this batch's events into the shard's
+/// `SessionStore` (coalescing / merging sessions within `gap`), then emit per mode.
+fn session_state_merge(
+    prev: Option<&[u8]>,
+    events: &[u8],
+    params: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let cfg = bincode::config::standard();
+    let mut store = match prev {
+        Some(b) => bincode::decode_from_slice::<SessionStore, _>(b, cfg)
+            .map(|(s, _)| s)
+            .map_err(|e| e.to_string())?,
+        None => SessionStore::new(),
+    };
+    let (events, _): (Vec<SessionEvent>, _) =
+        bincode::decode_from_slice(events, cfg).map_err(|e| e.to_string())?;
+    let (params, _): (SessionMergeParams, _) =
+        bincode::decode_from_slice(params, cfg).map_err(|e| e.to_string())?;
+    let gap = params.gap_ms as i64;
+    for (group, t, partial) in events {
+        store.absorb(group, t, partial, gap);
+    }
+    let emitted: Vec<(Vec<GroupVal>, Session)> = match params.mode {
+        MODE_APPEND => match params.watermark_ms {
+            Some(w) => store.drain_final(gap, w as i64),
+            None => vec![],
+        },
+        // Update — Complete is rejected for sessions before dispatch.
+        _ => store.all_sessions(),
+    };
+    let new_state = bincode::encode_to_vec(&store, cfg).map_err(|e| e.to_string())?;
+    let emitted_bytes = bincode::encode_to_vec(&emitted, cfg).map_err(|e| e.to_string())?;
+    Ok((new_state, emitted_bytes))
+}
+
+atomic_compute::register_state_merge!(SESSION_MERGE_FN, session_state_merge);
+
+/// Session-window aggregation whose per-group state is sharded across the cluster.
+///
+/// Wraps a [`SessionEngine`] for the driver-side event extraction and output, but
+/// merges each batch's events into worker-resident `SessionStore` shards (routed by
+/// a stable group-key hash) via `MergeState` tasks instead of one driver-local
+/// store.
+pub(crate) struct DistributedSessionEngine {
+    inner: SessionEngine,
+    sc: Arc<Context>,
+    num_shards: u32,
+    state_id_base: u64,
+    checkpoint_dir: Option<String>,
+}
+
+impl DistributedSessionEngine {
+    pub(crate) fn new(
+        inner: SessionEngine,
+        sc: Arc<Context>,
+        num_shards: u32,
+        query_id: u64,
+        checkpoint_dir: Option<String>,
+    ) -> Self {
+        DistributedSessionEngine {
+            inner,
+            sc,
+            num_shards: num_shards.max(1),
+            state_id_base: query_id << 16,
+            checkpoint_dir,
+        }
+    }
+}
+
+impl BatchEngine for DistributedSessionEngine {
+    fn post_commit(&self, epoch: u64) {
+        self.inner.post_commit(epoch);
+    }
+
+    fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
+        let gap_ms = self.inner.spec.gap_ms;
+        let mode = self.inner.spec.mode;
+        if mode == OutputMode::Complete {
+            return Err(StructuredError::Unsupported(
+                "Complete output mode is not supported for session windows".into(),
+            ));
+        }
+        let sb = self.inner.compute_events(epoch)?;
+
+        // Route events to shards by stable group-key hash; dispatch all shards each
+        // batch so Append eviction covers shards with no new events this batch.
+        let mut by_shard: Vec<Vec<SessionEvent>> = vec![Vec::new(); self.num_shards as usize];
+        for (group, t, partial) in sb.events {
+            let shard = shard_of(&group, self.num_shards) as usize;
+            by_shard[shard].push((group, t, partial));
+        }
+
+        let cfg = bincode::config::standard();
+        let params = SessionMergeParams {
+            watermark_ms: sb.wm_after,
+            gap_ms,
+            mode: mode_code(mode),
+        };
+        let params_bytes = bincode::encode_to_vec(&params, cfg)
+            .map_err(|e| StructuredError::Sql(e.to_string()))?;
+
+        let mut source_partitions: Vec<Vec<u8>> = Vec::with_capacity(self.num_shards as usize);
+        for (shard, events) in by_shard.into_iter().enumerate() {
+            let partials = bincode::encode_to_vec(&events, cfg)
+                .map_err(|e| StructuredError::Sql(e.to_string()))?;
+            let payload = StateMergePayload {
+                state_id: self.state_id_base + shard as u64,
+                params: params_bytes.clone(),
+                partials,
+                checkpoint_dir: self.checkpoint_dir.clone(),
+            };
+            source_partitions.push(
+                bincode::encode_to_vec(&payload, cfg)
+                    .map_err(|e| StructuredError::Sql(e.to_string()))?,
+            );
+        }
+
+        let ops = vec![PipelineOp {
+            op_id: String::new(),
+            action: TaskAction::MergeState {
+                merge_fn: SESSION_MERGE_FN.to_string(),
+            },
+            runtime: TaskRuntime::Native,
+            payload: vec![],
+        }];
+
+        let results = self
+            .sc
+            .dispatch_pipeline(source_partitions, ops)
+            .map_err(|e| StructuredError::Sql(format!("distributed session merge: {e}")))?;
+
+        let mut emitted: Vec<(Vec<GroupVal>, Session)> = Vec::new();
+        for bytes in results {
+            let (cells, _): (Vec<(Vec<GroupVal>, Session)>, _) =
+                bincode::decode_from_slice(&bytes, cfg)
+                    .map_err(|e| StructuredError::Sql(format!("session emitted decode: {e}")))?;
+            emitted.extend(cells);
+        }
+
+        self.inner.emit_batch(&emitted)
     }
 }

@@ -31,6 +31,14 @@ pub(crate) trait BatchEngine: Send + Sync {
     /// Forwards to the source so it can advance any tracked read position
     /// (e.g. Kafka offsets) only once delivery is confirmed. Default no-op.
     fn post_commit(&self, _epoch: u64) {}
+
+    /// Consumed offsets for the last batch from a Kafka source, ready to be
+    /// committed inside a producer transaction. Returns `None` for non-Kafka sources
+    /// and before the first batch. Delegates to the underlying `StreamSource`.
+    #[cfg(feature = "kafka")]
+    fn pending_offsets(&self) -> Option<crate::kafka::OffsetCommit> {
+        None
+    }
 }
 
 /// Stateless engine (4a): register the batch as `input`, run the SQL, emit the
@@ -45,6 +53,11 @@ pub(crate) struct StatelessEngine {
 impl BatchEngine for StatelessEngine {
     fn post_commit(&self, epoch: u64) {
         self.source.post_batch_commit(epoch);
+    }
+
+    #[cfg(feature = "kafka")]
+    fn pending_offsets(&self) -> Option<crate::kafka::OffsetCommit> {
+        self.source.pending_offsets()
     }
 
     fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
@@ -84,6 +97,18 @@ impl QueryRunner {
 
     pub(crate) fn run_batch(&self, epoch: u64) -> StructuredResult<()> {
         let out = self.engine.process(epoch)?;
+
+        // Exactly-once path: when the source exposes pending Kafka offsets, commit them
+        // inside the sink's producer transaction instead of in a separate `post_commit`
+        // call. This makes source-offset advancement and output-record visibility atomic —
+        // a crash-restart neither re-produces the batch nor skips the source messages.
+        #[cfg(feature = "kafka")]
+        if let Some(offsets) = self.engine.pending_offsets() {
+            self.sink.add_batch_with_offsets(epoch, &out, &offsets)?;
+            // Offsets already committed inside the transaction — do NOT call post_commit.
+            return Ok(());
+        }
+
         self.sink.add_batch(epoch, &out)?;
         self.engine.post_commit(epoch);
         Ok(())

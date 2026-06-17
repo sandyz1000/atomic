@@ -13,6 +13,23 @@ pub trait Sink: Send + Sync {
     /// Emit the result `batches` for micro-batch `epoch`. Empty input is a no-op
     /// for most sinks.
     fn add_batch(&self, epoch: u64, batches: &[RecordBatch]) -> StructuredResult<()>;
+
+    /// Exactly-once variant: produce `batches` **and** commit `offsets` inside a single
+    /// Kafka producer transaction. The default delegates to `add_batch` (ignoring the
+    /// offsets), so all non-Kafka sinks work unchanged. [`crate::kafka::KafkaSink`]
+    /// overrides this when `transactional` is set.
+    ///
+    /// When this succeeds the caller must NOT call `post_batch_commit` on the source —
+    /// the source offsets are already committed by the transaction.
+    #[cfg(feature = "kafka")]
+    fn add_batch_with_offsets(
+        &self,
+        epoch: u64,
+        batches: &[RecordBatch],
+        _offsets: &crate::kafka::OffsetCommit,
+    ) -> StructuredResult<()> {
+        self.add_batch(epoch, batches)
+    }
 }
 
 /// Collects all emitted batches in memory — the primary test sink. Cheaply

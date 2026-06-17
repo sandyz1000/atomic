@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased] — K8s, Structured Streaming, Kafka, Distributed Cache, Distributed Correctness
+## [Unreleased] — K8s, Structured Streaming, Kafka, Distributed Cache, Distributed Correctness, Distributed Streaming Sources, UDF Safety
 
 ### New crate: `atomic-structured`
 
@@ -31,6 +31,141 @@ batch), `KafkaSink` (`kafka` feature).
 
 **State store** — bincode-serialized `BTreeMap<group_key, aggregate_cells>` written
 to `{checkpoint_dir}/state.bin` on each batch; loaded on recovery.
+
+**Windows beyond tumbling:**
+
+- **Sliding windows** — `WindowedBuilder::slide(step)` (`WindowedSpec.slide_ms`). A row
+  at `t` fans out to every covering window via an Arrow `take` expansion before the
+  `GROUP BY window_start`; `None` slide means tumbling (`slide == size`).
+- **Session windows** — `StreamingDataFrame::session_window(col, gap)` →
+  `SessionBuilder`. `SessionEngine` keeps per-group sessions with dynamic bounds: an
+  event within `gap` extends a session, a bridging event merges two sessions, and a
+  session finalizes (and evicts) when `session_end + gap <= watermark`. `Append` emits
+  on finalize, `Update` re-emits on every change; `Complete` is rejected (unbounded key
+  space).
+- **Stream-stream joins** — `StreamingDataFrame::join_stream(right, left_key, right_key,
+  JoinType, time_bound)`. `StreamJoinEngine` buffers each side in a watermark-bounded
+  store, probes the opposite buffer per batch, and (for outer joins) emits unmatched
+  rows once the watermark passes their wait bound. Equi-join without a time bound is
+  rejected at plan time to keep state bounded.
+
+### New feature: distributed streaming sources
+
+`atomic-streaming` generalizes the Kafka Direct model into a `DistributedSource` trait
+(`dstream/distributed_source.rs`): `plan_batch(batch_time_ms)` returns per-partition
+read tasks (offset range / file split) that dispatch to workers as ordinary
+`TaskEnvelope`s.
+
+- **`DistributedFileSource`** — a watched directory becomes file-split tasks
+  (`TaskAction::ReadFileSplit` + `FileSplitPayload`); `StreamingContext::distributed_file_stream`
+  collects the worker blocks into one RDD per batch. The Kafka Direct source is the
+  second `DistributedSource` impl.
+- **`ReceiverTracker`** now tracks per-batch partition placement and gains a
+  `distributed: bool` (it no longer logs "local mode" unconditionally). A partition on a
+  dead worker is re-planned next batch — offsets/splits are driver-authoritative, so
+  recovery is at-least-once re-dispatch.
+- Push/receiver-model sources (custom `Receiver`, socket fan-in) stay driver-local by
+  design; only the Direct/pull model distributes.
+
+### New feature: polyglot UDF serialization safety
+
+Driver-side preflight for the dynamic (Python/JS/TS) UDF path, turning silent or late
+worker failures into typed driver-side errors:
+
+- **`atomic-js`** rejects native/bound functions (`f.toString()` containing
+  `[native code]`) at stage time with a clear message, and exposes explicit context
+  capture through `*WithContext` ops (`mapWithContext`, `filterWithContext`, …) so
+  captured free variables cross the wire instead of becoming `undefined` on the worker.
+- **`atomic-py`** round-trips every dispatched UDF through `cloudpickle.loads` on the
+  driver before the job leaves, so a value that pickles but fails to load (open files,
+  locks, C-extension handles) fails fast with a typed error instead of an opaque worker
+  `PyErr`.
+
+### Change: `atomic-js` is a TypeScript project
+
+The hand-maintained native-binding loader moved to `index.ts`, compiled to
+`dist/index.js` (the package `main`). `napi build --no-js` no longer emits a root
+`index.js`; the loader supports only the published targets (macOS arm64, Linux
+x64/arm64 — glibc and musl).
+
+### New feature: distributed structured-streaming state
+
+The structured-streaming window/join engines previously kept all keyed state in a
+single driver-local store. State can now be **sharded across the cluster**:
+
+- **New compute-layer primitive** (reusable, content-agnostic): `TaskAction::MergeState`
+  + `StateMergePayload` (`atomic-data`), a worker-resident `WORKER_STATE_STORE`
+  (`atomic-data::state_store`), and a `register_state_merge!` / `STATE_MERGE_REGISTRY`
+  (`atomic-compute`) that dispatches a named, byte-level state-merge function. The
+  data/compute layers carry no streaming types.
+- **Sharded engines**: `DistributedStateEngine` (windowed — tumbling + sliding),
+  `DistributedSessionEngine`, and `DistributedJoinEngine`. Each batch's partials/events/
+  rows route by a stable key hash to a `MergeState` task that merges into the shard's
+  persistent state and returns only the cells to emit; the driver assembles the output.
+  Append / Update / Complete modes and the watermark are carried per shard.
+- **Opt-in API**: `.distributed(num_shards)` on the windowed and session builders, and
+  `join_stream(...).distributed(num_shards)` for stream-stream joins.
+- **Per-shard checkpoint + recovery**: the `MergeState` handler persists each shard's
+  post-merge state under the query's checkpoint dir and reloads a cold shard after a
+  restart (verified by a recover-across-restart test).
+- The same `dispatch_pipeline` path runs the merge in-process in local mode (shards
+  share the process store) and on workers in distributed mode. Each shard is pinned to
+  a stable worker (`DistributedScheduler::pin_state_shard`, reusing the cache-locality
+  preferred-worker path) so its state stays local across batches; under worker
+  add/remove the pin reshuffles and moved shards reload from shared (`s3://`) checkpoint
+  storage. Local mode is fully correct and tested.
+
+### New feature: transactional Kafka sink (exactly-once output)
+
+`KafkaSink::transactional(brokers, topic, transactional_id)` configures an
+idempotent producer with a stable `transactional.id` and commits each batch as one
+Kafka transaction (begin → produce → commit, with abort on a produce error). A
+batch's rows become visible to read-committed consumers atomically, and a batch
+retried after a crash fences the previous producer instead of double-writing.
+`KafkaSink::new` remains the at-least-once mode. The structured-streaming file sink
+is already idempotent (deterministic `part-{epoch}.parquet`), verified by the
+`recovery_no_double_emit` test. Broker-gated test:
+`transactional_sink_commits_atomically` (`--features kafka -- --ignored`).
+
+### New feature: report-back state-shard affinity (autoscaling-robust)
+
+Structured-streaming state shards (`TaskAction::MergeState`) now use the same
+report-back pattern as distributed RDD caching: the worker embeds its held
+`state_id`s in `TaskResultEnvelope.held_state_ids`; the driver registers them in
+`DistributedScheduler::state_locs` (`DashMap<u64, SocketAddrV4>`).
+`pin_state_shard` prefers the registered worker over the modulo fallback, so a
+shard already in memory on a worker is routed back to that worker every subsequent
+batch — no state reload needed on a stable cluster. On worker death,
+`remove_worker` calls `invalidate_state_for_worker` to clear stale registrations,
+and the modulo fallback then picks a live worker that cold-loads from the per-shard
+checkpoint. Three unit tests: `register_state_locs_and_pin_prefers_registered`,
+`invalidate_state_for_worker_clears_its_shards`,
+`pin_state_shard_falls_back_when_worker_gone`.
+
+### New feature: end-to-end exactly-once Kafka→Kafka delivery
+
+`KafkaSource` now runs with `enable.auto.commit=false` and tracks the consumed
+`TopicPartitionList` atomically alongside the row buffer (via `SourceShared` under
+one `Mutex`). `pending_offsets()` returns an `OffsetCommit` (TPL +
+`ConsumerGroupMetadata`) after each batch. When `QueryRunner::run_batch` detects a
+transactional sink and a non-empty `pending_offsets`, it calls
+`KafkaSink::add_batch_with_offsets` which runs: begin-transaction → produce rows →
+`send_offsets_to_transaction` → commit. Source offsets and output records become
+durable in a single broker transaction; a crash between them is impossible.
+At-least-once mode (`KafkaSink::new` + `post_batch_commit`) is unchanged.
+Broker-gated test: `exactly_once_kafka_to_kafka` (`--features kafka -- --ignored`).
+
+### Performance: bounded reduce-side memory for wide sort-shuffles
+
+The sort-shuffle reduce already merged its output lazily, but it first decoded
+**every** fetched run into a `Vec` — O(total reduce-partition bytes) resident.
+`ShuffleFetcher::fetch_runs_spilled` now streams each fetched run to an anonymous
+temp file, and `SpilledRunIter` decodes it one `(K, V)` at a time into the same
+lazy k-way merge. `ShuffledRdd::compute` uses this path once a reduce partition
+draws from more than `ATOMIC_REDUCE_SPILL_THRESHOLD_RUNS` map outputs (default 64);
+narrow shuffles keep the in-memory path. Peak input memory drops to one run plus
+the O(#runs) merge working set. Output is byte-identical (verified by running the
+`joins` example through both paths).
 
 ### New feature: Kubernetes deployment
 

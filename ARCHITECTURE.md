@@ -71,7 +71,12 @@ Driver and worker run **the same binary**. The dispatch table is built at compil
 
 - **`atomic-sql`** — full SQL layer backed by DataFusion (SQL parser, Catalyst-style optimizer,
   Arrow columnar execution, Parquet/CSV/JSON, RDD-backed table providers).
-- **`atomic-streaming`** — Spark Streaming–style micro-batch streaming over `atomic-compute`.
+- **`atomic-streaming`** — Spark Streaming–style micro-batch streaming over `atomic-compute`;
+  `DistributedSource` dispatches source partitions (file splits + the Kafka Direct source) to workers.
+- **`atomic-structured`** — Spark Structured Streaming–style continuous SQL/DataFrame queries on the
+  batch loop: tumbling/sliding/session windows, stream-stream joins, watermarks, a
+  mergeable-aggregate state store backed by `atomic-sql`, distributed sharded state with
+  report-back affinity, and exactly-once Kafka→Kafka delivery.
 - **`atomic-graph`** — GraphX-style graph processing with Pregel and common algorithms.
 
 ---
@@ -114,6 +119,10 @@ Worker
 | `DashMapShuffleCache` | `atomic-data` | In-memory bucket store (lock-free via DashMap) |
 | `CachedRdd<T>` | `atomic-compute` | RDD wrapper that intercepts `compute()` to check/fill cache |
 | `PartitionStore` | `atomic-data` | Type-erased in-memory partition cache (DashMap keyed by (rdd_id, partition)) |
+| `WorkerCapabilities` | `atomic-data` | Advertised at TCP handshake — `max_tasks`, `registry_fingerprint`, `shuffle_server_port` |
+| `WORKER_PARTITION_CACHE` | `atomic-compute` | Worker-side LRU partition store; fills `TaskResultEnvelope.cached_partitions` |
+| `state_locs` | `atomic-scheduler` | `DashMap<state_id, SocketAddrV4>` — driver's record of which worker holds each state shard |
+| `TaskResultEnvelope.held_state_ids` | `atomic-data` | Worker reports the state IDs it merged; driver registers them in `state_locs` |
 
 ### Distributed shuffle flow
 
@@ -245,6 +254,73 @@ JobScheduler::run_batch_loop()
 
 ---
 
+## Structured Streaming Architecture (`atomic-structured`)
+
+Spark Structured Streaming–style continuous SQL/DataFrame queries on the `atomic-streaming` batch
+loop. Each micro-batch registers its source rows as an `input` table in a DataFusion
+`SessionContext`, runs the user's query, then emits the result through a `Sink`.
+
+### Key types
+
+| Type | File | Role |
+|------|------|------|
+| `StreamingDataFrame` | `frame.rs` | Builder — `read_stream` → `with_watermark` → `window` / `session_window` / `join_stream` → `write_stream` |
+| `StreamWriter` | `frame.rs` | Terminal builder — output mode, trigger, sink, `.start()` |
+| `StreamSource` | `source.rs` | `next_batch(time_ms)` + `schema()`; provides `pending_offsets()` for exactly-once Kafka |
+| `Sink` | `sink.rs` | `add_batch` (at-least-once) + `add_batch_with_offsets` (exactly-once, Kafka feature) |
+| `BatchEngine` | `query.rs` | Per-batch processing abstraction — `StatelessEngine` (SQL pass-through), `WindowedEngine`, `SessionEngine`, `StreamJoinEngine` |
+| `QueryRunner` | `query.rs` | Pairs engine + sink; routes batch through `add_batch_with_offsets` when `pending_offsets()` is non-None |
+| `WatermarkTracker` | `watermark.rs` | Monotonic `max(event_time) − delay`; gates window finalization |
+| `SessionEngine` | `session_window.rs` | Per-group dynamic-bound sessions; merges bridging events; finalizes on `end + gap ≤ watermark` |
+| `StreamJoinEngine` | `stream_join.rs` | Time-bounded stream-stream join; per-side watermark-bounded buffers |
+| `KafkaSource` | `kafka.rs` | `enable.auto.commit=false`; atomically drains `SourceShared` (buffer + TPL) in `next_batch` |
+| `KafkaSink` | `kafka.rs` | At-least-once (`new`) or exactly-once (`transactional`) Kafka output |
+| `OffsetCommit` | `kafka.rs` | `tpl: TopicPartitionList` + `group_metadata: Arc<ConsumerGroupMetadata>` for transactional commit |
+
+### Query execution flow
+
+```
+QueryRunner::run_batch(epoch)
+  ├─ engine.process(epoch)           ← source.next_batch → register "input" → SQL → RecordBatch[]
+  ├─ engine.pending_offsets()
+  │    Some(offsets) [kafka feature] → sink.add_batch_with_offsets(epoch, batches, offsets)
+  │         └─ begin_transaction → produce rows → send_offsets_to_transaction → commit
+  │              (source offsets + output records atomic in one broker transaction)
+  └─ None                            → sink.add_batch(epoch, batches)
+                                          └─ engine.post_commit(epoch) [advances Kafka offsets, at-least-once]
+```
+
+### Window models
+
+- **Tumbling** — `window(col, size)`; one window per row via `date_bin`.
+- **Sliding** — `window(col, size).slide(step)`; row fans out to every covering window via Arrow `take` expansion.
+- **Session** — `session_window(col, gap)`; dynamic bounds; bridging events merge sessions.
+
+### Distributed state
+
+`.distributed(n)` on the windowed/session builders and `join_stream(...).distributed(n)` shards
+the keyed state across `n` workers:
+
+```
+Driver (each batch)
+  for shard s in 0..n:
+    pick worker = pin_state_shard(s, state_locs[state_id])   ← registered worker first, modulo fallback
+    send TaskEnvelope { action: MergeState { state_id }, data: per_shard_partials }
+
+Worker
+  STATE_MERGE_REGISTRY.get(state_id)(existing_state, partials) → new_state
+  persist shard to checkpoint_dir
+  return TaskResultEnvelope { held_state_ids: [state_id], … }
+
+Driver
+  register_state_locs(held_state_ids, worker_addr)   ← shard stays on same worker next batch
+```
+
+Worker death: `remove_worker` calls `invalidate_state_for_worker`; modulo fallback routes
+to a live worker that cold-loads the shard from per-shard checkpoint storage.
+
+---
+
 ## Graph Architecture (`atomic-graph`)
 
 GraphX-style graph processing with RDD-backed vertex and edge sets.
@@ -261,6 +337,50 @@ GraphX-style graph processing with RDD-backed vertex and edge sets.
 | `LabelPropagation` | `algo/label_propagation.rs` | Community detection |
 | `TriangleCount` | `algo/triangle_count.rs` | Per-vertex triangle count |
 | `ConnectedComponent` | `algo/connected_component.rs` | Union-find via Pregel |
+
+---
+
+## NLQ Architecture (`atomic-nlq`)
+
+LLM-powered natural-language analytics. The user states intent in plain language; an LLM plans a
+`WorkflowPlan` (a dependency graph of tool calls); an executor runs it on Atomic, iterating until
+the question is answered.
+
+### Two cooperating layers
+
+1. **Agentic workflow** — `LlmPlanner` → `WorkflowPlan` → `WorkflowExecutor` → `AgentLoop`.
+   Tools are the builtin `sql_query` plus any user-registered Python/JS tools.
+2. **LLM-native SQL operators** — DataFusion `Extension(UserDefinedLogicalNode)` nodes
+   (`LlmFilterNode`, `LlmMapNode`, `EmbedNode`, `VectorSearchNode`) and `LlmBatchingRule` so
+   per-row LLM work can run *within* a SQL step and be grouped into batched API calls.
+
+### Key types
+
+| Type | File | Role |
+|------|------|------|
+| `NlqContext` | `context.rs` | Entry point — wraps `AtomicSqlContext` + `OpenAiClient` + `AgentLoop` |
+| `LlmPlanner` | `planner/llm_planner.rs` | Calls OpenAI → `WorkflowPlan` JSON |
+| `WorkflowPlan` / `WorkflowStep` | `workflow/mod.rs` | LLM's tool-call dependency graph |
+| `WorkflowExecutor` | `workflow/executor.rs` | Runs steps in parallel dependency waves (`tokio::JoinSet`) |
+| `AgentLoop` | `workflow/agent_loop.rs` | plan → execute → evaluate → repeat; returns `AgentResult` |
+| `ToolRegistry` | `registry.rs` | Builtin `sql_query` + user Python/JS tools |
+| `OpenAiClient` | `openai/client.rs` | OpenAI chat/embeddings client with retry |
+| `LlmBatchingRule` | `optimizer/` | Batches per-row LLM calls within a DataFusion SQL plan |
+| `InMemoryVectorIndex` | `vector/` | In-memory ANN index for `VectorSearchNode` |
+
+### Request flow
+
+```
+User NL query
+  └─ LlmPlanner (OpenAI: schema + tool list + query) → WorkflowPlan
+       └─ WorkflowExecutor (dependency waves)
+            ├─ Builtin(SqlQuery) → AtomicSqlContext.sql()
+            │     └─ DataFusion + LlmBatchingRule → LlmFilterExec / LlmMapExec / EmbedExec
+            ├─ Python(code) → atomic-worker PyO3 runtime
+            └─ JavaScript(code) → atomic-worker V8 runtime
+       └─ AgentLoop.evaluate (OpenAI) → { done, answer, visualization? }
+            └─ repeat until done or max_rounds
+```
 
 ---
 

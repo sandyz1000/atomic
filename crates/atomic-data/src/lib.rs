@@ -14,6 +14,7 @@ pub mod partitioner;
 pub mod rdd;
 pub mod shuffle;
 pub mod split;
+pub mod state_store;
 pub mod task;
 pub mod task_context;
 

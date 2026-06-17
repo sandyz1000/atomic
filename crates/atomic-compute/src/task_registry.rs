@@ -176,6 +176,40 @@ pub static SORT_SHUFFLE_MAP_REGISTRY: Lazy<HashMap<&'static str, ShuffleMapHandl
             .collect()
     });
 
+/// A registered state-merge function for distributed stateful streaming.
+///
+/// Content-agnostic, so the data/compute layers carry no streaming types: it
+/// operates on opaque serialized state. The worker calls it for a
+/// [`TaskAction::MergeState`](atomic_data::distributed::TaskAction::MergeState):
+/// `prev` is the shard's current serialized state (`None` if this is the first
+/// merge), `partials` is this batch's partial state for the shard, and `params` is
+/// the merge/emit configuration. It returns `(new_state_bytes, emitted_bytes)`.
+///
+/// Same `String`-error rationale as [`ShuffleMapHandlerFn`]: this is a `fn`-pointer
+/// ABI shared across binaries, converted to `ComputeError` at the dispatch boundary.
+pub type StateMergeFn =
+    fn(prev: Option<&[u8]>, partials: &[u8], params: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String>;
+
+/// A compile-time state-merge handler, registered by `register_state_merge!`.
+pub struct StateMergeEntry {
+    /// Stable name used as the dispatch key (e.g. `"atomic_structured::windowed_v1"`).
+    pub name: &'static str,
+    /// The merge handler.
+    pub handler: StateMergeFn,
+}
+
+inventory::collect!(StateMergeEntry);
+
+/// Global compile-time state-merge registry — built once from all
+/// `register_state_merge!` calls linked into the binary. `NativeBackend` uses this
+/// when it sees [`TaskAction::MergeState`](atomic_data::distributed::TaskAction::MergeState).
+pub static STATE_MERGE_REGISTRY: Lazy<HashMap<&'static str, StateMergeFn>> = Lazy::new(|| {
+    inventory::iter::<StateMergeEntry>
+        .into_iter()
+        .map(|entry| (entry.name, entry.handler))
+        .collect()
+});
+
 /// A compile-time named-partitioner factory, registered by
 /// `register_partitioner!(P)` for a `P: NamedPartitioner`.
 ///

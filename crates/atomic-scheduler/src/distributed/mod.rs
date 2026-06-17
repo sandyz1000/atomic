@@ -78,6 +78,12 @@ pub struct DistributedScheduler {
     /// Per-RDD cached partition holders, keyed by full worker endpoint.
     pub(crate) cache_endpoints: Arc<DashMap<usize, Vec<Vec<SocketAddrV4>>>>,
 
+    /// State shard → holding worker, built from `TaskResultEnvelope.held_state_ids`.
+    /// Mirrors `cache_endpoints` for `MergeState` tasks: the driver routes each shard
+    /// to its registered worker (the one that holds the shard's in-memory state), falling
+    /// back to the modulo-based `pin_state_shard` for the first batch / cold shards.
+    pub(crate) state_locs: Arc<DashMap<u64, SocketAddrV4>>,
+
     pub(crate) scheduler_lock: Arc<Mutex<bool>>,
     pub(crate) live_listener_bus: LiveListenerBus,
 }
@@ -105,6 +111,7 @@ impl DistributedScheduler {
             job_tasks: Arc::new(DashMap::new()),
             server_uris: Arc::new(Mutex::new(VecDeque::new())),
             cache_endpoints: Arc::new(DashMap::new()),
+            state_locs: Arc::new(DashMap::new()),
             scheduler_lock: Arc::new(Mutex::new(false)),
             live_listener_bus,
             job_cancel_tokens: Arc::new(DashMap::new()),
@@ -583,5 +590,67 @@ mod tests {
         assert_eq!(result.status, ResultStatus::Success);
         assert_eq!(result.data, vec![42]);
         server.await.expect("server join");
+    }
+
+    // G1: report-back state affinity tests.
+
+    #[test]
+    fn register_state_locs_and_pin_prefers_registered() {
+        let sched = DistributedScheduler::new(4, true);
+        let w1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
+        let w2 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
+        sched.register_worker(w1, WorkerCapabilities::new("w1".to_string(), 4, vec![]));
+        sched.register_worker(w2, WorkerCapabilities::new("w2".to_string(), 4, vec![]));
+
+        // Before any registration: falls back to modulo (shard 0 → index 0).
+        let cold = sched.pin_state_shard(0, None);
+        assert!(cold.is_some(), "modulo fallback should pick a worker");
+
+        // Register shard 42 on w2.
+        sched.register_state_locs(&[42u64], w2);
+
+        // After registration: shard 42 pinned to w2 regardless of index.
+        assert_eq!(sched.pin_state_shard(99, Some(42)), Some(w2));
+        // Unregistered shard falls back to modulo.
+        assert_ne!(sched.pin_state_shard(0, Some(999)), Some(w2));
+    }
+
+    #[test]
+    fn invalidate_state_for_worker_clears_its_shards() {
+        let sched = DistributedScheduler::new(4, true);
+        let w1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
+        let w2 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
+
+        sched.register_state_locs(&[1u64, 2, 3], w1);
+        sched.register_state_locs(&[4u64], w2);
+
+        // Invalidate w1.
+        sched.invalidate_state_for_worker(w1);
+
+        // w1's shards are gone.
+        assert!(!sched.state_locs.contains_key(&1));
+        assert!(!sched.state_locs.contains_key(&2));
+        assert!(!sched.state_locs.contains_key(&3));
+        // w2's shard is untouched.
+        assert_eq!(*sched.state_locs.get(&4).unwrap(), w2);
+    }
+
+    #[test]
+    fn pin_state_shard_falls_back_when_worker_gone() {
+        let sched = DistributedScheduler::new(4, true);
+        let w1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
+        let w2 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
+        sched.register_worker(w2, WorkerCapabilities::new("w2".to_string(), 4, vec![]));
+
+        // Register shard 7 on w1, but w1 is NOT in server_uris (it's "dead").
+        sched.register_state_locs(&[7u64], w1);
+
+        // pin_state_shard: w1 is not live → falls back to modulo (w2 at index 0).
+        let picked = sched.pin_state_shard(0, Some(7));
+        assert_eq!(
+            picked,
+            Some(w2),
+            "should fall back to live worker via modulo"
+        );
     }
 }

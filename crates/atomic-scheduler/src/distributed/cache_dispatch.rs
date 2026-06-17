@@ -82,4 +82,19 @@ impl DistributedScheduler {
     pub fn invalidate_rdd_cache(&self, rdd_id: usize) {
         self.cache_endpoints.remove(&rdd_id);
     }
+
+    /// Record that `endpoint` now holds the given state shards, so subsequent
+    /// `MergeState` batches route each shard back to the worker that holds its state.
+    pub fn register_state_locs(&self, state_ids: &[u64], endpoint: SocketAddrV4) {
+        for &id in state_ids {
+            self.state_locs.insert(id, endpoint);
+        }
+    }
+
+    /// Forget every state shard held by `endpoint` — the worker is gone (or its
+    /// in-memory state is lost). Affected shards fall back to `pin_state_shard` (modulo)
+    /// and reload from their checkpoint on the next batch.
+    pub(crate) fn invalidate_state_for_worker(&self, endpoint: SocketAddrV4) {
+        self.state_locs.retain(|_, v| *v != endpoint);
+    }
 }

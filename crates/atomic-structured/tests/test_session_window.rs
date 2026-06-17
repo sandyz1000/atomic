@@ -108,6 +108,48 @@ fn test_session_merges() {
     );
 }
 
+/// D4 — the same merge-on-bridge must hold when session state is sharded:
+/// all events for a group hash to one shard, so its sessions coalesce correctly.
+#[test]
+fn test_distributed_session_merges() {
+    let gap = Duration::from_millis(30);
+    let source = Arc::new(QueueSource::from_batches(
+        schema(),
+        vec![
+            vec![event(10, "a"), event(50, "a"), event(35, "a")],
+            vec![event(200, "a")],
+        ],
+    ));
+    let sink = Arc::new(MemorySink::new());
+
+    let q = StreamingDataFrame::read_stream(source)
+        .with_watermark("ts", Duration::from_millis(0))
+        .session_window("ts", gap)
+        .group_by(&["user"])
+        .aggregate(vec![Agg::count("cnt")])
+        .distributed(4)
+        .write_stream()
+        .output_mode(OutputMode::Append)
+        .format(sink.clone())
+        .trigger(Trigger::ProcessingTime(Duration::from_millis(50)))
+        .start(&ssc())
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    q.stop();
+
+    let rows = session_rows(&sink);
+    let merged: Vec<_> = rows.iter().filter(|(_, _, u, _)| u == "a").collect();
+    let total_count: i64 = merged.iter().map(|(_, _, _, c)| c).sum();
+    assert_eq!(
+        total_count, 3,
+        "sharded session merge → count=3; got {rows:?}"
+    );
+    assert!(
+        merged.iter().any(|(s, e, _, _)| *s == 10 && *e == 50),
+        "merged session must span [10,50]; got {rows:?}"
+    );
+}
+
 /// Two events separated by more than `gap` produce two distinct sessions.
 ///
 /// Timeline (gap=30ms):

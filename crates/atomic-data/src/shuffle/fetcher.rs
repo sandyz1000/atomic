@@ -8,6 +8,8 @@ use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::convert::TryFrom;
+use std::io::{BufReader, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::sync::{Arc, atomic, atomic::AtomicBool};
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -154,6 +156,105 @@ impl ShuffleFetcher {
         Ok(runs)
     }
 
+    /// Like [`fetch_runs`](Self::fetch_runs), but each fetched run is streamed to
+    /// an anonymous temp file and returned as a lazy [`SpilledRunIter`] that
+    /// decodes `(K, V)` pairs on demand. The reduce side uses this for wide
+    /// shuffles so the full set of input runs is never resident at once — peak
+    /// memory is one run during its fetch plus the k-way-merge working set (one
+    /// element per run) instead of every run decoded into a `Vec`.
+    pub async fn fetch_runs_spilled<K, V>(
+        &self,
+        shuffle_id: usize,
+        reduce_id: usize,
+    ) -> LibResult<Vec<SpilledRunIter<K, V>>>
+    where
+        K: Data + bincode::Decode<()>,
+        V: Data + bincode::Decode<()>,
+    {
+        let server_uris: Vec<String> =
+            self.tracker
+                .get_server_uris(shuffle_id)
+                .await
+                .map_err(|err| ShuffleError::FailFetchingShuffleUris {
+                    source: Box::new(err),
+                })?;
+        let mut inputs_by_uri = HashMap::new();
+        for (index, server_uri) in server_uris.into_iter().enumerate() {
+            inputs_by_uri
+                .entry(server_uri)
+                .or_insert_with(Vec::new)
+                .push(index);
+        }
+        let mut server_queue = Vec::new();
+        for (key, value) in inputs_by_uri {
+            server_queue.push((key, value));
+        }
+        let num_tasks = server_queue.len();
+        let server_queue = Arc::new(Mutex::new(server_queue));
+        let failure = Arc::new(AtomicBool::new(false));
+        let mut tasks = Vec::with_capacity(num_tasks);
+        for _ in 0..num_tasks {
+            let server_queue = server_queue.clone();
+            let failure = failure.clone();
+            let task = async move {
+                let mut lock = server_queue.lock().await;
+                if let Some((base_server_uri, input_ids)) = lock.pop() {
+                    drop(lock);
+                    let server_uri = format!("{}/shuffle/{}", base_server_uri, shuffle_id);
+                    let mut chunk_uri_str = String::with_capacity(server_uri.len() + 12);
+                    chunk_uri_str.push_str(&server_uri);
+                    let mut runs = Vec::with_capacity(input_ids.len());
+                    for input_id in input_ids {
+                        if failure.load(atomic::Ordering::Acquire) {
+                            return Err(ShuffleError::Other);
+                        }
+                        let chunk_uri = Self::make_chunk_uri(
+                            &server_uri,
+                            &mut chunk_uri_str,
+                            input_id,
+                            reduce_id,
+                        )?;
+                        let data_bytes = match Self::fetch_chunk_with_retry(chunk_uri).await {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                log::error!("Failed to fetch chunk: {:?}", e);
+                                failure.store(true, atomic::Ordering::Release);
+                                // Same lineage-recovery contract as `fetch_runs`:
+                                // surface the lost map output so the scheduler
+                                // recomputes it.
+                                return Err(ShuffleError::FetchFailed {
+                                    shuffle_id,
+                                    map_id: input_id,
+                                    server_uri: base_server_uri.clone(),
+                                });
+                            }
+                        };
+                        match SpilledRunIter::<K, V>::spill(&data_bytes) {
+                            Ok(run) => runs.push(run),
+                            Err(e) => {
+                                failure.store(true, atomic::Ordering::Release);
+                                return Err(e);
+                            }
+                        }
+                    }
+                    Ok::<Vec<SpilledRunIter<K, V>>, _>(runs)
+                } else {
+                    Ok::<Vec<SpilledRunIter<K, V>>, _>(Vec::new())
+                }
+            };
+            tasks.push(tokio::spawn(task));
+        }
+        let task_results = future::join_all(tasks).await;
+        let mut runs: Vec<SpilledRunIter<K, V>> = Vec::new();
+        for res in task_results {
+            match res {
+                Ok(Ok(chunk_runs)) => runs.extend(chunk_runs),
+                _ => return Err(ShuffleError::FailedFetchOp),
+            }
+        }
+        Ok(runs)
+    }
+
     /// Fetch and flatten all map outputs for `reduce_id` into a single iterator.
     pub async fn fetch<K, V>(
         &self,
@@ -276,6 +377,89 @@ impl ShuffleFetcher {
             .to_bytes();
 
         Ok(body_bytes.to_vec())
+    }
+}
+
+/// A lazily-decoded shuffle run backed by an anonymous temp file. Holds the file
+/// open (so it is auto-removed when the iterator drops) and decodes one `(K, V)`
+/// pair per `next()`, so the run's elements are never all resident at once.
+pub struct SpilledRunIter<K, V> {
+    reader: BufReader<std::fs::File>,
+    remaining: u64,
+    _pd: PhantomData<(K, V)>,
+}
+
+impl<K, V> SpilledRunIter<K, V> {
+    /// Spill a bincode-encoded `Vec<(K, V)>` to an anonymous temp file and return
+    /// an iterator positioned just after the length prefix.
+    fn spill(bytes: &[u8]) -> LibResult<Self> {
+        let mut file = tempfile::tempfile().map_err(|_| ShuffleError::FailedFetchOp)?;
+        file.write_all(bytes)
+            .map_err(|_| ShuffleError::FailedFetchOp)?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|_| ShuffleError::FailedFetchOp)?;
+        let mut reader = BufReader::new(file);
+        let config = bincode::config::standard();
+        // A `Vec`'s length prefix uses the same `u64` varint encoding a standalone
+        // `u64` decodes with, so this consumes exactly the header the map side
+        // wrote and leaves the reader at the first element.
+        let remaining: u64 = bincode::decode_from_std_read(&mut reader, config)
+            .map_err(|_| ShuffleError::FailedFetchOp)?;
+        Ok(SpilledRunIter {
+            reader,
+            remaining,
+            _pd: PhantomData,
+        })
+    }
+}
+
+impl<K, V> Iterator for SpilledRunIter<K, V>
+where
+    K: Data + bincode::Decode<()>,
+    V: Data + bincode::Decode<()>,
+{
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let config = bincode::config::standard();
+        match bincode::decode_from_std_read::<(K, V), _, _>(&mut self.reader, config) {
+            Ok(pair) => {
+                self.remaining -= 1;
+                Some(pair)
+            }
+            Err(_) => {
+                self.remaining = 0;
+                None
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spilled_run_roundtrips() {
+        let data: Vec<(i32, String)> = vec![(1, "a".into()), (2, "bb".into()), (3, "ccc".into())];
+        let bytes = bincode::encode_to_vec(&data, bincode::config::standard()).unwrap();
+        let got: Vec<(i32, String)> = SpilledRunIter::<i32, String>::spill(&bytes)
+            .unwrap()
+            .collect();
+        assert_eq!(got, data);
+    }
+
+    #[test]
+    fn spilled_run_empty() {
+        let data: Vec<(i32, String)> = vec![];
+        let bytes = bincode::encode_to_vec(&data, bincode::config::standard()).unwrap();
+        let n = SpilledRunIter::<i32, String>::spill(&bytes)
+            .unwrap()
+            .count();
+        assert_eq!(n, 0);
     }
 }
 

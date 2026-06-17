@@ -135,6 +135,58 @@ fn test_inner_join_matches() {
     );
 }
 
+/// D4 — the same inner join with sharded state (`.distributed(4)`): both sides of
+/// a match share the join key, so they route to one shard and the match is found.
+#[test]
+fn test_distributed_inner_join_matches() {
+    let left = Arc::new(QueueSource::from_batches(
+        left_schema(),
+        vec![vec![left_row(100, "x", 10)], vec![left_row(500, "y", 20)]],
+    ));
+    let right = Arc::new(QueueSource::from_batches(
+        right_schema(),
+        vec![
+            vec![right_row(150, "x", "match")],
+            vec![right_row(700, "y", "nomatch")],
+        ],
+    ));
+    let sink = Arc::new(MemorySink::new());
+
+    let q = StreamingDataFrame::read_stream(left)
+        .with_watermark("ts", Duration::from_millis(0))
+        .join_stream(
+            right,
+            "id",
+            "id",
+            JoinType::Inner,
+            Duration::from_millis(100),
+        )
+        .distributed(4)
+        .output_mode(OutputMode::Append)
+        .format(sink.clone())
+        .trigger(Trigger::ProcessingTime(Duration::from_millis(50)))
+        .start(&ssc())
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    q.stop();
+
+    let pairs = joined_ids(&sink);
+    assert!(
+        pairs
+            .iter()
+            .any(|(l, r)| l == "x" && r.as_deref() == Some("x")),
+        "sharded inner join must emit (x, x); got {:?}",
+        pairs
+    );
+    assert!(
+        !pairs
+            .iter()
+            .any(|(l, r)| l == "y" && r.as_deref() == Some("y")),
+        "y pair is outside the time bound; got {:?}",
+        pairs
+    );
+}
+
 /// Left outer join: unmatched left rows are emitted (with null right side)
 /// once the watermark advances past `row_time + time_bound`.
 #[test]

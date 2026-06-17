@@ -388,12 +388,14 @@ optional `HorizontalPodAutoscaler`, optional mTLS, and `/health` + `/metrics` pr
 | | `map`, `filter`, `flat_map`, `reduce_by_key`, `join`, `update_state_by_key` | yes |
 | | Checkpoint (bincode, atomic write) | yes |
 | | Structured Streaming (`atomic-structured`) — continuous SQL/DataFrame queries | yes |
-| | Tumbling event-time windows + watermark + late-data drop | yes |
+| | Tumbling / sliding / session event-time windows + watermark + late-data drop | yes |
+| | Stream-stream joins (inner / left / right outer, time-bounded) | yes |
 | | Output modes: Append / Update / Complete | yes |
 | | State store with checkpoint + recovery | yes |
 | | Kafka source/sink | yes (`kafka` feature; DStream + Structured) |
 | | Sinks: memory / console / file (parquet) / Kafka | yes |
-| | Distributed streaming receivers; sliding/session windows; stream-stream joins | not yet |
+| | Distributed streaming sources (`DistributedSource` — file splits + Kafka Direct to workers) | yes |
+| | Distributed structured-streaming state — sharded window/session/join state (`.distributed(n)`, `MergeState`, per-shard checkpoint, report-back affinity) | yes |
 | **Graph** | `Graph<VD,ED>` + Pregel engine — Rust | yes |
 | | `Graph(vertices, edges)` + 6 algorithms — Python + JS | yes |
 | | PageRank, SSSP, SCC, LabelPropagation, TriangleCount, CC | yes |
@@ -403,6 +405,7 @@ optional `HorizontalPodAutoscaler`, optional mTLS, and `/health` + `/metrics` pr
 | | `join`, `sort_by`, `glom`, `cache`, `checkpoint` on RDD — Python + JS | yes |
 | | Python → Arrow (`df.to_arrow()`) | yes |
 | | Python RDD → SQL bridge (`register_rdd`) | yes |
+| | Polyglot UDF preflight — JS native-fn rejection + `*WithContext` capture; Python `cloudpickle` load round-trip | yes |
 | **Infrastructure** | S3 object store — Rust only (`s3` feature) | yes |
 | | Mutual TLS (`tls` feature, rustls) | yes |
 | | Prometheus `/metrics` endpoint | yes |
@@ -486,7 +489,7 @@ already know. Here is the unvarnished trade-off — including where the incumben
 | Closure safety | Runtime serialization failures | Compile-time — "does it build?" = "does it dispatch?" |
 | Deployment | JVM on every node + cluster manager | Static musl binary, SSH upload |
 | SQL optimizer | Catalyst (10yr+, highly mature) | DataFusion (excellent, newer) |
-| Streaming | Structured Streaming + Kafka, exactly-once, distributed | Micro-batch + Structured Streaming (windows, watermark, output modes); Kafka source/sink (feature-gated); driver-local, at-least-once |
+| Streaming | Structured Streaming + Kafka, exactly-once, distributed | Micro-batch + Structured Streaming (tumbling/sliding/session windows, stream-stream joins, watermark, output modes); Kafka source/sink (feature-gated); source reads distribute to workers (`DistributedSource`); distributed sharded query state (`.distributed(n)`); exactly-once Kafka→Kafka (transactional sink + `send_offsets_to_transaction`) |
 | Kubernetes | Full operator | Dockerfile + Helm chart + DNS discovery (no CRD operator) |
 | Ecosystem | Delta Lake, MLflow, hundreds of connectors | Early |
 | NLQ / LLM | Plugin / prompt wrapper | First-class plan nodes |
@@ -498,10 +501,10 @@ large shuffles and complex joins need sort-merge join, broadcast join, adaptive 
 selection, and skew handling — all of which are tractable in Rust and planned (see
 [ROADMAP.md](ROADMAP.md)). Atomic already has shuffle hash joins, disk-spilling shuffle, adaptive
 partition coalescing, range-partitioned distributed sort, distributed RDD caching with locality
-scheduling, a Kafka source/sink, and Structured Streaming (event-time windows, watermark, output
-modes). The remaining streaming gap versus mature JVM engines is **distributed** streaming
-(receivers run driver-local today) and exactly-once delivery. Choose Atomic if you want to avoid the
-JVM stack entirely, run the same job in three languages, and accept being an early adopter.
+scheduling, a Kafka source/sink, Structured Streaming (tumbling/sliding/session windows,
+stream-stream joins, watermark, output modes) with distributed sharded state and report-back
+affinity, and exactly-once Kafka→Kafka delivery. Choose Atomic if you want to avoid the JVM stack
+entirely, run the same job in three languages, and accept being an early adopter.
 
 ---
 
@@ -583,9 +586,9 @@ See [docs/getting-started.md](docs/getting-started.md), [docs/configuration.md](
 
 **Beta** — all core features are implemented and tested. The test suite covers local execution, distributed TCP dispatch, shuffle, streaming, structured streaming, graph, and SQL. Production readiness depends on your risk tolerance and workload:
 
-- ✅ **Ready**: Local-mode jobs, SQL analytics (DataFusion), graph algorithms, Python/JS prototyping, musl static binary deployment, Kubernetes deployment (Helm)
-- ⚠️ **Early adopter**: Distributed mode on real workloads — core is solid (shuffle joins, fault recovery, distributed cache + locality, speculation), and Kafka + Structured Streaming + K8s now exist, but they are newer and the distributed integration tests run behind the `--ignored` CI job
-- ⛔ **Not yet**: Distributed streaming receivers (Structured Streaming runs driver-local), exactly-once streaming, sliding/session windows, a Kubernetes CRD operator, Delta/Iceberg table formats
+- **Ready**: Local-mode jobs, SQL analytics (DataFusion), graph algorithms, Python/JS prototyping, musl static binary deployment, Kubernetes deployment (Helm)
+- **Early adopter**: Distributed mode on real workloads — core is solid (shuffle joins, fault recovery, distributed cache + locality, speculation, distributed structured-streaming state with report-back affinity, exactly-once Kafka→Kafka); Kafka + Structured Streaming + K8s are newer and the distributed/broker integration tests run behind the `--ignored` CI job
+- **Not yet**: Kubernetes CRD operator; Delta/Iceberg table formats; broadcast join / sort-merge join / skew handling for very large shuffles
 
 ---
 

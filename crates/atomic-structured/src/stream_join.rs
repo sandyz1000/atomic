@@ -23,6 +23,10 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
 
+use atomic_compute::context::Context;
+use atomic_data::distributed::{PipelineOp, StateMergePayload, TaskAction, TaskRuntime};
+
+use crate::distributed_state::shard_of;
 use crate::errors::{StructuredError, StructuredResult};
 use crate::query::BatchEngine;
 use crate::source::StreamSource;
@@ -33,7 +37,7 @@ use crate::windowed::{read_group, read_i64};
 // ── Join type ─────────────────────────────────────────────────────────────────
 
 /// Which rows are emitted from an equi-join.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub enum JoinType {
     Inner,
     LeftOuter,
@@ -44,16 +48,23 @@ pub enum JoinType {
 
 /// One row buffered in a join side, with the event-time and a condensed
 /// representation of all column values.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, bincode::Encode, bincode::Decode)]
 pub struct JoinRow {
     pub time_ms: i64,
     pub cols: Vec<GroupVal>,
 }
 
 /// Per-side key-indexed buffer for stream-stream joins.
+#[derive(bincode::Encode, bincode::Decode)]
 pub struct JoinStateStore {
     /// join_key_vals → buffered rows with that key
     map: HashMap<Vec<GroupVal>, Vec<JoinRow>>,
+}
+
+impl Default for JoinStateStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl JoinStateStore {
@@ -275,6 +286,130 @@ impl StreamJoinEngine {
             |e| StructuredError::Sql(format!("join batch: {e}")),
         )?])
     }
+
+    /// Driver-side per-batch work shared by the local and distributed join engines:
+    /// pull both sides, advance the watermark, and extract keyed rows. The caller
+    /// runs the probe against a buffer pair (local for [`StreamJoinEngine`], sharded
+    /// for `DistributedJoinEngine`) via [`probe_and_buffer`].
+    fn compute_rows(&self, epoch: u64) -> JoinRows {
+        let left_batches = self.left.next_batch(epoch);
+        let right_batches = self.right.next_batch(epoch);
+        let wm = {
+            let mut tracker = self.watermark.lock();
+            for b in left_batches.iter().chain(right_batches.iter()) {
+                let tc = if b.schema().index_of(&self.spec.left_time_col).is_ok() {
+                    self.spec.left_time_col.clone()
+                } else {
+                    self.spec.right_time_col.clone()
+                };
+                if let Some(m) = batch_max_time(std::slice::from_ref(b), &tc) {
+                    tracker.observe_max(m);
+                }
+            }
+            tracker.current()
+        };
+        let new_left = self.extract_rows(&left_batches, self.left_key_idx, self.left_time_idx);
+        let new_right = self.extract_rows(&right_batches, self.right_key_idx, self.right_time_idx);
+        JoinRows {
+            new_left,
+            new_right,
+            wm,
+        }
+    }
+}
+
+/// Result of [`StreamJoinEngine::compute_rows`]: this batch's keyed rows per side
+/// and the post-batch watermark.
+struct JoinRows {
+    new_left: Vec<(Vec<GroupVal>, JoinRow)>,
+    new_right: Vec<(Vec<GroupVal>, JoinRow)>,
+    wm: Option<u64>,
+}
+
+/// Probe `new_left`/`new_right` against the buffer pair, append matches (and outer
+/// unmatched), then buffer the new rows and evict expired ones. Shared by the local
+/// engine (one buffer pair) and each distributed shard (its own buffer pair), so the
+/// join semantics are identical regardless of sharding. `left_ncols` is the left
+/// schema width, used to null-pad right-outer unmatched rows.
+#[allow(clippy::too_many_arguments)]
+fn probe_and_buffer(
+    left_buf: &mut JoinStateStore,
+    right_buf: &mut JoinStateStore,
+    new_left: Vec<(Vec<GroupVal>, JoinRow)>,
+    new_right: Vec<(Vec<GroupVal>, JoinRow)>,
+    time_bound: i64,
+    join_type: JoinType,
+    wm: Option<u64>,
+    left_ncols: usize,
+) -> Vec<(JoinRow, Option<JoinRow>)> {
+    let evict_before = wm.map(|w| w as i64 - time_bound).unwrap_or(i64::MIN);
+    let mut matched_pairs: Vec<(JoinRow, Option<JoinRow>)> = Vec::new();
+
+    // New left probes buffered right; new right probes buffered left.
+    for (key, lrow) in &new_left {
+        for rrow in right_buf.get(key) {
+            if (lrow.time_ms - rrow.time_ms).abs() <= time_bound {
+                matched_pairs.push((lrow.clone(), Some(rrow.clone())));
+            }
+        }
+    }
+    for (key, rrow) in &new_right {
+        for lrow in left_buf.get(key) {
+            if (lrow.time_ms - rrow.time_ms).abs() <= time_bound {
+                matched_pairs.push((lrow.clone(), Some(rrow.clone())));
+            }
+        }
+    }
+    // Same-batch cross-probe: rows co-arriving this epoch.
+    {
+        let mut right_index: HashMap<&[GroupVal], Vec<&JoinRow>> = HashMap::new();
+        for (key, rrow) in &new_right {
+            right_index.entry(key.as_slice()).or_default().push(rrow);
+        }
+        for (key, lrow) in &new_left {
+            if let Some(rvec) = right_index.get(key.as_slice()) {
+                for rrow in rvec {
+                    if (lrow.time_ms - rrow.time_ms).abs() <= time_bound {
+                        matched_pairs.push((lrow.clone(), Some((*rrow).clone())));
+                    }
+                }
+            }
+        }
+    }
+
+    // Outer unmatched: drain rows past their match window before eviction.
+    if join_type == JoinType::LeftOuter
+        && let Some(wm_ms) = wm
+    {
+        for row in left_buf.drain_unmatched(wm_ms as i64, time_bound) {
+            matched_pairs.push((row, None));
+        }
+    }
+    if join_type == JoinType::RightOuter
+        && let Some(wm_ms) = wm
+    {
+        for row in right_buf.drain_unmatched(wm_ms as i64, time_bound) {
+            matched_pairs.push((
+                JoinRow {
+                    time_ms: row.time_ms,
+                    cols: vec![GroupVal::Null; left_ncols],
+                },
+                Some(row),
+            ));
+        }
+    }
+
+    // Buffer the new rows (after probing, to avoid self-matches), then evict.
+    for (key, row) in new_left {
+        left_buf.insert(key, row);
+    }
+    left_buf.evict_before(evict_before);
+    for (key, row) in new_right {
+        right_buf.insert(key, row);
+    }
+    right_buf.evict_before(evict_before);
+
+    matched_pairs
 }
 
 impl BatchEngine for StreamJoinEngine {
@@ -284,122 +419,21 @@ impl BatchEngine for StreamJoinEngine {
     }
 
     fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
-        let left_batches = self.left.next_batch(epoch);
-        let right_batches = self.right.next_batch(epoch);
-
-        // Advance watermark from both sides.
-        let wm = {
-            let mut tracker = self.watermark.lock();
-            for b in left_batches.iter().chain(right_batches.iter()) {
-                let tc = if b.schema().index_of(&self.spec.left_time_col).is_ok() {
-                    self.spec.left_time_col.clone()
-                } else {
-                    self.spec.right_time_col.clone()
-                };
-                if let Some(m) = batch_max_time(&[b.clone()], &tc) {
-                    tracker.observe_max(m);
-                }
-            }
-            tracker.current()
-        };
-
-        let time_bound = self.spec.time_bound_ms as i64;
-        let evict_before = wm.map(|w| w as i64 - time_bound).unwrap_or(i64::MIN);
-
-        let new_left = self.extract_rows(&left_batches, self.left_key_idx, self.left_time_idx);
-        let new_right = self.extract_rows(&right_batches, self.right_key_idx, self.right_time_idx);
-
-        let mut matched_pairs: Vec<(JoinRow, Option<JoinRow>)> = Vec::new();
-
-        // 1. New left probes buffered right (rows from previous batches).
-        {
-            let right_buf = self.right_buf.lock();
-            for (key, lrow) in &new_left {
-                for rrow in right_buf.get(key) {
-                    if (lrow.time_ms - rrow.time_ms).abs() <= time_bound {
-                        matched_pairs.push((lrow.clone(), Some(rrow.clone())));
-                    }
-                }
-            }
-        }
-        // 2. New right probes buffered left (rows from previous batches).
-        {
-            let left_buf = self.left_buf.lock();
-            for (key, rrow) in &new_right {
-                for lrow in left_buf.get(key) {
-                    if (lrow.time_ms - rrow.time_ms).abs() <= time_bound {
-                        matched_pairs.push((lrow.clone(), Some(rrow.clone())));
-                    }
-                }
-            }
-        }
-        // 3. Same-batch cross-probe: new left × new right (rows co-arriving this epoch).
-        {
-            // Build a per-key index into new_right for O(N) lookup.
-            let mut right_index: std::collections::HashMap<&[GroupVal], Vec<&JoinRow>> =
-                std::collections::HashMap::new();
-            for (key, rrow) in &new_right {
-                right_index.entry(key.as_slice()).or_default().push(rrow);
-            }
-            for (key, lrow) in &new_left {
-                if let Some(rvec) = right_index.get(key.as_slice()) {
-                    for rrow in rvec {
-                        if (lrow.time_ms - rrow.time_ms).abs() <= time_bound {
-                            matched_pairs.push((lrow.clone(), Some((*rrow).clone())));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Outer unmatched: drain rows past their match window BEFORE eviction so they
-        // can be emitted.  `drain_unmatched` and `evict_before` use the same threshold,
-        // so draining first means evict_before finds nothing to add for those rows.
-        if self.spec.join_type == JoinType::LeftOuter {
-            if let Some(wm_ms) = wm {
-                let unmatched = self
-                    .left_buf
-                    .lock()
-                    .drain_unmatched(wm_ms as i64, time_bound);
-                for row in unmatched {
-                    matched_pairs.push((row, None));
-                }
-            }
-        }
-        if self.spec.join_type == JoinType::RightOuter {
-            if let Some(wm_ms) = wm {
-                let unmatched = self
-                    .right_buf
-                    .lock()
-                    .drain_unmatched(wm_ms as i64, time_bound);
-                for row in unmatched {
-                    matched_pairs.push((
-                        JoinRow {
-                            time_ms: row.time_ms,
-                            cols: vec![GroupVal::Null; self.spec.left_schema.fields().len()],
-                        },
-                        Some(row),
-                    ));
-                }
-            }
-        }
-
-        // Buffer the new rows (after probing to avoid self-matches from same epoch).
-        {
-            let mut left_buf = self.left_buf.lock();
-            for (key, row) in new_left {
-                left_buf.insert(key, row);
-            }
-            left_buf.evict_before(evict_before);
-        }
-        {
-            let mut right_buf = self.right_buf.lock();
-            for (key, row) in new_right {
-                right_buf.insert(key, row);
-            }
-            right_buf.evict_before(evict_before);
-        }
-
+        let r = self.compute_rows(epoch);
+        let mut left_buf = self.left_buf.lock();
+        let mut right_buf = self.right_buf.lock();
+        let matched_pairs = probe_and_buffer(
+            &mut left_buf,
+            &mut right_buf,
+            r.new_left,
+            r.new_right,
+            self.spec.time_bound_ms as i64,
+            self.spec.join_type,
+            r.wm,
+            self.spec.left_schema.fields().len(),
+        );
+        drop(left_buf);
+        drop(right_buf);
         self.build_joined_batch(&matched_pairs)
     }
 }
@@ -419,4 +453,172 @@ fn batch_max_time(batches: &[RecordBatch], col: &str) -> Option<u64> {
         }
     }
     max
+}
+
+// ── Distributed stream-stream join state (Part 3 / D4) ───────────────────────────
+
+/// Registered name of the stream-join state-merge function.
+pub(crate) const JOIN_MERGE_FN: &str = "atomic_structured::stream_join_v1";
+
+/// A shard's two-sided buffer state (both join inputs for the keys in the shard).
+#[derive(bincode::Encode, bincode::Decode)]
+struct JoinShardState {
+    left: JoinStateStore,
+    right: JoinStateStore,
+}
+
+/// Per-shard merge config for a stream-stream join.
+#[derive(bincode::Encode, bincode::Decode)]
+struct JoinMergeParams {
+    watermark_ms: Option<u64>,
+    time_bound_ms: u64,
+    join_type: JoinType,
+    left_ncols: u32,
+}
+
+type KeyedRows = Vec<(Vec<GroupVal>, JoinRow)>;
+
+/// Registered join state-merge: probe this batch's rows against the shard's buffer
+/// pair, then buffer + evict — identical semantics to the local engine because both
+/// call [`probe_and_buffer`]. An equi-join's two matching rows share the key, so they
+/// route to the same shard and all matches are found within it.
+fn join_state_merge(
+    prev: Option<&[u8]>,
+    partials: &[u8],
+    params: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let cfg = bincode::config::standard();
+    let mut state = match prev {
+        Some(b) => bincode::decode_from_slice::<JoinShardState, _>(b, cfg)
+            .map(|(s, _)| s)
+            .map_err(|e| e.to_string())?,
+        None => JoinShardState {
+            left: JoinStateStore::new(),
+            right: JoinStateStore::new(),
+        },
+    };
+    let ((new_left, new_right), _): ((KeyedRows, KeyedRows), _) =
+        bincode::decode_from_slice(partials, cfg).map_err(|e| e.to_string())?;
+    let (params, _): (JoinMergeParams, _) =
+        bincode::decode_from_slice(params, cfg).map_err(|e| e.to_string())?;
+    let matched = probe_and_buffer(
+        &mut state.left,
+        &mut state.right,
+        new_left,
+        new_right,
+        params.time_bound_ms as i64,
+        params.join_type,
+        params.watermark_ms,
+        params.left_ncols as usize,
+    );
+    let new_state = bincode::encode_to_vec(&state, cfg).map_err(|e| e.to_string())?;
+    let matched_bytes = bincode::encode_to_vec(&matched, cfg).map_err(|e| e.to_string())?;
+    Ok((new_state, matched_bytes))
+}
+
+atomic_compute::register_state_merge!(JOIN_MERGE_FN, join_state_merge);
+
+/// Stream-stream join whose two-sided buffer state is sharded across the cluster.
+///
+/// Wraps a [`StreamJoinEngine`] for driver-side row extraction and output assembly,
+/// but routes each batch's rows (by stable join-key hash, so both sides of a match
+/// land together) into worker-resident buffer shards via `MergeState` tasks.
+pub(crate) struct DistributedJoinEngine {
+    inner: StreamJoinEngine,
+    sc: Arc<Context>,
+    num_shards: u32,
+    state_id_base: u64,
+    checkpoint_dir: Option<String>,
+}
+
+impl DistributedJoinEngine {
+    pub(crate) fn new(
+        inner: StreamJoinEngine,
+        sc: Arc<Context>,
+        num_shards: u32,
+        query_id: u64,
+        checkpoint_dir: Option<String>,
+    ) -> Self {
+        DistributedJoinEngine {
+            inner,
+            sc,
+            num_shards: num_shards.max(1),
+            state_id_base: query_id << 16,
+            checkpoint_dir,
+        }
+    }
+}
+
+impl BatchEngine for DistributedJoinEngine {
+    fn post_commit(&self, epoch: u64) {
+        self.inner.post_commit(epoch);
+    }
+
+    fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
+        let n = self.num_shards as usize;
+        let time_bound_ms = self.inner.spec.time_bound_ms;
+        let join_type = self.inner.spec.join_type;
+        let left_ncols = self.inner.spec.left_schema.fields().len() as u32;
+        let r = self.inner.compute_rows(epoch);
+
+        // Route both sides by join key; the same key lands in the same shard.
+        let mut left_by_shard: Vec<KeyedRows> = vec![Vec::new(); n];
+        for (key, row) in r.new_left {
+            left_by_shard[shard_of(&key, self.num_shards) as usize].push((key, row));
+        }
+        let mut right_by_shard: Vec<KeyedRows> = vec![Vec::new(); n];
+        for (key, row) in r.new_right {
+            right_by_shard[shard_of(&key, self.num_shards) as usize].push((key, row));
+        }
+
+        let cfg = bincode::config::standard();
+        let params = JoinMergeParams {
+            watermark_ms: r.wm,
+            time_bound_ms,
+            join_type,
+            left_ncols,
+        };
+        let params_bytes = bincode::encode_to_vec(&params, cfg)
+            .map_err(|e| StructuredError::Sql(e.to_string()))?;
+
+        let mut source_partitions: Vec<Vec<u8>> = Vec::with_capacity(n);
+        for (shard, (lefts, rights)) in left_by_shard.into_iter().zip(right_by_shard).enumerate() {
+            let partials = bincode::encode_to_vec(&(lefts, rights), cfg)
+                .map_err(|e| StructuredError::Sql(e.to_string()))?;
+            let payload = StateMergePayload {
+                state_id: self.state_id_base + shard as u64,
+                params: params_bytes.clone(),
+                partials,
+                checkpoint_dir: self.checkpoint_dir.clone(),
+            };
+            source_partitions.push(
+                bincode::encode_to_vec(&payload, cfg)
+                    .map_err(|e| StructuredError::Sql(e.to_string()))?,
+            );
+        }
+
+        let ops = vec![PipelineOp {
+            op_id: String::new(),
+            action: TaskAction::MergeState {
+                merge_fn: JOIN_MERGE_FN.to_string(),
+            },
+            runtime: TaskRuntime::Native,
+            payload: vec![],
+        }];
+
+        let results = self
+            .sc
+            .dispatch_pipeline(source_partitions, ops)
+            .map_err(|e| StructuredError::Sql(format!("distributed join merge: {e}")))?;
+
+        let mut matched: Vec<(JoinRow, Option<JoinRow>)> = Vec::new();
+        for bytes in results {
+            let (pairs, _): (Vec<(JoinRow, Option<JoinRow>)>, _) =
+                bincode::decode_from_slice(&bytes, cfg)
+                    .map_err(|e| StructuredError::Sql(format!("join matched decode: {e}")))?;
+            matched.extend(pairs);
+        }
+
+        self.inner.build_joined_batch(&matched)
+    }
 }

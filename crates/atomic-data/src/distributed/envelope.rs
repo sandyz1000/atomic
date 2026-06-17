@@ -102,6 +102,15 @@ pub enum TaskAction {
     /// All config is in the task `data` (bincode-encoded `FileSplitPayload`); `op.payload`
     /// is empty.
     ReadFileSplit,
+    /// Distributed stateful-streaming merge. The worker reads its shard's serialized
+    /// state from `WORKER_STATE_STORE[state_id]`, applies the registered `merge_fn`
+    /// (looked up in `STATE_MERGE_REGISTRY`) to this batch's partials, stores the new
+    /// state, and returns the emitted cells. All per-shard config (state_id, params,
+    /// partials) is in the task `data` (bincode-encoded `StateMergePayload`).
+    MergeState {
+        /// Registered state-merge function name (e.g. `"atomic_structured::windowed_v1"`).
+        merge_fn: String,
+    },
 }
 
 /// Metadata carried in `PipelineOp.payload` for a Python UDF step.
@@ -179,6 +188,23 @@ pub struct FileSplitPayload {
     pub start_byte: u64,
     /// Exclusive end byte; `None` means read to EOF.
     pub end_byte: Option<u64>,
+}
+
+/// Per-shard input for a [`TaskAction::MergeState`] task (bincode-encoded into the
+/// task `data`). Content-agnostic: `params` and `partials` are opaque to the data
+/// layer and interpreted only by the registered state-merge function.
+#[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+pub struct StateMergePayload {
+    /// Identifies the shard whose persistent state this task merges into.
+    pub state_id: u64,
+    /// Merge/emit configuration (e.g. watermark, output mode, window size).
+    pub params: Vec<u8>,
+    /// This batch's partial state for the shard.
+    pub partials: Vec<u8>,
+    /// When `Some`, the worker checkpoints the shard's post-merge state to
+    /// `{dir}/shard-{state_id}.bin` and, on a cold shard (no in-memory state),
+    /// reloads from there first — giving per-shard recovery after a restart.
+    pub checkpoint_dir: Option<String>,
 }
 
 /// Result status codes for task execution.
@@ -280,6 +306,9 @@ pub struct TaskResultEnvelope {
     pub accumulator_deltas: Vec<(usize, Vec<u8>)>,
     /// Partitions this task cached on its worker: `(rdd_id, partition_id)` pairs.
     pub cached_partitions: Vec<(usize, usize)>,
+    /// State shards merged on this worker: the `state_id` values from any `MergeState` ops.
+    /// The driver uses these to update `state_locs` for autoscaling-robust shard affinity.
+    pub held_state_ids: Vec<u64>,
 }
 
 impl TaskResultEnvelope {
@@ -308,6 +337,7 @@ impl TaskResultEnvelope {
             shuffle_server_uri,
             accumulator_deltas: vec![],
             cached_partitions: vec![],
+            held_state_ids: vec![],
         }
     }
 
@@ -337,6 +367,7 @@ impl TaskResultEnvelope {
             shuffle_server_uri,
             accumulator_deltas: vec![],
             cached_partitions: vec![],
+            held_state_ids: vec![],
         }
     }
 
@@ -363,6 +394,7 @@ impl TaskResultEnvelope {
             shuffle_server_uri: None,
             accumulator_deltas: vec![],
             cached_partitions: vec![],
+            held_state_ids: vec![],
         }
     }
 
@@ -393,6 +425,7 @@ impl TaskResultEnvelope {
             shuffle_server_uri: None,
             accumulator_deltas: vec![],
             cached_partitions: vec![],
+            held_state_ids: vec![],
         }
     }
 
@@ -405,6 +438,13 @@ impl TaskResultEnvelope {
     /// Attach the partitions this task cached on its worker (called by NativeBackend).
     pub fn with_cached_partitions(mut self, cached: Vec<(usize, usize)>) -> Self {
         self.cached_partitions = cached;
+        self
+    }
+
+    /// Attach the state shard IDs merged on this worker (called by NativeBackend for
+    /// `MergeState` ops). The driver uses these to build `state_locs` for affinity routing.
+    pub fn with_held_state_ids(mut self, ids: Vec<u64>) -> Self {
+        self.held_state_ids = ids;
         self
     }
 }

@@ -2,9 +2,16 @@
 //!
 //! [`KafkaSource`] consumes JSON-object messages from topics and converts them to
 //! Arrow batches per a declared schema; [`KafkaSink`] serializes emitted rows back
-//! to JSON and produces them to a topic. Delivery is at-least-once: for the source,
-//! consumer-group offsets auto-commit; for the sink, rows are produced then flushed
-//! per batch.
+//! to JSON and produces them to a topic.
+//!
+//! Delivery semantics:
+//! - **At-least-once** (default): sink produces + flushes; source commits offsets
+//!   in `post_batch_commit` after the sink confirms delivery.
+//! - **Exactly-once** (transactional [`KafkaSink`] + [`KafkaSource`]): the source
+//!   exposes `pending_offsets()` carrying the consumed [`TopicPartitionList`] and the
+//!   consumer's [`ConsumerGroupMetadata`]; the sink's
+//!   `add_batch_with_offsets` wraps produce + `send_offsets_to_transaction` in one
+//!   Kafka transaction, so a crash-restart replays neither the source nor the output.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,8 +23,9 @@ use datafusion::arrow::array::{Array, BooleanArray, Float64Array, Int64Array, St
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
+use rdkafka::TopicPartitionList;
 use rdkafka::config::ClientConfig;
-use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::consumer::{BaseConsumer, CommitMode, Consumer, ConsumerGroupMetadata};
 use rdkafka::message::Message;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 
@@ -25,30 +33,90 @@ use crate::errors::{StructuredError, StructuredResult};
 use crate::sink::Sink;
 use crate::source::StreamSource;
 
+/// Consumed offsets for a single micro-batch — carries everything the Kafka producer
+/// needs to commit source offsets inside a transaction (`send_offsets_to_transaction`).
+pub struct OffsetCommit {
+    /// Topic-partition-to-next-offset map for messages returned by the last `next_batch`.
+    pub tpl: TopicPartitionList,
+    /// Consumer group metadata required by `send_offsets_to_transaction`.
+    pub group_metadata: Arc<ConsumerGroupMetadata>,
+}
+
+/// Shared buffer + polled-offset tracker updated atomically by the background thread.
+struct SourceShared {
+    buffer: Vec<serde_json::Value>,
+    /// Offsets polled since the last `next_batch` drain. Swapped out atomically by
+    /// `next_batch` so that `pending_tpl` covers exactly the messages returned.
+    polled_tpl: TopicPartitionList,
+}
+
 /// A structured-streaming source over Kafka topics carrying JSON-object messages.
+///
+/// Delivery contract:
+/// - With a non-transactional sink: commit consumer offsets in `post_batch_commit`
+///   (at-least-once — offsets advance only after the sink confirms the batch).
+/// - With [`KafkaSink::transactional`]: call `pending_offsets()` to get the batch's
+///   [`OffsetCommit`] and pass it to [`KafkaSink::add_batch_with_offsets`], which commits
+///   source offsets inside the producer transaction (exactly-once).
 pub struct KafkaSource {
     schema: SchemaRef,
     brokers: String,
     group_id: String,
     topics: Vec<String>,
-    buffer: Arc<Mutex<Vec<serde_json::Value>>>,
+    shared: Arc<Mutex<SourceShared>>,
+    /// Shared consumer — created in `start()`, accessible from the main thread for
+    /// `group_metadata()` (exactly-once) and `commit()` (at-least-once).
+    consumer: Arc<Mutex<Option<Arc<BaseConsumer>>>>,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     stop: Arc<AtomicBool>,
+    /// Offsets for the last batch returned by `next_batch`; consumed by `pending_offsets`.
+    pending_tpl: Mutex<TopicPartitionList>,
 }
 
 impl KafkaSource {
     /// Build a source. Each message payload must be a JSON object whose fields
-    /// match `schema`.
+    /// match `schema`. Offsets are committed manually (at-least-once via
+    /// `post_batch_commit`, or exactly-once via `pending_offsets` + the sink transaction).
     pub fn new(schema: SchemaRef, brokers: &str, group_id: &str, topics: &[&str]) -> Self {
         KafkaSource {
             schema,
             brokers: brokers.to_string(),
             group_id: group_id.to_string(),
             topics: topics.iter().map(|s| s.to_string()).collect(),
-            buffer: Arc::new(Mutex::new(Vec::new())),
+            shared: Arc::new(Mutex::new(SourceShared {
+                buffer: Vec::new(),
+                polled_tpl: TopicPartitionList::new(),
+            })),
+            consumer: Arc::new(Mutex::new(None)),
             handle: Mutex::new(None),
             stop: Arc::new(AtomicBool::new(false)),
+            pending_tpl: Mutex::new(TopicPartitionList::new()),
         }
+    }
+
+    /// The consumed offsets for the last batch, together with the consumer group metadata
+    /// required by `send_offsets_to_transaction`. Returns `None` before the first batch
+    /// or when no messages were consumed.
+    ///
+    /// Used by the exactly-once path in `QueryRunner` — the [`OffsetCommit`] is passed to
+    /// [`KafkaSink::add_batch_with_offsets`] so the source offsets are committed inside the
+    /// producer transaction instead of separately.
+    pub fn pending_offsets(&self) -> Option<OffsetCommit> {
+        let tpl = {
+            let mut guard = self.pending_tpl.lock();
+            let tpl = std::mem::replace(&mut *guard, TopicPartitionList::new());
+            tpl
+        };
+        if tpl.elements().is_empty() {
+            return None;
+        }
+        let consumer_guard = self.consumer.lock();
+        let consumer = consumer_guard.as_ref()?;
+        let metadata = consumer.group_metadata()?;
+        Some(OffsetCommit {
+            tpl,
+            group_metadata: Arc::new(metadata),
+        })
     }
 }
 
@@ -58,7 +126,15 @@ impl StreamSource for KafkaSource {
     }
 
     fn next_batch(&self, _time_ms: u64) -> Vec<RecordBatch> {
-        let rows: Vec<serde_json::Value> = self.buffer.lock().drain(..).collect();
+        // Atomically drain buffer and swap the polled-offset tracker so that
+        // `pending_tpl` covers exactly the messages we're about to return.
+        let (rows, tpl) = {
+            let mut state = self.shared.lock();
+            let rows = std::mem::take(&mut state.buffer);
+            let tpl = std::mem::replace(&mut state.polled_tpl, TopicPartitionList::new());
+            (rows, tpl)
+        };
+        *self.pending_tpl.lock() = tpl;
         match json_to_batch(&self.schema, &rows) {
             Ok(Some(b)) => vec![b],
             _ => vec![],
@@ -69,39 +145,50 @@ impl StreamSource for KafkaSource {
         let brokers = self.brokers.clone();
         let group_id = self.group_id.clone();
         let topics = self.topics.clone();
-        let buffer = self.buffer.clone();
+        let shared = self.shared.clone();
         let stop = self.stop.clone();
+
+        let consumer: BaseConsumer = match ClientConfig::new()
+            .set("bootstrap.servers", &brokers)
+            .set("group.id", &group_id)
+            .set("enable.auto.commit", "false")
+            .set("auto.offset.reset", "earliest")
+            .create()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("KafkaSource: consumer create failed: {e}");
+                return;
+            }
+        };
+        let refs: Vec<&str> = topics.iter().map(String::as_str).collect();
+        if let Err(e) = consumer.subscribe(&refs) {
+            log::error!("KafkaSource: subscribe failed: {e}");
+            return;
+        }
+        let consumer = Arc::new(consumer);
+        *self.consumer.lock() = Some(Arc::clone(&consumer));
 
         let handle = std::thread::Builder::new()
             .name("structured-kafka-source".into())
             .spawn(move || {
-                let consumer: BaseConsumer = match ClientConfig::new()
-                    .set("bootstrap.servers", &brokers)
-                    .set("group.id", &group_id)
-                    .set("enable.auto.commit", "true")
-                    .set("auto.offset.reset", "earliest")
-                    .create()
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        log::error!("KafkaSource: consumer create failed: {e}");
-                        return;
-                    }
-                };
-                let refs: Vec<&str> = topics.iter().map(String::as_str).collect();
-                if let Err(e) = consumer.subscribe(&refs) {
-                    log::error!("KafkaSource: subscribe failed: {e}");
-                    return;
-                }
                 while !stop.load(Ordering::SeqCst) {
                     match consumer.poll(Duration::from_millis(200)) {
                         Some(Ok(msg)) => {
+                            let mut state = shared.lock();
+                            // Track offset+1 (the next-to-consume offset) per Kafka convention.
+                            use rdkafka::Offset;
+                            let _ = state.polled_tpl.add_partition_offset(
+                                msg.topic(),
+                                msg.partition(),
+                                Offset::Offset(msg.offset() + 1),
+                            );
                             if let Some(v) = msg
                                 .payload()
                                 .and_then(|p| serde_json::from_slice::<serde_json::Value>(p).ok())
                                 .filter(serde_json::Value::is_object)
                             {
-                                buffer.lock().push(v);
+                                state.buffer.push(v);
                             }
                         }
                         Some(Err(e)) => log::warn!("KafkaSource: poll error: {e}"),
@@ -118,16 +205,49 @@ impl StreamSource for KafkaSource {
         if let Some(h) = self.handle.lock().take() {
             let _ = h.join();
         }
+        *self.consumer.lock() = None;
+    }
+
+    /// At-least-once offset commit: advance the consumer group's committed position
+    /// for all partitions consumed in the last batch. Called by `QueryRunner` after
+    /// the sink successfully writes the batch (so offsets only advance on confirmed
+    /// delivery). For exactly-once delivery, use [`pending_offsets`] + the
+    /// transactional sink path instead — that path skips `post_batch_commit`.
+    fn post_batch_commit(&self, _epoch: u64) {
+        // Take the pending TPL. If pending_offsets() was already called (exactly-once
+        // path), this will be empty — that's correct since the transaction already
+        // committed the offsets.
+        let tpl = {
+            let mut guard = self.pending_tpl.lock();
+            std::mem::replace(&mut *guard, TopicPartitionList::new())
+        };
+        if tpl.elements().is_empty() {
+            return;
+        }
+        let consumer_guard = self.consumer.lock();
+        if let Some(consumer) = consumer_guard.as_ref() {
+            if let Err(e) = consumer.commit(&tpl, CommitMode::Sync) {
+                log::warn!("KafkaSource: offset commit failed: {e}");
+            }
+        }
     }
 }
 
 /// A sink that produces each emitted row as a JSON-object message to a topic.
+///
+/// Two delivery modes:
+/// - [`KafkaSink::new`] — at-least-once: rows are produced then flushed each batch.
+/// - [`KafkaSink::transactional`] — each batch is produced inside one Kafka
+///   transaction (begin → produce → commit), so a batch's rows appear atomically
+///   and a batch retried after a crash does not double-write to the topic.
 pub struct KafkaSink {
     topic: String,
     producer: BaseProducer,
+    transactional: bool,
 }
 
 impl KafkaSink {
+    /// At-least-once sink.
     pub fn new(brokers: &str, topic: &str) -> StructuredResult<Self> {
         let producer: BaseProducer = ClientConfig::new()
             .set("bootstrap.servers", brokers)
@@ -136,12 +256,39 @@ impl KafkaSink {
         Ok(KafkaSink {
             topic: topic.to_string(),
             producer,
+            transactional: false,
         })
     }
-}
 
-impl Sink for KafkaSink {
-    fn add_batch(&self, _epoch: u64, batches: &[RecordBatch]) -> StructuredResult<()> {
+    /// Exactly-once-capable sink. The producer is configured with idempotence and a
+    /// stable `transactional.id` (derive it from the query id so a restart resumes
+    /// the same producer identity and fences the previous one), and each batch is
+    /// committed as one Kafka transaction. The transaction is aborted if any row in
+    /// the batch fails to produce.
+    pub fn transactional(
+        brokers: &str,
+        topic: &str,
+        transactional_id: &str,
+    ) -> StructuredResult<Self> {
+        let producer: BaseProducer = ClientConfig::new()
+            .set("bootstrap.servers", brokers)
+            .set("enable.idempotence", "true")
+            .set("transactional.id", transactional_id)
+            .create()
+            .map_err(|e| StructuredError::Sink(e.to_string()))?;
+        producer
+            .init_transactions(Duration::from_secs(30))
+            .map_err(|e| StructuredError::Sink(e.to_string()))?;
+        Ok(KafkaSink {
+            topic: topic.to_string(),
+            producer,
+            transactional: true,
+        })
+    }
+
+    /// Produce every row of every batch as a JSON message. Does not flush/commit —
+    /// the caller decides between a transaction commit and a plain flush.
+    fn produce_rows(&self, batches: &[RecordBatch]) -> StructuredResult<()> {
         for b in batches {
             for row in 0..b.num_rows() {
                 let json = row_to_json(b, row);
@@ -153,10 +300,73 @@ impl Sink for KafkaSink {
                 }
             }
         }
-        self.producer
-            .flush(Duration::from_secs(5))
-            .map_err(|e| StructuredError::Sink(e.to_string()))?;
         Ok(())
+    }
+}
+
+impl Sink for KafkaSink {
+    fn add_batch(&self, _epoch: u64, batches: &[RecordBatch]) -> StructuredResult<()> {
+        if !self.transactional {
+            self.produce_rows(batches)?;
+            return self
+                .producer
+                .flush(Duration::from_secs(5))
+                .map_err(|e| StructuredError::Sink(e.to_string()));
+        }
+
+        self.producer
+            .begin_transaction()
+            .map_err(|e| StructuredError::Sink(e.to_string()))?;
+        match self.produce_rows(batches) {
+            Ok(()) => self
+                .producer
+                .commit_transaction(Duration::from_secs(30))
+                .map_err(|e| StructuredError::Sink(e.to_string())),
+            Err(e) => {
+                // Best-effort abort so the partial batch is never visible to readers.
+                let _ = self.producer.abort_transaction(Duration::from_secs(30));
+                Err(e)
+            }
+        }
+    }
+
+    /// Exactly-once batch: begin → produce → commit source offsets inside the
+    /// transaction → commit. The source offsets and output rows become visible to
+    /// read-committed consumers atomically.
+    ///
+    /// Falls back to `add_batch` (ignoring offsets) when this sink is not transactional.
+    fn add_batch_with_offsets(
+        &self,
+        epoch: u64,
+        batches: &[RecordBatch],
+        offsets: &OffsetCommit,
+    ) -> StructuredResult<()> {
+        if !self.transactional {
+            return self.add_batch(epoch, batches);
+        }
+
+        self.producer
+            .begin_transaction()
+            .map_err(|e| StructuredError::Sink(e.to_string()))?;
+
+        match self.produce_rows(batches) {
+            Ok(()) => {
+                self.producer
+                    .send_offsets_to_transaction(
+                        &offsets.tpl,
+                        offsets.group_metadata.as_ref(),
+                        Duration::from_secs(30),
+                    )
+                    .map_err(|e| StructuredError::Sink(e.to_string()))?;
+                self.producer
+                    .commit_transaction(Duration::from_secs(30))
+                    .map_err(|e| StructuredError::Sink(e.to_string()))
+            }
+            Err(e) => {
+                let _ = self.producer.abort_transaction(Duration::from_secs(30));
+                Err(e)
+            }
+        }
     }
 }
 

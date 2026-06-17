@@ -9,15 +9,29 @@ use atomic_sql::context::AtomicSqlContext;
 use atomic_streaming::context::StreamingContext;
 use atomic_streaming::dstream::OutputOperation;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::distributed_state::DistributedStateEngine;
 use crate::errors::{StructuredError, StructuredResult};
 use crate::query::{BatchEngine, QueryOutputOp, QueryRunner, StatelessEngine, StreamingQuery};
-use crate::session_window::{SessionEngine, SessionSpec};
+use crate::session_window::{DistributedSessionEngine, SessionEngine, SessionSpec};
 use crate::sink::Sink;
 use crate::source::StreamSource;
 use crate::state::{Agg, ensure_mergeable};
-use crate::stream_join::{JoinType, StreamJoinEngine, StreamJoinSpec};
+use crate::stream_join::{DistributedJoinEngine, JoinType, StreamJoinEngine, StreamJoinSpec};
 use crate::windowed::{WindowedEngine, WindowedSpec};
 use crate::{OutputMode, Trigger};
+
+/// Stable (FNV-1a) query id from the checkpoint dir, so shard `state_id`s and
+/// their checkpoint files line up across restarts.
+fn stable_query_id(checkpoint_dir: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in checkpoint_dir.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
 
 /// A continuous query under construction.
 pub struct StreamingDataFrame {
@@ -56,6 +70,7 @@ impl StreamingDataFrame {
             gap_ms: gap.as_millis() as u64,
             group_cols: Vec::new(),
             aggs: Vec::new(),
+            distributed_shards: None,
         }
     }
 
@@ -78,6 +93,7 @@ impl StreamingDataFrame {
                 join_type,
                 time_bound_ms: time_bound.as_millis() as u64,
                 watermark: self.watermark.clone(),
+                distributed_shards: None,
             },
             self.watermark,
         )
@@ -94,6 +110,7 @@ impl StreamingDataFrame {
             slide_ms: None,
             group_cols: Vec::new(),
             aggs: Vec::new(),
+            distributed_shards: None,
         }
     }
 }
@@ -107,6 +124,7 @@ pub struct WindowedBuilder {
     slide_ms: Option<u64>,
     group_cols: Vec<String>,
     aggs: Vec<Agg>,
+    distributed_shards: Option<u32>,
 }
 
 impl WindowedBuilder {
@@ -129,6 +147,16 @@ impl WindowedBuilder {
         self
     }
 
+    /// Distribute the keyed window state across `num_shards` shards instead of
+    /// keeping it in one driver-local store. Each batch's partials are routed by a
+    /// stable key hash to a `MergeState` task; the shard's state persists on the
+    /// owning worker (in local mode, the in-process shared store). Use this when the
+    /// window/group key space is large enough that driver-local state is a concern.
+    pub fn distributed(mut self, num_shards: u32) -> Self {
+        self.distributed_shards = Some(num_shards.max(1));
+        self
+    }
+
     /// Finish building and move to the output/sink stage.
     pub fn write_stream(self) -> StreamWriter {
         StreamWriter::new(
@@ -139,6 +167,7 @@ impl WindowedBuilder {
                 slide_ms: self.slide_ms,
                 group_cols: self.group_cols,
                 aggs: self.aggs,
+                distributed_shards: self.distributed_shards,
             },
             self.watermark,
         )
@@ -153,6 +182,7 @@ pub struct SessionBuilder {
     gap_ms: u64,
     group_cols: Vec<String>,
     aggs: Vec<Agg>,
+    distributed_shards: Option<u32>,
 }
 
 impl SessionBuilder {
@@ -166,6 +196,14 @@ impl SessionBuilder {
         self
     }
 
+    /// Shard the per-group session state across `num_shards` shards (see
+    /// [`WindowedBuilder::distributed`]). Each batch's events route by a stable
+    /// group-key hash to a `MergeState` task instead of one driver-local store.
+    pub fn distributed(mut self, num_shards: u32) -> Self {
+        self.distributed_shards = Some(num_shards.max(1));
+        self
+    }
+
     pub fn write_stream(self) -> StreamWriter {
         StreamWriter::new(
             self.source,
@@ -174,6 +212,7 @@ impl SessionBuilder {
                 gap_ms: self.gap_ms,
                 group_cols: self.group_cols,
                 aggs: self.aggs,
+                distributed_shards: self.distributed_shards,
             },
             self.watermark,
         )
@@ -188,6 +227,7 @@ enum Plan {
         slide_ms: Option<u64>,
         group_cols: Vec<String>,
         aggs: Vec<Agg>,
+        distributed_shards: Option<u32>,
     },
     Join {
         right: Arc<dyn StreamSource>,
@@ -197,12 +237,14 @@ enum Plan {
         time_bound_ms: u64,
         /// Watermark hint — same value passed to StreamWriter; used to set up WatermarkTracker.
         watermark: Option<(String, u64)>,
+        distributed_shards: Option<u32>,
     },
     Session {
         time_col: String,
         gap_ms: u64,
         group_cols: Vec<String>,
         aggs: Vec<Agg>,
+        distributed_shards: Option<u32>,
     },
 }
 
@@ -242,6 +284,19 @@ impl StreamWriter {
 
     pub fn format(mut self, sink: Arc<dyn Sink>) -> Self {
         self.sink = Some(sink);
+        self
+    }
+
+    /// Shard a stream-stream join's buffer state across `num_shards` (see
+    /// [`WindowedBuilder::distributed`]). Joins have no intermediate builder, so this
+    /// is set on the writer; it applies only to the `join_stream` path.
+    pub fn distributed(mut self, num_shards: u32) -> Self {
+        if let Plan::Join {
+            distributed_shards, ..
+        } = &mut self.plan
+        {
+            *distributed_shards = Some(num_shards.max(1));
+        }
         self
     }
 
@@ -285,6 +340,7 @@ impl StreamWriter {
                 slide_ms,
                 group_cols,
                 aggs,
+                distributed_shards,
             } => {
                 ensure_mergeable(&aggs)?;
                 let spec = WindowedSpec {
@@ -296,13 +352,44 @@ impl StreamWriter {
                     aggs,
                     mode: self.mode,
                 };
-                Arc::new(WindowedEngine::new(
-                    sql_ctx,
-                    runtime,
-                    self.source.clone(),
-                    spec,
-                    self.checkpoint_dir,
-                )?)
+                match distributed_shards {
+                    Some(n) => {
+                        // Distributed state lives in the sharded worker stores, so the
+                        // inner engine's local store is unused (checkpoint = None); the
+                        // checkpoint is driven per-shard by the merge tasks instead.
+                        let windowed =
+                            WindowedEngine::new(sql_ctx, runtime, self.source.clone(), spec, None)?;
+                        let ckpt = self
+                            .checkpoint_dir
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned());
+                        // The query id must be stable across restarts when checkpointing
+                        // (shard state_ids and their checkpoint files are keyed by it), so
+                        // derive it from the checkpoint dir. Without a checkpoint, a unique
+                        // per-process counter is enough.
+                        let query_id = match &ckpt {
+                            Some(dir) => stable_query_id(dir),
+                            None => {
+                                static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
+                                NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed)
+                            }
+                        };
+                        Arc::new(DistributedStateEngine::new(
+                            windowed,
+                            ssc.sc.clone(),
+                            n,
+                            query_id,
+                            ckpt,
+                        ))
+                    }
+                    None => Arc::new(WindowedEngine::new(
+                        sql_ctx,
+                        runtime,
+                        self.source.clone(),
+                        spec,
+                        self.checkpoint_dir,
+                    )?),
+                }
             }
             Plan::Join {
                 right,
@@ -311,6 +398,7 @@ impl StreamWriter {
                 join_type,
                 time_bound_ms,
                 watermark,
+                distributed_shards,
             } => {
                 let left_schema = self.source.schema();
                 let right_schema = right.schema();
@@ -332,18 +420,42 @@ impl StreamWriter {
                     watermark_delay_ms,
                 };
                 right.start();
-                Arc::new(StreamJoinEngine::new(
-                    self.source.clone(),
-                    right,
-                    spec,
-                    self.checkpoint_dir,
-                )?)
+                match distributed_shards {
+                    Some(n) => {
+                        let ckpt = self
+                            .checkpoint_dir
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned());
+                        let query_id = match &ckpt {
+                            Some(dir) => stable_query_id(dir),
+                            None => {
+                                static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
+                                NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed)
+                            }
+                        };
+                        let inner = StreamJoinEngine::new(self.source.clone(), right, spec, None)?;
+                        Arc::new(DistributedJoinEngine::new(
+                            inner,
+                            ssc.sc.clone(),
+                            n,
+                            query_id,
+                            ckpt,
+                        ))
+                    }
+                    None => Arc::new(StreamJoinEngine::new(
+                        self.source.clone(),
+                        right,
+                        spec,
+                        self.checkpoint_dir,
+                    )?),
+                }
             }
             Plan::Session {
                 time_col,
                 gap_ms,
                 group_cols,
                 aggs,
+                distributed_shards,
             } => {
                 ensure_mergeable(&aggs)?;
                 let spec = SessionSpec {
@@ -354,11 +466,34 @@ impl StreamWriter {
                     aggs,
                     mode: self.mode,
                 };
-                Arc::new(SessionEngine::new(
-                    self.source.clone(),
-                    spec,
-                    self.checkpoint_dir,
-                )?)
+                match distributed_shards {
+                    Some(n) => {
+                        let ckpt = self
+                            .checkpoint_dir
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned());
+                        let query_id = match &ckpt {
+                            Some(dir) => stable_query_id(dir),
+                            None => {
+                                static NEXT_QUERY_ID: AtomicU64 = AtomicU64::new(1);
+                                NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed)
+                            }
+                        };
+                        let inner = SessionEngine::new(self.source.clone(), spec, None)?;
+                        Arc::new(DistributedSessionEngine::new(
+                            inner,
+                            ssc.sc.clone(),
+                            n,
+                            query_id,
+                            ckpt,
+                        ))
+                    }
+                    None => Arc::new(SessionEngine::new(
+                        self.source.clone(),
+                        spec,
+                        self.checkpoint_dir,
+                    )?),
+                }
             }
         };
 

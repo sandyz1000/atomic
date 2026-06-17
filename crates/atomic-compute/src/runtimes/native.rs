@@ -8,7 +8,9 @@ use atomic_data::distributed::{
 
 use crate::error::{ComputeError, ComputeResult};
 use crate::runtimes::{Backend, OpDispatcher};
-use crate::task_registry::{SHUFFLE_MAP_REGISTRY, SORT_SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
+use crate::task_registry::{
+    SHUFFLE_MAP_REGISTRY, SORT_SHUFFLE_MAP_REGISTRY, STATE_MERGE_REGISTRY, TASK_REGISTRY,
+};
 
 /// Handles `TaskRuntime::Native` ops — both compile-time `#[task]` registry
 /// lookups and shuffle-map writes.
@@ -96,6 +98,42 @@ impl OpDispatcher for NativeDispatcher {
                             ComputeError::InvalidPayload(format!("ReadFileSplit data decode: {e}"))
                         })?;
                 file_split_handler(&payload)
+            }
+            TaskAction::MergeState { merge_fn } => {
+                // Per-shard input shipped in `data` (bincode-encoded StateMergePayload).
+                // The merge fn is content-agnostic; the shard's state persists across
+                // batches in the worker-global WORKER_STATE_STORE.
+                let payload: atomic_data::distributed::StateMergePayload =
+                    bincode::decode_from_slice(data, bincode::config::standard())
+                        .map(|(p, _)| p)
+                        .map_err(|e| {
+                            ComputeError::InvalidPayload(format!("MergeState data decode: {e}"))
+                        })?;
+                let merge = STATE_MERGE_REGISTRY.get(merge_fn.as_str()).ok_or_else(|| {
+                    ComputeError::UnknownOperation(format!(
+                        "no state-merge fn '{merge_fn}' registered; \
+                         add `register_state_merge!` to your binary"
+                    ))
+                })?;
+                let store = atomic_data::state_store::worker_state_store();
+                // Cold shard after a restart: reload its last checkpoint before merging.
+                let mut prev = store.get(payload.state_id);
+                if prev.is_none()
+                    && let Some(dir) = &payload.checkpoint_dir
+                {
+                    let path = shard_checkpoint_path(dir, payload.state_id);
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        prev = Some(bytes);
+                    }
+                }
+                let (new_state, emitted) =
+                    merge(prev.as_deref(), &payload.partials, &payload.params)
+                        .map_err(ComputeError::InvalidPayload)?;
+                if let Some(dir) = &payload.checkpoint_dir {
+                    write_shard_checkpoint(dir, payload.state_id, &new_state)?;
+                }
+                store.put(payload.state_id, new_state);
+                Ok(emitted)
             }
             _ => match TASK_REGISTRY.get(op.op_id.as_str()) {
                 None => {
@@ -252,6 +290,22 @@ impl Backend for ComputeEngine {
             })
             .collect();
 
+        // Report state shard IDs merged by any `MergeState` op so the driver can build
+        // `state_locs` for report-back affinity (autoscaling-robust pinning, G1).
+        let held_state_ids: Vec<u64> = task
+            .ops
+            .iter()
+            .filter(|op| matches!(op.action, TaskAction::MergeState { .. }))
+            .filter_map(|_| {
+                bincode::decode_from_slice::<atomic_data::distributed::StateMergePayload, _>(
+                    &task.data,
+                    bincode::config::standard(),
+                )
+                .ok()
+                .map(|(p, _)| p.state_id)
+            })
+            .collect();
+
         Ok(TaskResultEnvelope::ok(
             task.run_id,
             task.stage_id,
@@ -263,7 +317,8 @@ impl Backend for ComputeEngine {
             shuffle_server_uri,
         )
         .with_accumulator_deltas(acc_deltas)
-        .with_cached_partitions(cached_partitions))
+        .with_cached_partitions(cached_partitions)
+        .with_held_state_ids(held_state_ids))
     }
 }
 
@@ -384,6 +439,24 @@ pub(crate) fn file_split_handler(
     rkyv::to_bytes::<rkyv::rancor::Error>(&lines)
         .map(|b| b.to_vec())
         .map_err(|e| ComputeError::InvalidPayload(format!("ReadFileSplit rkyv encode: {e}")))
+}
+
+/// Per-shard checkpoint file path for a `MergeState` task.
+fn shard_checkpoint_path(dir: &str, state_id: u64) -> std::path::PathBuf {
+    std::path::Path::new(dir).join(format!("shard-{state_id}.bin"))
+}
+
+/// Atomically persist a shard's post-merge state (write to `.tmp`, then rename).
+fn write_shard_checkpoint(dir: &str, state_id: u64, bytes: &[u8]) -> ComputeResult<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| ComputeError::InvalidPayload(format!("state checkpoint mkdir: {e}")))?;
+    let path = shard_checkpoint_path(dir, state_id);
+    let tmp = path.with_extension("bin.tmp");
+    std::fs::write(&tmp, bytes)
+        .map_err(|e| ComputeError::InvalidPayload(format!("state checkpoint write: {e}")))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| ComputeError::InvalidPayload(format!("state checkpoint rename: {e}")))?;
+    Ok(())
 }
 
 #[cfg(test)]

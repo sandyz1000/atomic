@@ -105,7 +105,8 @@ Atomic is a stable-Rust rewrite and refactor of Vega.
 - `crates/atomic-compute`: execution runtime — context, executor, `NativeBackend`, UDF dispatch, RDD implementations, persist/cache layer. Backend runtimes (in `runtimes/`): `native.rs` (Rust `#[task]` registry), `py.rs` (embedded PyO3 worker pool), `js.rs` (V8/deno_core thread-local runtime).
 - `crates/atomic-scheduler`: DAG building, stage planning, job tracking, `LocalScheduler`, `DistributedScheduler`.
 - `crates/atomic-sql`: structured data and SQL query layer — built on DataFusion (see below).
-- `crates/atomic-streaming`: Spark Streaming–style micro-batch streaming on top of `atomic-compute`.
+- `crates/atomic-streaming`: Spark Streaming–style micro-batch streaming on top of `atomic-compute`; includes `DistributedSource` (source partitions dispatched to workers) and the Kafka source.
+- `crates/atomic-structured`: Spark Structured Streaming–style continuous SQL/DataFrame queries on the batch loop — tumbling/sliding/session windows, stream-stream joins, watermarks, mergeable-aggregate state store, sinks. Built on `atomic-sql` (DataFusion).
 - `crates/atomic-graph`: GraphX-style graph processing — `Graph<VD,ED>`, Pregel engine, built-in algorithms.
 - `crates/atomic-nlq`: natural language query layer — agentic `WorkflowPlan` loop (`LlmPlanner` → `WorkflowExecutor` → `AgentLoop`), plus LLM-native DataFusion plan nodes + `LlmBatchingRule` and an in-memory vector index. Uses OpenAI.
 - `crates/atomic-py`: Python bindings via PyO3/maturin — full RDD API, mirrors `TypedRdd`.
@@ -302,16 +303,17 @@ The `#[task]` op_id format is `"crate::module::fn_name::body_hash_short"` — th
   - `atomic-py/src/rdd.rs` (1486 L) → `rdd/{mod,transforms,actions,pair_ops,sort}.rs`
   - `atomic-js/src/rdd.rs` (1386 L) → `rdd/{mod,transforms,actions,pair_ops,sort}.rs`
   - `atomic-cli/src/main.rs` (749 L) → `main.rs` (thin CLI dispatch) + `commands.rs` + `ssh.rs` + `cluster.rs`
-- **Distributed RDD caching + locality scheduling**: `TaskAction::Cache { rdd_id }` appended to staged pipelines; workers store partition bytes in process-global `WORKER_PARTITION_CACHE` (LRU-bounded) and report `(rdd_id, partition)` in `TaskResultEnvelope.cached_partitions`. Driver registers locations into `Mutators.cache_locs`; `DistributedScheduler::plan_cache_dispatch` dispatches cache-read tasks pinned to the holding worker (`pick_preferred_worker`). Worker death / `unpersist()` invalidate locations → recompute. Residual edge: LRU eviction on the holder (not death) fails the job rather than transparently recomputing.
+- **Distributed RDD caching + locality scheduling**: `TaskAction::Cache { rdd_id }` appended to staged pipelines; workers store partition bytes in process-global `WORKER_PARTITION_CACHE` (LRU-bounded) and report `(rdd_id, partition)` in `TaskResultEnvelope.cached_partitions`. Driver registers locations into `Mutators.cache_locs`; `DistributedScheduler::plan_cache_dispatch` dispatches cache-read tasks pinned to the holding worker (`pick_preferred_worker`). Worker death / `unpersist()` invalidate locations → recompute. LRU eviction on the holder (not death) is also handled: the worker returns `ResultStatus::CacheMiss`, and the driver invalidates that location and retries the recompute `fallback` envelope built alongside each cache-serve task (`job_runner.rs`).
+- **Report-back state-shard affinity**: `TaskResultEnvelope.held_state_ids: Vec<u64>` carries the state IDs merged by a worker. The driver registers them in `DistributedScheduler::state_locs` (`DashMap<u64, SocketAddrV4>`) via `register_state_locs`; `pin_state_shard` prefers the registered worker over the modulo fallback so the same shard stays on the same worker across batches without reshuffling on autoscaling. `remove_worker` calls `invalidate_state_for_worker` to clear stale registrations; the modulo fallback then routes to a live worker that cold-loads from checkpoint. Three unit tests verify registration, invalidation, and fallback.
+- **End-to-end exactly-once Kafka→Kafka**: `KafkaSource` runs with `enable.auto.commit=false`; `SourceShared` (buffer + `TopicPartitionList`) is drained atomically in `next_batch` under one `Mutex`. `pending_offsets()` returns `OffsetCommit { tpl, group_metadata }`. `QueryRunner::run_batch` detects a non-None `pending_offsets` and calls `KafkaSink::add_batch_with_offsets` — which runs begin → produce → `send_offsets_to_transaction` → commit — so source offsets and output records are committed atomically in one broker transaction. At-least-once mode (`KafkaSink::new` + `post_batch_commit`) is unchanged. Broker-gated test: `exactly_once_kafka_to_kafka`.
 
 ### Not Done Yet
 
-All P0, P1, P2, and P3 ROADMAP items are complete. Remaining known gaps:
+All P0, P1, P2, and P3 ROADMAP items are complete, and all previously-open Known Gaps are now closed. There are no open engineering gaps.
 
-- **Streaming distributed receivers**: `ReceiverTracker` tracks receivers/blocks locally, but distributed (cross-node) receiver scheduling and Kafka / Kinesis sources are not implemented.
 - **`atomic-nlq` real-API test**: `LlmFilterExec` / `LlmMapExec` / `EmbedExec` / `VectorSearchExec` are fully wired; `test_full_nlq_pipeline` auto-skips when `OPENAI_API_KEY` is absent.
 - **`sort_by` (non-pair RDD) distributed**: the key function `Fn(&T) -> K` makes K a local type param without serialization bounds; `sort_by` still collects to driver. Use `sort_by_key` on pair RDDs for distributed sort.
-- **Sort-shuffle reduce is a lazy k-way merge** (`ShuffledRdd::compute`): the pre-sorted runs are merged on demand via `itertools::kmerge_by` + `coalesce` (no re-sort), so the merged output is never materialised — a streaming consumer (`fold`/`count`/`save_as_text_file`) holds only the fetched input runs plus an O(#runs) heap. Verified globally-ordered both directions by `test_pair_ops::sort_shuffle_globally_ordered` (no client re-sort). Remaining limitation: the input runs are still fetched fully into memory; truly bounding *input* memory needs a chunked streaming per-run fetch (builds on `get_slice` ranged reads) — a follow-up for very large reduce partitions.
+- **Sort-shuffle reduce is a lazy k-way merge** (`ShuffledRdd::compute`): the pre-sorted runs are merged on demand via `itertools::kmerge_by` + `coalesce` (no re-sort), so the merged output is never materialised. For wide shuffles (more map outputs than `ATOMIC_REDUCE_SPILL_THRESHOLD_RUNS`, default 64) the input also avoids full residency: `ShuffleFetcher::fetch_runs_spilled` streams each fetched run to an anonymous temp file and `SpilledRunIter` decodes it one `(K, V)` at a time, so peak input memory is one run plus the O(#runs) merge working set instead of every run decoded into a `Vec`. The remaining floor is one run during its own fetch (the minimum fetch granularity without map-side element offsets) — relevant only for a single very large reduce partition fed by few map outputs.
 - **Custom partitioner distributed**: a user `CustomPartitioner` (`partition_by`) is a closure and cannot be serialized, so `PartitionerSpec::Custom` degrades to hash partitioning on workers (its `num_partitions` is honored). Hash/Range partitioners ship correctly.
 
 ## atomic-sql Architecture
@@ -648,13 +650,76 @@ RDD IDs for streaming-created RDDs use a module-level `static AtomicUsize` start
 
 `Checkpoint` is serialized with `bincode` v2 and written atomically (write to `.tmp`, then `rename()`). `Checkpoint::read_latest()` finds the most recent `checkpoint-<ms>` file. `JobScheduler` writes a checkpoint at the end of each batch when `StreamingContext`'s `checkpoint_dir` is set (`scheduler/job.rs`).
 
+### Distributed Sources
+
+The Direct/pull source model distributes across workers via the `DistributedSource` trait
+(`dstream/distributed_source.rs`): `plan_batch(batch_time_ms)` returns per-partition read tasks —
+each a serializable `(PipelineOp, partition_bytes)` describing *what to read* (offset range, file
+split). `DistributedInputDStream::compute(t)` dispatches them as `TaskEnvelope`s in distributed mode
+and falls back to the driver thread in local mode.
+
+- `DistributedFileSource` — a directory becomes file-split tasks (`TaskAction::ReadFileSplit` +
+  `FileSplitPayload`); `StreamingContext::distributed_file_stream` collects the worker blocks into one
+  RDD per batch. The Kafka Direct source is the second `DistributedSource` impl.
+- `ReceiverTracker` tracks per-batch partition placement and carries a `distributed: bool`; a
+  partition on a worker that `DistributedScheduler::remove_worker` reports dead is re-planned next
+  batch. Offsets/splits are driver-authoritative, so recovery is at-least-once re-dispatch.
+
 ### Streaming Features Not Yet Implemented
 
-- No Hadoop, no `blas`, no `hdrs`, no `atomic-sql` dependency.
-- No *distributed* receiver scheduling — `ReceiverTracker` registers receivers and tracks blocks locally (`register_receiver` / `add_block` / `get_blocks_and_clear`), but cross-node scheduling is a TODO.
+- No Hadoop, no `blas`, no `hdrs`.
+- Push/receiver-model sources (custom `Receiver`, socket fan-in) stay driver-local — only the
+  Direct/pull model distributes (see "Distributed Sources" above).
 - No dynamic executor allocation (`ExecutorAllocationManager` is a stub — `unimplemented!`).
 - No `mapWithState`. (`updateStateByKey` via `PairDStream::update_state_by_key` and windowed reduce-with-inverse via `ReducedWindowedDStream` *are* implemented.)
-- No distributed streaming mode — local mode uses the same `Arc<Context>` as `atomic-compute`.
+- No distributed structured-streaming *state* — `DistributedSource` distributes the source read, but the window/join engine and state store run driver-local on the same `Arc<Context>` as `atomic-compute`.
+
+---
+
+## atomic-structured Architecture
+
+`crates/atomic-structured` implements Spark Structured Streaming–style continuous SQL/DataFrame
+queries — a query declared once and run incrementally, once per micro-batch, on the
+`atomic-streaming` batch loop. SQL runs through `atomic-sql` (DataFusion); Arrow `RecordBatch` is the
+row format.
+
+### Core Types
+
+| Type | File | Role |
+| --- | --- | --- |
+| `StreamingDataFrame` | `frame.rs` | Builder — `read_stream` → `with_watermark` → `window` / `session_window` / `join_stream` → `write_stream` |
+| `WindowedBuilder` | `frame.rs` | `window(col, size)` then optional `slide(step)` (sliding; omitted = tumbling), `group_by`, `aggregate` |
+| `SessionBuilder` | `frame.rs` | `session_window(col, gap)` then `group_by`, `aggregate` |
+| `StreamSource` | `source.rs` | `next_batch(time)` + `schema()`; queue (test) + Kafka (`kafka` feature) |
+| `Sink` | `sink.rs` | `MemorySink`, `ConsoleSink`, `FileSink` (Parquet), `KafkaSink` (`kafka` feature) |
+| `StreamingQuery` | `query.rs` | Running handle — `await_termination()`, `stop()`, `restore(dir)` |
+| `WatermarkTracker` | `watermark.rs` | Monotonic `max(event_time) − delay`; gates window finalization |
+| `Agg` / `AggKind` | `state.rs` | Mergeable-aggregate state store (count/sum/min/max/avg); bincode checkpoint |
+| `SessionEngine` | `session_window.rs` | Per-group dynamic-bound sessions; merge-on-bridge; finalize at `end + gap ≤ watermark` |
+| `StreamJoinEngine` | `stream_join.rs` | Time-bounded stream-stream join; per-side watermark-bounded buffers; `JoinType` inner/left/right |
+
+### Window Models
+
+- **Tumbling** — `window(col, size)` with no `slide`; one window per row via `date_bin`.
+- **Sliding** — `window(col, size).slide(step)`; a row fans out to every covering window via an Arrow
+  `take` expansion before `GROUP BY window_start`. `StateKey` still keys on `window_start_ms`, so the
+  state-store merge is unchanged.
+- **Session** — `session_window(col, gap)`; bounds are dynamic. A window finalizes and evicts when
+  `session_end + gap ≤ watermark`. `Complete` mode is rejected (unbounded key space); `Append` emits
+  on finalize, `Update` re-emits on change.
+
+### Constraints
+
+- Mergeable aggregates only (count/sum/min/max/avg); `median` / exact-distinct / arbitrary UDAF are
+  rejected at plan time.
+- One monotonic, global watermark per query. Stream-stream joins require a time bound — an equi-join
+  without one is rejected to keep state bounded.
+- Execution is driver-local by default (same model as `atomic-streaming`). Opting in with
+  `.distributed(n)` (windowed/session builders, `join_stream(...).distributed(n)`) shards the keyed
+  state across workers via `TaskAction::MergeState` + a registered state-merge fn
+  (`register_state_merge!`) + the worker-resident `WORKER_STATE_STORE`, with per-shard checkpoint +
+  recovery. The source read distributes independently via `DistributedSource`. Report-back
+  shard affinity (`state_locs` + `held_state_ids`) keeps each shard on its registered worker.
 
 ---
 

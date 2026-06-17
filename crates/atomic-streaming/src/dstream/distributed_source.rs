@@ -85,6 +85,9 @@ pub trait DistributedSource: Send + Sync + 'static {
 
 // ── DistributedInputDStream ───────────────────────────────────────────────────
 
+/// Per-batch cache of generated RDDs, keyed by batch time.
+type GeneratedRddCache<I> = Mutex<HashMap<u64, Arc<dyn Rdd<Item = I>>>>;
+
 /// A DStream backed by a [`DistributedSource`].
 ///
 /// In **distributed mode**: calls `plan_batch`, dispatches one `TaskEnvelope` per
@@ -97,7 +100,7 @@ pub trait DistributedSource: Send + Sync + 'static {
 pub struct DistributedInputDStream<S: DistributedSource> {
     state: InputDStreamState,
     source: S,
-    generated: Mutex<HashMap<u64, Arc<dyn Rdd<Item = S::Item>>>>,
+    generated: GeneratedRddCache<S::Item>,
 }
 
 impl<S: DistributedSource> DistributedInputDStream<S> {

@@ -15,7 +15,8 @@ pub mod tls;
 
 pub mod __macro_support {
     pub use crate::task_registry::{
-        PartitionerEntry, ShuffleKeyEntry, ShuffleMapEntry, SortShuffleMapEntry, TaskEntry,
+        PartitionerEntry, ShuffleKeyEntry, ShuffleMapEntry, SortShuffleMapEntry, StateMergeEntry,
+        TaskEntry,
     };
     pub use crate::task_traits::{BinaryTask, UnaryTask};
     pub use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
@@ -88,6 +89,24 @@ macro_rules! register_partitioner {
         $crate::__macro_support::inventory::submit!($crate::__macro_support::PartitionerEntry {
             name: || <$P as $crate::__macro_support::NamedPartitioner>::NAME,
             factory: |n| $crate::__macro_support::Partitioner::from_named::<$P>(n),
+        });
+    };
+}
+
+/// Register a state-merge function for distributed stateful streaming under a
+/// stable `name`. Place this once in the binary (driver and workers run the same
+/// binary). The worker looks up `name` in `STATE_MERGE_REGISTRY` when it handles a
+/// [`TaskAction::MergeState`](atomic_data::distributed::TaskAction::MergeState).
+///
+/// ```rust,ignore
+/// atomic_compute::register_state_merge!("atomic_structured::windowed_v1", windowed_state_merge);
+/// ```
+#[macro_export]
+macro_rules! register_state_merge {
+    ($name:expr, $handler:path) => {
+        $crate::__macro_support::inventory::submit!($crate::__macro_support::StateMergeEntry {
+            name: $name,
+            handler: $handler,
         });
     };
 }

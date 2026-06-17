@@ -130,6 +130,10 @@ impl DistributedScheduler {
         // Cached partitions on the dead worker are gone — forget their locations so
         // the next job recomputes them instead of dispatching a doomed cache read.
         self.invalidate_cache_for_worker(endpoint);
+        // State shards pinned to this worker are now unreachable in-memory.
+        // The next MergeState batch for those shards falls back to modulo placement
+        // and reloads from checkpoint (cold-shard recovery).
+        self.invalidate_state_for_worker(endpoint);
         // Clear any stale shuffle-map outputs from this worker so failed
         // shuffle stages can be re-submitted on surviving workers.
         if let Some(tracker) = atomic_data::env::get_map_output_tracker() {

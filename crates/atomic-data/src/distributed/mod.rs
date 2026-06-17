@@ -157,7 +157,8 @@ mod tests {
             | TaskAction::Collect
             | TaskAction::ShuffleMap { .. }
             | TaskAction::Cache { .. }
-            | TaskAction::ReadFileSplit => true,
+            | TaskAction::ReadFileSplit
+            | TaskAction::MergeState { .. } => true,
             #[cfg(feature = "kafka")]
             TaskAction::KafkaConsume => true,
         };
