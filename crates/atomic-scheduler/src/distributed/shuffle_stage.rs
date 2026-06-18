@@ -25,36 +25,29 @@ impl DistributedScheduler {
         ops: Vec<PipelineOp>,
         partitions: Vec<Vec<u8>>,
     ) -> LibResult<()> {
-        let mut stage_attempt = 0usize;
-        loop {
-            match self
-                .run_shuffle_map_stage_inner(shuffle_id, ops.clone(), partitions.clone())
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    stage_attempt += 1;
-                    if stage_attempt > self.max_failures {
-                        return Err(e);
-                    }
+        let max_retries = self.max_failures;
+        super::retry::retry_with_backoff(max_retries, 200, || {
+            let ops = ops.clone();
+            let partitions = partitions.clone();
+            async move {
+                let result = self
+                    .run_shuffle_map_stage_inner(shuffle_id, ops, partitions)
+                    .await;
+                if let Err(ref e) = result {
                     // Clear stale map output URIs so the reduce phase doesn't try
                     // to fetch from the failed workers on the next attempt.
                     if let Some(tracker) = atomic_data::env::get_map_output_tracker() {
                         tracker.unregister_shuffle(shuffle_id);
                     }
                     log::warn!(
-                        "shuffle-map stage for shuffle_id={} failed (attempt {}): {}; \
-                         cleared MapOutputTracker, retrying",
-                        shuffle_id,
-                        stage_attempt,
-                        e
+                        "shuffle-map stage for shuffle_id={shuffle_id} failed: {e}; \
+                         cleared MapOutputTracker, retrying"
                     );
-                    let delay =
-                        std::time::Duration::from_millis(200 * (1u64 << stage_attempt).min(16));
-                    tokio::time::sleep(delay).await;
                 }
+                result
             }
-        }
+        })
+        .await
     }
 
     async fn run_shuffle_map_stage_inner(

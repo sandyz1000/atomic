@@ -31,6 +31,8 @@ use crate::{
 
 mod cache_dispatch;
 mod job_runner;
+pub(crate) mod locality;
+pub(crate) mod retry;
 mod shuffle_stage;
 mod transport;
 mod worker_pool;

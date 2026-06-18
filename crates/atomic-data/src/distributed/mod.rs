@@ -18,6 +18,13 @@ pub type RkyvWireStrategy = rkyv::rancor::Strategy<Pool, Error>;
 /// Semantic version for wire contracts used by distributed task transport.
 pub const WIRE_SCHEMA_V1: u16 = 1;
 
+/// Decode a bincode-encoded value from a byte slice, discarding the consumed-byte count.
+pub fn decode_payload<T: bincode::Decode<()>>(
+    bytes: &[u8],
+) -> Result<T, bincode::error::DecodeError> {
+    bincode::decode_from_slice(bytes, bincode::config::standard()).map(|(v, _)| v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

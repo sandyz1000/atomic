@@ -18,7 +18,9 @@
 use std::sync::Arc;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::{PipelineOp, StateMergePayload, TaskAction, TaskRuntime};
+use atomic_data::distributed::{
+    PipelineOp, StateMergePayload, TaskAction, TaskRuntime, decode_payload,
+};
 use datafusion::arrow::record_batch::RecordBatch;
 
 use crate::OutputMode;
@@ -79,15 +81,14 @@ fn windowed_state_merge(
         None => StateStore::new(),
     };
     let cfg = bincode::config::standard();
-    let (cells, _): (Vec<(StateKey, Vec<AggState>)>, _) =
-        bincode::decode_from_slice(partials, cfg).map_err(|e| e.to_string())?;
+    let cells: Vec<(StateKey, Vec<AggState>)> =
+        decode_payload(partials).map_err(|e| e.to_string())?;
     let touched: Vec<StateKey> = cells.iter().map(|(k, _)| k.clone()).collect();
     for (k, v) in cells {
         store.merge(k, v);
     }
 
-    let (params, _): (WindowedMergeParams, _) =
-        bincode::decode_from_slice(params, cfg).map_err(|e| e.to_string())?;
+    let params: WindowedMergeParams = decode_payload(params).map_err(|e| e.to_string())?;
     let emitted: Vec<(StateKey, Vec<AggState>)> = match params.mode {
         MODE_UPDATE => touched
             .iter()
@@ -211,9 +212,8 @@ impl BatchEngine for DistributedStateEngine {
         // Reassemble emitted cells from every shard into the output batch.
         let mut emitted: Vec<(StateKey, Vec<AggState>)> = Vec::new();
         for bytes in results {
-            let (cells, _): (Vec<(StateKey, Vec<AggState>)>, _) =
-                bincode::decode_from_slice(&bytes, cfg)
-                    .map_err(|e| StructuredError::Sql(format!("emitted decode: {e}")))?;
+            let cells: Vec<(StateKey, Vec<AggState>)> = decode_payload(&bytes)
+                .map_err(|e| StructuredError::Sql(format!("emitted decode: {e}")))?;
             emitted.extend(cells);
         }
 

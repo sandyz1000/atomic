@@ -24,7 +24,9 @@ use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::{PipelineOp, StateMergePayload, TaskAction, TaskRuntime};
+use atomic_data::distributed::{
+    PipelineOp, StateMergePayload, TaskAction, TaskRuntime, decode_payload,
+};
 
 use crate::distributed_state::shard_of;
 use crate::errors::{StructuredError, StructuredResult};
@@ -218,70 +220,9 @@ impl StreamJoinEngine {
         if pairs.is_empty() {
             return Ok(vec![]);
         }
-        let ls = &self.spec.left_schema;
-        let rs = &self.spec.right_schema;
-        let ncols = ls.fields().len() + rs.fields().len();
-        let nrows = pairs.len();
-
-        let mut col_data: Vec<Vec<GroupVal>> = vec![Vec::with_capacity(nrows); ncols];
-        for (l, r_opt) in pairs {
-            for (ci, v) in l.cols.iter().enumerate() {
-                col_data[ci].push(v.clone());
-            }
-            let r_offset = ls.fields().len();
-            for ci in 0..rs.fields().len() {
-                let v = r_opt
-                    .as_ref()
-                    .and_then(|r| r.cols.get(ci))
-                    .cloned()
-                    .unwrap_or(GroupVal::Null);
-                col_data[r_offset + ci].push(v);
-            }
-        }
-
-        // All join output fields are nullable: either side may be absent in an outer join.
-        let mut fields: Vec<Field> = ls
-            .fields()
-            .iter()
-            .map(|f| Field::new(f.name(), f.data_type().clone(), true))
-            .collect();
-        fields.extend(rs.fields().iter().map(|f| {
-            let name = if ls.fields().iter().any(|lf| lf.name() == f.name()) {
-                format!("{}_right", f.name())
-            } else {
-                f.name().to_string()
-            };
-            Field::new(&name, f.data_type().clone(), true)
-        }));
-        let schema = Arc::new(Schema::new(fields.clone()));
-
-        let columns: Vec<Arc<dyn Array>> = fields
-            .iter()
-            .enumerate()
-            .map(|(ci, field)| -> Arc<dyn Array> {
-                match field.data_type() {
-                    DataType::Utf8 => Arc::new(StringArray::from(
-                        col_data[ci]
-                            .iter()
-                            .map(|v| match v {
-                                GroupVal::Str(s) => Some(s.clone()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>(),
-                    )),
-                    _ => Arc::new(Int64Array::from(
-                        col_data[ci]
-                            .iter()
-                            .map(|v| match v {
-                                GroupVal::Int(i) => Some(*i),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>(),
-                    )),
-                }
-            })
-            .collect();
-
+        let schema = merged_schema(&self.spec.left_schema, &self.spec.right_schema);
+        let col_data = collect_join_columns(pairs, &self.spec.left_schema, &self.spec.right_schema);
+        let columns = scalar_columns_to_arrays(&col_data, &schema);
         Ok(vec![RecordBatch::try_new(schema, columns).map_err(
             |e| StructuredError::Sql(format!("join batch: {e}")),
         )?])
@@ -316,6 +257,83 @@ impl StreamJoinEngine {
             wm,
         }
     }
+}
+
+/// Build the merged output schema for a join: left fields (all nullable) followed by
+/// right fields (all nullable, name-mangled with `_right` on collision).
+fn merged_schema(left: &Schema, right: &Schema) -> Arc<Schema> {
+    let mut fields: Vec<Field> = left
+        .fields()
+        .iter()
+        .map(|f| Field::new(f.name(), f.data_type().clone(), true))
+        .collect();
+    fields.extend(right.fields().iter().map(|f| {
+        let name = if left.fields().iter().any(|lf| lf.name() == f.name()) {
+            format!("{}_right", f.name())
+        } else {
+            f.name().to_string()
+        };
+        Field::new(&name, f.data_type().clone(), true)
+    }));
+    Arc::new(Schema::new(fields))
+}
+
+/// Collect per-column `GroupVal` data from matched pairs, null-padding absent right
+/// values (outer joins).
+fn collect_join_columns(
+    pairs: &[(JoinRow, Option<JoinRow>)],
+    left_schema: &Schema,
+    right_schema: &Schema,
+) -> Vec<Vec<GroupVal>> {
+    let ncols = left_schema.fields().len() + right_schema.fields().len();
+    let nrows = pairs.len();
+    let mut col_data: Vec<Vec<GroupVal>> = vec![Vec::with_capacity(nrows); ncols];
+    for (l, r_opt) in pairs {
+        for (ci, v) in l.cols.iter().enumerate() {
+            col_data[ci].push(v.clone());
+        }
+        let r_offset = left_schema.fields().len();
+        for ci in 0..right_schema.fields().len() {
+            let v = r_opt
+                .as_ref()
+                .and_then(|r| r.cols.get(ci))
+                .cloned()
+                .unwrap_or(GroupVal::Null);
+            col_data[r_offset + ci].push(v);
+        }
+    }
+    col_data
+}
+
+/// Convert per-column `GroupVal` vecs to typed Arrow arrays matching `schema`.
+fn scalar_columns_to_arrays(col_data: &[Vec<GroupVal>], schema: &Schema) -> Vec<Arc<dyn Array>> {
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(ci, field)| -> Arc<dyn Array> {
+            match field.data_type() {
+                DataType::Utf8 => Arc::new(StringArray::from(
+                    col_data[ci]
+                        .iter()
+                        .map(|v| match v {
+                            GroupVal::Str(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                _ => Arc::new(Int64Array::from(
+                    col_data[ci]
+                        .iter()
+                        .map(|v| match v {
+                            GroupVal::Int(i) => Some(*i),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+            }
+        })
+        .collect()
 }
 
 /// Result of [`StreamJoinEngine::compute_rows`]: this batch's keyed rows per side
@@ -489,18 +507,15 @@ fn join_state_merge(
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
     let cfg = bincode::config::standard();
     let mut state = match prev {
-        Some(b) => bincode::decode_from_slice::<JoinShardState, _>(b, cfg)
-            .map(|(s, _)| s)
-            .map_err(|e| e.to_string())?,
+        Some(b) => decode_payload::<JoinShardState>(b).map_err(|e| e.to_string())?,
         None => JoinShardState {
             left: JoinStateStore::new(),
             right: JoinStateStore::new(),
         },
     };
-    let ((new_left, new_right), _): ((KeyedRows, KeyedRows), _) =
-        bincode::decode_from_slice(partials, cfg).map_err(|e| e.to_string())?;
-    let (params, _): (JoinMergeParams, _) =
-        bincode::decode_from_slice(params, cfg).map_err(|e| e.to_string())?;
+    let (new_left, new_right): (KeyedRows, KeyedRows) =
+        decode_payload(partials).map_err(|e| e.to_string())?;
+    let params: JoinMergeParams = decode_payload(params).map_err(|e| e.to_string())?;
     let matched = probe_and_buffer(
         &mut state.left,
         &mut state.right,
@@ -613,9 +628,8 @@ impl BatchEngine for DistributedJoinEngine {
 
         let mut matched: Vec<(JoinRow, Option<JoinRow>)> = Vec::new();
         for bytes in results {
-            let (pairs, _): (Vec<(JoinRow, Option<JoinRow>)>, _) =
-                bincode::decode_from_slice(&bytes, cfg)
-                    .map_err(|e| StructuredError::Sql(format!("join matched decode: {e}")))?;
+            let pairs: Vec<(JoinRow, Option<JoinRow>)> = decode_payload(&bytes)
+                .map_err(|e| StructuredError::Sql(format!("join matched decode: {e}")))?;
             matched.extend(pairs);
         }
 

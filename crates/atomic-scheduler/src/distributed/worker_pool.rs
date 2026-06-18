@@ -7,12 +7,49 @@ use std::{
     time::Duration,
 };
 
-use atomic_data::distributed::{PipelineOp, TaskAction, WorkerCapabilities};
+use atomic_data::distributed::{PipelineOp, TaskAction, WorkerCapabilities, decode_payload};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::{LibResult, SchedulerError};
 
 use super::DistributedScheduler;
+
+/// Worker health probe variants.
+///
+/// `Http` sends `GET /health` to the worker's ShuffleManager port.
+/// `Tcp` attempts a plain TCP connect to the worker's task port.
+pub(crate) enum WorkerProbe {
+    Http { port: u16 },
+    Tcp,
+}
+
+impl WorkerProbe {
+    pub(crate) async fn is_alive(&self, endpoint: SocketAddrV4, timeout: Duration) -> bool {
+        match self {
+            WorkerProbe::Http { port } => {
+                let port = *port;
+                let result = tokio::time::timeout(timeout, async move {
+                    let addr = format!("{}:{}", endpoint.ip(), port);
+                    if let Ok(mut stream) = tokio::net::TcpStream::connect(&addr).await {
+                        let req = format!("GET /health HTTP/1.0\r\nHost: {addr}\r\n\r\n");
+                        let _ = stream.write_all(req.as_bytes()).await;
+                        let mut buf = [0u8; 16];
+                        matches!(stream.read(&mut buf).await, Ok(n) if n > 0)
+                    } else {
+                        false
+                    }
+                })
+                .await;
+                result.unwrap_or(false)
+            }
+            WorkerProbe::Tcp => {
+                tokio::time::timeout(timeout, tokio::net::TcpStream::connect(endpoint))
+                    .await
+                    .is_ok_and(|r| r.is_ok())
+            }
+        }
+    }
+}
 
 /// RAII guard that decrements a worker's inflight counter when dropped.
 pub struct InflightGuard(pub(crate) Arc<AtomicI16>);
@@ -43,33 +80,15 @@ impl DistributedScheduler {
                 let endpoints: Vec<SocketAddrV4> =
                     sched.worker_capabilities.iter().map(|e| *e.key()).collect();
                 for endpoint in endpoints {
-                    let shuffle_port = {
-                        sched
-                            .worker_capabilities
-                            .get(&endpoint)
-                            .and_then(|c| c.shuffle_server_port)
+                    let shuffle_port = sched
+                        .worker_capabilities
+                        .get(&endpoint)
+                        .and_then(|c| c.shuffle_server_port);
+                    let probe = match shuffle_port {
+                        Some(port) => WorkerProbe::Http { port },
+                        None => WorkerProbe::Tcp,
                     };
-                    let healthy = if let Some(port) = shuffle_port {
-                        let probe = tokio::time::timeout(timeout, async {
-                            let addr = format!("{}:{}", endpoint.ip(), port);
-                            if let Ok(mut stream) = tokio::net::TcpStream::connect(&addr).await {
-                                let req = format!("GET /health HTTP/1.0\r\nHost: {addr}\r\n\r\n");
-                                let _ = stream.write_all(req.as_bytes()).await;
-                                let mut buf = [0u8; 16];
-                                matches!(stream.read(&mut buf).await, Ok(n) if n > 0)
-                            } else {
-                                false
-                            }
-                        })
-                        .await;
-                        probe.unwrap_or(false)
-                    } else {
-                        // Fallback: try a plain TCP connect to the task port.
-                        let probe =
-                            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(endpoint))
-                                .await;
-                        probe.is_ok_and(|r| r.is_ok())
-                    };
+                    let healthy = probe.is_alive(endpoint, timeout).await;
 
                     if healthy {
                         sched.worker_failures.remove(&endpoint);
@@ -229,9 +248,7 @@ impl DistributedScheduler {
         match &op.action {
             TaskAction::ShuffleMap { .. } => {
                 let key: String =
-                    bincode::decode_from_slice(&op.payload, bincode::config::standard())
-                        .map(|(s, _)| s)
-                        .unwrap_or_else(|_| "<invalid-payload>".to_string());
+                    decode_payload(&op.payload).unwrap_or_else(|_| "<invalid-payload>".to_string());
                 format!("shuffle:{key}")
             }
             _ => op.op_id.clone(),

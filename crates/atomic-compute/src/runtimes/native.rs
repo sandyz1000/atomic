@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use atomic_data::accumulator;
 use atomic_data::broadcast;
 use atomic_data::distributed::{
-    PipelineOp, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime,
+    PipelineOp, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime, decode_payload,
 };
 
 use crate::error::{ComputeError, ComputeResult};
@@ -35,12 +35,10 @@ impl OpDispatcher for NativeDispatcher {
                 num_output_partitions,
             } => {
                 // Payload carries the dispatch key + the shipped partitioner spec.
-                let payload: crate::shuffle_map::ShuffleMapPayload =
-                    bincode::decode_from_slice(&op.payload, bincode::config::standard())
-                        .map(|(p, _)| p)
-                        .map_err(|e| {
-                            ComputeError::InvalidPayload(format!("shuffle-map payload decode: {e}"))
-                        })?;
+                let payload: crate::shuffle_map::ShuffleMapPayload = decode_payload(&op.payload)
+                    .map_err(|e| {
+                        ComputeError::InvalidPayload(format!("shuffle-map payload decode: {e}"))
+                    })?;
                 let type_id = payload.type_id.as_str();
                 let spec = &payload.partitioner_spec;
                 // Range (sort) shuffles use the sorted handler when one is registered for the type
@@ -80,35 +78,29 @@ impl OpDispatcher for NativeDispatcher {
             TaskAction::KafkaConsume => {
                 // The per-partition consume config is shipped in `source_partitions[i]`
                 // (i.e. `data`), not in `op.payload` (which is empty for KafkaConsume).
-                let payload: atomic_data::distributed::KafkaConsumePayload =
-                    bincode::decode_from_slice(data, bincode::config::standard())
-                        .map(|(p, _)| p)
-                        .map_err(|e| {
-                            ComputeError::InvalidPayload(format!("KafkaConsume data decode: {e}"))
-                        })?;
+                let payload: atomic_data::distributed::KafkaConsumePayload = decode_payload(data)
+                    .map_err(|e| {
+                    ComputeError::InvalidPayload(format!("KafkaConsume data decode: {e}"))
+                })?;
                 kafka_consume_handler(&payload)
             }
             TaskAction::ReadFileSplit => {
                 // Per-partition config shipped in `data` (bincode-encoded FileSplitPayload);
                 // `op.payload` is empty.
-                let payload: atomic_data::distributed::FileSplitPayload =
-                    bincode::decode_from_slice(data, bincode::config::standard())
-                        .map(|(p, _)| p)
-                        .map_err(|e| {
-                            ComputeError::InvalidPayload(format!("ReadFileSplit data decode: {e}"))
-                        })?;
+                let payload: atomic_data::distributed::FileSplitPayload = decode_payload(data)
+                    .map_err(|e| {
+                        ComputeError::InvalidPayload(format!("ReadFileSplit data decode: {e}"))
+                    })?;
                 file_split_handler(&payload)
             }
             TaskAction::MergeState { merge_fn } => {
                 // Per-shard input shipped in `data` (bincode-encoded StateMergePayload).
                 // The merge fn is content-agnostic; the shard's state persists across
                 // batches in the worker-global WORKER_STATE_STORE.
-                let payload: atomic_data::distributed::StateMergePayload =
-                    bincode::decode_from_slice(data, bincode::config::standard())
-                        .map(|(p, _)| p)
-                        .map_err(|e| {
-                            ComputeError::InvalidPayload(format!("MergeState data decode: {e}"))
-                        })?;
+                let payload: atomic_data::distributed::StateMergePayload = decode_payload(data)
+                    .map_err(|e| {
+                        ComputeError::InvalidPayload(format!("MergeState data decode: {e}"))
+                    })?;
                 let merge = STATE_MERGE_REGISTRY.get(merge_fn.as_str()).ok_or_else(|| {
                     ComputeError::UnknownOperation(format!(
                         "no state-merge fn '{merge_fn}' registered; \
@@ -191,134 +183,167 @@ impl Default for ComputeEngine {
     }
 }
 
-impl Backend for ComputeEngine {
-    fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> ComputeResult<TaskResultEnvelope> {
-        // Locality read: load this partition's input from the worker cache when
-        // `cache_source` is set, else use the shipped `data`. A miss is a failure the
-        // driver recovers from by recomputing the partition (see scheduler 6c).
-        let mut data = match task.cache_source {
-            Some(rdd_id) => {
-                match atomic_data::cache::worker_partition_cache().get(rdd_id, task.partition_id) {
-                    Some(bytes) => bytes,
-                    None => {
-                        return Ok(TaskResultEnvelope::cache_miss(
-                            task.run_id,
-                            task.stage_id,
-                            task.task_id,
-                            task.attempt_id,
-                            task.partition_id,
-                            worker_id.to_string(),
-                            rdd_id,
-                        ));
-                    }
-                }
-            }
-            None => task.data.clone(),
-        };
+/// Disambiguates `resolve_input` output: either proceed with pipeline bytes, or
+/// short-circuit with a pre-built envelope (cache miss or empty-cache-serve).
+enum InputData {
+    Pipeline(Vec<u8>),
+    EarlyReturn(TaskResultEnvelope),
+}
 
-        if task.ops.is_empty() {
-            // A pure cache serve (cache_source + no ops) returns the cached bytes;
-            // a genuinely empty pipeline is an error.
-            if task.cache_source.is_some() {
-                return Ok(TaskResultEnvelope::ok(
-                    task.run_id,
-                    task.stage_id,
-                    task.task_id,
-                    task.attempt_id,
-                    task.partition_id,
-                    worker_id.to_string(),
-                    data,
-                    None,
-                ));
-            }
-            return Err(ComputeError::UnknownOperation("empty pipeline".to_string()));
-        }
-
-        if !task.broadcast_values.is_empty() {
-            broadcast::load_broadcast_values(&task.broadcast_values);
-        }
-
-        for op in &task.ops {
-            log::info!(
-                "[{}] pipeline op '{}' {:?} data_bytes={}",
-                worker_id,
-                op.op_id,
-                op.action,
-                data.len(),
-            );
-
-            let dispatcher = self.dispatchers.get(&op.runtime).ok_or_else(|| {
-                ComputeError::UnknownOperation(format!("unknown TaskRuntime: {:?}", op.runtime))
-            })?;
-
-            match dispatcher.dispatch(op, task.partition_id, &data) {
-                Ok(out) => data = out,
-                Err(e) => {
-                    return Ok(TaskResultEnvelope::fatal_failure(
+/// Load this partition's input: worker cache hit when `cache_source` is set, else
+/// the envelope's `data` bytes. Returns `EarlyReturn` for cache-miss and empty-serve.
+fn resolve_input(task: &TaskEnvelope, worker_id: &str) -> ComputeResult<InputData> {
+    let data = match task.cache_source {
+        Some(rdd_id) => {
+            match atomic_data::cache::worker_partition_cache().get(rdd_id, task.partition_id) {
+                Some(bytes) => bytes,
+                None => {
+                    return Ok(InputData::EarlyReturn(TaskResultEnvelope::cache_miss(
                         task.run_id,
                         task.stage_id,
                         task.task_id,
                         task.attempt_id,
                         task.partition_id,
                         worker_id.to_string(),
-                        e.to_string(),
-                    ));
+                        rdd_id,
+                    )));
                 }
             }
         }
+        None => task.data.clone(),
+    };
 
-        if !task.broadcast_values.is_empty() {
-            broadcast::clear_broadcast_values();
-        }
+    if task.ops.is_empty() {
+        // A pure cache serve (cache_source + no ops) returns the cached bytes;
+        // a genuinely empty pipeline without a cache source is an error.
+        return if task.cache_source.is_some() {
+            Ok(InputData::EarlyReturn(TaskResultEnvelope::ok(
+                task.run_id,
+                task.stage_id,
+                task.task_id,
+                task.attempt_id,
+                task.partition_id,
+                worker_id.to_string(),
+                data,
+                None,
+            )))
+        } else {
+            Err(ComputeError::UnknownOperation("empty pipeline".to_string()))
+        };
+    }
 
-        let acc_deltas = accumulator::drain_deltas();
+    Ok(InputData::Pipeline(data))
+}
 
-        let shuffle_server_uri = task
-            .ops
-            .iter()
-            .any(|op| matches!(op.action, TaskAction::ShuffleMap { .. }))
-            .then(atomic_data::env::get_shuffle_server_uri)
-            .flatten();
+/// Run each op in sequence, threading data through the pipeline. Returns the
+/// final output bytes, or `Err` if any dispatcher call fails.
+fn run_pipeline(
+    dispatchers: &HashMap<TaskRuntime, Box<dyn OpDispatcher>>,
+    task: &TaskEnvelope,
+    worker_id: &str,
+    mut data: Vec<u8>,
+) -> ComputeResult<Vec<u8>> {
+    if !task.broadcast_values.is_empty() {
+        broadcast::load_broadcast_values(&task.broadcast_values);
+    }
 
-        // Report partitions cached by any `Cache` op so the driver can record locality.
-        let cached_partitions: Vec<(usize, usize)> = task
-            .ops
-            .iter()
-            .filter_map(|op| match op.action {
-                TaskAction::Cache { rdd_id } => Some((rdd_id, task.partition_id)),
-                _ => None,
-            })
-            .collect();
+    for op in &task.ops {
+        log::info!(
+            "[{}] pipeline op '{}' {:?} data_bytes={}",
+            worker_id,
+            op.op_id,
+            op.action,
+            data.len(),
+        );
+        let dispatcher = dispatchers.get(&op.runtime).ok_or_else(|| {
+            ComputeError::UnknownOperation(format!("unknown TaskRuntime: {:?}", op.runtime))
+        })?;
+        data = dispatcher.dispatch(op, task.partition_id, &data)?;
+    }
 
-        // Report state shard IDs merged by any `MergeState` op so the driver can build
-        // `state_locs` for report-back affinity (autoscaling-robust pinning, G1).
-        let held_state_ids: Vec<u64> = task
-            .ops
-            .iter()
-            .filter(|op| matches!(op.action, TaskAction::MergeState { .. }))
-            .filter_map(|_| {
-                bincode::decode_from_slice::<atomic_data::distributed::StateMergePayload, _>(
-                    &task.data,
-                    bincode::config::standard(),
-                )
+    if !task.broadcast_values.is_empty() {
+        broadcast::clear_broadcast_values();
+    }
+
+    Ok(data)
+}
+
+/// Assemble the success `TaskResultEnvelope` with shuffle URI, cached partitions,
+/// held state IDs, and accumulator deltas.
+fn build_result_envelope(
+    task: &TaskEnvelope,
+    worker_id: &str,
+    output: Vec<u8>,
+) -> TaskResultEnvelope {
+    let acc_deltas = accumulator::drain_deltas();
+
+    let shuffle_server_uri = task
+        .ops
+        .iter()
+        .any(|op| matches!(op.action, TaskAction::ShuffleMap { .. }))
+        .then(atomic_data::env::get_shuffle_server_uri)
+        .flatten();
+
+    let cached_partitions: Vec<(usize, usize)> = task
+        .ops
+        .iter()
+        .filter_map(|op| match op.action {
+            TaskAction::Cache { rdd_id } => Some((rdd_id, task.partition_id)),
+            _ => None,
+        })
+        .collect();
+
+    // Report state shard IDs merged by any `MergeState` op so the driver can build
+    // `state_locs` for report-back affinity (autoscaling-robust pinning, G1).
+    let held_state_ids: Vec<u64> = task
+        .ops
+        .iter()
+        .filter(|op| matches!(op.action, TaskAction::MergeState { .. }))
+        .filter_map(|_| {
+            decode_payload::<atomic_data::distributed::StateMergePayload>(&task.data)
                 .ok()
-                .map(|(p, _)| p.state_id)
-            })
-            .collect();
+                .map(|p| p.state_id)
+        })
+        .collect();
 
-        Ok(TaskResultEnvelope::ok(
-            task.run_id,
-            task.stage_id,
-            task.task_id,
-            task.attempt_id,
-            task.partition_id,
-            worker_id.to_string(),
-            data,
-            shuffle_server_uri,
-        )
-        .with_accumulator_deltas(acc_deltas)
-        .with_cached_partitions(cached_partitions)
-        .with_held_state_ids(held_state_ids))
+    TaskResultEnvelope::ok(
+        task.run_id,
+        task.stage_id,
+        task.task_id,
+        task.attempt_id,
+        task.partition_id,
+        worker_id.to_string(),
+        output,
+        shuffle_server_uri,
+    )
+    .with_accumulator_deltas(acc_deltas)
+    .with_cached_partitions(cached_partitions)
+    .with_held_state_ids(held_state_ids)
+}
+
+impl Backend for ComputeEngine {
+    fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> ComputeResult<TaskResultEnvelope> {
+        let data = match resolve_input(task, worker_id)? {
+            InputData::EarlyReturn(r) => return Ok(r),
+            InputData::Pipeline(d) => d,
+        };
+
+        let output = match run_pipeline(&self.dispatchers, task, worker_id, data) {
+            Ok(out) => out,
+            Err(e) => {
+                return Ok(TaskResultEnvelope::fatal_failure(
+                    task.run_id,
+                    task.stage_id,
+                    task.task_id,
+                    task.attempt_id,
+                    task.partition_id,
+                    worker_id.to_string(),
+                    e.to_string(),
+                ));
+            }
+        };
+
+        Ok(build_result_envelope(task, worker_id, output))
     }
 }
 

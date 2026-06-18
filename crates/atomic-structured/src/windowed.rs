@@ -17,6 +17,8 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
 
+use atomic_data::distributed::decode_payload;
+
 use crate::OutputMode;
 use crate::errors::{StructuredError, StructuredResult};
 use crate::query::BatchEngine;
@@ -86,9 +88,8 @@ impl WindowedEngine {
             return Ok(());
         }
         let bytes = std::fs::read(&path).map_err(|e| StructuredError::Checkpoint(e.to_string()))?;
-        let (snap, _) =
-            bincode::decode_from_slice::<Snapshot, _>(&bytes, bincode::config::standard())
-                .map_err(|e| StructuredError::Checkpoint(e.to_string()))?;
+        let snap: Snapshot =
+            decode_payload(&bytes).map_err(|e| StructuredError::Checkpoint(e.to_string()))?;
         *self.state.get_mut() = StateStore::decode(&snap.store)?;
         self.watermark.get_mut().restore(snap.watermark_ms);
         Ok(())
