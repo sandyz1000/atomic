@@ -140,7 +140,7 @@ impl JsRdd {
 
     /// Apply `f` to each element for side effects.
     #[napi]
-    pub fn for_each(&self, f: Function<JsonValue, JsonValue>) -> Result<()> {
+    pub fn for_each(&self, f: Function<JsonValue, Unknown>) -> Result<()> {
         for elem in &self.elements {
             f.call(elem.clone())?;
         }
@@ -149,7 +149,7 @@ impl JsRdd {
 
     /// Apply `f` to each logical partition for side effects.
     #[napi]
-    pub fn for_each_partition(&self, f: Function<Vec<JsonValue>, JsonValue>) -> Result<()> {
+    pub fn for_each_partition(&self, f: Function<Vec<JsonValue>, Unknown>) -> Result<()> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
         let chunk_size = total.div_ceil(np).max(1);

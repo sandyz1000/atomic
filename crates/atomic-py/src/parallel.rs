@@ -16,10 +16,7 @@ fn get_or_create_pool(py: Python<'_>, n: usize) -> PyResult<Bound<'_, PyAny>> {
     let mut guard = pool_cell().lock();
     if guard.is_none() {
         let cf = py.import("concurrent.futures")?;
-        let pool = cf
-            .getattr("ProcessPoolExecutor")?
-            .call1((n,))?
-            .unbind();
+        let pool = cf.getattr("ProcessPoolExecutor")?.call1((n,))?.unbind();
         *guard = Some(pool);
     }
     Ok(guard.as_ref().unwrap().bind(py).clone())
@@ -38,7 +35,11 @@ pub fn shutdown_pool(py: Python<'_>) {
 /// Registered in the `atomic_compute` module so it is importable by name —
 /// a requirement for `ProcessPoolExecutor` to pickle it across process boundaries.
 #[pyfunction(name = "_run_partition")]
-pub fn run_partition(py: Python<'_>, fn_bytes: &[u8], items: Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+pub fn run_partition(
+    py: Python<'_>,
+    fn_bytes: &[u8],
+    items: Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
     let cp = py.import("cloudpickle")?;
     let fn_obj = cp.call_method1("loads", (PyBytes::new(py, fn_bytes),))?;
     Ok(fn_obj.call1((items,))?.unbind())
@@ -84,8 +85,7 @@ pub fn exec_parallel(
     let py_partitions = PyList::new(py, &partition_lists)?;
 
     // Blocking call — releases the GIL while waiting for subprocesses.
-    let results_iter =
-        pool.call_method1("map", (&run_fn, &py_fn_bytes_list, &py_partitions))?;
+    let results_iter = pool.call_method1("map", (&run_fn, &py_fn_bytes_list, &py_partitions))?;
 
     // Flatten iterator[list[Any]] → Vec<Py<PyAny>>
     let mut flat: Vec<Py<PyAny>> = Vec::with_capacity(elements.len());

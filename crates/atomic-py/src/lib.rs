@@ -12,7 +12,7 @@ use context::PyContext;
 use distributed_vars::{PyAccumulator, PyBroadcastVar};
 use graph::PyGraph;
 use parallel::run_partition;
-use rdd::{verify_picklable, PyRdd};
+use rdd::{PyRdd, verify_picklable};
 use sql::{PyDataFrame, PySqlContext};
 use streaming::{PyBatchQueue, PyDStream, PyStreamingContext};
 

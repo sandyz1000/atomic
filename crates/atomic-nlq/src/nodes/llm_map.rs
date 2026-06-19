@@ -20,8 +20,8 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 
 use crate::config::NlqConfig;
-use crate::nodes::llm_filter::record_batch_to_json_rows;
 use crate::llm::LlmClient;
+use crate::nodes::llm_filter::record_batch_to_json_rows;
 
 /// LLM-based row transformer. Adds a new column to each row.
 #[derive(Debug, Clone)]

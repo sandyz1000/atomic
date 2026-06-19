@@ -233,6 +233,7 @@ impl PyRdd {
     }
 
     /// Return the maximum element. Optional `key` function `f(x) => comparable`.
+    #[pyo3(signature = (key=None))]
     pub fn max(&self, py: Python, key: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         if self.elements.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err("max on empty RDD"));
@@ -260,6 +261,7 @@ impl PyRdd {
     }
 
     /// Return the minimum element. Optional `key` function `f(x) => comparable`.
+    #[pyo3(signature = (key=None))]
     pub fn min(&self, py: Python, key: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         if self.elements.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err("min on empty RDD"));

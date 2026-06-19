@@ -237,6 +237,10 @@ export declare class Graph {
   numVertices(): number
   /** Return the number of edges. */
   numEdges(): number
+  /** Return all vertices as an array of `[vertexId, data]` pairs. */
+  vertices(): Array<[number, number]>
+  /** Return all edges as an array of `[srcId, dstId, weight]` triples. */
+  edges(): Array<[number, number, number]>
   /** Run PageRank. Returns Record<string, number> (keys are vertex ID strings). */
   pageRank(numIter: number, resetProb: number): Record<string, number>
   /** Connected components (weakly). Returns Record<string, number>. */
@@ -300,10 +304,194 @@ export type JsGraph = Graph
  * // [6, 8]
  * ```
  */
-export declare class Rdd {
-
+export declare class JsRdd {
+  /** Return all elements as a JavaScript array. */
+  collect(): Array<JsonValue>
+  /** Return the number of elements. */
+  count(): number
+  /** Return the first element. Throws if the RDD is empty. */
+  first(): JsonValue
+  /** Return the first `n` elements. */
+  take(n: number): Array<JsonValue>
+  /** Aggregate all elements using `f(acc, element) => acc`. Throws if empty. */
+  reduce(f: (arg0: JsonValue, arg1: JsonValue) => JsonValue): JsonValue
+  /** Aggregate with an initial value using `f(acc, element) => acc`. */
+  fold(zero: JsonValue, f: (arg0: JsonValue, arg1: JsonValue) => JsonValue): JsonValue
+  /** Apply `f` to each element for side effects. */
+  forEach(f: (arg: JsonValue) => unknown): void
+  /** Apply `f` to each logical partition for side effects. */
+  forEachPartition(f: (arg: Array<JsonValue>) => unknown): void
+  /** Count occurrences of each distinct element. Returns `{element: count}`. */
+  countByValue(): JsonValue
+  /** Count elements per key in a pair RDD. Returns `{key: count}`. */
+  countByKey(): JsonValue
+  /** Return true if the RDD has no elements. */
+  isEmpty(): boolean
+  /** Return the maximum element. Optional comparator `f(a, b) => number` (positive = a > b). */
+  max(comparator?: ((arg0: JsonValue, arg1: JsonValue) => number) | undefined | null): JsonValue
+  /** Return the minimum element. Optional comparator `f(a, b) => number` (negative = a < b). */
+  min(comparator?: ((arg0: JsonValue, arg1: JsonValue) => number) | undefined | null): JsonValue
+  /**
+   * Write each element as a line to `path`.
+   *
+   * Accepts a local file path or, when built with the `s3` feature, an
+   * S3 URI (`s3://bucket/prefix`).
+   */
+  saveAsTextFile(path: string): void
+  /**
+   * Two-phase aggregation: `seqFn(acc, elem) => acc` within partitions,
+   * `combFn(acc, acc) => acc` across partition results.
+   */
+  aggregate(zero: JsonValue, seqFn: (arg0: JsonValue, arg1: JsonValue) => JsonValue, combFn: (arg0: JsonValue, arg1: JsonValue) => JsonValue): JsonValue
+  /** Return elements divided into `num_partitions` logical partition arrays. */
+  glom(): Array<Array<JsonValue>>
+  /** Mark this RDD to be cached in memory on first action (no-op in local mode). */
+  cache(): JsRdd
+  /** Mark this RDD to be persisted (alias for `cache` in local mode). */
+  persist(): JsRdd
+  /** Remove this RDD from the cache (no-op in local mode). */
+  unpersist(): JsRdd
+  /**
+   * Write all elements to `{path}/checkpoint.json` and return a new RDD
+   * backed by the same elements.
+   *
+   * The write is atomic: data is first written to `{path}/checkpoint.json.tmp`
+   * and then renamed to `{path}/checkpoint.json`.
+   */
+  checkpoint(path: string): JsRdd
+  /** Return the logical number of partitions. */
+  get numPartitions(): number
+  length(): number
+  /** Group `[key, value]` pairs by key → `[key, [values]]` pairs. */
+  groupByKey(): JsRdd
+  /** Aggregate values with the same key using `f(acc, value) => acc`. */
+  reduceByKey(f: (arg0: JsonValue, arg1: JsonValue) => JsonValue): JsRdd
+  /** Extract the key from each `[key, value]` pair. */
+  keys(): JsRdd
+  /** Extract the value from each `[key, value]` pair. */
+  values(): JsRdd
+  /** Return all values associated with `key` from a pair RDD. */
+  lookup(key: JsonValue): Array<JsonValue>
+  /**
+   * Inner join two pair RDDs on their first element (key).
+   *
+   * Both RDDs must contain `[key, value]` arrays.
+   * Emits `[key, [left_value, right_value]]` for each matching key pair.
+   *
+   * In distributed mode the right side (if already in driver memory) is embedded
+   * in the worker closure as JSON — each worker joins against its left partition
+   * without collecting data to the driver first.
+   */
+  join(other: JsRdd): JsRdd
+  /**
+   * Left outer join two pair RDDs on their first element (key).
+   *
+   * Emits `[key, [left_value, right_value]]` for matched keys and
+   * `[key, [left_value, null]]` for unmatched left keys.
+   *
+   * In distributed mode the right side is embedded in the worker closure as JSON.
+   */
+  leftOuterJoin(other: JsRdd): JsRdd
+  /** Return the top `n` elements (largest first). Optional comparator `f(a, b) => number`. */
+  top(n: number, comparator?: ((arg0: JsonValue, arg1: JsonValue) => number) | undefined | null): Array<JsonValue>
+  /** Return the `n` smallest elements. Optional comparator `f(a, b) => number`. */
+  takeOrdered(n: number, comparator?: ((arg0: JsonValue, arg1: JsonValue) => number) | undefined | null): Array<JsonValue>
+  /**
+   * Sort elements by a key extracted via `key_fn(element)`.
+   *
+   * `ascending` defaults to `true`. The key function is called on each
+   * element; results are compared using JSON ordering (numbers numerically,
+   * strings lexicographically).
+   */
+  sortBy(keyFn: (arg: JsonValue) => JsonValue, ascending?: boolean | undefined | null): JsRdd
+  /**
+   * Sort `[key, value]` pair elements by their first element (key).
+   *
+   * `ascending` defaults to `true`. Keys are compared using JSON ordering.
+   *
+   * In distributed mode each worker sorts its partition; the driver k-way merges
+   * the N sorted runs. Not a globally range-partitioned shuffle sort, but removes
+   * the O(N log N) bottleneck on the driver. `sort_by_key` is an action: dispatch
+   * happens immediately and `self` stays reusable for further transforms/actions.
+   */
+  sortByKey(ascending?: boolean | undefined | null): JsRdd
+  /** Apply `f` to each element, returning a new RDD. */
+  map(f: (arg: JsonValue) => JsonValue): JsRdd
+  /** Keep only elements for which `f` returns truthy. */
+  filter(f: (arg: JsonValue) => boolean): JsRdd
+  /** Apply `f` to each element and flatten (f must return an Array). */
+  flatMap(f: (arg: JsonValue) => Array<JsonValue>): JsRdd
+  /** Apply `f` only to the value in each `[key, value]` pair. */
+  mapValues(f: (arg: JsonValue) => JsonValue): JsRdd
+  /** Apply `f` to each value in `[key, value]` pairs and flatten. */
+  flatMapValues(f: (arg: JsonValue) => Array<JsonValue>): JsRdd
+  /** Produce `[f(element), element]` pairs. */
+  keyBy(f: (arg: JsonValue) => JsonValue): JsRdd
+  /** Group elements by `f(element)` → `[key, [elements]]` pairs. */
+  groupBy(f: (arg: JsonValue) => JsonValue): JsRdd
+  /** Apply `f` to each logical partition (array of elements), returning a flattened RDD. */
+  mapPartitions(f: (arg: Array<JsonValue>) => Array<JsonValue>): JsRdd
+  /** Merge two RDDs into one. */
+  union(other: JsRdd): JsRdd
+  /** Zip two equal-length RDDs into an RDD of `[a, b]` pairs. */
+  zip(other: JsRdd): JsRdd
+  /** Compute the Cartesian product of two RDDs as `[a, b]` pairs. */
+  cartesian(other: JsRdd): JsRdd
+  /** Reduce to `n` logical partitions. */
+  coalesce(n: number): JsRdd
+  /** Change partition count (alias for `coalesce`). */
+  repartition(n: number): JsRdd
+  /** Remove duplicate elements. */
+  distinct(): JsRdd
+  /** Return elements in `self` that are not in `other`. */
+  subtract(other: JsRdd): JsRdd
+  /** Return elements present in both `self` and `other` (no duplicates). */
+  intersection(other: JsRdd): JsRdd
+  /**
+   * Apply `f(element, ctx)` to each element.
+   *
+   * `ctx` is serialized as JSON and injected as `globalThis.__ctx` on the worker.
+   * Use this instead of `map` when your function closes over driver-side state —
+   * the captured scope is lost when `f.toString()` crosses the wire.
+   */
+  mapWithContext(ctx: JsonValue, f: (arg0: JsonValue, arg1: JsonValue) => JsonValue): JsRdd
+  /**
+   * Keep only elements for which `f(element, ctx)` returns truthy.
+   *
+   * See `mapWithContext` for the captured-context contract.
+   */
+  filterWithContext(ctx: JsonValue, f: (arg0: JsonValue, arg1: JsonValue) => boolean): JsRdd
+  /**
+   * Apply `f(element, ctx)` and flatten results.
+   *
+   * See `mapWithContext` for the captured-context contract.
+   */
+  flatMapWithContext(ctx: JsonValue, f: (arg0: JsonValue, arg1: JsonValue) => Array<JsonValue>): JsRdd
+  /**
+   * Apply `f(value, ctx)` only to the value in each `[key, value]` pair.
+   *
+   * See `mapWithContext` for the captured-context contract.
+   */
+  mapValuesWithContext(ctx: JsonValue, f: (arg0: JsonValue, arg1: JsonValue) => JsonValue): JsRdd
+  /**
+   * Reduce pair `[key, value]` elements by key using `f(acc, val, ctx)`.
+   *
+   * See `mapWithContext` for the captured-context contract.
+   */
+  reduceByKeyWithContext(ctx: JsonValue, f: (arg0: JsonValue, arg1: JsonValue, arg2: JsonValue) => JsonValue): JsRdd
+  /**
+   * Aggregate all elements using `f(acc, element, ctx) => acc`. Throws if empty.
+   *
+   * See `mapWithContext` for the captured-context contract.
+   */
+  reduceWithContext(ctx: JsonValue, f: (arg0: JsonValue, arg1: JsonValue, arg2: JsonValue) => JsonValue): JsonValue
+  /**
+   * Aggregate with an initial value using `f(acc, element, ctx) => acc`.
+   *
+   * See `mapWithContext` for the captured-context contract.
+   */
+  foldWithContext(ctx: JsonValue, zero: JsonValue, f: (arg0: JsonValue, arg1: JsonValue, arg2: JsonValue) => JsonValue): JsonValue
 }
-export type JsRdd = Rdd
 
 /**
  * SQL execution context backed by DataFusion.
@@ -369,7 +557,7 @@ export declare class SqlContext {
    * const df = sqlCtx.sql("SELECT * FROM data WHERE val > 2.0");
    * ```
    */
-  registerRdd(name: string, rdd: Rdd, schema: Record<string, string>): void
+  registerRdd(name: string, rdd: JsRdd, schema: Record<string, string>): void
   /** Remove a previously registered table from the catalog. */
   deregisterTable(name: string): void
 }

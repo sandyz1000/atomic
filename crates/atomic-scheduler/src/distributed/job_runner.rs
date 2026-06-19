@@ -267,9 +267,11 @@ impl DistributedScheduler {
                 let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
                 let task_key = format!("{}:{task_id}", ctx.run_id);
                 self.taskid_to_jobid.insert(task_key.clone(), ctx.run_id);
-                self.job_tasks.entry(ctx.run_id).or_default().insert(task_key);
-                let trace =
-                    format!("native-pipeline-{partition_id}-{}", ctx.pipeline_label);
+                self.job_tasks
+                    .entry(ctx.run_id)
+                    .or_default()
+                    .insert(task_key);
+                let trace = format!("native-pipeline-{partition_id}-{}", ctx.pipeline_label);
 
                 let holder_ip = match ctx.plan {
                     CacheDispatch::Serve { locs, .. } => {
@@ -644,15 +646,24 @@ impl DistributedScheduler {
             &cancel_token,
         );
 
+        // AgentStep stages are never speculated: each partition runs exactly once to
+        // avoid duplicate LLM cost and non-deterministic "first winner" results.
+        let has_agent_step = ops
+            .iter()
+            .any(|o| matches!(o.action, TaskAction::AgentStep));
         if let Some(multiplier) = self.speculation_multiplier {
-            self.run_speculation_monitor(
-                multiplier,
-                &tasks,
-                &slots,
-                &start_times,
-                &completed_durations,
-                num_partitions,
-            );
+            if !has_agent_step {
+                self.run_speculation_monitor(
+                    multiplier,
+                    &tasks,
+                    &slots,
+                    &start_times,
+                    &completed_durations,
+                    num_partitions,
+                );
+            } else {
+                log::debug!("speculation skipped for run_id={run_id}: pipeline contains AgentStep");
+            }
         }
 
         self.collect_job_results(handles, slots, run_id).await

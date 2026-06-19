@@ -23,8 +23,7 @@ impl PyRdd {
             self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) =
-                (staged.source_partitions.clone(), staged.ops.clone());
+            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
             self.staged = saved_staged;
             let result_bytes = self
                 .context
@@ -111,8 +110,7 @@ impl PyRdd {
             self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) =
-                (staged.source_partitions.clone(), staged.ops.clone());
+            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
             self.staged = saved_staged;
             let result_bytes = self
                 .context
@@ -247,13 +245,14 @@ impl PyRdd {
                 )?;
             }
             let helpers = PyModule::import(py, "atomic_compute._pair_helpers")?;
-            let join_fn = helpers.getattr("make_join_fn")?.call1((right_json.as_str(),))?;
+            let join_fn = helpers
+                .getattr("make_join_fn")?
+                .call1((right_json.as_str(),))?;
             let fn_bytes = Self::pickle_fn(py, &join_fn.unbind())?;
             self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) =
-                (staged.source_partitions.clone(), staged.ops.clone());
+            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
             self.staged = saved_staged;
             let result_bytes = self
                 .context
@@ -331,8 +330,7 @@ impl PyRdd {
             self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) =
-                (staged.source_partitions.clone(), staged.ops.clone());
+            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
             self.staged = saved_staged;
             let result_bytes = self
                 .context
@@ -374,15 +372,15 @@ impl PyRdd {
                 Some(right_vals) => {
                     for rv in right_vals.downcast::<PyList>()?.iter() {
                         let inner = PyTuple::new(py, [&lv, &rv])?.unbind().into_any();
-                        let outer =
-                            PyTuple::new(py, [&lk, inner.bind(py)])?.unbind().into_any();
+                        let outer = PyTuple::new(py, [&lk, inner.bind(py)])?.unbind().into_any();
                         elements.push(outer);
                     }
                 }
                 None => {
                     let none_val = py.None();
-                    let inner =
-                        PyTuple::new(py, [&lv, none_val.bind(py)])?.unbind().into_any();
+                    let inner = PyTuple::new(py, [&lv, none_val.bind(py)])?
+                        .unbind()
+                        .into_any();
                     let outer = PyTuple::new(py, [&lk, inner.bind(py)])?.unbind().into_any();
                     elements.push(outer);
                 }

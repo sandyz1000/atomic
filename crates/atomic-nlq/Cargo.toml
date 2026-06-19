@@ -9,6 +9,7 @@ integration = []
 [dependencies]
 atomic-sql = { workspace = true }
 atomic-compute = { workspace = true }
+atomic-data = { workspace = true }
 datafusion = { workspace = true }
 async-openai = { version = "0.41.0", features = [
     "chat-completion",
@@ -28,3 +29,5 @@ parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+atomic-compute = { workspace = true }
+atomic-data = { workspace = true }

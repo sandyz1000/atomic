@@ -1,0 +1,14 @@
+[package]
+name = "agent_step"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "agent_step"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute = { workspace = true }
+atomic-data = { workspace = true }
+atomic-nlq = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

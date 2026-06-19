@@ -119,12 +119,61 @@ pub enum TaskAction {
         /// Registered state-merge function name (e.g. `"atomic_structured::windowed_v1"`).
         merge_fn: String,
     },
+    /// Framework-native distributed sub-agent loop. The worker looks up the
+    /// registered `AgentRunner` (installed by `atomic-nlq`) and runs a multi-round
+    /// LLM plan→execute→evaluate loop over the partition's string inputs.
+    /// Config is in `PipelineOp.payload` (JSON-encoded `AgentStepPayload`);
+    /// input bytes are rkyv-encoded `Vec<String>` (or JSON fallback for Python/JS).
+    /// Returns rkyv-encoded `Vec<AgentFindings>`.
+    AgentStep,
     /// Kafka Direct source op (requires `kafka` feature). The worker `assign`+`seek`s to
     /// the given offset range and polls until `end_offset`, returning the messages as
     /// `rkyv`-encoded `Vec<String>`. `data` in the TaskEnvelope is ignored; all config
     /// is in `PipelineOp.payload` (bincode-encoded `KafkaConsumePayload`).
     #[cfg(feature = "kafka")]
     KafkaConsume,
+}
+
+/// Config for a [`TaskAction::AgentStep`] op.
+///
+/// Serialized as JSON into `PipelineOp.payload` so it can be decoded by the
+/// worker's `NativeDispatcher` without a shared rkyv schema.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AgentStepPayload {
+    /// LLM model identifier, e.g. `"gpt-4o"` or `"claude-opus-4-8"`.
+    pub model: String,
+    /// System prompt describing the agent's task.
+    pub system_prompt: String,
+    /// Maximum number of LLM rounds per input.
+    pub max_rounds: u32,
+    /// Tool IDs the agent may reference (builtin or user Python/JS tools).
+    pub tool_refs: Vec<String>,
+    /// Provider string: `"openai"` (default) or `"anthropic"`.
+    pub provider: String,
+    /// Optional JSON schema for output validation (best-effort check).
+    pub output_schema: Option<String>,
+    /// Optional token budget across all inputs in this partition.
+    pub max_tokens_total: Option<u64>,
+}
+
+/// Structured result returned by a sub-agent for one input string.
+///
+/// One `AgentFindings` is produced per input element in the partition.
+/// `Vec<AgentFindings>` is rkyv-encoded as the partition output of an
+/// [`TaskAction::AgentStep`] op.
+#[derive(Debug, Clone, PartialEq, Archive, RkyvSerialize, RkyvDeserialize)]
+#[rkyv(derive(Debug))]
+pub struct AgentFindings {
+    /// Index of the input string within this partition (0-based).
+    pub input_id: usize,
+    /// Final answer or extracted content produced by the agent.
+    pub answer: String,
+    /// Number of LLM rounds completed.
+    pub rounds: usize,
+    /// Confidence estimate in `[0.0, 1.0]` (set by the runner; not validated).
+    pub confidence: f32,
+    /// `true` if the token budget was exhausted before all inputs were processed.
+    pub budget_exceeded: bool,
 }
 
 /// Metadata carried in `PipelineOp.payload` for a Python UDF step.

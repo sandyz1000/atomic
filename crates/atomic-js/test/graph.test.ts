@@ -116,9 +116,11 @@ describe("P4.3 Graph", () => {
       [[1, 1.0], [2, 1.0], [3, 1.0]],
       [[1, 2, 1.0], [2, 3, 2.0], [1, 3, 5.0]]
     );
-    const sp = g.shortestPath([1]) as Record<string, Record<string, number>>;
-    expect(sp["1"]["2"]).toBeCloseTo(1.0);
-    expect(sp["1"]["3"]).toBeCloseTo(3.0); // via 2: 1+2=3, shorter than direct 5
+    // Landmark = 3. sp[v][l] = distance FROM vertex v TO landmark l.
+    const sp = g.shortestPath([3]) as Record<string, Record<string, number>>;
+    expect(sp["1"]["3"]).toBeCloseTo(3.0); // 1→2 (1.0) + 2→3 (2.0) = 3.0, shorter than direct 5.0
+    expect(sp["2"]["3"]).toBeCloseTo(2.0); // 2→3 direct
+    expect(sp["3"]["3"]).toBeCloseTo(0.0); // self
   });
 
   it("shortestPath self distance zero", () => {
@@ -133,13 +135,20 @@ describe("P4.3 Graph", () => {
 
   it("labelPropagation two clusters", () => {
     if (!moduleLoaded) return;
+    // Two directed triangles — pairs (2-node) oscillate and never converge.
+    // Triangles (3-node cliques) converge reliably, matching the Python test.
     const g = new Graph(
-      [[1, 1.0], [2, 1.0], [3, 1.0], [4, 1.0]],
-      [[1, 2, 1.0], [2, 1, 1.0], [3, 4, 1.0], [4, 3, 1.0]]
+      [[1, 1.0], [2, 1.0], [3, 1.0], [4, 1.0], [5, 1.0], [6, 1.0]],
+      [
+        [1, 2, 1.0], [2, 3, 1.0], [3, 1, 1.0], // triangle A
+        [4, 5, 1.0], [5, 6, 1.0], [6, 4, 1.0], // triangle B
+      ]
     );
     const labels = g.labelPropagation(20) as Record<string, number>;
     expect(labels["1"]).toBe(labels["2"]);
-    expect(labels["3"]).toBe(labels["4"]);
+    expect(labels["1"]).toBe(labels["3"]);
+    expect(labels["4"]).toBe(labels["5"]);
+    expect(labels["4"]).toBe(labels["6"]);
   });
 
   it("stronglyConnectedComponents cycle", () => {

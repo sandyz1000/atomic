@@ -84,6 +84,28 @@ impl JsGraph {
         self.inner.num_edges() as u32
     }
 
+    /// Return all vertices as an array of `[vertexId, data]` pairs.
+    #[napi(ts_return_type = "Array<[number, number]>")]
+    pub fn vertices(&self) -> serde_json::Value {
+        let arr: Vec<serde_json::Value> = self
+            .inner
+            .vertices()
+            .map(|(id, data)| serde_json::json!([id, data]))
+            .collect();
+        serde_json::Value::Array(arr)
+    }
+
+    /// Return all edges as an array of `[srcId, dstId, weight]` triples.
+    #[napi(ts_return_type = "Array<[number, number, number]>")]
+    pub fn edges(&self) -> serde_json::Value {
+        let arr: Vec<serde_json::Value> = self
+            .inner
+            .edges()
+            .map(|e| serde_json::json!([e.src, e.dst, e.attr]))
+            .collect();
+        serde_json::Value::Array(arr)
+    }
+
     /// Run PageRank. Returns Record<string, number> (keys are vertex ID strings).
     #[napi(ts_return_type = "Record<string, number>")]
     pub fn page_rank(&self, num_iter: u32, reset_prob: f64) -> serde_json::Value {

@@ -34,7 +34,7 @@ struct StagedJsPipeline {
 ///   .collect();
 /// // [6, 8]
 /// ```
-#[napi(js_name = "Rdd")]
+#[napi]
 pub struct JsRdd {
     pub(crate) elements: Vec<JsonValue>,
     pub(crate) num_partitions: usize,

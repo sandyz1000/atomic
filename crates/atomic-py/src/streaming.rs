@@ -19,31 +19,23 @@ use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyIterator, PyList, PyTuple};
 
-fn pickle_fn(py: Python<'_>, func: &Py<PyAny>) -> PyResult<Vec<u8>> {
-    let pickle = PyModule::import(py, "cloudpickle").or_else(|_| PyModule::import(py, "pickle"))?;
-    pickle
-        .call_method1("dumps", (func.bind(py),))?
-        .extract::<Vec<u8>>()
-}
-
-fn unpickle_fn(py: Python<'_>, bytes: &[u8]) -> PyResult<Py<PyAny>> {
-    let pickle = PyModule::import(py, "pickle")?;
-    Ok(pickle
-        .call_method1("loads", (PyBytes::new(py, bytes),))?
-        .unbind())
-}
-
-#[derive(Clone)]
+// Output/transform functions are stored as live `Py<PyAny>` references rather than
+// pickled bytes: every DStream op here runs in-process (synchronously in
+// `run_one_batch`, or via `Python::attach` in the background thread spawned by
+// `start()`) — nothing crosses a process boundary. Pickling would round-trip the
+// closure *by value* (cloudpickle captures free variables at dump time), silently
+// detaching callbacks like `lambda b: results.extend(b)` from the caller's live
+// `results` list. Holding the `Py<PyAny>` directly keeps the original object alive.
 enum PyStreamTransform {
-    Map(Vec<u8>),
-    Filter(Vec<u8>),
-    FlatMap(Vec<u8>),
-    ReduceByKey(Vec<u8>),
+    Map(Py<PyAny>),
+    Filter(Py<PyAny>),
+    FlatMap(Py<PyAny>),
+    ReduceByKey(Py<PyAny>),
     GroupByKey,
     Join(Arc<PyDStreamInner>),
     LeftOuterJoin(Arc<PyDStreamInner>),
-    UpdateStateByKey(Vec<u8>),
-    MapValues(Vec<u8>),
+    UpdateStateByKey(Py<PyAny>),
+    MapValues(Py<PyAny>),
 }
 
 enum PyDStreamInner {
@@ -79,37 +71,37 @@ pub struct PyDStream {
 
 #[pymethods]
 impl PyDStream {
-    pub fn map(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<PyDStream> {
+    pub fn map(&self, func: Py<PyAny>) -> PyResult<PyDStream> {
         Ok(PyDStream {
             inner: Arc::new(PyDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: PyStreamTransform::Map(pickle_fn(py, &func)?),
+                op: PyStreamTransform::Map(func),
             }),
             is_pair: false,
         })
     }
 
-    pub fn filter(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<PyDStream> {
+    pub fn filter(&self, func: Py<PyAny>) -> PyResult<PyDStream> {
         Ok(PyDStream {
             inner: Arc::new(PyDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: PyStreamTransform::Filter(pickle_fn(py, &func)?),
+                op: PyStreamTransform::Filter(func),
             }),
             is_pair: self.is_pair,
         })
     }
 
-    pub fn flat_map(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<PyDStream> {
+    pub fn flat_map(&self, func: Py<PyAny>) -> PyResult<PyDStream> {
         Ok(PyDStream {
             inner: Arc::new(PyDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: PyStreamTransform::FlatMap(pickle_fn(py, &func)?),
+                op: PyStreamTransform::FlatMap(func),
             }),
             is_pair: false,
         })
     }
 
-    pub fn reduce_by_key(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<PyDStream> {
+    pub fn reduce_by_key(&self, func: Py<PyAny>) -> PyResult<PyDStream> {
         if !self.is_pair {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "reduce_by_key requires a pair DStream",
@@ -118,7 +110,7 @@ impl PyDStream {
         Ok(PyDStream {
             inner: Arc::new(PyDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: PyStreamTransform::ReduceByKey(pickle_fn(py, &func)?),
+                op: PyStreamTransform::ReduceByKey(func),
             }),
             is_pair: true,
         })
@@ -169,7 +161,7 @@ impl PyDStream {
         })
     }
 
-    pub fn update_state_by_key(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<PyDStream> {
+    pub fn update_state_by_key(&self, func: Py<PyAny>) -> PyResult<PyDStream> {
         if !self.is_pair {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "update_state_by_key requires a pair DStream",
@@ -178,13 +170,13 @@ impl PyDStream {
         Ok(PyDStream {
             inner: Arc::new(PyDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: PyStreamTransform::UpdateStateByKey(pickle_fn(py, &func)?),
+                op: PyStreamTransform::UpdateStateByKey(func),
             }),
             is_pair: true,
         })
     }
 
-    pub fn map_values(&self, py: Python<'_>, func: Py<PyAny>) -> PyResult<PyDStream> {
+    pub fn map_values(&self, func: Py<PyAny>) -> PyResult<PyDStream> {
         if !self.is_pair {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "map_values requires a pair DStream",
@@ -193,7 +185,7 @@ impl PyDStream {
         Ok(PyDStream {
             inner: Arc::new(PyDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: PyStreamTransform::MapValues(pickle_fn(py, &func)?),
+                op: PyStreamTransform::MapValues(func),
             }),
             is_pair: true,
         })
@@ -233,7 +225,7 @@ impl PyBatchQueue {
 
 struct OutputOp {
     stream: Arc<PyDStreamInner>,
-    func_bytes: Vec<u8>,
+    func: Py<PyAny>,
 }
 
 fn compute_batch(
@@ -297,30 +289,23 @@ fn apply_transform(
     state_store: &mut HashMap<String, Vec<u8>>,
 ) -> PyResult<Vec<Py<PyAny>>> {
     match op {
-        PyStreamTransform::Map(func_bytes) => {
-            let f = unpickle_fn(py, func_bytes)?;
-            elements
-                .iter()
-                .map(|e| f.call1(py, (e.bind(py),)))
-                .collect()
-        }
+        PyStreamTransform::Map(f) => elements
+            .iter()
+            .map(|e| f.call1(py, (e.bind(py),)))
+            .collect(),
 
-        PyStreamTransform::Filter(func_bytes) => {
-            let f = unpickle_fn(py, func_bytes)?;
-            elements
-                .iter()
-                .filter_map(
-                    |e| match f.call1(py, (e.bind(py),)).and_then(|r| r.is_truthy(py)) {
-                        Ok(true) => Some(Ok(e.clone_ref(py))),
-                        Ok(false) => None,
-                        Err(err) => Some(Err(err)),
-                    },
-                )
-                .collect()
-        }
+        PyStreamTransform::Filter(f) => elements
+            .iter()
+            .filter_map(
+                |e| match f.call1(py, (e.bind(py),)).and_then(|r| r.is_truthy(py)) {
+                    Ok(true) => Some(Ok(e.clone_ref(py))),
+                    Ok(false) => None,
+                    Err(err) => Some(Err(err)),
+                },
+            )
+            .collect(),
 
-        PyStreamTransform::FlatMap(func_bytes) => {
-            let f = unpickle_fn(py, func_bytes)?;
+        PyStreamTransform::FlatMap(f) => {
             let mut result = Vec::new();
             for e in &elements {
                 let iter_result = f.call1(py, (e.bind(py),))?;
@@ -332,8 +317,7 @@ fn apply_transform(
             Ok(result)
         }
 
-        PyStreamTransform::ReduceByKey(func_bytes) => {
-            let f = unpickle_fn(py, func_bytes)?;
+        PyStreamTransform::ReduceByKey(f) => {
             let mut groups: Vec<(Py<PyAny>, Py<PyAny>)> = Vec::new();
             for e in &elements {
                 let pair = e.bind(py).cast::<PyTuple>()?;
@@ -432,8 +416,7 @@ fn apply_transform(
             Ok(result)
         }
 
-        PyStreamTransform::UpdateStateByKey(func_bytes) => {
-            let f = unpickle_fn(py, func_bytes)?;
+        PyStreamTransform::UpdateStateByKey(f) => {
             let pickle = PyModule::import(py, "pickle")?;
 
             // Group new values by key (repr as map key).
@@ -498,25 +481,21 @@ fn apply_transform(
             Ok(result)
         }
 
-        PyStreamTransform::MapValues(func_bytes) => {
-            let f = unpickle_fn(py, func_bytes)?;
-            elements
-                .iter()
-                .map(|e| {
-                    let pair = e.bind(py).cast::<PyTuple>()?;
-                    let k = pair.get_item(0)?.unbind();
-                    let new_v: Py<PyAny> = f.call1(py, (pair.get_item(1)?,))?;
-                    py_tuple2(py, &k, &new_v)
-                })
-                .collect()
-        }
+        PyStreamTransform::MapValues(f) => elements
+            .iter()
+            .map(|e| {
+                let pair = e.bind(py).cast::<PyTuple>()?;
+                let k = pair.get_item(0)?.unbind();
+                let new_v: Py<PyAny> = f.call1(py, (pair.get_item(1)?,))?;
+                py_tuple2(py, &k, &new_v)
+            })
+            .collect(),
     }
 }
 
-fn call_output_fn(py: Python<'_>, func_bytes: &[u8], elements: Vec<Py<PyAny>>) -> PyResult<()> {
-    let f = unpickle_fn(py, func_bytes)?;
+fn call_output_fn(py: Python<'_>, func: &Py<PyAny>, elements: Vec<Py<PyAny>>) -> PyResult<()> {
     let list = PyList::new(py, elements.iter().map(|e| e.bind(py)))?;
-    f.call1(py, (list.into_any(),))?;
+    func.call1(py, (list.into_any(),))?;
     Ok(())
 }
 
@@ -645,14 +624,18 @@ impl PyStreamingContext {
         (dstream, PyBatchQueue { queue })
     }
 
-    pub fn foreach_rdd(&self, py: Python<'_>, stream: &PyDStream, func: Py<PyAny>) -> PyResult<()> {
-        let func_bytes = pickle_fn(py, &func)?;
+    pub fn foreach_rdd(
+        &self,
+        _py: Python<'_>,
+        stream: &PyDStream,
+        func: Py<PyAny>,
+    ) -> PyResult<()> {
         let op_idx = {
             let mut ops = self.output_ops.lock();
             let idx = ops.len();
             ops.push(OutputOp {
                 stream: Arc::clone(&stream.inner),
-                func_bytes,
+                func,
             });
             idx
         };
@@ -672,7 +655,7 @@ impl PyStreamingContext {
         for (idx, op) in locked_ops.iter().enumerate() {
             let state_store = &mut locked_states[idx];
             let elements = compute_batch(py, &op.stream, state_store)?;
-            call_output_fn(py, &op.func_bytes, elements)?;
+            call_output_fn(py, &op.func, elements)?;
         }
         drop(locked_states);
         drop(locked_ops);
@@ -737,7 +720,7 @@ impl PyStreamingContext {
                         let state_store = &mut locked_states[idx];
                         match compute_batch(py, &op.stream, state_store) {
                             Ok(elements) => {
-                                let _ = call_output_fn(py, &op.func_bytes, elements);
+                                let _ = call_output_fn(py, &op.func, elements);
                             }
                             Err(e) => {
                                 eprintln!("PyStreamingContext batch error: {}", e);
