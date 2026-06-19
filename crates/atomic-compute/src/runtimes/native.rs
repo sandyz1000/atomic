@@ -9,7 +9,8 @@ use atomic_data::distributed::{
 use crate::error::{ComputeError, ComputeResult};
 use crate::runtimes::{Backend, OpDispatcher};
 use crate::task_registry::{
-    SHUFFLE_MAP_REGISTRY, SORT_SHUFFLE_MAP_REGISTRY, STATE_MERGE_REGISTRY, TASK_REGISTRY,
+    AGENT_RUNNER_REGISTRY, SHUFFLE_MAP_REGISTRY, SORT_SHUFFLE_MAP_REGISTRY, STATE_MERGE_REGISTRY,
+    TASK_REGISTRY,
 };
 
 /// Handles `TaskRuntime::Native` ops — both compile-time `#[task]` registry
@@ -126,6 +127,23 @@ impl OpDispatcher for NativeDispatcher {
                 }
                 store.put(payload.state_id, new_state);
                 Ok(emitted)
+            }
+            TaskAction::AgentStep => {
+                let payload: atomic_data::distributed::AgentStepPayload =
+                    serde_json::from_slice(&op.payload).map_err(|e| {
+                        ComputeError::InvalidPayload(format!("AgentStep payload decode: {e}"))
+                    })?;
+                let runner = AGENT_RUNNER_REGISTRY.get().ok_or_else(|| {
+                    ComputeError::UnknownOperation(
+                        "AgentStep: no agent runner registered; \
+                         call `atomic_compute::register_agent_runner(...)` at startup \
+                         or link `atomic-nlq` and call `atomic_nlq::agent_runner::register()`"
+                            .to_string(),
+                    )
+                })?;
+                runner
+                    .run_partition(&payload, data)
+                    .map_err(ComputeError::InvalidPayload)
             }
             _ => match TASK_REGISTRY.get(op.op_id.as_str()) {
                 None => {

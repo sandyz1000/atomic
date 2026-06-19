@@ -11,13 +11,7 @@ pub mod anthropic;
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// Single chat completion — system prompt + user message → text response.
-    async fn chat(
-        &self,
-        model: &str,
-        system: &str,
-        user: &str,
-        max_tokens: u32,
-    ) -> Result<String>;
+    async fn chat(&self, model: &str, system: &str, user: &str, max_tokens: u32) -> Result<String>;
 
     /// `chat` with exponential-backoff retry on transient failures (429, 529, timeout).
     async fn chat_with_retry(

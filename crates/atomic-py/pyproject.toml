@@ -27,6 +27,7 @@ Repository = "https://github.com/sandip-dey/atomic"
 dev = [
     "pytest>=9.1.0",
     "pytest-asyncio>=1.4.0",
+    "cloudpickle>=3.0.0",
 ]
 
 [tool.pytest.ini_options]

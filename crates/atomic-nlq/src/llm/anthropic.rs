@@ -87,13 +87,7 @@ impl AnthropicClient {
 
 #[async_trait]
 impl LlmClient for AnthropicClient {
-    async fn chat(
-        &self,
-        model: &str,
-        system: &str,
-        user: &str,
-        max_tokens: u32,
-    ) -> Result<String> {
+    async fn chat(&self, model: &str, system: &str, user: &str, max_tokens: u32) -> Result<String> {
         self.do_chat(model, system, user, max_tokens).await
     }
 

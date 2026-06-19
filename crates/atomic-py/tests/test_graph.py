@@ -1,9 +1,11 @@
 """Tests for atomic_compute.Graph (P4.3 — Python graph bindings)."""
+
 import pytest
 import atomic_compute
 
 
 # ── Construction ──────────────────────────────────────────────────────────────
+
 
 def test_empty_graph():
     g = atomic_compute.Graph([], [])
@@ -53,6 +55,7 @@ def test_edge_to_unknown_vertex_dropped():
 
 # ── PageRank ──────────────────────────────────────────────────────────────────
 
+
 def test_page_rank_cycle():
     """3-node cycle: all ranks should be approximately equal."""
     g = atomic_compute.Graph(
@@ -85,6 +88,7 @@ def test_page_rank_returns_all_vertices():
 
 
 # ── Connected components ──────────────────────────────────────────────────────
+
 
 def test_connected_components_single():
     """All vertices reachable from each other → one component."""
@@ -119,14 +123,18 @@ def test_connected_components_isolated_vertex():
 
 # ── Triangle count ────────────────────────────────────────────────────────────
 
+
 def test_triangle_count_basic():
     """Full bidirectional triangle: each vertex participates in ≥1 triangle."""
     g = atomic_compute.Graph(
         [(1, 1.0), (2, 1.0), (3, 1.0)],
         [
-            (1, 2, 1.0), (2, 1, 1.0),
-            (2, 3, 1.0), (3, 2, 1.0),
-            (3, 1, 1.0), (1, 3, 1.0),
+            (1, 2, 1.0),
+            (2, 1, 1.0),
+            (2, 3, 1.0),
+            (3, 2, 1.0),
+            (3, 1, 1.0),
+            (1, 3, 1.0),
         ],
     )
     tc = g.triangle_count()
@@ -144,6 +152,7 @@ def test_triangle_count_no_triangles():
 
 
 # ── Shortest path ─────────────────────────────────────────────────────────────
+
 
 def test_shortest_path_triangle():
     """1→2→3 is shorter than 1→3 direct when weights differ."""
@@ -168,29 +177,51 @@ def test_shortest_path_self_distance_zero():
 
 
 def test_shortest_path_disconnected():
-    """Unreachable vertex should not appear in landmark's distance map."""
+    """Vertices that cannot reach the landmark should have no entry for it.
+
+    `shortest_path` returns dict[vertex_id, dict[landmark_id, distance]] — the
+    distance from each vertex *to* the landmark, following directed edges
+    forward (matches GraphX's `ShortestPaths.run`).
+    """
     g = atomic_compute.Graph(
         [(1, 1.0), (2, 1.0), (3, 1.0)],
-        [(1, 2, 1.0)],  # vertex 3 unreachable from 1
+        [(1, 2, 1.0)],  # edge is 1 -> 2, so 2 cannot reach landmark 1
     )
     sp = g.shortest_path([1])
-    assert 1 in sp[1]
-    assert 2 in sp[1]
-    # vertex 3 cannot reach landmark 1
+    assert sp[1][1] == pytest.approx(0.0)
+    # vertex 2 has no outgoing path back to landmark 1
+    assert 1 not in sp.get(2, {})
+    # vertex 3 is isolated and cannot reach landmark 1
     assert 1 not in sp.get(3, {})
 
 
 # ── Label propagation ─────────────────────────────────────────────────────────
 
+
 def test_label_propagation_two_clusters():
-    """Two tightly connected cliques should receive distinct labels."""
+    """Two tightly connected triangles should each converge to one label.
+
+    A bidirectional *pair* (single mutual edge) is a degenerate case: with
+    only one neighbor, label propagation oscillates between the two labels
+    every superstep and never converges (documented in
+    atomic-graph's label_propagation::run). Triangles (3+ mutually connected
+    vertices) avoid that and converge, matching atomic-graph's own
+    `two_cliques_bridge` unit-test fixture.
+    """
     g = atomic_compute.Graph(
-        [(1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0)],
-        [(1, 2, 1.0), (2, 1, 1.0), (3, 4, 1.0), (4, 3, 1.0)],
+        [(1, 1.0), (2, 1.0), (3, 1.0), (4, 1.0), (5, 1.0), (6, 1.0)],
+        [
+            (1, 2, 1.0),
+            (2, 3, 1.0),
+            (3, 1, 1.0),  # triangle A
+            (4, 5, 1.0),
+            (5, 6, 1.0),
+            (6, 4, 1.0),  # triangle B
+        ],
     )
     labels = g.label_propagation(max_iter=20)
-    assert labels[1] == labels[2]
-    assert labels[3] == labels[4]
+    assert labels[1] == labels[2] == labels[3]
+    assert labels[4] == labels[5] == labels[6]
 
 
 def test_label_propagation_all_vertices_labeled():
@@ -204,6 +235,7 @@ def test_label_propagation_all_vertices_labeled():
 
 
 # ── Strongly connected components ────────────────────────────────────────────
+
 
 def test_strongly_connected_cycle():
     """Directed cycle: all vertices in one SCC."""
@@ -227,6 +259,7 @@ def test_strongly_connected_dag():
 
 
 # ── Custom Pregel vertex programs ─────────────────────────────────────────────
+
 
 def test_run_pregel_min_id_propagation():
     """Pregel: propagate minimum vertex ID. All reachable vertices converge to 1."""

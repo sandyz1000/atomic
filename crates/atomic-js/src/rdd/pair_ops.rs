@@ -362,8 +362,9 @@ impl JsRdd {
             // left_outer_join is an action: dispatch immediately and leave `self` reusable
             // for further transforms/actions, same as the local (non-mutating) path.
             let saved_staged = self.staged.clone();
-            let right_json = serde_json::to_string(&other.elements)
-                .map_err(|e| Error::from_reason(format!("left_outer_join: serialize right: {e}")))?;
+            let right_json = serde_json::to_string(&other.elements).map_err(|e| {
+                Error::from_reason(format!("left_outer_join: serialize right: {e}"))
+            })?;
             let wrapper = format!(
                 "(partition) => {{ \
                  const right = new Map(); \

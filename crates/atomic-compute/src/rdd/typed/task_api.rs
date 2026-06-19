@@ -312,3 +312,66 @@ where
         }
     }
 }
+
+impl TypedRdd<String> {
+    /// Dispatch a framework-native sub-agent over each partition of string inputs.
+    ///
+    /// The registered [`AgentRunner`][crate::task_registry::AgentRunner] (installed
+    /// by `atomic-nlq` at startup via [`register_agent_runner`][crate::register_agent_runner])
+    /// executes a multi-round plan→execute→evaluate loop per partition, returning one
+    /// [`AgentFindings`][atomic_data::distributed::AgentFindings] per input string.
+    ///
+    /// **Lazy in distributed mode** — appends an `AgentStep` op to the staged pipeline
+    /// and dispatches on the next action.  **Local mode** runs the registered runner
+    /// in-process.
+    ///
+    /// Stages are automatically marked non-speculatable by the scheduler so no
+    /// partition runs twice and accrues double LLM cost.
+    pub fn agent_step(
+        self,
+        config: atomic_data::distributed::AgentStepPayload,
+    ) -> TypedRdd<atomic_data::distributed::AgentFindings> {
+        use atomic_data::distributed::{AgentFindings, TaskRuntime, WireDecode};
+
+        let context = self.context.clone();
+        let payload_bytes =
+            serde_json::to_vec(&config).expect("AgentStepPayload serialization failed");
+
+        if !context.is_distributed() {
+            let runner = crate::task_registry::AGENT_RUNNER_REGISTRY.get().expect(
+                "agent_step: no agent runner registered; \
+                     call `atomic_compute::register_agent_runner(...)` at startup",
+            );
+            let source_partitions = Context::encode_rdd_partitions(self.rdd.clone())
+                .expect("agent_step: failed to encode source partitions");
+            let flat: Vec<AgentFindings> = source_partitions
+                .into_iter()
+                .flat_map(|part_bytes| {
+                    let raw = runner
+                        .run_partition(&config, &part_bytes)
+                        .expect("agent_step local runner failed");
+                    Vec::<AgentFindings>::decode_wire(&raw)
+                        .expect("agent_step: failed to decode AgentFindings from runner output")
+                })
+                .collect();
+            let id = context.new_rdd_id();
+            return TypedRdd::new(Arc::new(ParallelCollection::new(id, flat, 1)), context);
+        }
+
+        let op = PipelineOp {
+            op_id: String::new(),
+            action: TaskAction::AgentStep,
+            runtime: TaskRuntime::Native,
+            payload: payload_bytes,
+        };
+        let staged = TypedRdd::<String>::stage_op(self.staged, &self.rdd, op)
+            .expect("agent_step: failed to encode source partitions");
+        let id = context.new_rdd_id();
+        TypedRdd {
+            rdd: Arc::new(ParallelCollection::new(id, Vec::<AgentFindings>::new(), 1)),
+            context,
+            staged: Some(staged),
+            _marker: PhantomData,
+        }
+    }
+}

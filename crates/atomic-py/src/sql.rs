@@ -285,6 +285,7 @@ impl PyDataFrame {
     }
 
     /// Sort by a column name. `ascending=True` (default) for ascending order.
+    #[pyo3(signature = (col, ascending=None))]
     pub fn sort(&self, col: &str, ascending: Option<bool>) -> PyResult<Self> {
         let asc = ascending.unwrap_or(true);
         let df = self

@@ -9,6 +9,7 @@ use super::PyRdd;
 #[pymethods]
 impl PyRdd {
     /// Return the top `n` elements (largest first). Optional `key` function.
+    #[pyo3(signature = (n, key=None))]
     pub fn top(&self, py: Python, n: usize, key: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let mut indexed: Vec<(Py<PyAny>, Py<PyAny>)> = self
             .elements
@@ -54,6 +55,7 @@ impl PyRdd {
     }
 
     /// Return the `n` smallest elements. Optional `key` function.
+    #[pyo3(signature = (n, key=None))]
     pub fn take_ordered(
         &self,
         py: Python,
@@ -193,8 +195,7 @@ impl PyRdd {
             self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) =
-                (staged.source_partitions.clone(), staged.ops.clone());
+            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
             self.staged = saved_staged;
             let result_bytes = self
                 .context

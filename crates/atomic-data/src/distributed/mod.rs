@@ -165,7 +165,8 @@ mod tests {
             | TaskAction::ShuffleMap { .. }
             | TaskAction::Cache { .. }
             | TaskAction::ReadFileSplit
-            | TaskAction::MergeState { .. } => true,
+            | TaskAction::MergeState { .. }
+            | TaskAction::AgentStep => true,
             #[cfg(feature = "kafka")]
             TaskAction::KafkaConsume => true,
         };

@@ -10,11 +10,11 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 
 use crate::config::NlqConfig;
+use crate::llm::LlmClient;
 use crate::nodes::embed::{EmbedExec, EmbedNode};
 use crate::nodes::llm_filter::{LlmFilterExec, LlmFilterNode};
 use crate::nodes::llm_map::{LlmMapExec, LlmMapNode};
 use crate::nodes::vector_search::{VectorSearchExec, VectorSearchNode};
-use crate::llm::LlmClient;
 use crate::vector::provider::VectorIndexProvider;
 
 pub struct NlqExtensionPlanner {
