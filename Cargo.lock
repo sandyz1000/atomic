@@ -1517,6 +1517,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench_join"
+version = "0.1.0"
+dependencies = [
+ "atomic-compute",
+ "tokio",
+]
+
+[[package]]
+name = "bench_pi"
+version = "0.1.0"
+dependencies = [
+ "atomic-compute",
+ "tokio",
+]
+
+[[package]]
+name = "bench_sort"
+version = "0.1.0"
+dependencies = [
+ "atomic-compute",
+ "tokio",
+]
+
+[[package]]
+name = "bench_wordcount"
+version = "0.1.0"
+dependencies = [
+ "atomic-compute",
+ "tokio",
+]
+
+[[package]]
 name = "bigdecimal"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

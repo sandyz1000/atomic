@@ -1,0 +1,12 @@
+[package]
+name = "bench_wordcount"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bench_wordcount"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute.workspace = true
+tokio.workspace = true

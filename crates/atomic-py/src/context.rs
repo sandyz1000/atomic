@@ -194,9 +194,11 @@ impl PyContext {
     /// Stop the context and release resources.
     ///
     /// In distributed mode, sends a graceful-shutdown signal to every worker.
+    /// Also shuts down the local `ProcessPoolExecutor` (if one was started).
     /// Safe to call multiple times.
-    pub fn stop(&self) {
+    pub fn stop(&self, py: Python) {
         self.inner.stop();
+        crate::parallel::shutdown_pool(py);
     }
 }
 

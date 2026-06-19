@@ -9,88 +9,146 @@ use super::PyRdd;
 #[pymethods]
 impl PyRdd {
     /// Apply `f` to each element, returning a new RDD.
+    ///
+    /// In local mode, attempts parallel dispatch via `ProcessPoolExecutor`
+    /// (same model as PySpark's `local[N]`). Falls back to sequential
+    /// execution when `f` captures values that cannot be cloudpickled
+    /// (e.g. Rust-backed objects like `BroadcastVar`).
     pub fn map(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
-        if self.context.is_distributed() {
-            let wrapper = Self::make_partition_wrapper(
-                py,
-                "lambda partition, _f=_f: [_f(x) for x in partition]",
-                &f,
-            )?;
-            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
-            self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
-            return Ok(self.take_as_new(py));
-        }
-        let elements = self
-            .elements
-            .iter()
-            .map(|item| f.call1(py, (item,)))
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(PyRdd::from_data(
+        let wrapper = Self::make_partition_wrapper(
             py,
-            elements,
-            self.num_partitions,
-            Arc::clone(&self.context),
-        ))
+            "lambda partition, _f=_f: [_f(x) for x in partition]",
+            &f,
+        )?;
+        match Self::pickle_fn(py, &wrapper.unbind()) {
+            Ok(fn_bytes) if self.context.is_distributed() => {
+                self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
+                Ok(self.take_as_new(py))
+            }
+            Ok(fn_bytes) => {
+                let elements = crate::parallel::exec_parallel(
+                    py,
+                    fn_bytes,
+                    &self.elements,
+                    self.num_partitions,
+                )?;
+                Ok(PyRdd::from_data(
+                    py,
+                    elements,
+                    self.num_partitions,
+                    Arc::clone(&self.context),
+                ))
+            }
+            Err(_) => {
+                // Closure captures unpicklable values (e.g. BroadcastVar);
+                // fall back to direct in-process call.
+                let elements = self
+                    .elements
+                    .iter()
+                    .map(|item| f.call1(py, (item,)))
+                    .collect::<PyResult<Vec<_>>>()?;
+                Ok(PyRdd::from_data(
+                    py,
+                    elements,
+                    self.num_partitions,
+                    Arc::clone(&self.context),
+                ))
+            }
+        }
     }
 
     /// Keep only elements for which `f` returns truthy.
     pub fn filter(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
-        if self.context.is_distributed() {
-            let wrapper = Self::make_partition_wrapper(
-                py,
-                "lambda partition, _f=_f: [x for x in partition if _f(x)]",
-                &f,
-            )?;
-            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
-            self.stage_python_udf(py, fn_bytes, TaskAction::Filter)?;
-            return Ok(self.take_as_new(py));
-        }
-        let elements = self
-            .elements
-            .iter()
-            .filter_map(|item| {
-                let keep = f.call1(py, (item,)).and_then(|v| v.is_truthy(py));
-                match keep {
-                    Ok(true) => Some(Ok(item.clone_ref(py))),
-                    Ok(false) => None,
-                    Err(e) => Some(Err(e)),
-                }
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(PyRdd::from_data(
+        let wrapper = Self::make_partition_wrapper(
             py,
-            elements,
-            self.num_partitions,
-            Arc::clone(&self.context),
-        ))
+            "lambda partition, _f=_f: [x for x in partition if _f(x)]",
+            &f,
+        )?;
+        match Self::pickle_fn(py, &wrapper.unbind()) {
+            Ok(fn_bytes) if self.context.is_distributed() => {
+                self.stage_python_udf(py, fn_bytes, TaskAction::Filter)?;
+                Ok(self.take_as_new(py))
+            }
+            Ok(fn_bytes) => {
+                let elements = crate::parallel::exec_parallel(
+                    py,
+                    fn_bytes,
+                    &self.elements,
+                    self.num_partitions,
+                )?;
+                Ok(PyRdd::from_data(
+                    py,
+                    elements,
+                    self.num_partitions,
+                    Arc::clone(&self.context),
+                ))
+            }
+            Err(_) => {
+                let elements = self
+                    .elements
+                    .iter()
+                    .filter_map(|item| {
+                        let keep = f.call1(py, (item,)).and_then(|v| v.is_truthy(py));
+                        match keep {
+                            Ok(true) => Some(Ok(item.clone_ref(py))),
+                            Ok(false) => None,
+                            Err(e) => Some(Err(e)),
+                        }
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                Ok(PyRdd::from_data(
+                    py,
+                    elements,
+                    self.num_partitions,
+                    Arc::clone(&self.context),
+                ))
+            }
+        }
     }
 
     /// Apply `f` to each element and flatten the results (f must return an iterable).
     pub fn flat_map(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
-        if self.context.is_distributed() {
-            let wrapper = Self::make_partition_wrapper(
-                py,
-                "lambda partition, _f=_f: [y for x in partition for y in _f(x)]",
-                &f,
-            )?;
-            let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
-            self.stage_python_udf(py, fn_bytes, TaskAction::FlatMap)?;
-            return Ok(self.take_as_new(py));
-        }
-        let mut elements = Vec::new();
-        for item in &self.elements {
-            let result = f.call1(py, (item,))?;
-            let iter = PyIterator::from_object(result.bind(py))?;
-            for val in iter {
-                elements.push(val?.unbind());
+        let wrapper = Self::make_partition_wrapper(
+            py,
+            "lambda partition, _f=_f: [y for x in partition for y in _f(x)]",
+            &f,
+        )?;
+        match Self::pickle_fn(py, &wrapper.unbind()) {
+            Ok(fn_bytes) if self.context.is_distributed() => {
+                self.stage_python_udf(py, fn_bytes, TaskAction::FlatMap)?;
+                Ok(self.take_as_new(py))
+            }
+            Ok(fn_bytes) => {
+                let elements = crate::parallel::exec_parallel(
+                    py,
+                    fn_bytes,
+                    &self.elements,
+                    self.num_partitions,
+                )?;
+                Ok(PyRdd::from_data(
+                    py,
+                    elements,
+                    self.num_partitions,
+                    Arc::clone(&self.context),
+                ))
+            }
+            Err(_) => {
+                let mut elements = Vec::new();
+                for item in &self.elements {
+                    let result = f.call1(py, (item,))?;
+                    let iter = PyIterator::from_object(result.bind(py))?;
+                    for val in iter {
+                        elements.push(val?.unbind());
+                    }
+                }
+                Ok(PyRdd::from_data(
+                    py,
+                    elements,
+                    self.num_partitions,
+                    Arc::clone(&self.context),
+                ))
             }
         }
-        Ok(PyRdd::from_data(
-            py,
-            elements,
-            self.num_partitions,
-            Arc::clone(&self.context),
-        ))
     }
 
     /// Apply `f` only to the value in each `(key, value)` pair.

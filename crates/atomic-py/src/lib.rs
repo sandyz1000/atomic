@@ -1,6 +1,7 @@
 mod context;
 mod distributed_vars;
 mod graph;
+pub(crate) mod parallel;
 mod rdd;
 mod sql;
 mod streaming;
@@ -10,7 +11,8 @@ use pyo3::prelude::*;
 use context::PyContext;
 use distributed_vars::{PyAccumulator, PyBroadcastVar};
 use graph::PyGraph;
-use rdd::{PyRdd, verify_picklable};
+use parallel::run_partition;
+use rdd::{verify_picklable, PyRdd};
 use sql::{PyDataFrame, PySqlContext};
 use streaming::{PyBatchQueue, PyDStream, PyStreamingContext};
 
@@ -61,5 +63,6 @@ fn atomic(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDStream>()?;
     m.add_class::<PyBatchQueue>()?;
     m.add_function(wrap_pyfunction!(verify_picklable, m)?)?;
+    m.add_function(wrap_pyfunction!(run_partition, m)?)?;
     Ok(())
 }
