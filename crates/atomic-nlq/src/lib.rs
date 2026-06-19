@@ -1,6 +1,7 @@
 pub mod config;
 pub mod context;
 pub mod errors;
+pub mod llm;
 pub mod nodes;
 pub mod openai;
 pub mod optimizer;

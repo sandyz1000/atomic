@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use atomic_data::distributed::TaskAction;
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 use super::PyRdd;
 
@@ -168,16 +169,81 @@ impl PyRdd {
 
     /// Sort a pair RDD by key. `ascending` defaults to `true`.
     ///
-    /// Each element must be a `(key, value)` 2-tuple; sorting is performed on the key.
+    /// In distributed mode each worker sorts its partition; the driver k-way merges
+    /// the N sorted streams in O(N log P). Not a globally-distributed sort (no range
+    /// partitioner / shuffle), but removes the O(N log N) bottleneck on the driver.
     #[pyo3(signature = (ascending=None))]
-    pub fn sort_by_key(&self, py: Python, ascending: Option<bool>) -> PyResult<PyRdd> {
-        for item in &self.elements {
-            let pair = item.bind(py).cast::<pyo3::types::PyTuple>()?;
-            if pair.len() != 2 {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "sort_by_key requires elements to be 2-tuples",
-                ));
+    pub fn sort_by_key(&mut self, py: Python, ascending: Option<bool>) -> PyResult<PyRdd> {
+        let asc = ascending.unwrap_or(true);
+
+        if self.context.is_distributed() {
+            // sort_by_key is an action: dispatch immediately and leave `self` reusable
+            // for further transforms/actions, same as the local (non-mutating) path.
+            let saved_staged = self.staged.clone();
+            let builtins = PyModule::import(py, "builtins")?;
+            // Partition-level sort lambda: sorts by key (index 0), direction controlled by asc.
+            // Rust's bool Display ("true"/"false") is not valid Python — spell out the literal.
+            let asc_literal = if asc { "True" } else { "False" };
+            let sort_lambda = format!(
+                "lambda partition, _asc={asc_literal}: \
+                 sorted(partition, key=lambda x: x[0], reverse=not _asc)"
+            );
+            let sort_fn = builtins.getattr("eval")?.call1((sort_lambda.as_str(),))?;
+            let fn_bytes = Self::pickle_fn(py, &sort_fn.unbind())?;
+            self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
+
+            let staged = self.staged.as_ref().unwrap();
+            let (source_partitions, ops) =
+                (staged.source_partitions.clone(), staged.ops.clone());
+            self.staged = saved_staged;
+            let result_bytes = self
+                .context
+                .dispatch_pipeline(source_partitions, ops)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+            // Decode N sorted partition lists
+            let json_mod = PyModule::import(py, "json")?;
+            let mut sorted_parts: Vec<Vec<Py<PyAny>>> = Vec::with_capacity(result_bytes.len());
+            for bytes in &result_bytes {
+                let json_str = std::str::from_utf8(bytes)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                let items: Vec<Py<PyAny>> = json_mod
+                    .call_method1("loads", (json_str,))?
+                    .try_iter()?
+                    .map(|x| Ok(x?.unbind()))
+                    .collect::<PyResult<_>>()?;
+                sorted_parts.push(items);
             }
+
+            // K-way merge using heapq.merge — O(N log P)
+            let heapq = PyModule::import(py, "heapq")?;
+            let key_fn = builtins.getattr("eval")?.call1(("lambda x: x[0]",))?;
+            let kw = PyDict::new(py);
+            kw.set_item("key", &key_fn)?;
+            kw.set_item("reverse", (!asc).into_pyobject(py)?)?;
+            let py_parts: Vec<Bound<'_, PyAny>> = sorted_parts
+                .iter()
+                .map(|p| Ok(PyList::new(py, p.iter().map(|e| e.bind(py).clone()))?.into_any()))
+                .collect::<PyResult<_>>()?;
+            let args = PyTuple::new(py, &py_parts)?;
+            let merged = heapq.call_method("merge", args, Some(&kw))?;
+
+            let elements: Vec<Py<PyAny>> = merged
+                .try_iter()?
+                .map(|x| Ok(x?.unbind()))
+                .collect::<PyResult<_>>()?;
+            return Ok(PyRdd::from_data(
+                py,
+                elements,
+                self.num_partitions,
+                Arc::clone(&self.context),
+            ));
+        }
+
+        // Local path: driver-side sort by key
+        for item in &self.elements {
+            let bound = item.bind(py);
+            let (_, _) = PyRdd::extract_pair(bound)?;
         }
         let builtins = PyModule::import(py, "builtins")?;
         let key_fn = builtins

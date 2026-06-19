@@ -21,7 +21,7 @@ use futures::StreamExt;
 use serde_json::json;
 
 use crate::config::NlqConfig;
-use crate::openai::OpenAiClient;
+use crate::llm::LlmClient;
 
 /// LLM-based row filter. Schema is identical to the input's schema.
 #[derive(Debug, Clone)]
@@ -113,7 +113,7 @@ pub struct LlmFilterExec {
     prompt: String,
     model: String,
     batch_size: usize,
-    client: Arc<OpenAiClient>,
+    client: Arc<dyn LlmClient>,
     config: Arc<NlqConfig>,
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
@@ -133,7 +133,7 @@ impl LlmFilterExec {
     pub fn new(
         node: &LlmFilterNode,
         input: Arc<dyn ExecutionPlan>,
-        client: Arc<OpenAiClient>,
+        client: Arc<dyn LlmClient>,
         config: Arc<NlqConfig>,
     ) -> Self {
         let schema = input.schema().clone();
@@ -270,7 +270,7 @@ impl ExecutionPlan for LlmFilterExec {
 }
 
 async fn llm_filter_chunk(
-    client: &Arc<OpenAiClient>,
+    client: &Arc<dyn LlmClient>,
     prompt: &str,
     model: &str,
     max_chunk_bytes: usize,

@@ -5,7 +5,7 @@ use atomic_sql::context::AtomicSqlContext;
 use tokio::task::JoinSet;
 
 use crate::errors::{NlqError, Result};
-use crate::openai::OpenAiClient;
+use crate::llm::LlmClient;
 use crate::registry::{BuiltinTool, ToolRegistry, ToolRuntime};
 
 use super::streaming::{AgentEvent, AgentEventSender};
@@ -20,14 +20,14 @@ use super::{StepOutput, StepResult, WorkflowPlan, WorkflowStep};
 pub struct WorkflowExecutor {
     tool_registry: Arc<ToolRegistry>,
     sql_ctx: Option<Arc<AtomicSqlContext>>,
-    openai_client: Arc<OpenAiClient>,
+    openai_client: Arc<dyn LlmClient>,
 }
 
 impl WorkflowExecutor {
     pub fn new(
         tool_registry: Arc<ToolRegistry>,
         sql_ctx: Option<Arc<AtomicSqlContext>>,
-        openai_client: Arc<OpenAiClient>,
+        openai_client: Arc<dyn LlmClient>,
     ) -> Self {
         Self {
             tool_registry,
@@ -159,10 +159,12 @@ impl WorkflowExecutor {
                         let (output_kind, preview) = match &step_result.output {
                             StepOutput::DataFrame(bufs) => {
                                 let kind = "dataframe".to_string();
-                                let preview = Some(serde_json::json!({
-                                    "buffers": bufs.len(),
-                                    "total_bytes": bufs.iter().map(|b| b.len()).sum::<usize>()
-                                }));
+                                let rows = ipc_to_json_rows(bufs, 50);
+                                let preview = if rows.is_empty() {
+                                    None
+                                } else {
+                                    Some(serde_json::Value::Array(rows))
+                                };
                                 (kind, preview)
                             }
                             StepOutput::Text(t) => {
@@ -209,7 +211,7 @@ async fn run_step(
     step: WorkflowStep,
     tool_registry: Arc<ToolRegistry>,
     sql_ctx: Option<Arc<AtomicSqlContext>>,
-    openai_client: Arc<OpenAiClient>,
+    openai_client: Arc<dyn LlmClient>,
     upstream: HashMap<String, StepResult>,
 ) -> Result<StepResult> {
     let tool = tool_registry
@@ -236,7 +238,7 @@ async fn run_builtin(
     builtin: &BuiltinTool,
     step: &WorkflowStep,
     sql_ctx: Option<Arc<AtomicSqlContext>>,
-    _openai_client: Arc<OpenAiClient>,
+    _openai_client: Arc<dyn LlmClient>,
     _upstream: &HashMap<String, StepResult>,
 ) -> Result<StepOutput> {
     match builtin {
@@ -336,4 +338,29 @@ async fn run_javascript(
         "{{\"step\":\"{}\",\"status\":\"js_udf_dispatched\",\"args\":{args_json}}}",
         step.id
     )))
+}
+
+/// Decode Arrow IPC file bytes and return up to `limit` rows as JSON objects.
+///
+/// IPC is written with `FileWriter` in `run_builtin`, so we read with `FileReader`.
+/// Fields with unsupported types fall back to the string representation of the type name.
+fn ipc_to_json_rows(bufs: &[Vec<u8>], limit: usize) -> Vec<serde_json::Value> {
+    use crate::nodes::llm_filter::record_batch_to_json_rows;
+    use datafusion::arrow::ipc::reader::FileReader;
+
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    'outer: for buf in bufs {
+        let Ok(reader) = FileReader::try_new(std::io::Cursor::new(buf.as_slice()), None) else {
+            continue;
+        };
+        for batch in reader.flatten() {
+            for row in record_batch_to_json_rows(&batch) {
+                rows.push(row);
+                if rows.len() >= limit {
+                    break 'outer;
+                }
+            }
+        }
+    }
+    rows
 }

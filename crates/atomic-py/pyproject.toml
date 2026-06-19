@@ -25,8 +25,8 @@ Repository = "https://github.com/sandip-dey/atomic"
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
+    "pytest>=9.1.0",
+    "pytest-asyncio>=1.4.0",
 ]
 
 [tool.pytest.ini_options]
@@ -36,5 +36,8 @@ testpaths = ["tests"]
 [tool.maturin]
 module-name = "atomic_compute"
 features = ["pyo3/extension-module"]
-# Pick up type stubs from python/atomic_compute/__init__.pyi
-python-packages = ["python/atomic_compute"]
+# python/atomic_compute is the real package root: __init__.py re-exports the compiled
+# extension, and pure-Python helper modules (_pair_helpers.py, _local_pool.py) live
+# alongside it. `maturin develop` installs this editable, so .py edits take effect
+# without a rebuild — only Rust changes need `maturin develop` again.
+python-source = "python"

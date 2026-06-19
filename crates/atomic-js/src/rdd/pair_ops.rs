@@ -13,6 +13,9 @@ impl JsRdd {
     #[napi]
     pub fn group_by_key(&mut self) -> Result<JsRdd> {
         if self.context.is_distributed() {
+            // group_by_key is an action: dispatch immediately and leave `self` reusable
+            // for further transforms/actions, same as the local (non-mutating) path.
+            let saved_staged = self.staged.clone();
             let wrapper = "(partition) => { const g = new Map(), o = []; \
                 for (const p of partition) { const k = JSON.stringify(p[0]); \
                 if (!g.has(k)) { g.set(k, [p[0], []]); o.push(k); } \
@@ -20,7 +23,9 @@ impl JsRdd {
                 return o.map(k => g.get(k)); }"
                 .to_string();
             self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
-            let partials = self.dispatch_and_collect()?;
+            let partials_result = self.dispatch_and_collect();
+            self.staged = saved_staged;
+            let partials = partials_result?;
 
             let mut groups: HashMap<String, (JsonValue, Vec<JsonValue>)> = HashMap::new();
             let mut order: Vec<String> = Vec::new();
@@ -100,6 +105,9 @@ impl JsRdd {
         f: Function<FnArgs<(JsonValue, JsonValue)>, JsonValue>,
     ) -> Result<JsRdd> {
         if self.context.is_distributed() {
+            // reduce_by_key is an action: dispatch immediately and leave `self` reusable
+            // for further transforms/actions, same as the local (non-mutating) path.
+            let saved_staged = self.staged.clone();
             let fn_src = Self::fn_to_source(&f)?;
             let wrapper = format!(
                 "(partition) => {{ const g = new Map(), o = []; \
@@ -109,7 +117,9 @@ impl JsRdd {
                  return o.map(k => g.get(k)); }}"
             );
             self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
-            let partials = self.dispatch_and_collect()?;
+            let partials_result = self.dispatch_and_collect();
+            self.staged = saved_staged;
+            let partials = partials_result?;
 
             let mut accum: HashMap<String, (JsonValue, JsonValue)> = HashMap::new();
             let mut order: Vec<String> = Vec::new();
@@ -263,8 +273,44 @@ impl JsRdd {
     ///
     /// Both RDDs must contain `[key, value]` arrays.
     /// Emits `[key, [left_value, right_value]]` for each matching key pair.
+    ///
+    /// In distributed mode the right side (if already in driver memory) is embedded
+    /// in the worker closure as JSON — each worker joins against its left partition
+    /// without collecting data to the driver first.
     #[napi]
-    pub fn join(&self, other: &JsRdd) -> Result<JsRdd> {
+    pub fn join(&mut self, other: &JsRdd) -> Result<JsRdd> {
+        if self.context.is_distributed() && other.staged.is_none() {
+            // join is an action: dispatch immediately and leave `self` reusable for
+            // further transforms/actions, same as the local (non-mutating) path.
+            let saved_staged = self.staged.clone();
+            let right_json = serde_json::to_string(&other.elements)
+                .map_err(|e| Error::from_reason(format!("join: serialize right: {e}")))?;
+            let wrapper = format!(
+                "(partition) => {{ \
+                 const right = new Map(); \
+                 for (const p of {right_json}) {{ \
+                   const k = JSON.stringify(p[0]); \
+                   if (!right.has(k)) right.set(k, [p[0], []]); \
+                   right.get(k)[1].push(p[1]); }} \
+                 const result = []; \
+                 for (const pair of partition) {{ \
+                   const k = JSON.stringify(pair[0]); \
+                   if (right.has(k)) for (const rv of right.get(k)[1]) \
+                     result.push([pair[0], [pair[1], rv]]); }} \
+                 return result; }}"
+            );
+            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
+            let elements_result = self.dispatch_and_collect();
+            self.staged = saved_staged;
+            let elements = elements_result?;
+            return Ok(JsRdd::from_data(
+                elements,
+                self.num_partitions,
+                Arc::clone(&self.context),
+            ));
+        }
+
+        // Driver-side hash join (local mode or staged right side)
         let mut right_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
         for elem in &other.elements {
             let pair = elem.as_array().ok_or_else(|| {
@@ -278,7 +324,6 @@ impl JsRdd {
             let key_str = Self::key_to_string(&pair[0])?;
             right_map.entry(key_str).or_default().push(pair[1].clone());
         }
-
         let mut elements = Vec::new();
         for elem in &self.elements {
             let pair = elem
@@ -309,8 +354,45 @@ impl JsRdd {
     ///
     /// Emits `[key, [left_value, right_value]]` for matched keys and
     /// `[key, [left_value, null]]` for unmatched left keys.
+    ///
+    /// In distributed mode the right side is embedded in the worker closure as JSON.
     #[napi]
-    pub fn left_outer_join(&self, other: &JsRdd) -> Result<JsRdd> {
+    pub fn left_outer_join(&mut self, other: &JsRdd) -> Result<JsRdd> {
+        if self.context.is_distributed() && other.staged.is_none() {
+            // left_outer_join is an action: dispatch immediately and leave `self` reusable
+            // for further transforms/actions, same as the local (non-mutating) path.
+            let saved_staged = self.staged.clone();
+            let right_json = serde_json::to_string(&other.elements)
+                .map_err(|e| Error::from_reason(format!("left_outer_join: serialize right: {e}")))?;
+            let wrapper = format!(
+                "(partition) => {{ \
+                 const right = new Map(); \
+                 for (const p of {right_json}) {{ \
+                   const k = JSON.stringify(p[0]); \
+                   if (!right.has(k)) right.set(k, [p[0], []]); \
+                   right.get(k)[1].push(p[1]); }} \
+                 const result = []; \
+                 for (const pair of partition) {{ \
+                   const k = JSON.stringify(pair[0]); \
+                   if (right.has(k)) {{ \
+                     for (const rv of right.get(k)[1]) result.push([pair[0], [pair[1], rv]]); \
+                   }} else {{ \
+                     result.push([pair[0], [pair[1], null]]); \
+                   }} }} \
+                 return result; }}"
+            );
+            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
+            let elements_result = self.dispatch_and_collect();
+            self.staged = saved_staged;
+            let elements = elements_result?;
+            return Ok(JsRdd::from_data(
+                elements,
+                self.num_partitions,
+                Arc::clone(&self.context),
+            ));
+        }
+
+        // Driver-side (local mode or staged right side)
         let mut right_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
         for elem in &other.elements {
             let pair = elem.as_array().ok_or_else(|| {
@@ -324,7 +406,6 @@ impl JsRdd {
             let key_str = Self::key_to_string(&pair[0])?;
             right_map.entry(key_str).or_default().push(pair[1].clone());
         }
-
         let mut elements = Vec::new();
         for elem in &self.elements {
             let pair = elem.as_array().ok_or_else(|| {

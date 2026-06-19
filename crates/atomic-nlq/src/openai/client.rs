@@ -8,8 +8,10 @@ use async_openai::types::chat::{
     ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
 };
 use async_openai::types::embeddings::{CreateEmbeddingRequest, EmbeddingInput};
+use async_trait::async_trait;
 
 use crate::errors::{NlqError, Result};
+use crate::llm::LlmClient;
 
 pub struct OpenAiClient {
     inner: Client<OpenAIConfig>,
@@ -29,8 +31,7 @@ impl OpenAiClient {
         }
     }
 
-    /// Send a chat completion and return the first text response.
-    pub async fn chat(
+    async fn do_chat(
         &self,
         model: &str,
         system: &str,
@@ -73,34 +74,7 @@ impl OpenAiClient {
             .ok_or_else(|| NlqError::Api("empty response from OpenAI".to_string()))
     }
 
-    /// `chat` with exponential-backoff retry on transient failures.
-    pub async fn chat_with_retry(
-        &self,
-        model: &str,
-        system: &str,
-        user: &str,
-        max_tokens: u32,
-    ) -> Result<String> {
-        let mut delay = Duration::from_millis(500);
-        let mut last_err = String::new();
-        for attempt in 0..=self.max_retries {
-            match self.chat(model, system, user, max_tokens).await {
-                Ok(text) => return Ok(text),
-                Err(e) => {
-                    last_err = e.to_string();
-                    log::warn!("OpenAI chat attempt {}: {last_err}", attempt + 1);
-                    if attempt < self.max_retries {
-                        tokio::time::sleep(delay).await;
-                        delay = (delay * 2).min(Duration::from_secs(30));
-                    }
-                }
-            }
-        }
-        Err(NlqError::Api(last_err))
-    }
-
-    /// Generate embeddings for a batch of texts.
-    pub async fn embed(&self, model: &str, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+    async fn do_embed(&self, model: &str, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         let request = CreateEmbeddingRequest {
             model: model.to_string(),
             input: EmbeddingInput::StringArray(texts),
@@ -121,5 +95,47 @@ impl OpenAiClient {
             .collect();
         out.sort_by_key(|(i, _)| *i);
         Ok(out.into_iter().map(|(_, v)| v).collect())
+    }
+}
+
+#[async_trait]
+impl LlmClient for OpenAiClient {
+    async fn chat(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String> {
+        self.do_chat(model, system, user, max_tokens).await
+    }
+
+    async fn chat_with_retry(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String> {
+        let mut delay = Duration::from_millis(500);
+        let mut last_err = String::new();
+        for attempt in 0..=self.max_retries {
+            match self.do_chat(model, system, user, max_tokens).await {
+                Ok(text) => return Ok(text),
+                Err(e) => {
+                    last_err = e.to_string();
+                    log::warn!("OpenAI chat attempt {}: {last_err}", attempt + 1);
+                    if attempt < self.max_retries {
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(30));
+                    }
+                }
+            }
+        }
+        Err(NlqError::Api(last_err))
+    }
+
+    async fn embed(&self, model: &str, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        self.do_embed(model, texts).await
     }
 }

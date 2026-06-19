@@ -5,7 +5,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 
 use crate::config::NlqConfig;
 use crate::errors::{NlqError, Result};
-use crate::openai::OpenAiClient;
+use crate::llm::LlmClient;
 use crate::registry::ToolRegistry;
 use crate::workflow::{AgentContext, WorkflowPlan};
 
@@ -19,18 +19,18 @@ fn sanitize_nl_query(q: &str) -> String {
 }
 
 pub struct LlmPlanner {
-    client: Arc<OpenAiClient>,
+    client: Arc<dyn LlmClient>,
     config: Arc<NlqConfig>,
 }
 
 impl LlmPlanner {
-    pub fn new(client: Arc<OpenAiClient>, config: Arc<NlqConfig>) -> Self {
+    pub fn new(client: Arc<dyn LlmClient>, config: Arc<NlqConfig>) -> Self {
         Self { client, config }
     }
 
     /// Expose the client so `AgentLoop` can reuse it for the evaluation step.
-    pub fn client(&self) -> &OpenAiClient {
-        &self.client
+    pub fn client(&self) -> &dyn LlmClient {
+        self.client.as_ref()
     }
 
     /// Translate a natural language query into a `WorkflowPlan`.

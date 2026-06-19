@@ -14,11 +14,11 @@ use crate::nodes::embed::{EmbedExec, EmbedNode};
 use crate::nodes::llm_filter::{LlmFilterExec, LlmFilterNode};
 use crate::nodes::llm_map::{LlmMapExec, LlmMapNode};
 use crate::nodes::vector_search::{VectorSearchExec, VectorSearchNode};
-use crate::openai::OpenAiClient;
+use crate::llm::LlmClient;
 use crate::vector::provider::VectorIndexProvider;
 
 pub struct NlqExtensionPlanner {
-    client: Arc<OpenAiClient>,
+    client: Arc<dyn LlmClient>,
     config: Arc<NlqConfig>,
     vector_indexes: Arc<DashMap<String, Arc<dyn VectorIndexProvider>>>,
 }
@@ -32,7 +32,7 @@ impl fmt::Debug for NlqExtensionPlanner {
 
 impl NlqExtensionPlanner {
     pub fn new(
-        client: Arc<OpenAiClient>,
+        client: Arc<dyn LlmClient>,
         config: Arc<NlqConfig>,
         vector_indexes: Arc<DashMap<String, Arc<dyn VectorIndexProvider>>>,
     ) -> Self {

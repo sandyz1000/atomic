@@ -1,13 +1,68 @@
+/// Which LLM provider to use for planning, evaluation, and SQL extension nodes.
+///
+/// Selected via the `LLM_PROVIDER` environment variable (default: `openai`).
+/// The Anthropic provider does not support embeddings — `EmbedExec` / `VectorSearchExec`
+/// return an error when it is active.
+#[derive(Debug, Clone, Default)]
+pub enum LlmProvider {
+    #[default]
+    OpenAi,
+    Anthropic,
+}
+
+impl LlmProvider {
+    fn from_env() -> Self {
+        match std::env::var("LLM_PROVIDER")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "anthropic" | "claude" => LlmProvider::Anthropic,
+            _ => LlmProvider::OpenAi,
+        }
+    }
+
+    /// Default API base URL for this provider.
+    pub fn default_base_url(&self) -> &'static str {
+        match self {
+            LlmProvider::OpenAi => "https://api.openai.com/v1",
+            LlmProvider::Anthropic => "https://api.anthropic.com",
+        }
+    }
+
+    /// Default chat model for this provider.
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            LlmProvider::OpenAi => "gpt-4o",
+            LlmProvider::Anthropic => "claude-sonnet-4-6",
+        }
+    }
+
+    /// Default embedding model (only meaningful for OpenAI).
+    pub fn default_embed_model(&self) -> &'static str {
+        "text-embedding-3-small"
+    }
+
+    fn env_key_var(&self) -> &'static str {
+        match self {
+            LlmProvider::OpenAi => "OPENAI_API_KEY",
+            LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
+        }
+    }
+}
+
 /// Configuration for NlqContext.
 #[derive(Debug, Clone)]
 pub struct NlqConfig {
-    /// OpenAI API key. Defaults to `OPENAI_API_KEY` env var if not set.
-    pub openai_api_key: String,
-    /// OpenAI API base URL (override for proxies / Azure OpenAI).
-    pub openai_base_url: String,
-    /// Model used for planning and agent evaluation (e.g. "gpt-4o").
+    /// Which LLM provider to use. Defaults to OpenAI; set `LLM_PROVIDER=anthropic` for Claude.
+    pub provider: LlmProvider,
+    /// API key for the selected provider (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`).
+    pub api_key: String,
+    /// API base URL. Defaults to the provider's standard endpoint; override for proxies.
+    pub base_url: String,
+    /// Model used for planning and agent evaluation.
     pub model: String,
-    /// Model used for embedding generation (e.g. "text-embedding-3-small").
+    /// Model used for embedding generation (OpenAI only).
     pub embed_model: String,
     /// Maximum agent rounds before returning the best result found so far.
     pub max_rounds: usize,
@@ -23,12 +78,17 @@ pub struct NlqConfig {
 
 impl Default for NlqConfig {
     fn default() -> Self {
-        let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        let provider = LlmProvider::from_env();
+        let api_key = std::env::var(provider.env_key_var()).unwrap_or_default();
+        let base_url = provider.default_base_url().to_string();
+        let model = provider.default_model().to_string();
+        let embed_model = provider.default_embed_model().to_string();
         Self {
-            openai_api_key: api_key,
-            openai_base_url: "https://api.openai.com/v1".to_string(),
-            model: "gpt-4o".to_string(),
-            embed_model: "text-embedding-3-small".to_string(),
+            provider,
+            api_key,
+            base_url,
+            model,
+            embed_model,
             max_rounds: 5,
             llm_batch_size: 50,
             max_chunk_bytes: 200_000,
@@ -40,10 +100,14 @@ impl Default for NlqConfig {
 
 impl NlqConfig {
     pub fn validate(&self) -> crate::errors::Result<()> {
-        if self.openai_api_key.is_empty() {
-            return Err(crate::errors::NlqError::Config(
-                "OPENAI_API_KEY is not set; set the env var or supply it in NlqConfig".to_string(),
-            ));
+        if self.api_key.is_empty() {
+            let var = match self.provider {
+                LlmProvider::OpenAi => "OPENAI_API_KEY",
+                LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
+            };
+            return Err(crate::errors::NlqError::Config(format!(
+                "{var} is not set; set the env var or supply it in NlqConfig"
+            )));
         }
         if self.llm_batch_size == 0 {
             return Err(crate::errors::NlqError::Config(

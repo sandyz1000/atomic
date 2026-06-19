@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let has_key = !api_key.is_empty();
 
     let config = NlqConfig {
-        openai_api_key: if has_key {
+        api_key: if has_key {
             api_key
         } else {
             "dummy-key-no-api-call".to_string()

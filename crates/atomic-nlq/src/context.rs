@@ -7,8 +7,10 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::execution::context::SessionContext;
 use datafusion::execution::session_state::SessionStateBuilder;
 
-use crate::config::NlqConfig;
+use crate::config::{LlmProvider, NlqConfig};
 use crate::errors::Result;
+use crate::llm::LlmClient;
+use crate::llm::anthropic::AnthropicClient;
 use crate::openai::OpenAiClient;
 use crate::optimizer::llm_batching_rule::LlmBatchingRule;
 use crate::physical::extension_planner::{NlqExtensionPlanner, NlqQueryPlanner};
@@ -52,12 +54,20 @@ impl NlqContext {
             panic!("NlqConfig is invalid: {e}");
         }
         let config = Arc::new(config);
-        let client = Arc::new(OpenAiClient::new(
-            &config.openai_api_key,
-            &config.openai_base_url,
-            config.timeout_secs,
-            config.max_retries,
-        ));
+        let client: Arc<dyn LlmClient> = match config.provider {
+            LlmProvider::OpenAi => Arc::new(OpenAiClient::new(
+                &config.api_key,
+                &config.base_url,
+                config.timeout_secs,
+                config.max_retries,
+            )),
+            LlmProvider::Anthropic => Arc::new(AnthropicClient::new(
+                &config.api_key,
+                &config.base_url,
+                config.timeout_secs,
+                config.max_retries,
+            )),
+        };
         let vector_indexes: Arc<DashMap<String, Arc<dyn VectorIndexProvider>>> =
             Arc::new(DashMap::new());
 

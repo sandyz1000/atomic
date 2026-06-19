@@ -79,6 +79,11 @@ impl Executor {
                 .keys()
                 .map(|k| format!("shuffle:{k}")),
         );
+        // Advertise dynamic UDF runtimes so the scheduler can route Python/JS ops.
+        #[cfg(feature = "python")]
+        registered_ops.push("atomic::udf::python".to_string());
+        #[cfg(feature = "js")]
+        registered_ops.push("atomic::udf::js".to_string());
         log::debug!(
             "worker {} advertising {} registered ops ({} shuffle types)",
             self.worker_id,

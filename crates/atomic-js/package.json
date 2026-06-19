@@ -5,8 +5,8 @@
   "main": "dist/index.js",
   "types": "index.d.ts",
   "scripts": {
-    "build": "napi build --platform --release --no-js --manifest-path ../../Cargo.toml && tsc",
-    "build:debug": "napi build --platform --no-js --manifest-path ../../Cargo.toml && tsc",
+    "build": "napi build --platform --release --no-js && tsc",
+    "build:debug": "napi build --platform --no-js && tsc",
     "prepare": "tsc",
     "type-check": "tsc --project tsconfig.typecheck.json",
     "test": "vitest run",

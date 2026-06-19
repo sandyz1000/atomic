@@ -19,7 +19,7 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 
 use crate::config::NlqConfig;
-use crate::openai::OpenAiClient;
+use crate::llm::LlmClient;
 
 fn model_dim(model: &str, config_override: Option<usize>) -> i32 {
     if let Some(d) = config_override {
@@ -159,7 +159,7 @@ pub struct EmbedExec {
     output_col: String,
     model: String,
     dim: i32,
-    client: Arc<OpenAiClient>,
+    client: Arc<dyn LlmClient>,
     config: Arc<NlqConfig>,
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
@@ -179,7 +179,7 @@ impl EmbedExec {
     pub fn new(
         node: &EmbedNode,
         input: Arc<dyn ExecutionPlan>,
-        client: Arc<OpenAiClient>,
+        client: Arc<dyn LlmClient>,
         config: Arc<NlqConfig>,
     ) -> Self {
         let mut fields: Vec<FieldRef> = input.schema().fields().iter().cloned().collect();

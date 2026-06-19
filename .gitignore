@@ -40,3 +40,4 @@ skills-lock.json
 __pycache__
 
 *.node
+*.abi3.so

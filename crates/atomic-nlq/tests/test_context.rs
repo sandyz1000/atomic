@@ -2,7 +2,7 @@ use atomic_nlq::{NlqConfig, NlqContext, ToolDefinition, ToolRuntime};
 
 fn test_config() -> NlqConfig {
     NlqConfig {
-        openai_api_key: std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "sk-test".to_string()),
+        api_key: std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "sk-test".to_string()),
         ..Default::default()
     }
 }
@@ -19,7 +19,7 @@ fn test_config_default_values() {
 #[test]
 fn test_config_empty_key() {
     let cfg = NlqConfig {
-        openai_api_key: String::new(),
+        api_key: String::new(),
         ..Default::default()
     };
     assert!(cfg.validate().is_err());
@@ -28,7 +28,7 @@ fn test_config_empty_key() {
 #[test]
 fn test_config_zero_batch() {
     let cfg = NlqConfig {
-        openai_api_key: "sk-test".to_string(),
+        api_key: "sk-test".to_string(),
         llm_batch_size: 0,
         ..Default::default()
     };
@@ -38,7 +38,7 @@ fn test_config_zero_batch() {
 #[test]
 fn test_config_validation_ok() {
     let cfg = NlqConfig {
-        openai_api_key: "sk-test".to_string(),
+        api_key: "sk-test".to_string(),
         ..Default::default()
     };
     assert!(cfg.validate().is_ok());

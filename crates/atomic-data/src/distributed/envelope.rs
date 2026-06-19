@@ -14,6 +14,13 @@ use super::WIRE_SCHEMA_V1;
 /// pulling in Python or V8 symbols:
 /// - feature `python`     → enables [`TaskRuntime::Python`]
 /// - feature `javascript` → enables [`TaskRuntime::JavaScript`]
+///
+/// Discriminants are pinned explicitly. Driver and worker binaries routinely compile
+/// this crate with *different* feature sets (e.g. `atomic-py` enables only `python`,
+/// `atomic-js` enables only `javascript`, while `atomic-worker` enables both) — without
+/// pinned values, the implicit "position among compiled-in variants" discriminant for
+/// `JavaScript` would shift between those builds (1 vs 2), corrupting the wire protocol
+/// silently. Pinning makes the discriminant a property of the variant, not the build.
 #[derive(
     Debug,
     Clone,
@@ -31,13 +38,13 @@ use super::WIRE_SCHEMA_V1;
 pub enum TaskRuntime {
     /// Compile-time `TASK_REGISTRY` lookup via `op_id` (default for `#[task]` functions).
     #[default]
-    Native,
+    Native = 0,
     /// Pickled partition-level Python callable executed in the subprocess worker pool.
     #[cfg(feature = "python")]
-    Python,
+    Python = 1,
     /// Partition-level JavaScript function evaluated in the embedded V8 (deno_core) runtime.
     #[cfg(feature = "javascript")]
-    JavaScript,
+    JavaScript = 2,
 }
 
 /// One step in a multi-op pipeline sent to a worker.
@@ -63,6 +70,13 @@ pub struct PipelineOp {
 ///
 /// The driver sets this based on which RDD operation triggered the task submission.
 /// The worker dispatch handler reads this to decide how to iterate over the partition.
+///
+/// `KafkaConsume` is `#[cfg(feature = "kafka")]`-gated and declared **last**, intentionally.
+/// Variants with struct fields can't carry explicit discriminants in Rust (unlike
+/// [`TaskRuntime`]'s pinned values), so the only way to keep every other variant's implicit
+/// discriminant stable across builds with/without the `kafka` feature is to put the
+/// cfg-gated variant after all of them — inserting or removing it then never shifts anyone
+/// else's position.
 #[derive(
     Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
@@ -91,12 +105,6 @@ pub enum TaskAction {
     /// `(rdd_id, partition_id)`, so a later job can be scheduled here and served from
     /// cache instead of recomputing. Emitted by a distributed `.cache()` / `persist()`.
     Cache { rdd_id: usize },
-    /// Kafka Direct source op (requires `kafka` feature). The worker `assign`+`seek`s to
-    /// the given offset range and polls until `end_offset`, returning the messages as
-    /// `rkyv`-encoded `Vec<String>`. `data` in the TaskEnvelope is ignored; all config
-    /// is in `PipelineOp.payload` (bincode-encoded `KafkaConsumePayload`).
-    #[cfg(feature = "kafka")]
-    KafkaConsume,
     /// File-split source op. The worker opens `path`, optionally seeks to `start_byte`,
     /// reads lines up to `end_byte` (or EOF), and returns them as rkyv-encoded `Vec<String>`.
     /// All config is in the task `data` (bincode-encoded `FileSplitPayload`); `op.payload`
@@ -111,6 +119,12 @@ pub enum TaskAction {
         /// Registered state-merge function name (e.g. `"atomic_structured::windowed_v1"`).
         merge_fn: String,
     },
+    /// Kafka Direct source op (requires `kafka` feature). The worker `assign`+`seek`s to
+    /// the given offset range and polls until `end_offset`, returning the messages as
+    /// `rkyv`-encoded `Vec<String>`. `data` in the TaskEnvelope is ignored; all config
+    /// is in `PipelineOp.payload` (bincode-encoded `KafkaConsumePayload`).
+    #[cfg(feature = "kafka")]
+    KafkaConsume,
 }
 
 /// Metadata carried in `PipelineOp.payload` for a Python UDF step.

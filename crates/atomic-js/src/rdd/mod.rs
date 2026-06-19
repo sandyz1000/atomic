@@ -14,6 +14,7 @@ mod sort;
 mod transforms;
 mod with_context;
 
+#[derive(Clone)]
 struct StagedJsPipeline {
     source_partitions: Vec<Vec<u8>>,
     ops: Vec<PipelineOp>,
@@ -143,6 +144,26 @@ impl JsRdd {
             all.extend(items);
         }
         Ok(all)
+    }
+
+    /// Like `dispatch_and_collect` but returns one `Vec<JsonValue>` per partition.
+    /// Used by `sort_by_key` to feed the k-way merge with pre-sorted runs.
+    pub(crate) fn dispatch_and_collect_partitioned(&self) -> Result<Vec<Vec<JsonValue>>> {
+        let staged = self
+            .staged
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("no staged pipeline to dispatch"))?;
+        let result_bytes = self
+            .context
+            .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+            .map_err(|e| Error::from_reason(format!("dispatch_pipeline: {e}")))?;
+        result_bytes
+            .into_iter()
+            .map(|bytes| {
+                serde_json::from_slice::<Vec<JsonValue>>(&bytes)
+                    .map_err(|e| Error::from_reason(format!("decode result: {e}")))
+            })
+            .collect()
     }
 
     pub(crate) fn key_to_string(val: &JsonValue) -> Result<String> {

@@ -23,6 +23,7 @@ pub(crate) fn verify_picklable(py: Python<'_>, f: Py<PyAny>) -> PyResult<()> {
     Ok(())
 }
 
+#[derive(Clone)]
 struct StagedPyPipeline {
     source_partitions: Vec<Vec<u8>>,
     ops: Vec<PipelineOp>,

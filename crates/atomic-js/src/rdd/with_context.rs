@@ -164,11 +164,13 @@ impl JsRdd {
         let fn_src = Self::fn_to_source(&f)?;
         if self.context.is_distributed() {
             let wrapper = format!(
-                "(partition) => {{ const g = new Map(), o = []; \
-                 for (const p of partition) {{ const k = JSON.stringify(p[0]); \
-                 if (g.has(k)) {{ g.set(k, [p[0], ({fn_src})(g.get(k)[1], p[1], globalThis.__ctx)]); }} \
-                 else {{ g.set(k, [p[0], p[1]]); o.push(k); }} }} \
-                 return o.map(k => g.get(k)); }}"
+                r#"
+                (partition) => {{ const g = new Map(), o = []; 
+                    for (const p of partition) {{ const k = JSON.stringify(p[0]); 
+                    if (g.has(k)) {{ g.set(k, [p[0], ({fn_src})(g.get(k)[1], p[1], globalThis.__ctx)]); }} 
+                    else {{ g.set(k, [p[0], p[1]]); o.push(k); }} }} 
+                    return o.map(k => g.get(k)); }}
+                "#
             );
             self.stage_js_udf(
                 wrapper,

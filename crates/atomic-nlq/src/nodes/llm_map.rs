@@ -21,7 +21,7 @@ use futures::StreamExt;
 
 use crate::config::NlqConfig;
 use crate::nodes::llm_filter::record_batch_to_json_rows;
-use crate::openai::OpenAiClient;
+use crate::llm::LlmClient;
 
 /// LLM-based row transformer. Adds a new column to each row.
 #[derive(Debug, Clone)]
@@ -152,7 +152,7 @@ pub struct LlmMapExec {
     output_col: String,
     output_type: DataType,
     batch_size: usize,
-    client: Arc<OpenAiClient>,
+    client: Arc<dyn LlmClient>,
     config: Arc<NlqConfig>,
     input: Arc<dyn ExecutionPlan>,
     schema: SchemaRef,
@@ -171,7 +171,7 @@ impl LlmMapExec {
     pub fn new(
         node: &LlmMapNode,
         input: Arc<dyn ExecutionPlan>,
-        client: Arc<OpenAiClient>,
+        client: Arc<dyn LlmClient>,
         config: Arc<NlqConfig>,
     ) -> Self {
         let mut fields: Vec<Arc<Field>> = input.schema().fields().iter().cloned().collect();
@@ -319,7 +319,7 @@ impl ExecutionPlan for LlmMapExec {
 }
 
 async fn llm_map_chunk(
-    client: &Arc<OpenAiClient>,
+    client: &Arc<dyn LlmClient>,
     prompt: &str,
     model: &str,
     output_type: &DataType,
