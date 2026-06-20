@@ -95,6 +95,9 @@ impl Context {
         if let Some(m) = config.speculation_multiplier {
             dist_sched = dist_sched.with_speculation(m);
         }
+        if let Some(secs) = config.agent_step_timeout_secs {
+            dist_sched = dist_sched.with_agent_step_timeout(std::time::Duration::from_secs(secs));
+        }
         let scheduler = Arc::new(dist_sched);
         let mut address_map = Vec::new();
 

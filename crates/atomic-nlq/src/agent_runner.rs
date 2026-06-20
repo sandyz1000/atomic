@@ -64,11 +64,11 @@ impl PartitionAgentRunner {
         let system = format!("{}{}", payload.system_prompt, tool_hint);
 
         for round in 0..payload.max_rounds {
-            if let Some(max) = payload.max_tokens_total {
-                if *tokens_used >= max {
-                    budget_exceeded = true;
-                    break;
-                }
+            if let Some(max) = payload.max_tokens_total
+                && *tokens_used >= max
+            {
+                budget_exceeded = true;
+                break;
             }
 
             let user_msg = if round == 0 {
@@ -140,17 +140,17 @@ impl PartitionAgentRunner {
         let mut tokens_used: u64 = 0;
 
         for (idx, input) in inputs.into_iter().enumerate() {
-            if let Some(max) = payload.max_tokens_total {
-                if tokens_used >= max {
-                    findings.push(AgentFindings {
-                        input_id: idx,
-                        answer: String::new(),
-                        rounds: 0,
-                        confidence: 0.0,
-                        budget_exceeded: true,
-                    });
-                    continue;
-                }
+            if let Some(max) = payload.max_tokens_total
+                && tokens_used >= max
+            {
+                findings.push(AgentFindings {
+                    input_id: idx,
+                    answer: String::new(),
+                    rounds: 0,
+                    confidence: 0.0,
+                    budget_exceeded: true,
+                });
+                continue;
             }
             let finding =
                 Self::run_one_input(&client, payload, idx, &input, &mut tokens_used).await;

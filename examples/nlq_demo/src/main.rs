@@ -1,7 +1,16 @@
-/// Smoke test: register an in-memory table and run a few NL queries.
+/// NLQ smoke test: register an in-memory table and run natural language queries.
 ///
-/// Run with:
-///   OPENAI_API_KEY=sk-... cargo run -p atomic-nlq --example nlq_demo
+/// # Prerequisites
+///
+/// ```bash
+/// export OPENAI_API_KEY=sk-...
+/// ```
+///
+/// # Run
+///
+/// ```bash
+/// cargo run --example nlq_demo
+/// ```
 use std::sync::Arc;
 
 use atomic_nlq::{NlqConfig, NlqContext};
@@ -18,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ]));
 
     let batch = RecordBatch::try_new(
-        schema.clone(),
+        schema,
         vec![
             Arc::new(Int64Array::from(vec![1, 2, 3, 1, 2, 3, 1, 2, 3, 4])),
             Arc::new(Float64Array::from(vec![

@@ -15,6 +15,7 @@ atomic-data = { workspace = true, features = ["javascript"] }
 atomic-compute = { workspace = true }
 atomic-graph = { workspace = true }
 atomic-sql = { workspace = true }
+atomic-nlq = { workspace = true }
 datafusion = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true }

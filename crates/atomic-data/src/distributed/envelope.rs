@@ -161,7 +161,9 @@ pub struct AgentStepPayload {
 /// One `AgentFindings` is produced per input element in the partition.
 /// `Vec<AgentFindings>` is rkyv-encoded as the partition output of an
 /// [`TaskAction::AgentStep`] op.
-#[derive(Debug, Clone, PartialEq, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct AgentFindings {
     /// Index of the input string within this partition (0-based).

@@ -43,6 +43,11 @@ pub use worker_pool::InflightGuard;
 /// Consecutive TCP-level failure count per worker before removal.
 pub(crate) const MAX_WORKER_FAILURES: u32 = 3;
 
+/// Default per-task timeout for `AgentStep` pipelines when `agent_step_timeout` is
+/// unset. Multi-round LLM calls (with provider-side retry/backoff already happening
+/// inside the agent runner) need far more headroom than the 5-minute CPU-task default.
+pub(crate) const AGENT_STEP_DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
+
 #[derive(Clone, Default)]
 pub struct DistributedScheduler {
     pub(crate) mutators: Mutators,
@@ -57,6 +62,10 @@ pub struct DistributedScheduler {
     pub(crate) worker_failures: Arc<DashMap<SocketAddrV4, u32>>,
     /// Per-task timeout. `None` means no timeout (useful in tests / local mode).
     pub(crate) task_timeout: Option<Duration>,
+    /// Per-task timeout for pipelines containing an `AgentStep` op. Multi-round LLM
+    /// calls run far longer than the cheap-CPU-task default `task_timeout`, so this
+    /// is a separate, larger knob. Falls back to `AGENT_STEP_DEFAULT_TIMEOUT` when unset.
+    pub(crate) agent_step_timeout: Option<Duration>,
     /// Speculative execution multiplier.
     pub(crate) speculation_multiplier: Option<f64>,
 
@@ -104,6 +113,7 @@ impl DistributedScheduler {
             inflight: Arc::new(DashMap::new()),
             worker_failures: Arc::new(DashMap::new()),
             task_timeout: Some(Duration::from_secs(300)),
+            agent_step_timeout: None,
             speculation_multiplier: None,
             master,
             active_jobs: Arc::new(DashMap::new()),
@@ -163,6 +173,12 @@ impl DistributedScheduler {
     /// Enable speculative execution with the given multiplier.
     pub fn with_speculation(mut self, multiplier: f64) -> Self {
         self.speculation_multiplier = Some(multiplier);
+        self
+    }
+
+    /// Override the per-task timeout used for pipelines containing an `AgentStep` op.
+    pub fn with_agent_step_timeout(mut self, timeout: Duration) -> Self {
+        self.agent_step_timeout = Some(timeout);
         self
     }
 
@@ -654,5 +670,67 @@ mod tests {
             Some(w2),
             "should fall back to live worker via modulo"
         );
+    }
+
+    #[test]
+    fn agent_step_timeout_unset_by_default() {
+        let sched = DistributedScheduler::new(4, true);
+        assert_eq!(sched.agent_step_timeout, None);
+        // task_timeout (the cheap-CPU-task default) is unaffected.
+        assert_eq!(sched.task_timeout, Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn with_agent_step_timeout_overrides() {
+        let sched =
+            DistributedScheduler::new(4, true).with_agent_step_timeout(Duration::from_secs(900));
+        assert_eq!(sched.agent_step_timeout, Some(Duration::from_secs(900)));
+    }
+
+    fn envelope_with_ops(ops: Vec<PipelineOp>) -> TaskEnvelope {
+        TaskEnvelope::new(0, 0, 0, 0, 0, "test".to_string(), ops, Vec::new())
+    }
+
+    #[test]
+    fn effective_timeout_uses_agent_step_default_when_unset() {
+        let sched = DistributedScheduler::new(4, true);
+        let task = envelope_with_ops(vec![PipelineOp {
+            op_id: String::new(),
+            action: TaskAction::AgentStep,
+            runtime: TaskRuntime::Native,
+            payload: vec![],
+        }]);
+        assert_eq!(
+            sched.effective_timeout(&task),
+            Some(super::AGENT_STEP_DEFAULT_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn effective_timeout_uses_configured_agent_step_timeout() {
+        let sched =
+            DistributedScheduler::new(4, true).with_agent_step_timeout(Duration::from_secs(60));
+        let task = envelope_with_ops(vec![PipelineOp {
+            op_id: String::new(),
+            action: TaskAction::AgentStep,
+            runtime: TaskRuntime::Native,
+            payload: vec![],
+        }]);
+        assert_eq!(
+            sched.effective_timeout(&task),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn effective_timeout_falls_back_to_task_timeout_for_non_agent_ops() {
+        let sched = DistributedScheduler::new(4, true);
+        let task = envelope_with_ops(vec![PipelineOp {
+            op_id: String::new(),
+            action: TaskAction::Map,
+            runtime: TaskRuntime::Native,
+            payload: vec![],
+        }]);
+        assert_eq!(sched.effective_timeout(&task), sched.task_timeout);
     }
 }

@@ -72,7 +72,7 @@ impl PyRdd {
             let bound = item.bind(py);
             let (key, val) = Self::extract_pair(bound)?;
             match dict.get_item(&key)? {
-                Some(lst) => lst.downcast::<PyList>()?.append(val)?,
+                Some(lst) => lst.cast::<PyList>()?.append(val)?,
                 None => {
                     dict.set_item(&key, PyList::new(py, [val])?)?;
                 }
@@ -278,7 +278,7 @@ impl PyRdd {
             let bound = item.bind(py);
             let (k, v) = Self::extract_pair(bound)?;
             match right_map.get_item(&k)? {
-                Some(lst) => lst.downcast::<PyList>()?.append(v)?,
+                Some(lst) => lst.cast::<PyList>()?.append(v)?,
                 None => {
                     right_map.set_item(&k, PyList::new(py, [v])?)?;
                 }
@@ -289,7 +289,7 @@ impl PyRdd {
             let bound = item.bind(py);
             let (lk, lv) = Self::extract_pair(bound)?;
             if let Some(right_vals) = right_map.get_item(&lk)? {
-                for rv in right_vals.downcast::<PyList>()?.iter() {
+                for rv in right_vals.cast::<PyList>()?.iter() {
                     let inner = PyTuple::new(py, [&lv, &rv])?.unbind().into_any();
                     let outer = PyTuple::new(py, [&lk, inner.bind(py)])?.unbind().into_any();
                     elements.push(outer);
@@ -358,7 +358,7 @@ impl PyRdd {
             let bound = item.bind(py);
             let (k, v) = Self::extract_pair(bound)?;
             match right_map.get_item(&k)? {
-                Some(lst) => lst.downcast::<PyList>()?.append(v)?,
+                Some(lst) => lst.cast::<PyList>()?.append(v)?,
                 None => {
                     right_map.set_item(&k, PyList::new(py, [v])?)?;
                 }
@@ -370,7 +370,7 @@ impl PyRdd {
             let (lk, lv) = Self::extract_pair(bound)?;
             match right_map.get_item(&lk)? {
                 Some(right_vals) => {
-                    for rv in right_vals.downcast::<PyList>()?.iter() {
+                    for rv in right_vals.cast::<PyList>()?.iter() {
                         let inner = PyTuple::new(py, [&lv, &rv])?.unbind().into_any();
                         let outer = PyTuple::new(py, [&lk, inner.bind(py)])?.unbind().into_any();
                         elements.push(outer);

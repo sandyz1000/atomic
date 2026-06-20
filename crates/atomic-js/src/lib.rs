@@ -13,3 +13,10 @@ pub use graph::JsGraph;
 pub use rdd::JsRdd;
 pub use sql::{JsDataFrame, JsSqlContext};
 pub use streaming::{JsBatchQueue, JsDStream, JsStreamingContext};
+
+/// Registers the framework-native agent runner once when the native module loads,
+/// so `JsRdd::agent_step` works without a separate explicit init call from JS.
+#[napi_derive::module_init]
+fn init() {
+    atomic_nlq::agent_runner::register();
+}

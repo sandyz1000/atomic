@@ -310,6 +310,126 @@ in a streaming agent loop — is not something other distributed compute framewo
 
 ---
 
+## Distributed Subagents (`agent_step`)
+
+`agent_step` puts a multi-round LLM agent loop **inside the map-reduce engine itself**: instead of
+writing a one-shot prompt per row, you get one *subagent* per partition that can reason over several
+rounds, then the driver reduces all subagents' findings into one result set. The agent loop is owned
+by the framework (atomic-nlq's `AgentLoop`) — callers never write the loop, retry logic, or an HTTP
+client. You supply a **config** (model, system prompt, round budget, token budget); the same config
+shape works identically from Rust, Python, or JavaScript, and dispatches through the *same* op
+pipeline as `map_task`/`filter_task` — no separate execution path, no closures shipped over the wire.
+
+### What actually happens per partition
+
+For each partition, the worker runs one subagent that processes its input elements **one at a time,
+in order**. For each input it loops up to `max_rounds` times, sending the running conversation back to
+the LLM each round, until either the model's response contains a `FINAL ANSWER:` marker (early exit)
+or `max_rounds` is reached. The loop also stops early if `max_tokens_total` (an approximate,
+char-based token budget shared across *all* inputs in that partition) would be exceeded — remaining
+inputs in the partition are returned with `budget_exceeded: true` and an empty answer rather than
+silently dropped. One `AgentFindings` record comes back per input element, in input order:
+
+| Field | Meaning |
+| --- | --- |
+| `input_id` | Index of the input within its partition (0-based) |
+| `answer` | Final response text (the `FINAL ANSWER:` prefix is stripped if present) |
+| `rounds` | How many LLM rounds this input actually took |
+| `confidence` | Currently always `1.0` unless `budget_exceeded` zeroed it out |
+| `budget_exceeded` | `true` if the partition's token budget ran out before this input got a real answer |
+
+### Config fields (`AgentStepPayload`)
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `model` | string | e.g. `"gpt-4o-mini"`, `"claude-haiku-4-5-20251001"` |
+| `system_prompt` | string | Task instructions sent as the system message every round |
+| `max_rounds` | int | Per-input round cap |
+| `provider` | string | `"openai"` (default) or `"anthropic"` — selects the API client and reads the matching env var (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) |
+| `tool_refs` | string[] | Names of tools the model is told it may reference (see limitation below) |
+| `output_schema` | string \| null | Optional JSON Schema; if set, each answer is checked to be valid JSON and wrapped in an `{"error": ...}` envelope if it isn't (best-effort, not full schema validation) |
+| `max_tokens_total` | int \| null | Approximate (`chars / 4`) token budget shared across the whole partition |
+
+### Rust example
+
+```rust
+atomic_nlq::agent_runner::register();   // wires the agent loop into this binary — call once at startup
+
+let config = AgentStepPayload {
+    model: "gpt-4o-mini".to_string(),
+    system_prompt: "Extract the key obligation (who must do what by when) as one sentence. \
+                     End with FINAL ANSWER: <text> once confident.".to_string(),
+    max_rounds: 2,
+    tool_refs: vec![],
+    provider: "openai".to_string(),
+    output_schema: None,
+    max_tokens_total: Some(20_000),
+};
+
+let docs = ctx.parallelize_typed(legal_clauses, 4);   // 4 partitions = 4 subagents in parallel
+let findings = docs.agent_step(config).collect()?;
+
+for f in &findings {
+    println!("[{}] rounds={} -> {}", f.input_id, f.rounds, f.answer);
+}
+```
+
+### Python example
+
+```python
+findings = ctx.parallelize(legal_clauses, num_partitions=4).agent_step({
+    "model": "gpt-4o-mini",
+    "system_prompt": "Extract the key obligation as one sentence.",
+    "max_rounds": 2,
+    "provider": "openai",
+    "max_tokens_total": 20_000,
+})
+for f in findings:
+    print(f["input_id"], f["rounds"], f["answer"])
+```
+
+### TypeScript example
+
+```typescript
+const findings = rdd.agentStep({
+  model: "gpt-4o-mini",
+  systemPrompt: "Extract the key obligation as one sentence.",
+  maxRounds: 2,
+  provider: "openai",
+  maxTokensTotal: 20_000,
+});
+```
+
+Full runnable versions: [`examples/agent_step`](examples/agent_step) (Rust), `examples/py-demo/src/agent_step.py`,
+and the heavier [`examples/agent_code_audit`](examples/agent_code_audit) (multi-round severity review)
+and [`examples/agent_news_triage`](examples/agent_news_triage) (urgency ranking) walkthroughs.
+
+### Current limitation: `tool_refs` is a prompt hint, not tool execution
+
+`tool_refs` is forwarded into the system prompt as a list of names the model is told it "may
+reference" — the `AgentStep` runner does **not** parse tool-call responses or invoke
+`ToolRegistry` tools on the model's behalf today. This is different from the NLQ `WorkflowExecutor`
+path above, which *does* execute `sql_query` and registered Python/JS tools as real steps. Real
+in-loop tool execution for `agent_step` is open work, tracked in
+`notes/agentic-udf-future-design.md`.
+
+### Production-safety knobs
+
+A long-running, rate-limited multi-round LLM call doesn't fit the retry/timeout assumptions tuned
+for cheap CPU tasks, so `AgentStep` pipelines get separate handling in `DistributedScheduler`:
+
+- **Skipped from speculation** — no duplicate (billed) LLM calls racing each other for the same
+  partition.
+- **A longer, separate timeout** — `agent_step_timeout` (default 30 min vs. the 5-min cheap-task
+  default), configurable via `Config::builder().agent_step_timeout_secs(n)` or the
+  `ATOMIC_AGENT_STEP_TIMEOUT_SECS` env var.
+- **Cost-aware retry logging** — there is no per-input checkpointing within a partition, so a retried
+  `AgentStep` partition re-runs its *entire* agent loop from scratch. The scheduler logs a clear
+  warning on every such retry, naming the run/task IDs, so a re-incurred LLM bill for already-answered
+  inputs shows up in logs rather than being silent.
+
+---
+
 ## Deployment — Ship a Static Binary in 60 Seconds
 
 ```bash
@@ -419,6 +539,10 @@ optional `HorizontalPodAutoscaler`, optional mTLS, and `/health` + `/metrics` pr
 | **NLQ** | LLM-native DataFusion plan nodes | yes |
 | | `LlmBatchingRule` optimizer | yes |
 | | `InMemoryVectorIndex` | yes |
+| **Agentic** | `agent_step` distributed subagents — Rust + Python + JS | yes |
+| | Speculation-skip for `AgentStep` partitions | yes |
+| | Agent-aware per-task timeout (separate from cheap-CPU-task default) | yes |
+| | Cost-aware retry warning logging for `AgentStep` partitions | yes |
 
 ---
 

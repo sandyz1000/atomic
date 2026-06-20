@@ -46,12 +46,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent_code_audit"
+version = "0.1.0"
+dependencies = [
+ "atomic-compute",
+ "atomic-data",
+ "atomic-nlq",
+ "serde_json",
+]
+
+[[package]]
+name = "agent_news_triage"
+version = "0.1.0"
+dependencies = [
+ "atomic-compute",
+ "atomic-data",
+ "atomic-nlq",
+ "serde_json",
+]
+
+[[package]]
 name = "agent_step"
 version = "0.1.0"
 dependencies = [
  "atomic-compute",
  "atomic-data",
  "atomic-nlq",
+ "tokio",
+]
+
+[[package]]
+name = "agent_workflow_dag"
+version = "0.1.0"
+dependencies = [
+ "atomic-nlq",
+ "datafusion",
+ "serde_json",
  "tokio",
 ]
 
@@ -783,6 +813,7 @@ dependencies = [
  "atomic-compute",
  "atomic-data",
  "atomic-graph",
+ "atomic-nlq",
  "atomic-sql",
  "datafusion",
  "napi",
@@ -823,6 +854,7 @@ dependencies = [
  "atomic-compute",
  "atomic-data",
  "atomic-graph",
+ "atomic-nlq",
  "atomic-sql",
  "datafusion",
  "parking_lot",
@@ -5148,6 +5180,15 @@ dependencies = [
 
 [[package]]
 name = "nlq"
+version = "0.1.0"
+dependencies = [
+ "atomic-nlq",
+ "datafusion",
+ "tokio",
+]
+
+[[package]]
+name = "nlq_demo"
 version = "0.1.0"
 dependencies = [
  "atomic-nlq",

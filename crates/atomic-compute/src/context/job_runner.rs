@@ -122,36 +122,40 @@ impl Context {
         let broadcasts = self.broadcast_snapshot();
         match &self.scheduler {
             Schedulers::Local(_) => {
-                let backend = ComputeEngine::default();
-                source_partitions
-                    .into_iter()
-                    .enumerate()
-                    .map(|(part_id, data)| {
-                        let task = TaskEnvelope::new(
-                            0,
-                            0,
-                            part_id,
-                            0,
-                            part_id,
-                            format!("local-pipeline-{}", part_id),
-                            ops.clone(),
-                            data,
-                        )
-                        .with_broadcasts(broadcasts.clone());
-                        let result = backend.execute("local-driver", &task)?;
-                        match result.status {
-                            ResultStatus::Success => {
-                                if !result.accumulator_deltas.is_empty() {
-                                    self.merge_accumulator_deltas(&result.accumulator_deltas);
+                // Some ops (e.g. AgentStep) need a reachable Tokio runtime to `block_on`
+                // their async work; local mode otherwise runs on a plain native thread.
+                env::Env::run_in_async_rt(|| {
+                    let backend = ComputeEngine::default();
+                    source_partitions
+                        .into_iter()
+                        .enumerate()
+                        .map(|(part_id, data)| {
+                            let task = TaskEnvelope::new(
+                                0,
+                                0,
+                                part_id,
+                                0,
+                                part_id,
+                                format!("local-pipeline-{}", part_id),
+                                ops.clone(),
+                                data,
+                            )
+                            .with_broadcasts(broadcasts.clone());
+                            let result = backend.execute("local-driver", &task)?;
+                            match result.status {
+                                ResultStatus::Success => {
+                                    if !result.accumulator_deltas.is_empty() {
+                                        self.merge_accumulator_deltas(&result.accumulator_deltas);
+                                    }
+                                    Ok(result.data)
                                 }
-                                Ok(result.data)
+                                _ => Err(ComputeError::InvalidPayload(
+                                    result.error.unwrap_or_else(|| "task failed".to_string()),
+                                )),
                             }
-                            _ => Err(ComputeError::InvalidPayload(
-                                result.error.unwrap_or_else(|| "task failed".to_string()),
-                            )),
-                        }
-                    })
-                    .collect()
+                        })
+                        .collect()
+                })
             }
             Schedulers::Distributed(sched) => Ok(env::Env::run_in_async_rt(|| {
                 futures::executor::block_on(sched.run_native_job_with_broadcasts(

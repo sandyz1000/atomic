@@ -1,0 +1,14 @@
+[package]
+name = "agent_news_triage"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "agent_news_triage"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute = { workspace = true }
+atomic-data = { workspace = true }
+atomic-nlq = { workspace = true }
+serde_json = { workspace = true }

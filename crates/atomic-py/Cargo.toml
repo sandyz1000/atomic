@@ -18,6 +18,7 @@ atomic-compute = { workspace = true }
 atomic-data = { workspace = true, features = ["python"] }
 atomic-sql = { workspace = true }
 atomic-graph = { workspace = true }
+atomic-nlq = { workspace = true }
 datafusion = { workspace = true }
 tokio = { workspace = true }
 pyo3-arrow = { workspace = true }

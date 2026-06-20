@@ -72,6 +72,10 @@ pub struct Config {
     /// gets a speculative re-run on a different worker.  The first result wins; the
     /// duplicate is discarded.  `None` (default) disables speculation.
     pub speculation_multiplier: Option<f64>,
+    /// Per-task timeout (seconds) for pipelines containing an `AgentStep` op. Multi-round
+    /// LLM calls run far longer than the cheap-CPU-task default `task_timeout` (5 min).
+    /// `None` (default) falls back to `AGENT_STEP_DEFAULT_TIMEOUT` (30 min) in the scheduler.
+    pub agent_step_timeout_secs: Option<u64>,
     /// Adaptive shuffle coalescing threshold (bytes).  After the shuffle-map stage
     /// completes, reduce partitions whose total byte content is smaller than
     /// `coalesce_shuffle_threshold_bytes / original_num_partitions` are merged with
@@ -147,6 +151,7 @@ impl Config {
             shuffle_spill_threshold: None,
             metrics_port: None,
             speculation_multiplier: None,
+            agent_step_timeout_secs: None,
             coalesce_shuffle_threshold_bytes: 0,
             heartbeat_interval_secs: 0,
             heartbeat_timeout_ms: 2000,
@@ -173,6 +178,7 @@ impl Config {
             shuffle_spill_threshold: None,
             metrics_port: None,
             speculation_multiplier: None,
+            agent_step_timeout_secs: None,
             coalesce_shuffle_threshold_bytes: 0,
             heartbeat_interval_secs: 0,
             heartbeat_timeout_ms: 2000,
@@ -199,6 +205,7 @@ impl Config {
             shuffle_spill_threshold: None,
             metrics_port: None,
             speculation_multiplier: None,
+            agent_step_timeout_secs: None,
             coalesce_shuffle_threshold_bytes: 0,
             heartbeat_interval_secs: 0,
             heartbeat_timeout_ms: 2000,
@@ -293,6 +300,10 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<f64>().ok());
 
+        let agent_step_timeout_secs = std::env::var(format!("{PREFIX}AGENT_STEP_TIMEOUT_SECS"))
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok());
+
         let coalesce_shuffle_threshold_bytes =
             std::env::var(format!("{PREFIX}COALESCE_SHUFFLE_THRESHOLD_BYTES"))
                 .ok()
@@ -348,6 +359,7 @@ impl Config {
             shuffle_spill_threshold,
             metrics_port,
             speculation_multiplier,
+            agent_step_timeout_secs,
             coalesce_shuffle_threshold_bytes,
             heartbeat_interval_secs,
             heartbeat_timeout_ms,

@@ -8,6 +8,7 @@ use napi_derive::napi;
 use serde_json::Value as JsonValue;
 
 mod actions;
+mod agent;
 mod errors;
 mod pair_ops;
 mod sort;

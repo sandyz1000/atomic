@@ -19,5 +19,6 @@ pub use registry::{ToolDefinition, ToolRegistry, ToolRuntime, UdfDescription};
 pub use vector::in_memory::InMemoryVectorIndex;
 pub use vector::provider::VectorIndexProvider;
 pub use workflow::{
-    AgentEvent, AgentEventSender, AgentResult, VisualizationSpec, WorkflowPlan, WorkflowStep,
+    AgentEvent, AgentEventSender, AgentResult, StepOutput, StepResult, VisualizationSpec,
+    WorkflowPlan, WorkflowStep,
 };

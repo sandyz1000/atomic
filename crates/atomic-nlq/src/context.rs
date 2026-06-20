@@ -131,6 +131,18 @@ impl NlqContext {
         &self.sql_ctx
     }
 
+    /// Execute a manually-constructed `WorkflowPlan` against the registered tables.
+    ///
+    /// Steps with an empty `depends_on` run in parallel; others wait for their
+    /// upstream results. This bypasses LLM planning — useful when you want to
+    /// hard-code the tool graph and let only the execution be Atomic-orchestrated.
+    pub async fn execute_plan(
+        &self,
+        plan: crate::workflow::WorkflowPlan,
+    ) -> Result<std::collections::HashMap<String, crate::workflow::StepResult>> {
+        self.agent_loop.execute_plan(plan).await
+    }
+
     /// Dry-run: return the `WorkflowPlan` the LLM would produce for `nl` without executing it.
     ///
     /// Useful for debugging and inspecting which tools / SQL steps would be chosen.

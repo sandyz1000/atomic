@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
 mod actions;
+mod agent;
 mod errors;
 mod pair_ops;
 mod sort;

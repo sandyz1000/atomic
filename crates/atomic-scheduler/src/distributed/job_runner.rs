@@ -128,13 +128,32 @@ impl DistributedScheduler {
         Ok(())
     }
 
-    /// Send `task` to `target` exactly once, honouring `task_timeout`.
+    /// The timeout to apply when dispatching `task`: `agent_step_timeout` (default
+    /// [`super::AGENT_STEP_DEFAULT_TIMEOUT`]) when the pipeline contains an `AgentStep`
+    /// op, since a multi-round LLM call runs far longer than a cheap CPU task —
+    /// otherwise the regular `task_timeout`.
+    pub(crate) fn effective_timeout(&self, task: &TaskEnvelope) -> Option<Duration> {
+        let is_agent_step = task
+            .ops
+            .iter()
+            .any(|o| matches!(o.action, TaskAction::AgentStep));
+        if is_agent_step {
+            Some(
+                self.agent_step_timeout
+                    .unwrap_or(super::AGENT_STEP_DEFAULT_TIMEOUT),
+            )
+        } else {
+            self.task_timeout
+        }
+    }
+
+    /// Send `task` to `target` exactly once, honouring [`Self::effective_timeout`].
     async fn send_task_once(
         &self,
         task: &TaskEnvelope,
         target: SocketAddrV4,
     ) -> LibResult<TaskResultEnvelope> {
-        match self.task_timeout {
+        match self.effective_timeout(task) {
             Some(timeout) => {
                 tokio::time::timeout(timeout, self.submit_task_to_worker(task, target))
                     .await
@@ -215,6 +234,24 @@ impl DistributedScheduler {
                         attempt + 1,
                         self.max_failures + 1,
                     );
+                    if attempt < self.max_failures
+                        && task
+                            .ops
+                            .iter()
+                            .any(|o| matches!(o.action, TaskAction::AgentStep))
+                    {
+                        // No per-input checkpointing within a partition (by design — see
+                        // notes/agentic-udf-future-design.md): retrying re-runs every input
+                        // in this partition's agent loop from scratch, including any that
+                        // already produced a successful (and billed) finding.
+                        log::warn!(
+                            "task {}/{} is an AgentStep pipeline — retry will re-run the \
+                             entire partition's agent loop (no per-input checkpointing), \
+                             which re-incurs LLM cost for already-completed inputs",
+                            task.run_id,
+                            task.task_id,
+                        );
+                    }
                     self.record_worker_failure(target);
                     last_err = Some(e);
                 }

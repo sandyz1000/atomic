@@ -56,6 +56,17 @@ impl AgentLoop {
         }
     }
 
+    /// Execute a manually-constructed `WorkflowPlan` without an LLM planning step.
+    ///
+    /// Independent steps (empty `depends_on`) run in parallel; dependent steps wait
+    /// for their upstream results. This is the same executor the agentic loop uses.
+    pub async fn execute_plan(
+        &self,
+        plan: crate::workflow::WorkflowPlan,
+    ) -> Result<std::collections::HashMap<String, StepResult>> {
+        self.executor.execute(plan).await
+    }
+
     /// Translate a natural language query into a `WorkflowPlan` without executing it.
     ///
     /// Use this for dry-run / debugging: inspect which tools and SQL steps the planner

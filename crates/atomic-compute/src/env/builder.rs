@@ -12,6 +12,7 @@ pub enum ConfigKey {
     ShufflePort,
     MetricsPort,
     SpeculationMultiplier,
+    AgentStepTimeoutSecs,
     HeartbeatIntervalSecs,
     HeartbeatTimeoutMs,
     RegisterPort,
@@ -50,6 +51,9 @@ impl ConfigBuilder {
             ConfigKey::SpeculationMultiplier => {
                 self.inner.speculation_multiplier = value.parse().ok()
             }
+            ConfigKey::AgentStepTimeoutSecs => {
+                self.inner.agent_step_timeout_secs = value.parse().ok()
+            }
             ConfigKey::HeartbeatIntervalSecs => {
                 self.inner.heartbeat_interval_secs = value.parse().unwrap_or(0)
             }
@@ -83,6 +87,14 @@ impl ConfigBuilder {
     /// Enable speculative execution with the given multiplier.
     pub fn speculation_multiplier(mut self, m: f64) -> Self {
         self.inner.speculation_multiplier = Some(m);
+        self
+    }
+
+    /// Per-task timeout (seconds) for pipelines containing an `AgentStep` op.
+    /// Defaults to 30 minutes when unset — a multi-round LLM call needs far more
+    /// headroom than the 5-minute default used for cheap CPU tasks.
+    pub fn agent_step_timeout_secs(mut self, secs: u64) -> Self {
+        self.inner.agent_step_timeout_secs = Some(secs);
         self
     }
 

@@ -362,6 +362,25 @@ export declare class JsRdd {
   /** Return the logical number of partitions. */
   get numPartitions(): number
   length(): number
+  /**
+   * Run a framework-native, multi-round LLM agent loop over each partition.
+   *
+   * `config` is an object describing the agent:
+   *   - `model` (string, required)            — e.g. `"gpt-4o-mini"`
+   *   - `systemPrompt` (string, required)      — the agent's task description
+   *   - `maxRounds` (number, default 2)        — plan→execute→evaluate rounds per input
+   *   - `provider` (string, default "openai")  — `"openai"` or `"anthropic"`
+   *   - `toolRefs` (string[], default [])      — tool names the agent may reference
+   *   - `outputSchema` (string, optional)      — JSON schema for best-effort output validation
+   *   - `maxTokensTotal` (number, optional)    — token budget across all inputs in a partition
+   *
+   * Each RDD element must be a string. Returns an array of objects, one per input element:
+   *   `{ inputId, answer, rounds, confidence, budgetExceeded }`
+   *
+   * Requires the agent runner to be registered (done automatically at module load)
+   * and one of `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` set in the environment.
+   */
+  agentStep(config: JsonValue): Array<{ inputId: number, answer: string, rounds: number, confidence: number, budgetExceeded: boolean }>
   /** Group `[key, value]` pairs by key → `[key, [values]]` pairs. */
   groupByKey(): JsRdd
   /** Aggregate values with the same key using `f(acc, value) => acc`. */

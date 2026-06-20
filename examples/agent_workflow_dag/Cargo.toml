@@ -1,0 +1,14 @@
+[package]
+name = "agent_workflow_dag"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "agent_workflow_dag"
+path = "src/main.rs"
+
+[dependencies]
+atomic-nlq = { workspace = true }
+datafusion = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

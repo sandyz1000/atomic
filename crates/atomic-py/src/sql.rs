@@ -747,7 +747,7 @@ fn python_dicts_to_batches(
             ($builder_ty:ty, $extract_ty:ty) => {{
                 let mut b = <$builder_ty>::new();
                 for row in rows {
-                    let dict = row.bind(py).downcast::<pyo3::types::PyDict>()?;
+                    let dict = row.bind(py).cast::<pyo3::types::PyDict>()?;
                     match dict.get_item(col_name)? {
                         Some(v) => b.append_option(v.extract::<$extract_ty>().ok()),
                         None => b.append_null(),
@@ -770,7 +770,7 @@ fn python_dicts_to_batches(
             DataType::Boolean => {
                 let mut b = BooleanBuilder::new();
                 for row in rows {
-                    let dict = row.bind(py).downcast::<pyo3::types::PyDict>()?;
+                    let dict = row.bind(py).cast::<pyo3::types::PyDict>()?;
                     match dict.get_item(col_name)? {
                         Some(v) => b.append_option(v.extract::<bool>().ok()),
                         None => b.append_null(),
@@ -781,7 +781,7 @@ fn python_dicts_to_batches(
             DataType::Utf8 | _ => {
                 let mut b = StringBuilder::new();
                 for row in rows {
-                    let dict = row.bind(py).downcast::<pyo3::types::PyDict>()?;
+                    let dict = row.bind(py).cast::<pyo3::types::PyDict>()?;
                     match dict.get_item(col_name)? {
                         Some(v) => b.append_option(v.extract::<String>().ok()),
                         None => b.append_null(),
