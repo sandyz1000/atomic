@@ -5,6 +5,12 @@ edition.workspace = true
 
 [features]
 integration = []
+# Forwarded to atomic-compute: lets agent_step TOOL_CALL: dispatch run Python tools
+# resolved into AgentStepPayload.resolved_tools (PyWorkerPool).
+python = ["atomic-compute/python"]
+# Forwarded to atomic-compute: lets agent_step TOOL_CALL: dispatch run JS tools
+# resolved into AgentStepPayload.resolved_tools (V8/deno_core).
+js = ["atomic-compute/js"]
 
 [dependencies]
 atomic-sql = { workspace = true }

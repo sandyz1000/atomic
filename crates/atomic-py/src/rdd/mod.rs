@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::{PipelineOp, PythonUdfPayload, TaskAction, TaskRuntime};
+use atomic_data::distributed::{PipelineOp, PythonTaskPayload, TaskAction, TaskRuntime};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
@@ -12,7 +12,7 @@ mod pair_ops;
 mod sort;
 mod transforms;
 
-use errors::PyUdfStageError;
+use errors::PyTaskStageError;
 
 /// Verify that `f` survives the same pickle round-trip distributed-mode staging
 /// performs. Distributed `Context` construction requires real reachable workers,
@@ -68,7 +68,7 @@ impl PyRdd {
     }
 
     /// Pickle a callable using cloudpickle (if available) or stdlib pickle, then
-    /// verify it round-trips through `loads` before returning.  A UDF that pickles
+    /// verify it round-trips through `loads` before returning.  A task fn that pickles
     /// but refuses to load (captures an open file, a C-extension handle, a thread
     /// lock, …) is caught here at staging time rather than failing on every worker.
     fn pickle_fn(py: Python, f: &Py<PyAny>) -> PyResult<Vec<u8>> {
@@ -79,7 +79,7 @@ impl PyRdd {
             .call_method1("loads", (PyBytes::new(py, &bytes),))
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(
-                    PyUdfStageError::Unpicklable(e.to_string()).to_string(),
+                    PyTaskStageError::Unpicklable(e.to_string()).to_string(),
                 )
             })?;
         Ok(bytes)
@@ -147,20 +147,20 @@ impl PyRdd {
         Ok(())
     }
 
-    fn stage_python_udf(
+    fn stage_python_task(
         &mut self,
         py: Python,
         partition_fn_bytes: Vec<u8>,
         action: TaskAction,
     ) -> PyResult<()> {
-        let payload_struct = PythonUdfPayload {
+        let payload_struct = PythonTaskPayload {
             fn_bytes: partition_fn_bytes,
             zero_bytes: vec![],
         };
         let payload = serde_json::to_vec(&payload_struct)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let op = PipelineOp {
-            op_id: "atomic::udf::python".to_string(),
+            op_id: "atomic::task::python".to_string(),
             action,
             runtime: TaskRuntime::Python,
             payload,

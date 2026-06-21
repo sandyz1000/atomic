@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::{JsUdfPayload, PipelineOp, TaskAction, TaskRuntime};
+use atomic_data::distributed::{JsTaskPayload, PipelineOp, TaskAction, TaskRuntime};
 use napi::JsValue as _;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -80,21 +80,21 @@ impl JsRdd {
         Ok(partitions)
     }
 
-    fn stage_js_udf(
+    fn stage_js_task(
         &mut self,
         fn_source: String,
         action: TaskAction,
         context_json: Option<String>,
     ) -> Result<()> {
-        let payload_struct = JsUdfPayload {
+        let payload_struct = JsTaskPayload {
             fn_source,
             zero_json: String::new(),
             context_json,
         };
         let payload = serde_json::to_vec(&payload_struct)
-            .map_err(|e| Error::from_reason(format!("JsUdfPayload encode: {e}")))?;
+            .map_err(|e| Error::from_reason(format!("JsTaskPayload encode: {e}")))?;
         let op = PipelineOp {
-            op_id: "atomic::udf::js".to_string(),
+            op_id: "atomic::task::js".to_string(),
             action,
             runtime: TaskRuntime::JavaScript,
             payload,

@@ -1,7 +1,7 @@
 """Partition-level aggregation helpers shipped to workers via cloudpickle.
 
 Each function here is called on the driver to produce a closure that is then
-cloudpickle-serialized and sent inside a PythonUdfPayload to workers. Workers
+cloudpickle-serialized and sent inside a PythonTaskPayload to workers. Workers
 execute the closure against their local partition slice and return a compact
 partial result, avoiding large intermediate data transfers to the driver.
 """

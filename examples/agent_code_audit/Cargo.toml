@@ -11,4 +11,3 @@ path = "src/main.rs"
 atomic-compute = { workspace = true }
 atomic-data = { workspace = true }
 atomic-nlq = { workspace = true }
-serde_json = { workspace = true }

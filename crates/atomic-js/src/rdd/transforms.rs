@@ -13,7 +13,7 @@ impl JsRdd {
     #[napi]
     pub fn map(&mut self, f: Function<JsonValue, JsonValue>) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(
+            self.stage_js_task(
                 format!(
                     "(partition) => partition.map((x) => ({})(x))",
                     Self::fn_to_source(&f)?
@@ -39,7 +39,7 @@ impl JsRdd {
     #[napi]
     pub fn filter(&mut self, f: Function<JsonValue, bool>) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(
+            self.stage_js_task(
                 format!(
                     "(partition) => partition.filter((x) => ({})(x))",
                     Self::fn_to_source(&f)?
@@ -66,7 +66,7 @@ impl JsRdd {
     #[napi]
     pub fn flat_map(&mut self, f: Function<JsonValue, Vec<JsonValue>>) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(
+            self.stage_js_task(
                 format!(
                     "(partition) => partition.flatMap((x) => ({})(x))",
                     Self::fn_to_source(&f)?
@@ -94,7 +94,7 @@ impl JsRdd {
     #[napi]
     pub fn map_values(&mut self, f: Function<JsonValue, JsonValue>) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(
+            self.stage_js_task(
                 format!(
                     "(partition) => partition.map((p) => [p[0], ({})(p[1])])",
                     Self::fn_to_source(&f)?
@@ -130,7 +130,7 @@ impl JsRdd {
     #[napi]
     pub fn flat_map_values(&mut self, f: Function<JsonValue, Vec<JsonValue>>) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(
+            self.stage_js_task(
                 format!(
                     "(partition) => partition.flatMap((p) => ({})(p[1]).map((v) => [p[0], v]))",
                     Self::fn_to_source(&f)?
@@ -167,7 +167,7 @@ impl JsRdd {
     #[napi]
     pub fn key_by(&mut self, f: Function<JsonValue, JsonValue>) -> Result<JsRdd> {
         if self.context.is_distributed() {
-            self.stage_js_udf(
+            self.stage_js_task(
                 format!(
                     "(partition) => partition.map((x) => [({})(x), x])",
                     Self::fn_to_source(&f)?

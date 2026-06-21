@@ -9,6 +9,16 @@
 /// - Multi-round agent analysis (`max_rounds = 2`)
 /// - Early termination via `FINAL ANSWER:` marker
 /// - Structured severity classification on the driver side
+/// - **Real tool calling**: the subagent may emit `TOOL_CALL: <name> <json_args>`
+///   mid-round to invoke `lookup_cve_severity`, a Rust `#[task]` function dispatched
+///   through `TASK_REGISTRY` — the same mechanism distributed `map_task`/`filter_task`
+///   use, applied to tools.
+///
+/// This is the **Rust task** lane: tools are compiled `#[task]` functions in the
+/// binary. The **scripted** lane (Python/JS tool source shipped dynamically, no
+/// rebuild) is shown from a Python driver in `examples/py-demo/src/agent_step.py` —
+/// embedding Python source in a Rust binary behind a Cargo feature would misrepresent
+/// it as a compile-time concern, which it isn't.
 ///
 /// # Prerequisites
 ///
@@ -23,7 +33,23 @@
 /// cargo run --example agent_code_audit
 /// ```
 use atomic_compute::context::Context;
+use atomic_compute::task_traits::UnaryTask;
 use atomic_data::distributed::AgentStepPayload;
+
+/// A real Rust tool: looks up the typical CVSS severity band for a known issue class.
+/// Registered into `TASK_REGISTRY` at compile time by `#[task]`; dispatched by op_id
+/// when the subagent emits `TOOL_CALL: <op_id> "<issue_class>"`.
+#[atomic_compute::task]
+fn lookup_cve_severity(issue_class: String) -> String {
+    let key = issue_class.trim_matches('"').to_lowercase();
+    let severity = match key.as_str() {
+        s if s.contains("sql") || s.contains("injection") => "CRITICAL",
+        s if s.contains("race") || s.contains("toctou") => "HIGH",
+        s if s.contains("overflow") || s.contains("panic") || s.contains("unwrap") => "MEDIUM",
+        _ => "UNKNOWN",
+    };
+    format!("{{\"issue_class\":{issue_class:?},\"typical_severity\":\"{severity}\"}}")
+}
 
 fn main() {
     atomic_nlq::agent_runner::register();
@@ -95,9 +121,19 @@ fn process_upload(path: &Path, data: &[u8]) -> std::io::Result<()> {
         return;
     }
 
+    let tool_refs = vec![LookupCveSeverity::NAME.to_string()];
+    let tool_hint = format!(
+        "\n\nYou may call the tool `{}` with a JSON string naming the issue class \
+         (e.g. TOOL_CALL: {} \"sql injection\") to check its typical severity band \
+         before finalizing your rating.",
+        LookupCveSeverity::NAME,
+        LookupCveSeverity::NAME
+    );
+
     let config = AgentStepPayload {
         model: model.to_string(),
-        system_prompt: r#"You are an expert Rust security auditor.
+        system_prompt: format!(
+            r#"You are an expert Rust security auditor.
 
 Round 1: list every potential bug, panic, race condition, or security issue you see,
 one per line, prefixed with the severity label [CRITICAL], [HIGH], [MEDIUM], or [LOW].
@@ -107,10 +143,11 @@ significant, correct them. Then output:
 
 FINAL ANSWER:
 [CRITICAL/HIGH/MEDIUM/LOW] <issue title> — <one-sentence explanation>
-(one line per finding, most severe first)"#
-            .to_string(),
-        max_rounds: 2,
-        tool_refs: vec![],
+(one line per finding, most severe first){tool_hint}"#
+        ),
+        max_rounds: 4,
+        tool_refs,
+        resolved_tools: vec![],
         provider: provider.to_string(),
         output_schema: None,
         max_tokens_total: Some(40_000),

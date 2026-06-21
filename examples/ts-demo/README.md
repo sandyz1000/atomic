@@ -73,7 +73,7 @@ Demonstrates every transformation and action available on `RDD<T>`:
 
 TypeScript/JavaScript closures are serialised as source strings
 (`Function.prototype.toString`) and executed on workers via their embedded
-V8 runtime (deno_core). The `atomic-worker` binary handles all JS UDF
+V8 runtime (deno_core). The `atomic-worker` binary handles all JS task
 execution — no binary deployment of your code is required.
 
 ```bash

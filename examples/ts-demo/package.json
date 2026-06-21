@@ -9,6 +9,7 @@
     "mapreduce": "tsx src/map_reduce.ts",
     "distributed": "tsx src/distributed_word_count.ts",
     "agentstep": "tsx src/agent_step.ts",
+    "agentstep:tool": "tsx src/agent_step_tool.ts",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {

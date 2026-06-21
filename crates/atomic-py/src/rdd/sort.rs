@@ -192,7 +192,7 @@ impl PyRdd {
             );
             let sort_fn = builtins.getattr("eval")?.call1((sort_lambda.as_str(),))?;
             let fn_bytes = Self::pickle_fn(py, &sort_fn.unbind())?;
-            self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
+            self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
             let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());

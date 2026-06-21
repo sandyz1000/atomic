@@ -304,9 +304,9 @@ async fn run_python(
     step: &WorkflowStep,
     _upstream: &HashMap<String, StepResult>,
 ) -> Result<StepOutput> {
-    // Python UDFs are executed via the atomic-worker PyO3 runtime.
+    // Python tasks are executed via the atomic-worker PyO3 runtime.
     // The code string is the full function body; args are passed as JSON.
-    // This dispatches through Atomic's existing Python UDF infrastructure.
+    // This dispatches through Atomic's existing Python task infrastructure.
     log::debug!(
         "running Python tool for step '{}': {} bytes of code",
         step.id,
@@ -317,7 +317,7 @@ async fn run_python(
     // Placeholder: real dispatch goes through atomic_compute's Python pool.
     // Returns the result as a text JSON payload until full wiring is complete.
     Ok(StepOutput::Text(format!(
-        "{{\"step\":\"{}\",\"status\":\"python_udf_dispatched\",\"args\":{args_json}}}",
+        "{{\"step\":\"{}\",\"status\":\"python_task_dispatched\",\"args\":{args_json}}}",
         step.id
     )))
 }
@@ -335,7 +335,7 @@ async fn run_javascript(
     let args_json = serde_json::to_string(&step.args)
         .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
     Ok(StepOutput::Text(format!(
-        "{{\"step\":\"{}\",\"status\":\"js_udf_dispatched\",\"args\":{args_json}}}",
+        "{{\"step\":\"{}\",\"status\":\"js_task_dispatched\",\"args\":{args_json}}}",
         step.id
     )))
 }

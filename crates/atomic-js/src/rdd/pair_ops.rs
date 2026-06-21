@@ -22,7 +22,7 @@ impl JsRdd {
                 g.get(k)[1].push(p[1]); } \
                 return o.map(k => g.get(k)); }"
                 .to_string();
-            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
+            self.stage_js_task(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
             let partials_result = self.dispatch_and_collect();
             self.staged = saved_staged;
             let partials = partials_result?;
@@ -116,7 +116,7 @@ impl JsRdd {
                  else {{ g.set(k, [p[0], p[1]]); o.push(k); }} }} \
                  return o.map(k => g.get(k)); }}"
             );
-            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
+            self.stage_js_task(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
             let partials_result = self.dispatch_and_collect();
             self.staged = saved_staged;
             let partials = partials_result?;
@@ -299,7 +299,7 @@ impl JsRdd {
                      result.push([pair[0], [pair[1], rv]]); }} \
                  return result; }}"
             );
-            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
+            self.stage_js_task(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
             let elements_result = self.dispatch_and_collect();
             self.staged = saved_staged;
             let elements = elements_result?;
@@ -382,7 +382,7 @@ impl JsRdd {
                    }} }} \
                  return result; }}"
             );
-            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
+            self.stage_js_task(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
             let elements_result = self.dispatch_and_collect();
             self.staged = saved_staged;
             let elements = elements_result?;

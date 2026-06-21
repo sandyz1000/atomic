@@ -1,9 +1,9 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub(crate) enum PyUdfStageError {
+pub(crate) enum PyTaskStageError {
     #[error(
-        "UDF serialized but failed to load back (workers would fail): {0}. \
+        "task function serialized but failed to load back (workers would fail): {0}. \
          Avoid capturing open files, locks, or C-extension handles."
     )]
     Unpicklable(String),

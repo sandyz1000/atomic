@@ -241,7 +241,7 @@ impl DistributedScheduler {
                             .any(|o| matches!(o.action, TaskAction::AgentStep))
                     {
                         // No per-input checkpointing within a partition (by design — see
-                        // notes/agentic-udf-future-design.md): retrying re-runs every input
+                        // notes/agentic-task-future-design.md): retrying re-runs every input
                         // in this partition's agent loop from scratch, including any that
                         // already produced a successful (and billed) finding.
                         log::warn!(

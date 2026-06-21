@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased] — K8s, Structured Streaming, Kafka, Distributed Cache, Distributed Correctness, Distributed Streaming Sources, UDF Safety
+## [Unreleased] — K8s, Structured Streaming, Kafka, Distributed Cache, Distributed Correctness, Distributed Streaming Sources, Task Safety
 
 ### New crate: `atomic-structured`
 
@@ -67,16 +67,16 @@ read tasks (offset range / file split) that dispatch to workers as ordinary
 - Push/receiver-model sources (custom `Receiver`, socket fan-in) stay driver-local by
   design; only the Direct/pull model distributes.
 
-### New feature: polyglot UDF serialization safety
+### New feature: polyglot task serialization safety
 
-Driver-side preflight for the dynamic (Python/JS/TS) UDF path, turning silent or late
+Driver-side preflight for the dynamic (Python/JS/TS) task path, turning silent or late
 worker failures into typed driver-side errors:
 
 - **`atomic-js`** rejects native/bound functions (`f.toString()` containing
   `[native code]`) at stage time with a clear message, and exposes explicit context
   capture through `*WithContext` ops (`mapWithContext`, `filterWithContext`, …) so
   captured free variables cross the wire instead of becoming `undefined` on the worker.
-- **`atomic-py`** round-trips every dispatched UDF through `cloudpickle.loads` on the
+- **`atomic-py`** round-trips every dispatched task through `cloudpickle.loads` on the
   driver before the job leaves, so a value that pickles but fails to load (open files,
   locks, C-extension handles) fails fast with a typed error instead of an opaque worker
   `PyErr`.

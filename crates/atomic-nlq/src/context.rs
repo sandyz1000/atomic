@@ -118,6 +118,21 @@ impl NlqContext {
         self.registry.register_tool(tool);
     }
 
+    /// Resolve an [`atomic_data::distributed::AgentStepPayload`]'s `tool_refs` against
+    /// this context's `ToolRegistry` (and `TASK_REGISTRY` for Rust tools) before staging
+    /// it into a pipeline op, e.g.:
+    ///
+    /// ```ignore
+    /// let config = ctx.resolve_agent_step(config)?;
+    /// let findings = rdd.agent_step(config).collect()?;
+    /// ```
+    pub fn resolve_agent_step(
+        &self,
+        config: atomic_data::distributed::AgentStepPayload,
+    ) -> Result<atomic_data::distributed::AgentStepPayload> {
+        self.registry.resolve_agent_step(config)
+    }
+
     /// Register a `VectorIndexProvider` for the `vector_search` builtin tool.
     pub fn register_vector_index(&self, index: Arc<dyn VectorIndexProvider>) {
         self.vector_indexes.insert(index.name().to_string(), index);

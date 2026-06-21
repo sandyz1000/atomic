@@ -60,6 +60,7 @@ fn main() {
             .to_string(),
         max_rounds: 2,
         tool_refs: vec![],
+        resolved_tools: vec![],
         provider: provider.to_string(),
         output_schema: None,
         max_tokens_total: Some(20_000),

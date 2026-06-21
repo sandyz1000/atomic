@@ -1,5 +1,6 @@
 use atomic_data::distributed::{
-    AgentFindings, AgentStepPayload, PipelineOp, TaskAction, TaskRuntime, WireDecode,
+    AgentFindings, AgentStepPayload, PipelineOp, ResolvedTool, ScriptRuntime, TaskAction,
+    TaskRuntime, WireDecode,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -16,7 +17,10 @@ impl JsRdd {
     ///   - `systemPrompt` (string, required)      — the agent's task description
     ///   - `maxRounds` (number, default 2)        — plan→execute→evaluate rounds per input
     ///   - `provider` (string, default "openai")  — `"openai"` or `"anthropic"`
-    ///   - `toolRefs` (string[], default [])      — tool names the agent may reference
+    ///   - `toolRefs` (string[], default [])      — names of Rust `#[task]` tools the agent may call
+    ///   - `tools` (object[], default [])         — inline JS tools shipped with the job (no rebuild).
+    ///     Each: `{ name: string, source: string }` where `source` is a function expression
+    ///     `(args) => result`. The model calls them via `TOOL_CALL: <name> <json>`.
     ///   - `outputSchema` (string, optional)      — JSON schema for best-effort output validation
     ///   - `maxTokensTotal` (number, optional)    — token budget across all inputs in a partition
     ///
@@ -97,7 +101,7 @@ fn parse_agent_config(config: &JsonValue) -> Result<AgentStepPayload> {
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| "openai".to_string());
-    let tool_refs = obj
+    let mut tool_refs: Vec<String> = obj
         .get("toolRefs")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -106,6 +110,35 @@ fn parse_agent_config(config: &JsonValue) -> Result<AgentStepPayload> {
                 .collect()
         })
         .unwrap_or_default();
+
+    // Inline JS tools shipped with the job (the scripted lane — no rebuild).
+    // Each is `{ name, source }`; `source` is a function expression `(args) => result`.
+    let mut resolved_tools: Vec<ResolvedTool> = Vec::new();
+    if let Some(tools) = obj.get("tools") {
+        let arr = tools
+            .as_array()
+            .ok_or_else(|| Error::from_reason("agentStep: 'tools' must be an array of objects"))?;
+        for item in arr {
+            let tool = item
+                .as_object()
+                .ok_or_else(|| Error::from_reason("agentStep: each tool must be an object"))?;
+            let name = tool
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::from_reason("agentStep: tool is missing 'name'"))?;
+            let source = tool
+                .get("source")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::from_reason("agentStep: tool is missing 'source'"))?;
+            tool_refs.push(name.to_string());
+            resolved_tools.push(ResolvedTool {
+                name: name.to_string(),
+                runtime: ScriptRuntime::JavaScript,
+                source: source.to_string(),
+            });
+        }
+    }
+
     let output_schema = obj
         .get("outputSchema")
         .and_then(|v| v.as_str())
@@ -117,6 +150,7 @@ fn parse_agent_config(config: &JsonValue) -> Result<AgentStepPayload> {
         system_prompt,
         max_rounds,
         tool_refs,
+        resolved_tools,
         provider,
         output_schema,
         max_tokens_total,

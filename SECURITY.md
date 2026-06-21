@@ -39,7 +39,7 @@ The following are **out of scope** for the security program:
 
 ## Security Considerations for Operators
 
-- **Worker isolation**: Workers execute arbitrary Rust `#[task]` functions linked into the binary at compile time and Python/JavaScript UDFs at runtime. Run workers on isolated machines or containers with appropriate resource limits.
+- **Worker isolation**: Workers execute arbitrary Rust `#[task]` functions linked into the binary at compile time and Python/JavaScript tasks at runtime. Run workers on isolated machines or containers with appropriate resource limits.
 - **TLS**: Enable mTLS for worker communication in production (`--features tls`, `Config::tls_*` fields or `ATOMIC_TLS_*` env vars).
 - **S3 credentials**: Use IAM instance roles or environment variables; never embed credentials in source code.
 - **SSH key management**: `atomic ship` reads SSH private keys from the default agent or key path; ensure key permissions are `0600`.

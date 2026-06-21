@@ -55,7 +55,7 @@ impl JsRdd {
                 "(partition) => partition.length === 0 ? [] : [partition.reduce(({}))]",
                 fn_src
             );
-            self.stage_js_udf(
+            self.stage_js_task(
                 partition_fn,
                 atomic_data::distributed::TaskAction::Reduce,
                 None,
@@ -107,7 +107,7 @@ impl JsRdd {
                 "(partition) => [partition.reduce(({})  , {})]",
                 fn_src, zero_json
             );
-            self.stage_js_udf(
+            self.stage_js_task(
                 partition_fn,
                 atomic_data::distributed::TaskAction::Fold,
                 None,

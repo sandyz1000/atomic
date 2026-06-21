@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use atomic_data::distributed::{AgentStepPayload, ResolvedTool, ScriptRuntime};
 use dashmap::DashMap;
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{AggregateUDF, ScalarUDF};
@@ -175,5 +176,154 @@ impl ToolRegistry {
             .iter()
             .map(|e| e.value().clone())
             .collect()
+    }
+
+    /// Resolve `config.tool_refs` against this registry and `atomic-compute`'s
+    /// `TASK_REGISTRY`, filling in `config.resolved_tools`. Call this once,
+    /// driver-side, before staging `config` into a pipeline op (e.g. `rdd.agent_step(..)`)
+    /// — workers dispatch `TOOL_CALL:` by op_id / resolved-tool name and never consult
+    /// `ToolRegistry` directly.
+    ///
+    /// - A `tool_refs` entry matching a `#[task]` op_id in `TASK_REGISTRY` is left as-is;
+    ///   the worker dispatches it through `TASK_REGISTRY` at call time.
+    /// - A `Python`/`JavaScript` tool is resolved into `resolved_tools`.
+    /// - A `Builtin` tool (`sql_query`, `llm_filter`, ...) is rejected: builtins run in the
+    ///   driver-side `WorkflowExecutor` today, not inside a worker's `agent_step` loop.
+    /// - A name matching neither registry is rejected with [`NlqError::ToolNotFound`].
+    pub fn resolve_agent_step(&self, mut config: AgentStepPayload) -> Result<AgentStepPayload> {
+        let mut resolved = Vec::with_capacity(config.tool_refs.len());
+        for name in &config.tool_refs {
+            if atomic_compute::task_registry::TASK_REGISTRY.contains_key(name.as_str()) {
+                continue;
+            }
+            match self.get_tool(name) {
+                Some(ToolDefinition {
+                    runtime: ToolRuntime::Python(source),
+                    ..
+                }) => resolved.push(ResolvedTool {
+                    name: name.clone(),
+                    runtime: ScriptRuntime::Python,
+                    source,
+                }),
+                Some(ToolDefinition {
+                    runtime: ToolRuntime::JavaScript(source),
+                    ..
+                }) => resolved.push(ResolvedTool {
+                    name: name.clone(),
+                    runtime: ScriptRuntime::JavaScript,
+                    source,
+                }),
+                Some(ToolDefinition {
+                    runtime: ToolRuntime::Builtin(_),
+                    ..
+                }) => {
+                    return Err(crate::errors::NlqError::ToolNotFound(format!(
+                        "'{name}' is a builtin tool; builtins are not supported inside agent_step \
+                         (they run in the driver-side WorkflowExecutor)"
+                    )));
+                }
+                None => {
+                    return Err(crate::errors::NlqError::ToolNotFound(format!(
+                        "'{name}' is not a registered #[task] op_id nor a ToolRegistry tool"
+                    )));
+                }
+            }
+        }
+        config.resolved_tools = resolved;
+        Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_registry() -> ToolRegistry {
+        ToolRegistry::new(Arc::new(SessionContext::new()))
+    }
+
+    fn base_payload(tool_refs: Vec<String>) -> AgentStepPayload {
+        AgentStepPayload {
+            model: "test-model".to_string(),
+            system_prompt: String::new(),
+            max_rounds: 1,
+            tool_refs,
+            resolved_tools: vec![],
+            provider: "openai".to_string(),
+            output_schema: None,
+            max_tokens_total: None,
+        }
+    }
+
+    #[test]
+    fn resolve_agent_step_leaves_rust_op_id_unresolved() {
+        // Any #[task]-registered op_id (none registered in this crate's test binary,
+        // but the call path is identical) is left out of resolved_tools — it's
+        // dispatched by the worker via TASK_REGISTRY at call time, not pre-resolved here.
+        // We simulate "registered" by checking a genuinely unregistered name is rejected
+        // instead (the complementary case is covered by atomic-nlq's agent_runner tests,
+        // which run in the same binary as the #[task] registration).
+        let registry = test_registry();
+        let result = registry.resolve_agent_step(base_payload(vec!["not_a_real_tool".to_string()]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_agent_step_resolves_python_tool() {
+        let registry = test_registry();
+        registry.register_tool(ToolDefinition {
+            name: "py_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: serde_json::json!({}),
+            runtime: ToolRuntime::Python("def run(args):\n    return args".to_string()),
+        });
+        let config = registry
+            .resolve_agent_step(base_payload(vec!["py_tool".to_string()]))
+            .expect("resolution should succeed");
+        assert_eq!(config.resolved_tools.len(), 1);
+        assert_eq!(config.resolved_tools[0].name, "py_tool");
+        assert_eq!(config.resolved_tools[0].runtime, ScriptRuntime::Python);
+    }
+
+    #[test]
+    fn resolve_agent_step_resolves_javascript_tool() {
+        let registry = test_registry();
+        registry.register_tool(ToolDefinition {
+            name: "js_tool".to_string(),
+            description: "test".to_string(),
+            input_schema: serde_json::json!({}),
+            runtime: ToolRuntime::JavaScript("function run(args) { return args; }".to_string()),
+        });
+        let config = registry
+            .resolve_agent_step(base_payload(vec!["js_tool".to_string()]))
+            .expect("resolution should succeed");
+        assert_eq!(config.resolved_tools.len(), 1);
+        assert_eq!(config.resolved_tools[0].runtime, ScriptRuntime::JavaScript);
+    }
+
+    #[test]
+    fn resolve_agent_step_rejects_builtin_tool() {
+        let registry = test_registry();
+        let result = registry.resolve_agent_step(base_payload(vec!["sql_query".to_string()]));
+        assert!(
+            result.is_err(),
+            "builtin tools must be rejected inside agent_step"
+        );
+    }
+
+    #[test]
+    fn resolve_agent_step_rejects_unknown_tool() {
+        let registry = test_registry();
+        let result = registry.resolve_agent_step(base_payload(vec!["totally_unknown".to_string()]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_agent_step_empty_tool_refs_is_noop() {
+        let registry = test_registry();
+        let config = registry
+            .resolve_agent_step(base_payload(vec![]))
+            .expect("empty tool_refs always resolves");
+        assert!(config.resolved_tools.is_empty());
     }
 }

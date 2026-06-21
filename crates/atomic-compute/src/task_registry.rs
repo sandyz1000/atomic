@@ -1,4 +1,4 @@
-use atomic_data::distributed::{AgentStepPayload, TaskAction};
+use atomic_data::distributed::{AgentStepPayload, TaskAction, WireDecode, WireEncode};
 use once_cell::sync::Lazy;
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -294,6 +294,28 @@ pub trait AgentRunner: Send + Sync {
     /// `inputs` is rkyv-encoded `Vec<String>` (or JSON array fallback for Python/JS).
     /// Returns rkyv-encoded `Vec<AgentFindings>` on success, or an error string.
     fn run_partition(&self, payload: &AgentStepPayload, inputs: &[u8]) -> Result<Vec<u8>, String>;
+}
+
+/// Invoke a registered `fn(String) -> String` `#[task]` by its op_id, using the same
+/// `TaskAction::Map` wire encoding the macro generates for that signature.
+///
+/// Used by `agent_step` tool dispatch (`atomic-nlq`'s `TOOL_CALL:` handling) to call a
+/// Rust tool by op_id with one JSON-text argument and get one JSON-text result back —
+/// the `fn(String) -> String` shape `AgentStepPayload.tool_refs` requires for Rust tools
+/// (see `agent-step-tool-calling` design notes: `serde_json::Value` has no rkyv impl, so
+/// the wire-level signature must be `String` in/out).
+pub fn invoke_str_task(op_id: &str, arg: String) -> Result<String, String> {
+    let handler = TASK_REGISTRY
+        .get(op_id)
+        .ok_or_else(|| format!("tool '{op_id}' is not registered in TASK_REGISTRY"))?;
+    let data = vec![arg]
+        .encode_wire()
+        .map_err(|e| format!("encode tool arg for '{op_id}': {e}"))?;
+    let result = handler(&TaskAction::Map, &[], &data)?;
+    let mut out = Vec::<String>::decode_wire(&result)
+        .map_err(|e| format!("decode tool result for '{op_id}': {e}"))?;
+    out.pop()
+        .ok_or_else(|| format!("tool '{op_id}' returned no output"))
 }
 
 /// Global agent runner registry — populated once by [`register_agent_runner`].

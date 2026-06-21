@@ -52,7 +52,6 @@ dependencies = [
  "atomic-compute",
  "atomic-data",
  "atomic-nlq",
- "serde_json",
 ]
 
 [[package]]

@@ -22,7 +22,7 @@ impl PyRdd {
         )?;
         match Self::pickle_fn(py, &wrapper.unbind()) {
             Ok(fn_bytes) if self.context.is_distributed() => {
-                self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
+                self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
                 Ok(self.take_as_new(py))
             }
             Ok(fn_bytes) => {
@@ -66,7 +66,7 @@ impl PyRdd {
         )?;
         match Self::pickle_fn(py, &wrapper.unbind()) {
             Ok(fn_bytes) if self.context.is_distributed() => {
-                self.stage_python_udf(py, fn_bytes, TaskAction::Filter)?;
+                self.stage_python_task(py, fn_bytes, TaskAction::Filter)?;
                 Ok(self.take_as_new(py))
             }
             Ok(fn_bytes) => {
@@ -115,7 +115,7 @@ impl PyRdd {
         )?;
         match Self::pickle_fn(py, &wrapper.unbind()) {
             Ok(fn_bytes) if self.context.is_distributed() => {
-                self.stage_python_udf(py, fn_bytes, TaskAction::FlatMap)?;
+                self.stage_python_task(py, fn_bytes, TaskAction::FlatMap)?;
                 Ok(self.take_as_new(py))
             }
             Ok(fn_bytes) => {
@@ -160,7 +160,7 @@ impl PyRdd {
                 &f,
             )?;
             let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
-            self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
+            self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
             return Ok(self.take_as_new(py));
         }
         let elements = self
@@ -195,7 +195,7 @@ impl PyRdd {
                 &f,
             )?;
             let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
-            self.stage_python_udf(py, fn_bytes, TaskAction::FlatMap)?;
+            self.stage_python_task(py, fn_bytes, TaskAction::FlatMap)?;
             return Ok(self.take_as_new(py));
         }
         let mut elements = Vec::new();
@@ -233,7 +233,7 @@ impl PyRdd {
                 &f,
             )?;
             let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
-            self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
+            self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
             return Ok(self.take_as_new(py));
         }
         let elements = self

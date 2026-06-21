@@ -102,7 +102,7 @@ def test_count_by_value_keys_are_items():
 
 **File:** `crates/atomic-py/src/rdd.rs` (the `map_values` distributed branch)  
 **Severity:** High — in distributed mode, the key is dropped; workers receive only the value and
-apply the UDF, returning an ungrouped sequence rather than `(key, new_value)` pairs. The result
+apply the task function, returning an ungrouped sequence rather than `(key, new_value)` pairs. The result
 is unrecoverable.
 
 **Test to add:**
@@ -213,11 +213,11 @@ No distributed-mode tests exist at all. Critical paths to cover:
 | Path | Concern |
 |---|---|
 | `collect` with staged pipeline | Dispatches to workers; aggregates results correctly |
-| `map` in distributed mode | `stage_python_udf` + pickle round-trip |
+| `map` in distributed mode | `stage_python_task` + pickle round-trip |
 | `filter` in distributed mode | Python predicate serialization |
 | `reduce_by_key` in distributed mode | Shuffle + repr-based key bug surfaces here |
 | Multi-stage pipeline (map → filter → collect) | Op chain serialization |
-| Worker-side Python UDF deserialization | `pickle.loads` + call on worker |
+| Worker-side Python task deserialization | `pickle.loads` + call on worker |
 
 ---
 
@@ -277,7 +277,7 @@ test("range with negative step from positive to zero", () => {
 
 **File:** `crates/atomic-js/src/rdd.rs`  
 **Severity:** High — every other distributed-mode transform (`map`, `filter`, `flat_map`, `fold`,
-`reduce`) checks `self.is_distributed()` and calls `stage_js_udf()`. `reduce_by_key` and
+`reduce`) checks `self.is_distributed()` and calls `stage_js_task()`. `reduce_by_key` and
 `group_by_key` do not. They always run on the driver using local data regardless of the context
 mode. This silently returns wrong results (misses data on workers) in distributed deployments.
 
@@ -413,9 +413,9 @@ No distributed-mode tests exist. Critical paths to cover:
 
 | Path | Concern |
 |---|---|
-| `collect` with staged pipeline | Full JS UDF dispatch round-trip |
+| `collect` with staged pipeline | Full JS task dispatch round-trip |
 | `map` in distributed mode | `fn.toString()` serialization + V8 eval on worker |
-| `filter` in distributed mode | Boolean UDF over wire |
+| `filter` in distributed mode | Boolean task over wire |
 | `fold` in distributed mode | Broken JS string generation (JS-B5) |
 | Multi-stage pipeline | Op chain serialization ordering |
 | `reduce_by_key` in distributed mode | Currently has no distributed path (JS-B2) |
@@ -477,7 +477,7 @@ Update `crates/atomic-py/python/atomic/__init__.pyi` to declare all 18 missing m
 ### P4 — Distributed integration tests
 
 Add at minimum:
-- One test per UDF type (Python pickle round-trip, JS source string round-trip)
+- One test per task type (Python pickle round-trip, JS source string round-trip)
 - `reduce_by_key` end-to-end in distributed mode (after JS-B2 fix)
 - Multi-stage distributed pipeline (map → filter → collect)
 

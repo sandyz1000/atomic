@@ -102,7 +102,7 @@ Atomic is a stable-Rust rewrite and refactor of Vega.
 ## Repository Structure
 
 - `crates/atomic-data`: shared types — RDD traits, task envelopes, distributed structs, shuffle primitives, dependency DAG, partition cache.
-- `crates/atomic-compute`: execution runtime — context, executor, `NativeBackend`, UDF dispatch, RDD implementations, persist/cache layer. Backend runtimes (in `runtimes/`): `native.rs` (Rust `#[task]` registry), `py.rs` (embedded PyO3 worker pool), `js.rs` (V8/deno_core thread-local runtime).
+- `crates/atomic-compute`: execution runtime — context, executor, `NativeBackend`, task dispatch, RDD implementations, persist/cache layer. Backend runtimes (in `runtimes/`): `native.rs` (Rust `#[task]` registry), `py.rs` (embedded PyO3 worker pool), `js.rs` (V8/deno_core thread-local runtime).
 - `crates/atomic-scheduler`: DAG building, stage planning, job tracking, `LocalScheduler`, `DistributedScheduler`.
 - `crates/atomic-sql`: structured data and SQL query layer — built on DataFusion (see below).
 - `crates/atomic-streaming`: Spark Streaming–style micro-batch streaming on top of `atomic-compute`; includes `DistributedSource` (source partitions dispatched to workers) and the Kafka source.
@@ -253,7 +253,7 @@ The `#[task]` op_id format is `"crate::module::fn_name::body_hash_short"` — th
 - `DashMapShuffleCache` + `ShuffleManager` HTTP server.
 - `ShuffleFetcher` + `MapOutputTracker` — per-chunk fetch retry with exponential backoff (`fetch_chunk_with_retry`, `MAX_FETCH_RETRIES`).
 - `partition_id` in `TaskResultEnvelope` for correct result ordering after retries.
-- Python UDF support (PyO3 / pickle) and JavaScript UDF support (V8 / deno_core / fn.toString).
+- Python task support (PyO3 / pickle) and JavaScript task support (V8 / deno_core / fn.toString).
 - Unified `_task` API: `map_task`, `filter_task`, `flat_map_task`, `fold_task`, `reduce_task` — work identically in local and distributed mode.
 - All action methods (`collect`, `count`, `take`, `first`, `reduce`, `fold`, `aggregate`, `for_each`, `for_each_partition`, `count_by_value`, `is_empty`, `top`, `take_ordered`, `max`, `min`) dispatch staged pipelines to workers in distributed mode.
 - `AtomicApp::build()` — unified entry point; reads `--worker`/`--workers`/`--local-ip` from CLI.
@@ -534,17 +534,17 @@ atomic ship --workers user@host1,user@host2        # SFTP upload + SHA-256 verif
 ```
 
 Each remote worker node receives the same binary. The binary embeds both the Rust task registry
-and the PyO3/V8 runtimes for Python and JS UDFs — no separate runtime installation needed.
+and the PyO3/V8 runtimes for Python and JS tasks — no separate runtime installation needed.
 
 ### 5. Python / JS closures: the dynamic execution path
 
 Python and JavaScript functions are a first-class dynamic path — they ship with the job and never
 require binary redeployment:
 
-- Python lambdas are `cloudpickle`-serialized on the driver (`PythonUdfPayload.fn_bytes`) and shipped
+- Python lambdas are `cloudpickle`-serialized on the driver (`PythonTaskPayload.fn_bytes`) and shipped
   inside `TaskEnvelope`; the worker's embedded PyO3 runtime executes them.
 - JavaScript functions are captured as source via `Function.prototype.toString()`
-  (`JsUdfPayload.fn_source`, with optional `context_json` for closure-like capture) and evaluated by
+  (`JsTaskPayload.fn_source`, with optional `context_json` for closure-like capture) and evaluated by
   the embedded V8 runtime.
 
 Use `#[task]` when you want native Rust speed and the compile-time dispatch guarantee; use the
@@ -553,8 +553,8 @@ production.
 
 | Change type | Requires binary redeployment? |
 | --- | --- |
-| Modify a Python UDF lambda | **No** — pickled and sent in TaskEnvelope |
-| Modify a JavaScript UDF function | **No** — source string sent in TaskEnvelope |
+| Modify a Python task lambda | **No** — pickled and sent in TaskEnvelope |
+| Modify a JavaScript task function | **No** — source string sent in TaskEnvelope |
 | Modify a Rust `#[task]` function | **Yes** — compiled into the binary |
 | Add new scheduler/shuffle infrastructure | **Yes** — compiled into the binary |
 

@@ -3,7 +3,7 @@ Distributed word count demo using the atomic Python API.
 
 Python lambdas are serialized via ``pickle`` and executed on workers via their
 embedded PyO3 runtime. The ``atomic-worker`` pre-built binary handles all Python
-UDF execution — no binary deployment of your code is required.
+task execution — no binary deployment of your code is required.
 
 Setup:
   1. Build and install the Python module (driver side):

@@ -204,7 +204,7 @@ Workers now execute the compiled Rust `#[task]` function instead of deserializin
 | Feature | Rust | Python | TypeScript |
 | --- | --- | --- | --- |
 | `#[task]` compile-time dispatch | yes | no | no |
-| Closure / lambda UDFs | yes (local) | yes (pickled) | yes (V8 source string) |
+| Closure / lambda tasks | yes (local) | yes (pickled) | yes (V8 source string) |
 | SQL (`SqlContext`) | yes | yes | yes |
 | Streaming (`StreamingContext`) | yes | yes | yes |
 | Graph (`Graph`, 6 algorithms) | yes | yes | yes |
@@ -346,7 +346,8 @@ silently dropped. One `AgentFindings` record comes back per input element, in in
 | `system_prompt` | string | Task instructions sent as the system message every round |
 | `max_rounds` | int | Per-input round cap |
 | `provider` | string | `"openai"` (default) or `"anthropic"` — selects the API client and reads the matching env var (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) |
-| `tool_refs` | string[] | Names of tools the model is told it may reference (see limitation below) |
+| `tool_refs` | string[] | Names of tools the model may call mid-loop via `TOOL_CALL: <name> <json_args>` (see "Tool calling" below) |
+| `resolved_tools` | `ResolvedTool[]` | Python/JS tool source, resolved driver-side by `ToolRegistry::resolve_agent_step` — leave empty and let resolution fill it in; don't construct by hand |
 | `output_schema` | string \| null | Optional JSON Schema; if set, each answer is checked to be valid JSON and wrapped in an `{"error": ...}` envelope if it isn't (best-effort, not full schema validation) |
 | `max_tokens_total` | int \| null | Approximate (`chars / 4`) token budget shared across the whole partition |
 
@@ -361,6 +362,7 @@ let config = AgentStepPayload {
                      End with FINAL ANSWER: <text> once confident.".to_string(),
     max_rounds: 2,
     tool_refs: vec![],
+    resolved_tools: vec![],
     provider: "openai".to_string(),
     output_schema: None,
     max_tokens_total: Some(20_000),
@@ -404,14 +406,47 @@ Full runnable versions: [`examples/agent_step`](examples/agent_step) (Rust), `ex
 and the heavier [`examples/agent_code_audit`](examples/agent_code_audit) (multi-round severity review)
 and [`examples/agent_news_triage`](examples/agent_news_triage) (urgency ranking) walkthroughs.
 
-### Current limitation: `tool_refs` is a prompt hint, not tool execution
+### Tool calling inside `agent_step`
 
-`tool_refs` is forwarded into the system prompt as a list of names the model is told it "may
-reference" — the `AgentStep` runner does **not** parse tool-call responses or invoke
-`ToolRegistry` tools on the model's behalf today. This is different from the NLQ `WorkflowExecutor`
-path above, which *does* execute `sql_query` and registered Python/JS tools as real steps. Real
-in-loop tool execution for `agent_step` is open work, tracked in
-`notes/agentic-udf-future-design.md`.
+A subagent can call a tool mid-loop by responding with exactly one line:
+
+```text
+TOOL_CALL: <tool_name> <json_args>
+```
+
+The runner parses that marker out of the response, dispatches the call, appends `Tool <name>
+result: <output>` to the conversation, and starts the next round — the model sees the result and
+can continue reasoning, call another tool, or emit `FINAL ANSWER:`. Tool dispatch follows the same
+two-lane split as the rest of Atomic:
+
+- **Rust tools** are ordinary `#[task]` functions with the shape `fn(String) -> String` (JSON text
+  in, JSON text out — `WireEncode`/`WireDecode` only cover rkyv types, so a tool can't take
+  `serde_json::Value` directly). Put the function's `#[task]`-generated `op_id`
+  (`SomeTask::NAME`) straight into `tool_refs` — workers look it up in the same `TASK_REGISTRY`
+  used by `map_task`/`filter_task`, no separate tool registry involved.
+- **Python/JS tools** are registered in `atomic-nlq`'s `ToolRegistry` (raw source defining a
+  top-level `run(args)` function — the same convention the `WorkflowExecutor`'s Python/JS tools
+  use) and must be resolved once, driver-side, **before** staging the config:
+
+  ```rust
+  let config = ctx.resolve_agent_step(config)?;   // fills resolved_tools
+  let findings = rdd.agent_step(config).collect()?;
+  ```
+
+  `resolve_agent_step` leaves `#[task]` op_ids untouched (workers resolve those themselves) and
+  copies matching `ToolRegistry` Python/JS source into `resolved_tools`, so workers never need
+  a `ToolRegistry` of their own — only the resolved source travels over the wire. It rejects builtin
+  tools (`sql_query`, `llm_filter`, ...) and unknown names with a clear error rather than silently
+  dropping them. Running Python/JS tools requires building with the matching Cargo feature
+  (`atomic-nlq/python` or `atomic-nlq/js`); without it, a `TOOL_CALL:` to an unresolved-but-named
+  tool returns a clear "binary not built with this feature" error string fed back into the
+  conversation instead of crashing the worker.
+
+A tool call that names something neither in `TASK_REGISTRY` nor `resolved_tools` also
+produces an error string fed back into the conversation, not a panic — the model gets a chance to
+retry with a different tool or give up and answer anyway. See
+[`examples/agent_code_audit`](examples/agent_code_audit) for a full example with one Rust tool
+(`lookup_cve_severity`) and one Python tool (`severity_weight`, behind `--features python`).
 
 ### Production-safety knobs
 
@@ -525,7 +560,7 @@ optional `HorizontalPodAutoscaler`, optional mTLS, and `/health` + `/metrics` pr
 | | `join`, `sort_by`, `glom`, `cache`, `checkpoint` on RDD — Python + JS | yes |
 | | Python → Arrow (`df.to_arrow()`) | yes |
 | | Python RDD → SQL bridge (`register_rdd`) | yes |
-| | Polyglot UDF preflight — JS native-fn rejection + `*WithContext` capture; Python `cloudpickle` load round-trip | yes |
+| | Polyglot task preflight — JS native-fn rejection + `*WithContext` capture; Python `cloudpickle` load round-trip | yes |
 | **Infrastructure** | S3 object store — Rust only (`s3` feature) | yes |
 | | Mutual TLS (`tls` feature, rustls) | yes |
 | | Prometheus `/metrics` endpoint | yes |
@@ -576,7 +611,7 @@ optional `HorizontalPodAutoscaler`, optional mTLS, and `/health` + `/metrics` pr
 - `TASK_REGISTRY` is linked at compile time via `inventory::submit!`. Workers cannot execute tasks they weren't compiled with — there is no remote code execution surface.
 - All distributed wire types use `rkyv` for zero-copy deserialization. No reflection, no dynamic dispatch on the hot path.
 - `LocalScheduler` and `DistributedScheduler` share the same `NativeBackend` dispatch. Local-mode tests cover exactly the same codepath as distributed-mode jobs.
-- Python UDFs are `cloudpickle`-serialized and executed by the embedded PyO3 runtime in `atomic-worker`. JavaScript UDFs are shipped as source strings and evaluated by the embedded V8 runtime. Both go through the same `TaskEnvelope` wire format as Rust `#[task]` functions.
+- Python tasks are `cloudpickle`-serialized and executed by the embedded PyO3 runtime in `atomic-worker`. JavaScript tasks are shipped as source strings and evaluated by the embedded V8 runtime. Both go through the same `TaskEnvelope` wire format as Rust `#[task]` functions.
 
 ---
 

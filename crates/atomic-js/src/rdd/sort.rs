@@ -140,7 +140,7 @@ impl JsRdd {
                 "(partition) => partition.slice().sort((a, b) => \
                  a[0] < b[0] ? {cmp_lt} : a[0] > b[0] ? {cmp_gt} : 0)"
             );
-            self.stage_js_udf(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
+            self.stage_js_task(wrapper, atomic_data::distributed::TaskAction::Map, None)?;
             let parts_result = self.dispatch_and_collect_partitioned();
             self.staged = saved_staged;
             let sorted_parts = parts_result?;

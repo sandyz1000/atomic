@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use atomic_data::distributed::{PipelineOp, PythonUdfPayload, TaskAction, TaskRuntime};
+use atomic_data::distributed::{PipelineOp, PythonTaskPayload, TaskAction, TaskRuntime};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyIterator, PyList, PyTuple};
 
@@ -67,14 +67,14 @@ impl PyRdd {
                 &f,
             )?;
             let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
-            let payload_struct = PythonUdfPayload {
+            let payload_struct = PythonTaskPayload {
                 fn_bytes,
                 zero_bytes: vec![],
             };
             let payload = serde_json::to_vec(&payload_struct)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let op = PipelineOp {
-                op_id: "atomic::udf::python".to_string(),
+                op_id: "atomic::task::python".to_string(),
                 action: TaskAction::Reduce,
                 runtime: TaskRuntime::Python,
                 payload,
@@ -132,14 +132,14 @@ impl PyRdd {
             )?;
             let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
             let zero_bytes = Self::pickle_fn(py, &zero)?;
-            let payload_struct = PythonUdfPayload {
+            let payload_struct = PythonTaskPayload {
                 fn_bytes,
                 zero_bytes: vec![],
             };
             let payload = serde_json::to_vec(&payload_struct)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let op = PipelineOp {
-                op_id: "atomic::udf::python".to_string(),
+                op_id: "atomic::task::python".to_string(),
                 action: TaskAction::Fold,
                 runtime: TaskRuntime::Python,
                 payload,

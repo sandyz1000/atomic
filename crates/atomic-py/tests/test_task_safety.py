@@ -1,5 +1,5 @@
-"""Coverage for the pickle round-trip check UDFs go through before being staged
-for distributed dispatch (A3).
+"""Coverage for the pickle round-trip check task functions go through before being
+staged for distributed dispatch (A3).
 
 `_verify_picklable` calls the same `pickle_fn` helper that every distributed
 `map`/`filter`/`flat_map`/... call site uses internally. It is exposed only so

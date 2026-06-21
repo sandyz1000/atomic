@@ -82,7 +82,7 @@ Sum of 1..100 = 5050
 ### `src/distributed_word_count.py` — Distributed word count
 
 Python lambdas are serialized via `pickle` and executed on workers by their embedded
-PyO3 runtime. The `atomic-worker` binary handles all Python UDF execution — no binary
+PyO3 runtime. The `atomic-worker` binary handles all Python task execution — no binary
 deployment of your code is required.
 
 ```bash

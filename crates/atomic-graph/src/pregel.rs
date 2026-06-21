@@ -31,7 +31,7 @@ use crate::topology::{EdgeContext, EdgeDirection, VertexId};
 ///   messages.  `EdgeDirection::Either` (the GraphX default)
 ///   considers all edges.
 /// * `vprog`            — vertex program: `(vid, vd, msg) -> new_vd`.
-/// * `send_msg`         — edge UDF: receives an `EdgeContext` and emits messages.
+/// * `send_msg`         — edge function: receives an `EdgeContext` and emits messages.
 /// * `merge_msg`        — commutative associative combiner for messages.
 pub fn run<VD, ED, A, VProg, SendMsg, MergeMsg>(
     graph: &Graph<VD, ED>,

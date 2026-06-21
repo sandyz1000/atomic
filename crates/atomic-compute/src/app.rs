@@ -140,7 +140,7 @@ impl AtomicApp {
     /// Start the worker executor loop. This is the consumer side of the
     /// driver/worker split — analogous to `app.consume_from(queues)` in celery.
     ///
-    /// Binds the TCP port declared in `--port`, initialises shuffle and UDF
+    /// Binds the TCP port declared in `--port`, initialises shuffle and task
     /// runtimes, then enters the task-dispatch loop. **Never returns.**
     ///
     /// # Panics

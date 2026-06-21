@@ -3,8 +3,8 @@ name = "atomic-worker"
 version.workspace = true
 edition.workspace = true
 
-# NOTE: exclude atomic-worker from `cargo test --workspace` because the `udf`
-# feature activates pyo3 (which needs libpython) inside atomic-compute, causing
+# NOTE: exclude atomic-worker from `cargo test --workspace` because the
+# `embedded-runtime` feature activates pyo3 (which needs libpython) inside atomic-compute, causing
 # link failures in other test binaries that don't link against libpython.
 # Since atomic-worker has no unit tests, this exclusion loses nothing.
 #
@@ -16,7 +16,7 @@ name = "atomic-worker"
 path = "src/main.rs"
 
 [dependencies]
-# `udf` enables both `python` and `js` features inside atomic-compute (subprocess pool + V8).
+# `embedded-runtime` enables both `python` and `js` features inside atomic-compute (PyO3 pool + V8).
 atomic-compute = { workspace = true, features = ["embedded-runtime"] }
 tokio = { workspace = true }
 env_logger = { workspace = true }

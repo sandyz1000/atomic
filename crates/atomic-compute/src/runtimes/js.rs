@@ -1,9 +1,9 @@
 use crate::error::{ComputeError, ComputeResult};
-use atomic_data::distributed::JsUdfPayload;
+use atomic_data::distributed::JsTaskPayload;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub(crate) enum JsUdfError {
+pub(crate) enum JsTaskError {
     #[error("payload decode: {0}")]
     PayloadDecode(#[from] serde_json::Error),
     #[error("partition data is not valid UTF-8: {0}")]
@@ -12,12 +12,12 @@ pub(crate) enum JsUdfError {
     Eval(String),
 }
 
-impl From<JsUdfError> for ComputeError {
-    fn from(e: JsUdfError) -> Self {
+impl From<JsTaskError> for ComputeError {
+    fn from(e: JsTaskError) -> Self {
         ComputeError::InvalidPayload(e.to_string())
     }
 }
-/// Thread-local V8 JavaScript runtime for UDF execution (deno_core).
+/// Thread-local V8 JavaScript runtime for task execution (deno_core).
 ///
 /// One [`deno_core::JsRuntime`] is kept per tokio blocking thread.  Because V8
 /// isolates are `!Send`, thread-local storage is the correct placement and also
@@ -28,7 +28,7 @@ impl From<JsUdfError> for ComputeError {
 ///
 /// # Function compilation cache
 ///
-/// UDF functions (e.g. `"x => x * 2"`) are compiled into `globalThis.__f<hash>`
+/// task functions (e.g. `"x => x * 2"`) are compiled into `globalThis.__f<hash>`
 /// on first use and referenced by name on all subsequent partitions.  V8 parses
 /// each distinct function expression exactly once per thread rather than once per
 /// partition call.  The per-thread cache tracks which functions have been compiled.
@@ -36,7 +36,7 @@ impl From<JsUdfError> for ComputeError {
 /// # Context capture
 ///
 /// The caller may pass a `context_json` string (a JSON object).  It is injected
-/// as `globalThis.__ctx` before the UDF script runs, allowing functions written
+/// as `globalThis.__ctx` before the task script runs, allowing functions written
 /// as `(x, ctx) => x > ctx.threshold` to access driver-side values without
 /// closure serialization.
 use std::cell::RefCell;
@@ -51,7 +51,7 @@ thread_local! {
 
 /// [`OpDispatcher`] for `TaskRuntime::JavaScript` ops.
 ///
-/// Decodes the [`JsUdfPayload`] from `op.payload` and evaluates the partition
+/// Decodes the [`JsTaskPayload`] from `op.payload` and evaluates the partition
 /// through the thread-local V8 runtime.
 ///
 /// V8 isolates are `!Send`; the runtime lives in thread-local storage by
@@ -92,7 +92,7 @@ impl JsDispatcher {
     fn ensure_fn_compiled(
         rt: &mut deno_core::JsRuntime,
         fn_source: &str,
-    ) -> Result<String, JsUdfError> {
+    ) -> Result<String, JsTaskError> {
         use std::hash::{Hash, Hasher};
         let mut hasher = rustc_hash::FxHasher::default();
         fn_source.hash(&mut hasher);
@@ -107,13 +107,13 @@ impl JsDispatcher {
             "<fn_init>",
             format!("globalThis.{js_name} = ({fn_source});"),
         )
-        .map_err(|e| JsUdfError::Eval(e.to_string()))?;
+        .map_err(|e| JsTaskError::Eval(e.to_string()))?;
 
         FN_CACHE.with(|c| c.borrow_mut().insert(key, js_name.clone()));
         Ok(js_name)
     }
 
-    /// Evaluate a UDF partition operation using the thread-local V8 runtime.
+    /// Evaluate a task partition operation using the thread-local V8 runtime.
     ///
     /// - `fn_source` — JavaScript function expression (from `fn.toString()` on the driver).
     /// - `context_json` — optional JSON object injected as `globalThis.__ctx`.
@@ -125,21 +125,21 @@ impl JsDispatcher {
         fn_source: &str,
         context_json: Option<&str>,
         data_str: &str,
-    ) -> Result<Vec<u8>, JsUdfError> {
+    ) -> Result<Vec<u8>, JsTaskError> {
         Self::with_runtime(|rt| {
             let ctx_js = match context_json {
                 Some(ctx) => format!("globalThis.__ctx = {ctx};"),
                 None => "globalThis.__ctx = undefined;".to_string(),
             };
             rt.execute_script("<ctx>", ctx_js)
-                .map_err(|e| JsUdfError::Eval(e.to_string()))?;
+                .map_err(|e| JsTaskError::Eval(e.to_string()))?;
 
             let fn_var = Self::ensure_fn_compiled(rt, fn_source)?;
 
             let script = format!("JSON.stringify(({})({}));", fn_var, data_str);
             let result = rt
-                .execute_script("<udf>", script)
-                .map_err(|e| JsUdfError::Eval(e.to_string()))?;
+                .execute_script("<task>", script)
+                .map_err(|e| JsTaskError::Eval(e.to_string()))?;
 
             // SAFETY: hs (ScopeStorage) is immediately shadowed by the PinnedRef below;
             // it stays on the stack and cannot be moved after this point.
@@ -158,13 +158,26 @@ impl JsDispatcher {
     }
 }
 
+/// Run a JS tool function against one JSON-text argument and return one JSON-text result.
+///
+/// `fn_source` is a JS function expression (`fn.toString()`-captured, same convention as
+/// ordinary map/filter tasks); it receives the parsed `args_json` value as its single
+/// argument. Used by `agent_step` tool dispatch (`atomic-nlq`'s `TOOL_CALL:` handling) for
+/// tools resolved from `AgentStepPayload.resolved_tools`.
+pub fn run_tool_call(fn_source: &str, args_json: &str) -> Result<String, String> {
+    let bytes = JsDispatcher::new()
+        .eval_partition(fn_source, None, args_json)
+        .map_err(|e| e.to_string())?;
+    String::from_utf8(bytes).map_err(|e| format!("JS tool result is not valid UTF-8: {e}"))
+}
+
 impl JsDispatcher {
     fn dispatch_impl(
         &self,
         op: &atomic_data::distributed::PipelineOp,
         data: &[u8],
-    ) -> Result<Vec<u8>, JsUdfError> {
-        let spec: JsUdfPayload = serde_json::from_slice(&op.payload)?;
+    ) -> Result<Vec<u8>, JsTaskError> {
+        let spec: JsTaskPayload = serde_json::from_slice(&op.payload)?;
         let data_str = std::str::from_utf8(data)?;
         self.eval_partition(&spec.fn_source, spec.context_json.as_deref(), data_str)
     }

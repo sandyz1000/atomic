@@ -1,5 +1,6 @@
 use atomic_data::distributed::{
-    AgentFindings, AgentStepPayload, PipelineOp, TaskAction, TaskRuntime, WireDecode,
+    AgentFindings, AgentStepPayload, PipelineOp, ResolvedTool, ScriptRuntime, TaskAction,
+    TaskRuntime, WireDecode,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -15,7 +16,10 @@ impl PyRdd {
     ///   - `system_prompt` (str, required)    — the agent's task description
     ///   - `max_rounds` (int, default 2)       — plan→execute→evaluate rounds per input
     ///   - `provider` (str, default "openai")  — `"openai"` or `"anthropic"`
-    ///   - `tool_refs` (list[str], default []) — tool names the agent may reference
+    ///   - `tool_refs` (list[str], default []) — names of Rust `#[task]` tools the agent may call
+    ///   - `tools` (list[dict], default [])    — inline Python tools shipped with the job
+    ///     (no rebuild). Each: `{"name": str, "source": str}` where `source` defines a
+    ///     top-level `run(args)` function. The model calls them via `TOOL_CALL: <name> <json>`.
     ///   - `output_schema` (str, optional)     — JSON schema for best-effort output validation
     ///   - `max_tokens_total` (int, optional)  — token budget across all inputs in a partition
     ///
@@ -95,10 +99,43 @@ fn parse_agent_config(config: &Bound<'_, PyDict>) -> PyResult<AgentStepPayload> 
         .map(|v| v.extract())
         .transpose()?
         .unwrap_or_else(|| "openai".to_string());
-    let tool_refs: Vec<String> = optional("tool_refs")?
+    let mut tool_refs: Vec<String> = optional("tool_refs")?
         .map(|v| v.extract())
         .transpose()?
         .unwrap_or_default();
+
+    // Inline Python tools shipped with the job (the scripted lane — no rebuild).
+    // Each is `{"name": str, "source": str}`; `source` defines a top-level `run(args)`.
+    let mut resolved_tools: Vec<ResolvedTool> = Vec::new();
+    if let Some(tools) = optional("tools")? {
+        let list = tools.cast::<PyList>().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err("agent_step: 'tools' must be a list of dicts")
+        })?;
+        for item in list.iter() {
+            let tool = item.cast::<PyDict>().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err("agent_step: each tool must be a dict")
+            })?;
+            let name: String = tool
+                .get_item("name")?
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyKeyError::new_err("agent_step: tool is missing 'name'")
+                })?
+                .extract()?;
+            let source: String = tool
+                .get_item("source")?
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyKeyError::new_err("agent_step: tool is missing 'source'")
+                })?
+                .extract()?;
+            tool_refs.push(name.clone());
+            resolved_tools.push(ResolvedTool {
+                name,
+                runtime: ScriptRuntime::Python,
+                source,
+            });
+        }
+    }
+
     let output_schema: Option<String> = optional("output_schema")?
         .map(|v| v.extract())
         .transpose()?;
@@ -111,6 +148,7 @@ fn parse_agent_config(config: &Bound<'_, PyDict>) -> PyResult<AgentStepPayload> 
         system_prompt,
         max_rounds,
         tool_refs,
+        resolved_tools,
         provider,
         output_schema,
         max_tokens_total,

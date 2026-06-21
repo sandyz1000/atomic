@@ -53,15 +53,15 @@ Driver and worker run **the same binary**. The dispatch table is built at compil
 **Atomic** uses an explicit `Config` struct built at the entry point and passed to
 `Context::new_with_config()`. Environment variables still work for legacy use.
 
-### 4. No UDF story for non-Rust developers
+### 4. No cross-language task story for non-Rust developers
 
 **Vega** had no mechanism for dynamic/non-Rust tasks.
 
-**Atomic** adds first-class Python and JavaScript UDF support:
+**Atomic** adds first-class Python and JavaScript task support:
 
-- Python UDFs are serialized with `pickle` and executed in an embedded PyO3 runtime.
-- JavaScript UDFs are sent as source strings and evaluated by an embedded V8 runtime (deno_core, one `JsRuntime` per worker thread).
-- UDFs follow the same `PipelineOp` dispatch path as native tasks.
+- Python tasks are serialized with `pickle` and executed in an embedded PyO3 runtime.
+- JavaScript tasks are sent as source strings and evaluated by an embedded V8 runtime (deno_core, one `JsRuntime` per worker thread).
+- Scripted (Python/JS) tasks follow the same `PipelineOp` dispatch path as native Rust tasks.
 
 ### 5. No SQL, streaming, or graph layers
 

@@ -62,7 +62,7 @@ benchmarks/.venv/bin/python benchmarks/spark/sort_benchmark.py
 benchmarks/.venv/bin/python benchmarks/spark/join_benchmark.py
 ```
 
-### atomic-py (Python UDF via PyO3 — local mode)
+### atomic-py (Python task via PyO3 — local mode)
 ```bash
 benchmarks/.venv/bin/python benchmarks/atomic_py/pi_benchmark.py
 benchmarks/.venv/bin/python benchmarks/atomic_py/wordcount_benchmark.py
@@ -115,7 +115,7 @@ scan (confirmed in `crates/atomic-py/src/rdd/pair_ops.rs`) rather than a hash ma
 making large-scale shuffle-heavy workloads impractical in local Python mode.
 
 **This is by design**: the `atomic-py` Python closure API targets the *distributed*
-execution path (`Context` connected to real workers), where Python UDFs are `cloudpickle`-
+execution path (`Context` connected to real workers), where Python tasks are `cloudpickle`-
 serialized and dispatched to worker processes. Local-mode ergonomic execution was never
 claimed to be high-performance. The **recommended path for performance-sensitive work** is
 either Rust `#[task]` registration (the path benchmarked here) or distributed mode with

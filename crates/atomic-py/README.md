@@ -271,7 +271,7 @@ ssc.run_one_batch()    # synchronous tick (for tests / single-step use)
 
 ## Runtime Notes
 
-- **UDF serialization preflight** — Every UDF dispatched to a worker is serialized with
+- **task serialization preflight** — Every task dispatched to a worker is serialized with
   `cloudpickle` (falling back to `pickle`) and then round-tripped through `loads` on the driver
   before the job is sent. A function that pickles but fails to load back — typically because it
   captures an open file, a lock, or a C-extension handle — is rejected at the staging call with a

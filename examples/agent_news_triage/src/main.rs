@@ -64,6 +64,7 @@ Return a JSON array — one object per headline — and nothing else."#
             .to_string(),
         max_rounds: 1,
         tool_refs: vec![],
+        resolved_tools: vec![],
         provider: provider.to_string(),
         output_schema: Some(r#"{"type":"array","items":{"type":"object","required":["urgency","category","summary"]}}"#.to_string()),
         max_tokens_total: Some(30_000),

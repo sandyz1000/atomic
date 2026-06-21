@@ -1,12 +1,92 @@
 use std::sync::Arc;
 
 use atomic_compute::AgentRunner;
-use atomic_data::distributed::{AgentFindings, AgentStepPayload, WireDecode as _, WireEncode as _};
+use atomic_compute::task_registry;
+use atomic_data::distributed::{
+    AgentFindings, AgentStepPayload, ScriptRuntime, WireDecode as _, WireEncode as _,
+};
 
 use crate::config::{LlmProvider, NlqConfig};
 use crate::llm::LlmClient;
 use crate::llm::anthropic::AnthropicClient;
 use crate::openai::OpenAiClient;
+
+/// Parses a `TOOL_CALL: <tool_ref> <json_args>` marker out of an LLM response.
+///
+/// Everything after the marker is treated as `<tool_ref>` (first whitespace-delimited
+/// token) followed by `<json_args>` (the remainder, trimmed — may itself contain
+/// newlines if the model wrapped a JSON object). Returns `None` if no marker is present
+/// or the tool ref is empty.
+fn parse_tool_call(response: &str) -> Option<(String, String)> {
+    const MARKER: &str = "TOOL_CALL:";
+    let idx = response.find(MARKER)?;
+    let rest = response[idx + MARKER.len()..].trim_start();
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let tool_ref = parts.next()?.trim();
+    if tool_ref.is_empty() {
+        return None;
+    }
+    let json_args = parts.next().unwrap_or("{}").trim();
+    Some((tool_ref.to_string(), json_args.to_string()))
+}
+
+/// Run a Python tool's source against `args_json`. Requires the `python` feature.
+#[cfg(feature = "python")]
+fn dispatch_python_tool(source: &str, args_json: &str) -> Result<String, String> {
+    atomic_compute::runtimes::py::run_tool_call(source, args_json).map_err(|e| e.to_string())
+}
+
+#[cfg(not(feature = "python"))]
+fn dispatch_python_tool(_source: &str, _args_json: &str) -> Result<String, String> {
+    Err(
+        "this binary was not built with the 'python' feature; Python tools are unavailable"
+            .to_string(),
+    )
+}
+
+/// Run a JS tool's source against `args_json`. Requires the `js` feature.
+#[cfg(feature = "js")]
+fn dispatch_js_tool(source: &str, args_json: &str) -> Result<String, String> {
+    atomic_compute::runtimes::js::run_tool_call(source, args_json)
+}
+
+#[cfg(not(feature = "js"))]
+fn dispatch_js_tool(_source: &str, _args_json: &str) -> Result<String, String> {
+    Err(
+        "this binary was not built with the 'js' feature; JavaScript tools are unavailable"
+            .to_string(),
+    )
+}
+
+/// Dispatch one `TOOL_CALL:` to a Rust `#[task]` (by op_id, via `TASK_REGISTRY`) or a
+/// resolved Python/JS tool (via `AgentStepPayload.resolved_tools`). Always returns
+/// a string — errors are formatted as `"error: ..."` and fed back into the conversation
+/// rather than aborting the partition (per the design: a model that mistypes a tool ref
+/// should get a chance to retry or give up, not crash the worker).
+fn dispatch_tool(payload: &AgentStepPayload, tool_ref: &str, json_args: &str) -> String {
+    if task_registry::TASK_REGISTRY.contains_key(tool_ref) {
+        return match task_registry::invoke_str_task(tool_ref, json_args.to_string()) {
+            Ok(out) => out,
+            Err(e) => format!("error: {e}"),
+        };
+    }
+
+    if let Some(tool) = payload.resolved_tools.iter().find(|t| t.name == tool_ref) {
+        let result = match tool.runtime {
+            ScriptRuntime::Python => dispatch_python_tool(&tool.source, json_args),
+            ScriptRuntime::JavaScript => dispatch_js_tool(&tool.source, json_args),
+        };
+        return match result {
+            Ok(out) => out,
+            Err(e) => format!("error: {e}"),
+        };
+    }
+
+    format!(
+        "error: tool '{tool_ref}' is not registered (not a TASK_REGISTRY op_id and not in \
+         resolved_tools) — check the tool name and retry, or proceed without it"
+    )
+}
 
 /// Concrete [`AgentRunner`] implementation backed by atomic-nlq's LlmClient.
 ///
@@ -57,7 +137,9 @@ impl PartitionAgentRunner {
             String::new()
         } else {
             format!(
-                "\n\nAvailable tools you may reference: {}.",
+                "\n\nAvailable tools: {}. To call one, respond with exactly one line: \
+                 TOOL_CALL: <tool_name> <json_args>\nThen stop — you'll receive the tool's \
+                 result and can continue or call another tool.",
                 payload.tool_refs.join(", ")
             )
         };
@@ -94,6 +176,14 @@ impl PartitionAgentRunner {
             conversation = format!("{conversation}\n\nRound {}: {response}", round + 1);
             answer = response;
             rounds_done = round + 1;
+
+            // A tool call takes priority over a final answer in the same response —
+            // dispatch it, feed the result back, and let the model continue or retry.
+            if let Some((tool_ref, json_args)) = parse_tool_call(&answer) {
+                let tool_result = dispatch_tool(payload, &tool_ref, &json_args);
+                conversation = format!("{conversation}\n\nTool {tool_ref} result: {tool_result}");
+                continue;
+            }
 
             // If the response signals completion, stop early.
             if answer.contains("FINAL ANSWER:") || answer.contains("final answer:") {
@@ -205,8 +295,87 @@ pub fn register() {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_string_partition;
-    use atomic_data::distributed::WireEncode as _;
+    use super::{decode_string_partition, dispatch_tool, parse_tool_call};
+    use atomic_compute::task_traits::UnaryTask;
+    use atomic_data::distributed::{
+        AgentStepPayload, ResolvedTool, ScriptRuntime, WireEncode as _,
+    };
+
+    #[atomic_compute::task]
+    fn shout_tool(args: String) -> String {
+        format!("{}!", args.trim_matches('"').to_uppercase())
+    }
+
+    fn base_payload() -> AgentStepPayload {
+        AgentStepPayload {
+            model: "test-model".to_string(),
+            system_prompt: String::new(),
+            max_rounds: 1,
+            tool_refs: vec![],
+            resolved_tools: vec![],
+            provider: "openai".to_string(),
+            output_schema: None,
+            max_tokens_total: None,
+        }
+    }
+
+    #[test]
+    fn parse_tool_call_extracts_ref_and_args() {
+        let response = "I need data.\nTOOL_CALL: my_tool {\"x\": 1}";
+        let (tool_ref, json_args) = parse_tool_call(response).expect("should parse");
+        assert_eq!(tool_ref, "my_tool");
+        assert_eq!(json_args, "{\"x\": 1}");
+    }
+
+    #[test]
+    fn parse_tool_call_defaults_empty_args() {
+        let response = "TOOL_CALL: my_tool";
+        let (tool_ref, json_args) = parse_tool_call(response).expect("should parse");
+        assert_eq!(tool_ref, "my_tool");
+        assert_eq!(json_args, "{}");
+    }
+
+    #[test]
+    fn parse_tool_call_returns_none_without_marker() {
+        assert!(parse_tool_call("FINAL ANSWER: done").is_none());
+    }
+
+    #[test]
+    fn dispatch_tool_invokes_registered_rust_task() {
+        let payload = base_payload();
+        let op_id = ShoutTool::NAME;
+        let result = dispatch_tool(&payload, op_id, "\"hello\"");
+        assert_eq!(result, "HELLO!");
+    }
+
+    #[test]
+    fn dispatch_tool_unresolved_returns_error_string() {
+        let payload = base_payload();
+        let result = dispatch_tool(&payload, "no_such_tool", "{}");
+        assert!(result.starts_with("error:"), "got: {result}");
+    }
+
+    #[test]
+    fn dispatch_tool_unresolved_python_runtime_returns_error_string() {
+        let mut payload = base_payload();
+        payload.resolved_tools.push(ResolvedTool {
+            name: "py_tool".to_string(),
+            runtime: ScriptRuntime::Python,
+            source: "def run(args): return args".to_string(),
+        });
+        // Without the `python` feature compiled in, dispatch_python_tool returns
+        // an error string rather than panicking — exactly the "binary not built
+        // with this feature" path real deployments hit when features are off.
+        #[cfg(not(feature = "python"))]
+        {
+            let result = dispatch_tool(&payload, "py_tool", "{}");
+            assert!(result.starts_with("error:"), "got: {result}");
+        }
+        #[cfg(feature = "python")]
+        {
+            let _ = &payload; // exercised by the python feature's own integration tests
+        }
+    }
 
     #[test]
     fn decode_string_partition_rkyv_roundtrip() {

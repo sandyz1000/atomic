@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub(crate) enum JsUdfStageError {
+pub(crate) enum JsTaskStageError {
     #[error(
         "cannot ship a native/bound function to workers; \
          wrap it in an arrow function, e.g. map(x => Math.sqrt(x))"
@@ -11,17 +11,17 @@ pub(crate) enum JsUdfStageError {
     ContextEncode(#[from] serde_json::Error),
 }
 
-impl From<JsUdfStageError> for napi::Error {
-    fn from(e: JsUdfStageError) -> Self {
+impl From<JsTaskStageError> for napi::Error {
+    fn from(e: JsTaskStageError) -> Self {
         napi::Error::from_reason(e.to_string())
     }
 }
 
 /// Reject a function's source text if it is native/bound code (e.g. `Math.sqrt`),
 /// which loses its implementation entirely when shipped to a worker as a string.
-pub(crate) fn reject_native_source(src: &str) -> Result<(), JsUdfStageError> {
+pub(crate) fn reject_native_source(src: &str) -> Result<(), JsTaskStageError> {
     if src.contains("[native code]") {
-        return Err(JsUdfStageError::NativeFunction);
+        return Err(JsTaskStageError::NativeFunction);
     }
     Ok(())
 }
@@ -35,7 +35,7 @@ mod tests {
         let src = "function sqrt() { [native code] }";
         assert!(matches!(
             reject_native_source(src),
-            Err(JsUdfStageError::NativeFunction)
+            Err(JsTaskStageError::NativeFunction)
         ));
     }
 

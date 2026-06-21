@@ -6,7 +6,7 @@ use napi_derive::napi;
 use serde_json::Value as JsonValue;
 
 use super::JsRdd;
-use super::errors::JsUdfStageError;
+use super::errors::JsTaskStageError;
 
 #[napi]
 impl JsRdd {
@@ -24,7 +24,7 @@ impl JsRdd {
         let context_json = serialize_ctx(&ctx)?;
         let fn_src = Self::fn_to_source(&f)?;
         if self.context.is_distributed() {
-            self.stage_js_udf(
+            self.stage_js_task(
                 format!("(partition) => partition.map((x) => ({fn_src})(x, globalThis.__ctx))"),
                 atomic_data::distributed::TaskAction::Map,
                 Some(context_json),
@@ -55,7 +55,7 @@ impl JsRdd {
         let context_json = serialize_ctx(&ctx)?;
         let fn_src = Self::fn_to_source(&f)?;
         if self.context.is_distributed() {
-            self.stage_js_udf(
+            self.stage_js_task(
                 format!("(partition) => partition.filter((x) => ({fn_src})(x, globalThis.__ctx))"),
                 atomic_data::distributed::TaskAction::Filter,
                 Some(context_json),
@@ -87,7 +87,7 @@ impl JsRdd {
         let context_json = serialize_ctx(&ctx)?;
         let fn_src = Self::fn_to_source(&f)?;
         if self.context.is_distributed() {
-            self.stage_js_udf(
+            self.stage_js_task(
                 format!("(partition) => partition.flatMap((x) => ({fn_src})(x, globalThis.__ctx))"),
                 atomic_data::distributed::TaskAction::FlatMap,
                 Some(context_json),
@@ -118,7 +118,7 @@ impl JsRdd {
         let context_json = serialize_ctx(&ctx)?;
         let fn_src = Self::fn_to_source(&f)?;
         if self.context.is_distributed() {
-            self.stage_js_udf(
+            self.stage_js_task(
                 format!(
                     "(partition) => partition.map((p) => [p[0], ({fn_src})(p[1], globalThis.__ctx)])"
                 ),
@@ -172,7 +172,7 @@ impl JsRdd {
                     return o.map(k => g.get(k)); }}
                 "#
             );
-            self.stage_js_udf(
+            self.stage_js_task(
                 wrapper,
                 atomic_data::distributed::TaskAction::Map,
                 Some(context_json.clone()),
@@ -272,7 +272,7 @@ impl JsRdd {
                 "(partition) => partition.length === 0 ? [] : \
                  [partition.reduce((a, x) => ({fn_src})(a, x, globalThis.__ctx))]"
             );
-            self.stage_js_udf(
+            self.stage_js_task(
                 partition_fn,
                 atomic_data::distributed::TaskAction::Reduce,
                 Some(context_json),
@@ -327,7 +327,7 @@ impl JsRdd {
             let partition_fn = format!(
                 "(partition) => [partition.reduce((a, x) => ({fn_src})(a, x, globalThis.__ctx), {zero_json})]"
             );
-            self.stage_js_udf(
+            self.stage_js_task(
                 partition_fn,
                 atomic_data::distributed::TaskAction::Fold,
                 Some(context_json),
@@ -360,5 +360,5 @@ impl JsRdd {
 }
 
 fn serialize_ctx(ctx: &JsonValue) -> Result<String> {
-    serde_json::to_string(ctx).map_err(|e| JsUdfStageError::ContextEncode(e).into())
+    serde_json::to_string(ctx).map_err(|e| JsTaskStageError::ContextEncode(e).into())
 }

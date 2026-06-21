@@ -20,7 +20,7 @@ impl PyRdd {
             let helpers = PyModule::import(py, "atomic_compute._pair_helpers")?;
             let partial_fn = helpers.getattr("make_partial_group_fn")?.call0()?;
             let fn_bytes = Self::pickle_fn(py, &partial_fn.unbind())?;
-            self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
+            self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
             let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
@@ -105,9 +105,9 @@ impl PyRdd {
                 .getattr("make_partial_reduce_fn")?
                 .call1((f.bind(py),))?;
             let fn_bytes = Self::pickle_fn(py, &partial_fn.unbind())?;
-            // push_op (called by stage_python_udf) auto-creates the staged pipeline from
+            // push_op (called by stage_python_task) auto-creates the staged pipeline from
             // self.elements when not already staged — works for both chained and standalone use.
-            self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
+            self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
             let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
@@ -249,7 +249,7 @@ impl PyRdd {
                 .getattr("make_join_fn")?
                 .call1((right_json.as_str(),))?;
             let fn_bytes = Self::pickle_fn(py, &join_fn.unbind())?;
-            self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
+            self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
             let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
@@ -327,7 +327,7 @@ impl PyRdd {
                 .getattr("make_left_outer_join_fn")?
                 .call1((right_json.as_str(),))?;
             let fn_bytes = Self::pickle_fn(py, &join_fn.unbind())?;
-            self.stage_python_udf(py, fn_bytes, TaskAction::Map)?;
+            self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
             let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());

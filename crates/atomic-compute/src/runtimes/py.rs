@@ -1,4 +1,4 @@
-/// PyO3 thread-pool for Python UDF execution.
+/// PyO3 thread-pool for Python task execution.
 ///
 /// Each [`PyWorker`] is a dedicated OS thread that holds a PyO3 interpreter
 /// context. Workers communicate with their callers via synchronous Rust channels
@@ -8,8 +8,8 @@
 ///
 /// Standard CPython has a process-wide GIL: only one thread runs Python bytecode
 /// at a time regardless of the number of workers. Round-robin dispatch across
-/// multiple workers gives true concurrency for I/O-bound UDFs (the GIL is released
-/// during I/O). CPU-bound UDFs serialize through the GIL — the same limitation as
+/// multiple workers gives true concurrency for I/O-bound tasks (the GIL is released
+/// during I/O). CPU-bound tasks serialize through the GIL — the same limitation as
 /// any embedded CPython approach. The architecture is forward-compatible with
 /// Python 3.13 free-threaded builds, which remove the GIL entirely.
 ///
@@ -29,10 +29,10 @@ use pyo3::types::PyBytes;
 use thiserror::Error;
 
 use crate::error::{ComputeError, ComputeResult};
-use atomic_data::distributed::PythonUdfPayload;
+use atomic_data::distributed::PythonTaskPayload;
 
 #[derive(Debug, Error)]
-pub enum PythonUdfError {
+pub enum PythonTaskError {
     #[error("Python error: {0}")]
     Py(#[from] pyo3::PyErr),
     #[error("payload decode: {0}")]
@@ -41,10 +41,14 @@ pub enum PythonUdfError {
     Convert(#[from] pythonize::PythonizeError),
     #[error("worker channel closed")]
     ChannelClosed,
+    #[error("tool source contains an embedded NUL byte")]
+    InvalidSource,
+    #[error("tool source has no top-level `run(args)` function")]
+    MissingRunFn,
 }
 
-impl From<PythonUdfError> for ComputeError {
-    fn from(e: PythonUdfError) -> Self {
+impl From<PythonTaskError> for ComputeError {
+    fn from(e: PythonTaskError) -> Self {
         ComputeError::InvalidPayload(e.to_string())
     }
 }
@@ -52,7 +56,7 @@ impl From<PythonUdfError> for ComputeError {
 struct PyTask {
     fn_bytes: Vec<u8>,
     data: Vec<u8>,
-    reply: mpsc::SyncSender<Result<Vec<u8>, PythonUdfError>>,
+    reply: mpsc::SyncSender<Result<Vec<u8>, PythonTaskError>>,
 }
 
 struct PyWorker {
@@ -61,13 +65,13 @@ struct PyWorker {
 }
 
 impl PyWorker {
-    /// Execute one pickled Python UDF against a JSON-encoded partition.
+    /// Execute one pickled Python task against a JSON-encoded partition.
     ///
     /// Called from within `Python::attach` so `py` is the live GIL token.
     /// `pythonize`/`depythonize` convert between `serde_json::Value` and Python
     /// objects in Rust — the only Python import needed is `cloudpickle`/`pickle`.
-    fn run_udf(py: Python<'_>, fn_bytes: &[u8], data: &[u8]) -> Result<Vec<u8>, PythonUdfError> {
-        // Unpickle the user's UDF — cloudpickle is the only Python import needed.
+    fn run_task(py: Python<'_>, fn_bytes: &[u8], data: &[u8]) -> Result<Vec<u8>, PythonTaskError> {
+        // Unpickle the user's task — cloudpickle is the only Python import needed.
         let pickle = py.import("cloudpickle").or_else(|_| py.import("pickle"))?;
         let fn_obj = pickle.call_method1("loads", (PyBytes::new(py, fn_bytes),))?;
 
@@ -86,7 +90,7 @@ impl PyWorker {
         let (task_tx, task_rx) = mpsc::sync_channel::<PyTask>(0);
         let thread = std::thread::spawn(move || {
             for task in task_rx {
-                let result = Python::attach(|py| Self::run_udf(py, &task.fn_bytes, &task.data));
+                let result = Python::attach(|py| Self::run_task(py, &task.fn_bytes, &task.data));
                 let _ = task.reply.send(result);
             }
         });
@@ -96,7 +100,7 @@ impl PyWorker {
         }
     }
 
-    fn execute(&self, fn_bytes: Vec<u8>, data: Vec<u8>) -> Result<Vec<u8>, PythonUdfError> {
+    fn execute(&self, fn_bytes: Vec<u8>, data: Vec<u8>) -> Result<Vec<u8>, PythonTaskError> {
         let (reply_tx, reply_rx) = mpsc::sync_channel(0);
         self.task_tx
             .send(PyTask {
@@ -104,8 +108,10 @@ impl PyWorker {
                 data,
                 reply: reply_tx,
             })
-            .map_err(|_| PythonUdfError::ChannelClosed)?;
-        reply_rx.recv().map_err(|_| PythonUdfError::ChannelClosed)?
+            .map_err(|_| PythonTaskError::ChannelClosed)?;
+        reply_rx
+            .recv()
+            .map_err(|_| PythonTaskError::ChannelClosed)?
     }
 }
 
@@ -126,15 +132,41 @@ impl PyWorkerPool {
         }
     }
 
-    pub fn execute(&self, fn_bytes: Vec<u8>, data: Vec<u8>) -> Result<Vec<u8>, PythonUdfError> {
+    pub fn execute(&self, fn_bytes: Vec<u8>, data: Vec<u8>) -> Result<Vec<u8>, PythonTaskError> {
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.workers.len();
         self.workers[idx].execute(fn_bytes, data)
     }
 }
 
+/// Run a Python tool's source against one JSON-text argument and return one
+/// JSON-text result.
+///
+/// Unlike [`PyWorkerPool::execute`] (which unpickles a closure shipped from the
+/// driver), `source` is raw Python text defining a top-level `run(args)` function —
+/// the same convention `atomic-nlq`'s `ToolRegistry::Python(String)` tools already use
+/// (see `crates/atomic-nlq/tests/test_context.rs`). Used by `agent_step` tool dispatch
+/// (`TOOL_CALL:` handling) for tools resolved into `AgentStepPayload.resolved_tools`.
+pub fn run_tool_call(source: &str, args_json: &str) -> Result<String, PythonTaskError> {
+    Python::initialize();
+    Python::attach(|py| {
+        let code = std::ffi::CString::new(source).map_err(|_| PythonTaskError::InvalidSource)?;
+        let module = PyModule::from_code(py, &code, c"<agent_tool>", c"agent_tool")?;
+        let run_fn = module
+            .getattr("run")
+            .map_err(|_| PythonTaskError::MissingRunFn)?;
+
+        let value: serde_json::Value = serde_json::from_str(args_json)?;
+        let args_obj = pythonize::pythonize(py, &value)?;
+        let result = run_fn.call1((args_obj,))?;
+
+        let out: serde_json::Value = pythonize::depythonize(&result)?;
+        Ok(serde_json::to_string(&out)?)
+    })
+}
+
 /// [`OpDispatcher`] for `TaskRuntime::Python` ops.
 ///
-/// Owns a [`PyWorkerPool`] and forwards pickled UDF bytes + partition data to it.
+/// Owns a [`PyWorkerPool`] and forwards pickled task bytes + partition data to it.
 /// Constructed by [`ComputeEngine::default`]; the pool starts on first construction.
 pub(crate) struct PythonDispatcher {
     pool: Arc<PyWorkerPool>,
@@ -151,8 +183,8 @@ impl PythonDispatcher {
         &self,
         op: &atomic_data::distributed::PipelineOp,
         data: &[u8],
-    ) -> Result<Vec<u8>, PythonUdfError> {
-        let spec: PythonUdfPayload = serde_json::from_slice(&op.payload)?;
+    ) -> Result<Vec<u8>, PythonTaskError> {
+        let spec: PythonTaskPayload = serde_json::from_slice(&op.payload)?;
         self.pool.execute(spec.fn_bytes, data.to_vec())
     }
 }

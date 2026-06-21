@@ -4,7 +4,7 @@
  * JavaScript/TypeScript closures are serialised as source strings
  * (via Function.prototype.toString) and executed on workers via their
  * embedded V8 (deno_core) runtime — no binary deployment of your code required.
- * The `atomic-worker` binary handles all JS UDF execution.
+ * The `atomic-worker` binary handles all JS task execution.
  *
  * Setup:
  *   cd examples/ts-demo && npm install
