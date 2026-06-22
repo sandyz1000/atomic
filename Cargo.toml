@@ -69,6 +69,7 @@ atomic-nlq = { path = "crates/atomic-nlq" }
 atomic-sql = { path = "crates/atomic-sql" }
 atomic-compute = { path = "crates/atomic-compute" }
 atomic-scheduler = { path = "crates/atomic-scheduler" }
+atomic-k8s = { path = "crates/atomic-k8s" }
 atomic-streaming = { path = "crates/atomic-streaming" }
 atomic-data = { path = "crates/atomic-data" }
 atomic-utils = { path = "crates/atomic-utils" }

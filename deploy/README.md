@@ -26,6 +26,34 @@ the A records of all worker pods. The driver is started with:
 (or HPA) scales up. Pods that disappear are pruned by the existing heartbeat loop.
 So autoscaling works end-to-end with no static worker list.
 
+## Per-job worker allocation (`allocator: kube`)
+
+The default (`allocator: static`) scopes each job over the standing worker pool above.
+When jobs need *different* resources, set `allocator: kube`: the driver creates dedicated
+worker pods per job via the Kubernetes API, sized to the job's `ResourceProfile`
+(CPU/memory/count, GPU/extended resources, nodeSelector/affinity/tolerations), pins the
+job's task placement to exactly those pods, and deletes them when the job finishes.
+
+```bash
+# Image must be built with the `k8s` feature (adds kube-rs).
+helm install demo deploy/helm/atomic \
+  --set image.repository=myrepo/atomic --set image.tag=0.1.0 \
+  --set allocator=kube --set worker.enabled=false
+```
+
+With `allocator: kube` the chart also creates a `Role`/`RoleBinding` granting the driver
+ServiceAccount pod-management rights, and injects the driver's pod identity
+(`POD_NAME`/`POD_UID`) so worker pods carry an `OwnerReference` — Kubernetes
+garbage-collects them if the driver dies. `worker.enabled: false` drops the standing
+StatefulSet/HPA so the driver provisions everything on demand. From application code:
+
+```rust
+ctx.with_workers(
+    ResourceProfile::new(6).with_cpu("4", "8").with_memory("8Gi", "16Gi"),
+    |sc| sc.parallelize_typed(data, 6).map_task(Heavy).collect(),
+).await?;
+```
+
 ## Build & deploy
 
 ```bash

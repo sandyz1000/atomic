@@ -53,6 +53,21 @@ spec:
             - configMapRef:
                 name: {{ include "atomic.fullname" . }}-env
           env:
+            {{- if eq .Values.allocator "kube" }}
+            # Driver pod identity for OwnerReference GC of per-job worker pods.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- end }}
             {{- range $k, $v := .Values.driver.env }}
             - name: {{ $k }}
               value: {{ $v | quote }}

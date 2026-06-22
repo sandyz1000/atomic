@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — K8s, Structured Streaming, Kafka, Distributed Cache, Distributed Correctness, Distributed Streaming Sources, Task Safety
 
+### New feature: per-job Kubernetes worker allocation
+
+Different jobs can now request different resources. `Context::with_workers(profile, |sc| …)`
+provisions workers dedicated to one job, runs it pinned to exactly those workers, and releases
+them on completion.
+
+- **`ResourceProfile`** (`atomic-scheduler`) — per-job worker shape: count, CPU/memory
+  requests+limits, extended resources (e.g. `nvidia.com/gpu`), `nodeSelector`, affinity,
+  tolerations, env, labels.
+- **`WorkerAllocator`** trait + **`StaticAllocator`** (default, scopes over the existing pool;
+  behavior unchanged) + **`KubeWorkerAllocator`** (new crate **`atomic-k8s`**, behind the
+  `atomic-compute` `k8s` feature) which creates/awaits/deletes pods via `kube-rs`.
+- **Dedicated isolation** via `DistributedScheduler::scoped_to(endpoints)` — a scheduler view
+  with a private placement queue; all existing placement/shuffle/cache code restricts to the
+  job's workers with no changes.
+- **Config**: `allocator` (`ATOMIC_ALLOCATOR` = `static` | `kube`) + `KubeAllocatorConfig`
+  (`ATOMIC_K8S_*`). **Helm**: `allocator: kube` adds a driver pod-management `Role`/`RoleBinding`,
+  downward-API `POD_NAME`/`POD_UID` for `OwnerReference` GC, and `worker.enabled: false` to drop
+  the standing StatefulSet/HPA.
+
 ### New crate: `atomic-structured`
 
 Spark Structured Streaming–style continuous SQL/DataFrame queries on the micro-batch

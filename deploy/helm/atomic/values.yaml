@@ -9,7 +9,27 @@ image:
 # `command` lets you override the entrypoint if your image differs.
 command: []
 
+# Worker allocation strategy:
+#   static — jobs scope over the standing worker pool (StatefulSet + HPA + DNS discovery).
+#   kube   — the driver creates dedicated worker pods per job via the Kubernetes API,
+#            sized to each job's ResourceProfile (requires the image built with the
+#            `k8s` feature). With `kube`, set `worker.enabled: false` to drop the
+#            standing pool and let the driver provision on demand.
+allocator: static
+
+# Settings for `allocator: kube`. Ignored when `allocator: static`.
+k8s:
+  # Namespace the driver creates worker pods in. Empty = the release namespace.
+  namespace: ""
+  # Image for per-job worker pods. Empty = the chart image.
+  workerImage: ""
+  # Seconds to wait for a worker pod to become Ready before failing the allocation.
+  readyTimeoutSecs: 120
+
 worker:
+  # Run the standing worker StatefulSet/HPA. Set false with `allocator: kube` to
+  # have the driver provision dedicated pods per job instead.
+  enabled: true
   # Number of worker pods. The HPA (if enabled) overrides this at runtime.
   replicas: 3
   # TCP port the worker listens on for TaskEnvelopes (matches Dockerfile EXPOSE).

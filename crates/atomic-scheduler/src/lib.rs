@@ -12,7 +12,10 @@ use atomic_data::partial::{ApproximateEvaluator, result::PartialResult};
 use atomic_data::{data::Data, rdd::Rdd, task_context::TaskContext};
 use std::sync::Arc;
 
-pub use crate::distributed::{RegisterRequest, start_register_server};
+pub use crate::distributed::{
+    AllocatorError, AllocatorResult, RegisterRequest, ResourceProfile, StaticAllocator,
+    WorkerAllocator, start_register_server,
+};
 pub use crate::{base::NativeScheduler, error::LibResult};
 pub use crate::{distributed::DistributedScheduler, local::LocalScheduler};
 

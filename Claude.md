@@ -113,6 +113,7 @@ Atomic is a stable-Rust rewrite and refactor of Vega.
 - `crates/atomic-js`: Node.js bindings via NAPI — full RDD API, mirrors `TypedRdd`.
 - `crates/atomic-worker`: standalone worker binary with embedded PyO3 + V8 runtimes.
 - `crates/atomic-cli`: cross-compilation and secure binary distribution to remote workers.
+- `crates/atomic-k8s`: Kubernetes worker allocator (`KubeWorkerAllocator`) — provisions dedicated per-job worker pods via `kube-rs`. Optional; pulled in by `atomic-compute`'s `k8s` feature.
 - `crates/atomic-utils`: shared utilities.
 - `crates/atomic-tests`: integration test suite (distributed, shuffle, streaming, graph, SQL).
 - `notes/`: architecture notes and design documents.

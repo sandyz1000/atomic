@@ -29,6 +29,7 @@ use crate::{
     stage::Stage,
 };
 
+mod allocator;
 mod cache_dispatch;
 mod job_runner;
 pub(crate) mod locality;
@@ -37,6 +38,9 @@ mod shuffle_stage;
 mod transport;
 mod worker_pool;
 
+pub use allocator::{
+    AllocatorError, AllocatorResult, ResourceProfile, StaticAllocator, WorkerAllocator,
+};
 pub use cache_dispatch::CacheDispatch;
 pub use worker_pool::InflightGuard;
 
@@ -147,6 +151,20 @@ impl DistributedScheduler {
     pub fn with_driver_fingerprint(mut self, fp: u64) -> Self {
         self.driver_fingerprint = fp;
         self
+    }
+
+    /// Build a job-scoped view whose task placement is restricted to `endpoints`.
+    ///
+    /// Every other piece of state — worker capabilities, in-flight counts, caches,
+    /// trackers, heartbeat — is shared with `self` via `Arc`; only the round-robin
+    /// placement queue (`server_uris`) is private to the returned view. This pins a
+    /// job to a dedicated set of workers without changing any placement code, which
+    /// all reads `self.server_uris`. The endpoints must already be registered in
+    /// `worker_capabilities` (capacity-aware placement consults it).
+    pub fn scoped_to(&self, endpoints: Vec<SocketAddrV4>) -> Self {
+        let mut view = self.clone();
+        view.server_uris = Arc::new(Mutex::new(allocator::placement_queue(endpoints)));
+        view
     }
 
     /// Total number of tasks currently dispatched to workers and not yet completed.
@@ -448,6 +466,27 @@ mod tests {
         );
         let selected = scheduler.next_executor().expect("should select worker");
         assert_eq!(selected, addr);
+    }
+
+    #[test]
+    fn scoped_pins_subset() {
+        let sched = DistributedScheduler::new(4, true);
+        let all: Vec<_> = (0..3)
+            .map(|i| SocketAddrV4::new(Ipv4Addr::LOCALHOST, 32000 + i))
+            .collect();
+        for (i, addr) in all.iter().enumerate() {
+            sched.register_worker(*addr, WorkerCapabilities::new(format!("w{i}"), 2, vec![]));
+        }
+
+        let view = sched.scoped_to(vec![all[0], all[2]]);
+
+        // The view places only on the two scoped endpoints...
+        let mut picked = vec![view.next_executor().unwrap(), view.next_executor().unwrap()];
+        picked.sort();
+        assert_eq!(picked, vec![all[0], all[2]]);
+        // ...while still sharing the full capability registry with the parent.
+        assert_eq!(view.worker_capabilities.len(), 3);
+        assert_eq!(sched.server_uris.lock().len(), 3);
     }
 
     #[test]

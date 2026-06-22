@@ -72,6 +72,8 @@ impl Context {
             work_dir: job_work_dir,
             broadcast_store: Arc::new(dashmap::DashMap::new()),
             accumulator_store: Arc::new(dashmap::DashMap::new()),
+            allocator: None,
+            scoped: false,
         }))
     }
 
@@ -123,7 +125,9 @@ impl Context {
             }
         }
 
-        if address_map.is_empty() {
+        // The Kubernetes allocator starts with no standing workers and provisions
+        // dedicated pods per job, so an empty pool is valid in that mode only.
+        if address_map.is_empty() && config.allocator != crate::env::AllocatorKind::Kube {
             return Err(ComputeError::WorkerHandshake(
                 "no reachable workers found".to_string(),
             ));
@@ -155,6 +159,8 @@ impl Context {
             config.coalesce_shuffle_threshold_bytes,
         ));
 
+        let allocator = Context::build_allocator(&config, &address_map);
+
         Ok(Arc::new(Context {
             config,
             scheduler,
@@ -165,7 +171,58 @@ impl Context {
             work_dir: job_work_dir,
             broadcast_store: Arc::new(dashmap::DashMap::new()),
             accumulator_store: Arc::new(dashmap::DashMap::new()),
+            allocator: Some(allocator),
+            scoped: false,
         }))
+    }
+
+    /// Select the worker allocator for `Context::with_workers` from `config`.
+    /// `Static` scopes jobs over the existing pool; `Kube` provisions dedicated pods.
+    fn build_allocator(
+        config: &Config,
+        address_map: &[SocketAddrV4],
+    ) -> Arc<dyn atomic_scheduler::WorkerAllocator> {
+        match config.allocator {
+            crate::env::AllocatorKind::Kube => Context::build_kube_allocator(config, address_map),
+            crate::env::AllocatorKind::Static => {
+                Arc::new(atomic_scheduler::StaticAllocator::new(address_map.to_vec()))
+            }
+        }
+    }
+
+    #[cfg(feature = "k8s")]
+    fn build_kube_allocator(
+        config: &Config,
+        _address_map: &[SocketAddrV4],
+    ) -> Arc<dyn atomic_scheduler::WorkerAllocator> {
+        // Driver pod identity (downward API) becomes the OwnerReference on worker
+        // pods so Kubernetes garbage-collects them if the driver dies.
+        let owner = match (std::env::var("POD_NAME"), std::env::var("POD_UID")) {
+            (Ok(name), Ok(uid)) => Some(atomic_k8s::DriverOwner { name, uid }),
+            _ => None,
+        };
+        let kube_config = atomic_k8s::KubeConfig {
+            namespace: config.kube.namespace.clone(),
+            worker_image: config.kube.worker_image.clone(),
+            service_account: config.kube.service_account.clone(),
+            task_port: config.kube.task_port,
+            ready_timeout: Duration::from_secs(config.kube.ready_timeout_secs),
+            command: config.kube.command.clone(),
+            owner,
+        };
+        Arc::new(atomic_k8s::KubeWorkerAllocator::new(kube_config))
+    }
+
+    #[cfg(not(feature = "k8s"))]
+    fn build_kube_allocator(
+        _config: &Config,
+        address_map: &[SocketAddrV4],
+    ) -> Arc<dyn atomic_scheduler::WorkerAllocator> {
+        log::error!(
+            "Config requested the Kubernetes allocator but this binary was built without the \
+             `k8s` feature; falling back to the static worker pool"
+        );
+        Arc::new(atomic_scheduler::StaticAllocator::new(address_map.to_vec()))
     }
 
     pub(super) fn worker_clean_up_directives(

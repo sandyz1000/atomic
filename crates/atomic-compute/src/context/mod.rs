@@ -14,6 +14,7 @@ use crate::error::{ComputeError, ComputeResult};
 mod broadcast;
 mod io;
 mod job_runner;
+mod scope;
 mod worker;
 
 pub use worker::start_worker;
@@ -42,10 +43,20 @@ pub struct Context {
     pub(crate) broadcast_store: Arc<dashmap::DashMap<usize, Vec<u8>>>,
     /// Driver-side accumulator store: `accumulator_id → (current_bytes, merge_fn)`.
     pub(crate) accumulator_store: AccumulatorStore,
+    /// Provisions dedicated workers for [`Context::with_workers`]. `None` in local
+    /// mode (and whenever no allocator is configured).
+    pub(crate) allocator: Option<Arc<dyn atomic_scheduler::WorkerAllocator>>,
+    /// True for the transient per-allocation view built by [`Context::with_workers`].
+    /// Its `Drop` must not run driver cleanup — it shares `work_dir`/`address_map`
+    /// with the parent context, which still owns them.
+    pub(crate) scoped: bool,
 }
 
 impl Drop for Context {
     fn drop(&mut self) {
+        if self.scoped {
+            return;
+        }
         #[cfg(debug_assertions)]
         if self.distributed_driver {
             log::info!("inside context drop in master");

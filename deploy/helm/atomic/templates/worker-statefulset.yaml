@@ -1,3 +1,4 @@
+{{- if .Values.worker.enabled }}
 # Workers run the same image as the driver, with `--worker --port <taskPort>`.
 # A StatefulSet (not a Deployment) gives each worker a stable pod DNS name, which
 # the shuffle server relies on for fetches across the cluster.
@@ -88,3 +89,4 @@ spec:
           secret:
             secretName: {{ .Values.tls.secretName }}
       {{- end }}
+{{- end }}

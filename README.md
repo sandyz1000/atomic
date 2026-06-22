@@ -501,6 +501,35 @@ The chart includes the worker StatefulSet, headless Service, driver Job/Deployme
 optional `HorizontalPodAutoscaler`, optional mTLS, and `/health` + `/metrics` probes. See
 [deploy/README.md](deploy/README.md). Kubernetes is an *option*, not a requirement.
 
+#### Per-job dedicated workers (different resources per job)
+
+The default allocator scopes every job over the standing worker pool. When jobs need
+*different* resources — a wide shuffle wants many small CPU workers, an `agent_step`/ML job wants a
+few GPU workers — set `allocator: kube` and let the driver create dedicated pods per job, sized to a
+`ResourceProfile`, then tear them down when the job finishes:
+
+```rust
+use atomic_compute::ResourceProfile;
+
+let findings = ctx
+    .with_workers(
+        ResourceProfile::new(4)
+            .with_cpu("4", "8")
+            .with_memory("8Gi", "16Gi")
+            .with_gpu(1)
+            .with_node_selector("pool", "gpu"),
+        |sc| sc.parallelize_typed(docs, 4).agent_step(cfg).collect(),
+    )
+    .await?;
+```
+
+`with_workers` allocates the pods via the Kubernetes API, pins the job's task placement to exactly
+those pods (dedicated isolation), and deletes them on completion. Enable with the image built
+`--features k8s` and `helm install … --set allocator=kube --set worker.enabled=false`; the chart
+then grants the driver a pod-management `Role` and sets an `OwnerReference` so pods are
+garbage-collected if the driver dies. In local/static mode `with_workers` is a transparent
+pass-through, so the same code runs unchanged.
+
 ---
 
 ## Feature Matrix
@@ -747,7 +776,7 @@ See [docs/getting-started.md](docs/getting-started.md), [docs/configuration.md](
 
 - **Ready**: Local-mode jobs, SQL analytics (DataFusion), graph algorithms, Python/JS prototyping, musl static binary deployment, Kubernetes deployment (Helm)
 - **Early adopter**: Distributed mode on real workloads — core is solid (shuffle joins, fault recovery, distributed cache + locality, speculation, distributed structured-streaming state with report-back affinity, exactly-once Kafka→Kafka); Kafka + Structured Streaming + K8s are newer and the distributed/broker integration tests run behind the `--ignored` CI job
-- **Not yet**: Kubernetes CRD operator; Delta/Iceberg table formats; broadcast join / sort-merge join / skew handling for very large shuffles
+- **Not yet**: Kubernetes CRD operator (per-job worker allocation *is* available, but driver-side imperative via `with_workers`, not an operator); Delta/Iceberg table formats; broadcast join / sort-merge join / skew handling for very large shuffles
 
 ---
 

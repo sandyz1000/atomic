@@ -29,6 +29,51 @@ impl WorkerConfig {
     }
 }
 
+/// How the driver obtains workers for a job run via [`Context::with_workers`].
+///
+/// [`Static`](AllocatorKind::Static) scopes jobs over the existing, already-running
+/// worker pool. [`Kube`](AllocatorKind::Kube) creates dedicated pods per job via the
+/// Kubernetes API (requires the `k8s` feature).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllocatorKind {
+    #[default]
+    Static,
+    Kube,
+}
+
+/// Settings for the Kubernetes worker allocator. Used only when
+/// [`Config::allocator`] is [`AllocatorKind::Kube`].
+#[derive(Debug, Clone)]
+pub struct KubeAllocatorConfig {
+    /// Namespace the driver creates worker pods in.
+    pub namespace: String,
+    /// Container image for worker pods (typically the same image as the driver).
+    pub worker_image: String,
+    /// Service account bound to worker pods. `None` uses the namespace default.
+    pub service_account: Option<String>,
+    /// TCP port the worker listens on for task envelopes.
+    pub task_port: u16,
+    /// How long to wait for a worker pod to become `Running`+`Ready` before failing.
+    pub ready_timeout_secs: u64,
+    /// Container entrypoint override; empty uses the image's own entrypoint. The
+    /// worker flags (`--worker --port <task_port>`) are always appended as args.
+    pub command: Vec<String>,
+}
+
+impl Default for KubeAllocatorConfig {
+    fn default() -> Self {
+        Self {
+            namespace: "default".to_string(),
+            worker_image: String::new(),
+            service_account: None,
+            task_port: 10001,
+            ready_timeout_secs: 120,
+            command: Vec::new(),
+        }
+    }
+}
+
 /// Runtime configuration for a driver or worker process.
 ///
 /// Build this at the program entry point — using [`Config::local`],
@@ -112,6 +157,12 @@ pub struct Config {
     /// after the timeout regardless — workers are long-running daemons and an
     /// abandoned task is simply recomputed on the next job.
     pub drain_timeout_ms: u64,
+    /// How [`Context::with_workers`] provisions workers. Default
+    /// [`AllocatorKind::Static`] (scope over the existing pool).
+    /// Env var: `ATOMIC_ALLOCATOR` (`static` | `kube`).
+    pub allocator: AllocatorKind,
+    /// Kubernetes allocator settings; consulted only when `allocator == Kube`.
+    pub kube: KubeAllocatorConfig,
 }
 
 /// Errors raised by [`Config::validate`].
@@ -161,6 +212,8 @@ impl Config {
             register_port: None,
             sort_shuffle_threshold: None,
             drain_timeout_ms: DEFAULT_DRAIN_TIMEOUT_MS,
+            allocator: AllocatorKind::Static,
+            kube: KubeAllocatorConfig::default(),
         }
     }
 
@@ -188,6 +241,8 @@ impl Config {
             register_port: None,
             sort_shuffle_threshold: None,
             drain_timeout_ms: DEFAULT_DRAIN_TIMEOUT_MS,
+            allocator: AllocatorKind::Static,
+            kube: KubeAllocatorConfig::default(),
         }
     }
 
@@ -215,6 +270,8 @@ impl Config {
             register_port: None,
             sort_shuffle_threshold: None,
             drain_timeout_ms: DEFAULT_DRAIN_TIMEOUT_MS,
+            allocator: AllocatorKind::Static,
+            kube: KubeAllocatorConfig::default(),
         }
     }
 
@@ -343,6 +400,29 @@ impl Config {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(DEFAULT_DRAIN_TIMEOUT_MS);
 
+        let allocator = std::env::var(format!("{PREFIX}ALLOCATOR"))
+            .ok()
+            .and_then(|s| {
+                serde_json::from_str::<AllocatorKind>(&format!("\"{}\"", s.to_lowercase())).ok()
+            })
+            .unwrap_or_default();
+
+        let kube = KubeAllocatorConfig {
+            namespace: std::env::var(format!("{PREFIX}K8S_NAMESPACE"))
+                .unwrap_or_else(|_| "default".to_string()),
+            worker_image: std::env::var(format!("{PREFIX}K8S_WORKER_IMAGE")).unwrap_or_default(),
+            service_account: std::env::var(format!("{PREFIX}K8S_SERVICE_ACCOUNT")).ok(),
+            task_port: std::env::var(format!("{PREFIX}K8S_TASK_PORT"))
+                .ok()
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(10001),
+            ready_timeout_secs: std::env::var(format!("{PREFIX}K8S_READY_TIMEOUT_SECS"))
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(120),
+            command: Vec::new(),
+        };
+
         // In env-var mode, workers come from hosts.conf — resolved by the caller.
         Config {
             local_ip,
@@ -369,6 +449,8 @@ impl Config {
             register_port,
             sort_shuffle_threshold,
             drain_timeout_ms,
+            allocator,
+            kube,
         }
     }
 
@@ -392,7 +474,13 @@ impl Config {
                 if worker.port == 0 {
                     return Err(ConfigError::ZeroWorkerPort);
                 }
-            } else if self.workers.is_empty() && self.worker_dns.is_none() {
+            } else if self.workers.is_empty()
+                && self.worker_dns.is_none()
+                && self.allocator != AllocatorKind::Kube
+            {
+                // The Kubernetes allocator provisions workers per job, so a driver
+                // with no standing pool is valid — it starts empty and `with_workers`
+                // creates dedicated pods on demand.
                 return Err(ConfigError::NoWorkers);
             }
         }

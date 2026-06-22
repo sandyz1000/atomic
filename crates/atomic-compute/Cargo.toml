@@ -55,6 +55,7 @@ tokio-rustls = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 rdkafka = { version = "0.36", optional = true, features = ["cmake-build"] }
+atomic-k8s = { workspace = true, optional = true }
 
 [features]
 # Embedded PyO3 thread-pool — each worker thread acquires the GIL per task.
@@ -68,5 +69,7 @@ s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types", "base64"]
 tls = ["tokio-rustls", "rustls", "rustls-pemfile", "atomic-data/tls"]
 # Enables TaskAction::KafkaConsume dispatch on workers (pulls in librdkafka via cmake).
 kafka = ["dep:rdkafka", "atomic-data/kafka"]
+# Driver-side Kubernetes worker allocator (per-job dedicated pods via kube-rs).
+k8s = ["dep:atomic-k8s"]
 
 [dev-dependencies]

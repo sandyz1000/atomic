@@ -10,6 +10,14 @@ data:
   WORKER_DNS: {{ include "atomic.workerService" . | quote }}
   WORKER_TASK_PORT: "{{ .Values.worker.taskPort }}"
   ATOMIC_SHUFFLE_PORT: "{{ .Values.worker.shufflePort }}"
+  {{- if eq .Values.allocator "kube" }}
+  ATOMIC_ALLOCATOR: "kube"
+  ATOMIC_K8S_NAMESPACE: {{ .Values.k8s.namespace | default .Release.Namespace | quote }}
+  ATOMIC_K8S_WORKER_IMAGE: {{ .Values.k8s.workerImage | default (include "atomic.image" .) | quote }}
+  ATOMIC_K8S_SERVICE_ACCOUNT: {{ include "atomic.serviceAccountName" . | quote }}
+  ATOMIC_K8S_TASK_PORT: "{{ .Values.worker.taskPort }}"
+  ATOMIC_K8S_READY_TIMEOUT_SECS: "{{ .Values.k8s.readyTimeoutSecs }}"
+  {{- end }}
   {{- if .Values.metrics.enabled }}
   ATOMIC_METRICS_PORT: "{{ .Values.worker.shufflePort }}"
   {{- end }}

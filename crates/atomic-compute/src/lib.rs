@@ -114,5 +114,6 @@ macro_rules! register_state_merge {
 pub use atomic_runtime_macros::task;
 pub use atomic_runtime_macros::task_fn;
 
+pub use atomic_scheduler::{ResourceProfile, WorkerAllocator};
 pub use env::{Config, WorkerConfig};
 pub use task_registry::{AgentRunner, register_agent_runner};
