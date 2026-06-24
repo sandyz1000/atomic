@@ -4,24 +4,23 @@ use crate::graph::Graph;
 use crate::pregel;
 use crate::topology::{EdgeContext, EdgeDirection, VertexId, VertexMap};
 
-/// Community detection via label propagation (matching GraphX's `LabelPropagation.run`).
+/// Detect communities via label propagation.
 ///
 /// Each vertex starts with its own vertex ID as its community label.
-/// In each Pregel superstep:
+/// In each superstep:
 ///
 /// 1. Every vertex sends its current label to all neighbors.
-/// 2. Each vertex collects all received labels, tallies their frequencies,
-///    and adopts the **most frequent** label.  Ties are broken by the
-///    **smallest** label value (deterministic, matches GraphX behavior).
+/// 2. Each vertex adopts the **most frequent** received label.
+///    Ties are broken by the **smallest** label value (deterministic).
 ///
-/// The algorithm runs for exactly `max_steps` supersteps (static; no
-/// convergence detection — GraphX's implementation is also non-convergent).
+/// Runs for exactly `max_steps` supersteps with no convergence detection.
 ///
-/// # Parameters
+/// # Arguments
+///
 /// * `graph`     — input graph (vertex and edge attributes are ignored).
-/// * `max_steps` — number of supersteps.
+/// * `max_steps` — number of supersteps to run.
 ///
-/// Returns `VertexMap<VertexId>` mapping each vertex to its community label.
+/// Returns [`VertexMap`]`<`[`VertexId`]`>` mapping each vertex to its community label.
 pub fn run<VD: Clone, ED: Clone>(graph: &Graph<VD, ED>, max_steps: usize) -> VertexMap<VertexId> {
     // Vertex attr = current community label (initially own ID).
     let g: Graph<VertexId, ED> = graph.map_vertices(|vid, _| vid);

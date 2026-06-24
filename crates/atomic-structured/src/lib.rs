@@ -1,4 +1,4 @@
-//! `atomic-structured` — Spark-style micro-batch Structured Streaming.
+//! `atomic-structured` — micro-batch structured streaming for the Atomic engine.
 //!
 //! A continuous query is a normal SQL/DataFrame query declared once and executed
 //! incrementally, once per micro-batch, on top of [`atomic_streaming`]'s batch

@@ -1,6 +1,9 @@
-# Getting Started with Atomic
+---
+title: Getting Started
+description: Install Atomic and run your first distributed job in Rust, Python, or TypeScript.
+---
 
-Atomic is a stable-Rust distributed compute engine with a Spark-like RDD API. It has three entry points: Rust (native), Python (`atomic-compute` on PyPI), and TypeScript/JavaScript (`@atomic-compute/js` on npm).
+Atomic is a distributed compute engine built in Rust. It provides a partition-based RDD API with three first-class entry points: Rust (native), Python (`atomic-compute` on PyPI), and TypeScript/JavaScript (`@atomic-compute/js` on npm).
 
 ---
 
@@ -298,8 +301,9 @@ print(acc.value())  # 15
 
 ## 12. Next steps
 
-- [Configuration Reference](configuration.md) — all `ATOMIC_*` env vars and `Config` fields
-- [Deployment Guide](deployment.md) — building, shipping binaries, mTLS, S3
-- [atomic-py README](../crates/atomic-py/README.md) — full Python API reference
-- [atomic-js README](../crates/atomic-js/README.md) — full TypeScript/JS API reference
-- [API Reference](https://docs.rs/atomic-compute) — full Rust API docs
+- [The RDD API](/concepts/rdd-api/) — transformations, actions, and tasks
+- [Configuration Reference](/guides/configuration/) — all `ATOMIC_*` env vars and `Config` fields
+- [Deployment Guide](/guides/deployment/) — building, shipping binaries, mTLS, S3
+- [Architecture Overview](/architecture/overview/) — how the engine is built
+- [JS API Reference](/reference/js/) — generated TypeScript/JavaScript API docs
+- [Rust API (docs.rs)](https://docs.rs/atomic-compute) — full Rust API reference

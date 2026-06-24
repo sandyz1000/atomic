@@ -77,7 +77,7 @@ impl PyGraph {
     /// Returns `dict[int, float]` mapping each vertex ID to its rank.
     ///
     /// * `num_iter`   — number of fixed iterations (default: 20).
-    /// * `reset_prob` — teleportation probability (default: 0.15, matching GraphX).
+    /// * `reset_prob` — teleportation probability (default: `0.15`).
     #[pyo3(signature = (num_iter=20, reset_prob=0.15))]
     pub fn page_rank(&self, num_iter: usize, reset_prob: f64) -> HashMap<VId, f64> {
         page_rank::run(&self.inner, num_iter, reset_prob)

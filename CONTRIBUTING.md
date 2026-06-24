@@ -66,7 +66,7 @@ crates/
   atomic-scheduler/  — local and distributed schedulers
   atomic-sql/        — DataFusion SQL layer
   atomic-streaming/  — micro-batch streaming
-  atomic-graph/      — GraphX-style graph algorithms
+  atomic-graph/      — graph processing: Graph, Pregel, built-in algorithms
   atomic-nlq/        — natural language query (agentic WorkflowPlan, OpenAI)
   atomic-py/         — Python bindings (PyO3/maturin)
   atomic-js/         — Node.js bindings (napi-rs)

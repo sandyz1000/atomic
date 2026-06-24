@@ -5,12 +5,11 @@
 //!
 //! # Design
 //!
-//! The Spark receiver model requires long-running worker tasks, a block manager, and
-//! replication — none of which Atomic currently supports.  The *Direct* model (already
-//! used for Kafka) is simpler: **the driver plans** which byte ranges / file splits /
-//! offsets to read for each batch, dispatches one short-lived task per partition, and
-//! commits only after the sink confirms success.  A worker death just means the split
-//! is never committed and is automatically re-planned on the next batch (at-least-once).
+//! The *Direct* model (used for Kafka and file sources) is simpler than a receiver-based
+//! design: **the driver plans** which byte ranges / file splits / offsets to read for
+//! each batch, dispatches one short-lived task per partition, and commits only after the
+//! sink confirms success.  A worker death means the split is never committed and is
+//! automatically re-planned on the next batch (at-least-once).
 //!
 //! # Usage
 //! ```ignore

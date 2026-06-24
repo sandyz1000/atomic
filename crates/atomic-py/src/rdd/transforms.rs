@@ -11,7 +11,7 @@ impl PyRdd {
     /// Apply `f` to each element, returning a new RDD.
     ///
     /// In local mode, attempts parallel dispatch via `ProcessPoolExecutor`
-    /// (same model as PySpark's `local[N]`). Falls back to sequential
+    /// (N worker processes, GIL bypassed). Falls back to sequential
     /// execution when `f` captures values that cannot be cloudpickled
     /// (e.g. Rust-backed objects like `BroadcastVar`).
     pub fn map(&mut self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {

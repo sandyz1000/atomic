@@ -2,17 +2,18 @@ use crate::graph::Graph;
 use crate::pregel;
 use crate::topology::{EdgeDirection, VertexId, VertexMap};
 
-/// Compute the connected component for each vertex using Pregel.
+/// Compute the (weakly) connected component for each vertex using Pregel.
 ///
-/// Each vertex is labeled with the minimum vertex ID in its (weakly) connected
-/// component — identical to GraphX's `ConnectedComponents.run`.
+/// Each vertex is labeled with the minimum vertex ID in its component.
+/// Propagation proceeds across edges in both directions regardless of edge orientation.
 ///
-/// # Parameters
-/// * `graph`         — input graph.
-/// * `max_iterations`— maximum number of Pregel supersteps (use `usize::MAX`
-///   for full convergence).
+/// # Arguments
 ///
-/// Returns a `VertexMap<VertexId>` mapping each vertex to the representative
+/// * `graph`          — input graph.
+/// * `max_iterations` — maximum number of Pregel supersteps; use `usize::MAX`
+///   for full convergence on large graphs.
+///
+/// Returns a [`VertexMap`]`<`[`VertexId`]`>` mapping each vertex to the representative
 /// (lowest ID) of its component.
 pub fn run<VD: Clone, ED: Clone>(
     graph: &Graph<VD, ED>,

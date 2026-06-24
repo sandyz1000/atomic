@@ -1,4 +1,4 @@
-//! Direct Kafka input DStream — Spark's "Direct" model, not the receiver model.
+//! Direct-pull Kafka input DStream.
 //!
 //! Per batch, the driver polls Kafka for high-water marks, computes per-partition
 //! offset ranges, and dispatches one-shot consume tasks to workers (one per Kafka

@@ -1,3 +1,22 @@
+//! Job scheduling for the Atomic engine.
+//!
+//! Two schedulers are available:
+//!
+//! - [`LocalScheduler`] — runs every partition on a thread pool in the current process.
+//!   Used when `Config::local()` is set or no workers are registered.
+//! - [`DistributedScheduler`] — dispatches [`TaskEnvelope`](atomic_data::distributed::TaskEnvelope)s
+//!   to remote worker processes over TCP. Handles stage splitting at shuffle boundaries,
+//!   speculative execution, adaptive shuffle coalescing, and heartbeat-based worker health.
+//!
+//! Select via [`Schedulers`], which wraps both behind a common `run_job` interface.
+//!
+//! # Kubernetes allocation
+//!
+//! [`WorkerAllocator`] is the trait for on-demand worker provisioning.
+//! [`StaticAllocator`] is the default (uses a fixed worker list).
+//! The `atomic-k8s` crate provides [`KubeWorkerAllocator`](atomic_k8s::KubeWorkerAllocator)
+//! for per-job pod creation.
+
 pub mod base;
 pub mod dag;
 pub mod distributed;

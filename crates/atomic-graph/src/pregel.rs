@@ -5,7 +5,7 @@ use crate::topology::{EdgeContext, EdgeDirection, VertexId};
 
 /// Run the Pregel vertex-centric computation model on `graph`.
 ///
-/// This is a direct translation of GraphX's `Pregel.apply()`:
+/// Execution proceeds as follows:
 ///
 /// 1. Apply `vprog(vid, vd, initial_msg)` to every vertex to obtain the
 ///    starting vertex state.
@@ -22,16 +22,15 @@ use crate::topology::{EdgeContext, EdgeDirection, VertexId};
 /// * `ED` — edge data type (must be `Clone`).
 /// * `A`  — message type (must be `Clone`).
 ///
-/// # Parameters
+/// # Arguments
 ///
-/// * `graph`            — input graph (borrowed; the result is a new `Graph`).
+/// * `graph`            — input graph (borrowed; the result is a new [`Graph`]).
 /// * `initial_msg`      — message sent to every vertex before superstep 0.
 /// * `max_iterations`   — maximum number of supersteps.
-/// * `active_direction` — which direction of edges to consider when sending
-///   messages.  `EdgeDirection::Either` (the GraphX default)
-///   considers all edges.
+/// * `active_direction` — which direction of edges to consider when sending messages.
+///   [`EdgeDirection::Either`] considers all edges.
 /// * `vprog`            — vertex program: `(vid, vd, msg) -> new_vd`.
-/// * `send_msg`         — edge function: receives an `EdgeContext` and emits messages.
+/// * `send_msg`         — edge function: receives an [`EdgeContext`] and emits messages.
 /// * `merge_msg`        — commutative associative combiner for messages.
 pub fn run<VD, ED, A, VProg, SendMsg, MergeMsg>(
     graph: &Graph<VD, ED>,

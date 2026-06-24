@@ -1,0 +1,11 @@
+# Astro / Starlight build output and dependencies
+node_modules/
+dist/
+.astro/
+
+# TypeDoc-generated API reference (regenerated on build)
+src/content/docs/reference/js/
+
+# Environment
+.env
+.env.production

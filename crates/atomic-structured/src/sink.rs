@@ -73,7 +73,7 @@ impl Sink for MemorySink {
     }
 }
 
-/// Pretty-prints each non-empty batch to stdout (like Spark's `console` sink).
+/// Prints each non-empty batch to stdout in a human-readable tabular format.
 pub struct ConsoleSink {
     name: String,
 }

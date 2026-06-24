@@ -3,16 +3,18 @@ use std::collections::HashMap;
 use crate::graph::Graph;
 use crate::topology::{Edge, VertexId, VertexMap};
 
-/// Fixed-iteration PageRank (matches GraphX's `PageRank.run`).
+/// Compute PageRank using a fixed number of iterations.
 ///
 /// Uses `aggregate_messages` directly (no Pregel) for `num_iter` iterations.
+/// Edge attributes are ignored; only graph topology affects the result.
 ///
-/// # Parameters
-/// * `graph`      — the graph (edge attr is ignored; only topology matters).
-/// * `num_iter`   — number of iterations.
-/// * `reset_prob` — teleportation probability (GraphX default: 0.15).
+/// Returns a [`VertexMap`] mapping each vertex ID to its PageRank score.
 ///
-/// Returns a `VertexMap` mapping each vertex ID to its PageRank score.
+/// # Arguments
+///
+/// * `graph`      — input graph.
+/// * `num_iter`   — number of iterations to run.
+/// * `reset_prob` — teleportation probability; `0.15` is a common default.
 pub fn run<VD: Clone, ED: Clone>(
     graph: &Graph<VD, ED>,
     num_iter: usize,
@@ -60,18 +62,18 @@ pub fn run<VD: Clone, ED: Clone>(
     current.vertices().map(|(vid, rank)| (vid, *rank)).collect()
 }
 
-/// Convergence-based PageRank (matches GraphX's `PageRank.runUntilConvergence`).
+/// Compute PageRank and stop early once scores converge.
 ///
-/// Runs fixed-iteration PageRank and stops early when the maximum rank change
-/// across all vertices falls below `tol`. Capped at `max_iter` to prevent
-/// infinite loops on graphs that oscillate (e.g., star graphs with dangling nodes).
+/// Runs iterations until the maximum rank change across all vertices falls below
+/// `tol`, or `max_iter` is reached. Use a finite `max_iter` (e.g. `100`) to
+/// guard against oscillation on graphs with dangling nodes.
 ///
-/// # Parameters
-/// * `graph`      — the graph.
+/// # Arguments
+///
+/// * `graph`      — input graph.
 /// * `tol`        — convergence tolerance (e.g., `0.001`).
-/// * `reset_prob` — teleportation probability (GraphX default: 0.15).
-/// * `max_iter`   — hard cap on iterations (GraphX uses `Int.MaxValue`; use
-///   a finite value like `100` for safety).
+/// * `reset_prob` — teleportation probability; `0.15` is a common default.
+/// * `max_iter`   — hard upper bound on the number of iterations.
 pub fn run_until_convergence<VD: Clone, ED: Clone>(
     graph: &Graph<VD, ED>,
     tol: f64,

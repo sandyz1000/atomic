@@ -1,0 +1,15 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["../crates/atomic-js/index.d.ts"],
+  "entryPointStrategy": "resolve",
+  "tsconfig": "../crates/atomic-js/tsconfig.json",
+  "plugin": ["typedoc-plugin-markdown"],
+  "out": "src/content/docs/reference/js",
+  "name": "atomic-js",
+  "includeVersion": false,
+  "excludePrivate": true,
+  "excludeInternal": true,
+  "readme": "none",
+  "githubPages": false,
+  "hideGenerator": true
+}

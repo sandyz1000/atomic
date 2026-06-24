@@ -5,16 +5,13 @@ use petgraph::algo::tarjan_scc;
 use crate::graph::Graph;
 use crate::topology::{VertexId, VertexMap};
 
-/// Compute Strongly Connected Components using Tarjan's algorithm.
+/// Compute strongly connected components (SCCs) using Tarjan's algorithm.
 ///
-/// Each vertex is labeled with the minimum vertex ID in its SCC — matching
-/// the GraphX `StronglyConnectedComponents.run` semantics.
+/// Each vertex is labeled with the minimum vertex ID in its SCC.
+/// Uses `petgraph::algo::tarjan_scc` under the hood — a single-pass algorithm,
+/// so `num_iter` is accepted but not used.
 ///
-/// Uses petgraph's built-in `tarjan_scc` under the hood (correct and efficient)
-/// rather than a Pregel-based approximation. The `num_iter` parameter is kept
-/// for API compatibility with GraphX but is not used (Tarjan is a single pass).
-///
-/// Returns `VertexMap<VertexId>` mapping each vertex to the representative
+/// Returns [`VertexMap`]`<`[`VertexId`]`>` mapping each vertex to the representative
 /// (lowest ID) of its SCC.
 pub fn run<VD: Clone, ED: Clone>(graph: &Graph<VD, ED>, _num_iter: usize) -> VertexMap<VertexId> {
     // Run Tarjan's SCC on the petgraph inner representation.

@@ -1,4 +1,7 @@
-# Configuration Reference
+---
+title: Configuration Reference
+description: All ATOMIC_* environment variables and Config struct fields.
+---
 
 Atomic is configured either via environment variables (`ATOMIC_*`) or by constructing a [`Config`](https://docs.rs/atomic-compute) struct explicitly in Rust.
 
@@ -75,7 +78,7 @@ let config = Config::builder()
 
 ---
 
-## SparkConf-style key/value API
+## Key/value API
 
 For dynamic configuration from a properties file or CLI flags:
 

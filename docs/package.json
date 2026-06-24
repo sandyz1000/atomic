@@ -1,0 +1,21 @@
+{
+  "name": "atomic-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "typedoc": "typedoc"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.34.4",
+    "astro": "^5.9.0",
+    "starlight-typedoc": "^0.20.1"
+  },
+  "devDependencies": {
+    "typedoc": "^0.28.5",
+    "typedoc-plugin-markdown": "^4.7.0"
+  }
+}

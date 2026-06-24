@@ -1,3 +1,45 @@
+//! Execution runtime for the Atomic distributed compute engine.
+//!
+//! # Entry points
+//!
+//! Use [`app::AtomicApp`] to build a driver or worker from CLI flags:
+//!
+//! ```rust,ignore
+//! let app = AtomicApp::build().await?;
+//! let ctx = app.driver_context()?;
+//! ```
+//!
+//! For programmatic setup, construct a [`context::Context`] directly:
+//!
+//! ```rust,ignore
+//! use atomic_compute::{context::Context, env::Config};
+//!
+//! let ctx = Context::new_with_config(Config::local())?;
+//! let rdd = ctx.parallelize_typed(vec![1i32, 2, 3], 2);
+//! let result = rdd.map_task(MyTask).collect()?;
+//! ```
+//!
+//! # Task registration
+//!
+//! Distributed work must be registered at compile time:
+//!
+//! ```rust,ignore
+//! use atomic_compute::task;
+//!
+//! #[task]
+//! fn double(x: i32) -> i32 { x * 2 }
+//!
+//! // In main.rs — registers the shuffle handler for (String, u32) pairs:
+//! atomic_compute::register_shuffle_map!(String, u32);
+//! ```
+//!
+//! # Modes
+//!
+//! - **Local** (`Config::local()`) — all partitions run on a thread pool in-process.
+//! - **Distributed** (`Config::distributed(workers)`) — partitions are dispatched as
+//!   [`TaskEnvelope`](atomic_data::distributed::TaskEnvelope)s over TCP to remote workers.
+//!   Workers run the same binary with `--worker --port N`.
+
 pub mod app;
 pub mod builtin_tasks;
 pub mod context;

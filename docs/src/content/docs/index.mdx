@@ -1,0 +1,44 @@
+---
+title: Atomic
+description: A distributed compute engine for Rust, Python, and TypeScript.
+template: splash
+hero:
+  tagline: >
+    Fast, type-safe distributed compute — write once, run locally or across a
+    cluster with the same code.
+  actions:
+    - text: Get Started
+      link: /guides/getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/sandyz1000/atomic
+      icon: external
+---
+
+import { CardGrid, Card } from '@astrojs/starlight/components'
+
+<CardGrid stagger>
+  <Card title="Rust, Python, TypeScript" icon="seti:rust">
+    One compute engine, three first-class language APIs. Prototype in Python or
+    TypeScript, compile hot paths to native Rust — no rewrite of your job logic
+    required.
+  </Card>
+
+  <Card title="Local or distributed" icon="server">
+    Run partitions on a thread pool in one process, or dispatch them as
+    serialized task envelopes to remote workers over TCP. Switch by setting one
+    environment variable.
+  </Card>
+
+  <Card title="Compile-time task safety" icon="approve-check">
+    Rust `#[task]` functions are registered at compile time and dispatched by
+    string ID. A `REGISTRY_FINGERPRINT` check catches mismatched binaries at
+    worker handshake time, not mid-job.
+  </Card>
+
+  <Card title="Built on DataFusion & Arrow" icon="open-book">
+    SQL queries run through Apache DataFusion with an Apache Arrow columnar
+    execution layer. Standard Parquet, CSV, and JSON readers included.
+  </Card>
+</CardGrid>

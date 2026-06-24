@@ -49,8 +49,8 @@ pub fn run_partition(
 /// `elements` using `concurrent.futures.ProcessPoolExecutor`, returning a flat
 /// result `Vec`.
 ///
-/// Models PySpark's `local[N]` execution: N separate OS processes, genuine
-/// multi-core parallelism, GIL bypassed entirely.
+/// Dispatch using N separate OS processes for genuine multi-core parallelism,
+/// bypassing the GIL entirely.
 pub fn exec_parallel(
     py: Python<'_>,
     fn_bytes: Vec<u8>,

@@ -12,9 +12,8 @@ use crate::topology::{Edge, EdgeContext, EdgeTriplet, VertexId, VertexMap};
 /// Backed by `petgraph::stable_graph::StableGraph` with a companion
 /// `HashMap<VertexId, NodeIndex>` for O(1) vertex lookup by ID.
 ///
-/// Matches the GraphX `Graph[VD, ED]` API where possible, adapted for Rust
-/// ownership rules (transformation methods return a new `Graph` rather than
-/// mutating in place).
+/// Transformation methods return a new [`Graph`] rather than mutating in place,
+/// following Rust ownership conventions.
 pub struct Graph<VD, ED> {
     pub(crate) inner: StableGraph<(VertexId, VD), ED>,
     // Vertex-id → petgraph node index map; backs the `node_index`/`out_neighbors`
@@ -345,8 +344,8 @@ impl<VD: Clone, ED: Clone> Graph<VD, ED> {
 
     /// Join vertices with an external map, replacing each vertex attribute.
     ///
-    /// Equivalent to GraphX's `outerJoinVertices`.  `map_func` receives
-    /// `(vid, old_vd, Option<&U>)` — `None` when the vertex has no entry in `other`.
+    /// `map_func` receives `(vid, old_vd, Option<&U>)` — `None` when `other` has no entry
+    /// for that vertex.
     pub fn outer_join_vertices<U: Clone, VD2: Clone, F>(
         &self,
         other: &HashMap<VertexId, U>,

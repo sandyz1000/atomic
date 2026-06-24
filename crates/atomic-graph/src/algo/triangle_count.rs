@@ -5,16 +5,14 @@ use crate::topology::{VertexId, VertexMap};
 
 /// Count the number of triangles each vertex participates in.
 ///
-/// Uses the neighbor-set intersection approach matching GraphX's
-/// `TriangleCount.run`:
+/// Uses the undirected neighbor-set intersection approach:
 ///
-/// 1. Treat the graph as undirected by collecting both-direction neighbors.
-/// 2. For each edge (u, v), count `|N(u) ∩ N(v)|` where N is the undirected
-///    neighbor set.
-/// 3. Each triangle is counted twice (once per direction of the edge), so the
-///    final per-vertex count is the sum of intersections divided by 2.
+/// 1. Collect bidirectional neighbors for each vertex.
+/// 2. For each edge (u, v), count `|N(u) ∩ N(v)|`.
+/// 3. Divide by 2 to correct for double-counting (each triangle is seen once per
+///    direction of the shared edge).
 ///
-/// Returns `VertexMap<usize>` — the triangle count for each vertex.
+/// Returns [`VertexMap`]`<usize>` — the triangle count for each vertex.
 pub fn run<VD: Clone, ED: Clone>(graph: &Graph<VD, ED>) -> VertexMap<usize> {
     // Build undirected neighbor sets (include both directions).
     let mut nbr_sets: HashMap<VertexId, HashSet<VertexId>> = graph

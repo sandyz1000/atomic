@@ -4,6 +4,11 @@ use crate::{
 
 use std::sync::Arc;
 
+/// Base trait for all RDDs, providing structural metadata without type parameters.
+///
+/// Every RDD in Atomic implements this trait. It exposes the RDD's identity,
+/// dependency graph edges, partitioning, and preferred placement for data-local
+/// scheduling. Methods that compute data are on the typed [`Rdd`] trait.
 pub trait RddBase: Send + Sync {
     fn get_rdd_id(&self) -> usize;
 
@@ -28,8 +33,6 @@ pub trait RddBase: Send + Sync {
         self.splits().len()
     }
 
-    // Analyse whether this is required or not. It requires downcasting while executing tasks which could hurt performance.
-    // TODO: Rename the below method to use only the prefix noun and remove any suffix _any
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
@@ -60,7 +63,14 @@ pub trait RddBase: Send + Sync {
     }
 }
 
-// Rdd containing methods associated with processing
+/// Typed RDD trait — the core compute primitive.
+///
+/// Implemented by every RDD node in the DAG. `compute` returns a lazy iterator
+/// over one partition's elements; the scheduler calls it for each partition in
+/// parallel, then aggregates results on the driver.
+///
+/// For most user code, work through the high-level [`TypedRdd`](atomic_compute::rdd::TypedRdd)
+/// wrapper rather than implementing this trait directly.
 pub trait Rdd: RddBase + 'static {
     type Item: Data;
     fn get_rdd(&self) -> Arc<dyn Rdd<Item = Self::Item>>;
@@ -74,6 +84,7 @@ pub trait Rdd: RddBase + 'static {
     }
 }
 
+/// Iterator adapter that folds elements pairwise using a commutative-associative function.
 pub trait Reduce<T> {
     fn reduce<F>(self, f: F) -> Option<T>
     where

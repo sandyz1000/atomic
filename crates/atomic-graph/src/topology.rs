@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-/// Vertex identifier — i64 matches GraphX's VertexId = Long.
+/// Vertex identifier — a 64-bit signed integer uniquely naming a vertex in the graph.
 pub type VertexId = i64;
 
 /// A directed edge with associated attribute.

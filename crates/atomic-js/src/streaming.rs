@@ -339,7 +339,7 @@ fn compute_batch(
             let cutoff = Duration::from_millis(*window_ms);
             let mut buf = buffer.lock();
             buf.push_back((now, batch));
-            buf.retain(|(ts, _)| now.duration_since(*ts) < cutoff);
+            buf.retain(|(ts, _)| now.duration_since(*ts) <= cutoff);
             Ok(buf
                 .iter()
                 .flat_map(|(_, elems)| elems.iter().cloned())
@@ -567,6 +567,16 @@ mod tests {
 
     // Handle to a queue-backed DStream's shared batch buffer.
     type QueueHandle = Arc<Mutex<VecDeque<Vec<JV>>>>;
+
+    // SAFETY: all tested variants (Queue/GroupByKey/Join/Windowed) are pure Rust
+    // and never dereference `env`. The zeroed pointer is never passed to the JS runtime.
+    fn compute_batch(
+        inner: &Arc<JsDStreamInner>,
+        state: &mut HashMap<String, JV>,
+    ) -> napi::Result<Vec<JV>> {
+        let env: napi::Env = unsafe { std::mem::zeroed() };
+        super::compute_batch(&env, inner, state)
+    }
 
     // Helper: create a Queue-backed DStreamInner directly.
     fn make_queue(batches: Vec<Vec<JV>>) -> (Arc<JsDStreamInner>, QueueHandle) {

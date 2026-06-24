@@ -1,4 +1,7 @@
-# Deployment Guide
+---
+title: Deployment Guide
+description: Build, distribute, and operate Atomic in a multi-machine cluster.
+---
 
 This guide covers building, distributing, and operating Atomic in a multi-machine cluster.
 
