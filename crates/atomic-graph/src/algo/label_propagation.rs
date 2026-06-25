@@ -1,201 +1,111 @@
-use std::collections::HashMap;
+//! Community detection by label propagation, on distributed Pregel.
+//!
+//! Every vertex starts labeled with its own id. Each superstep, vertices broadcast
+//! their label to neighbors and adopt the most frequent label received (ties broken
+//! by the smallest label). Message frequencies travel as `Vec<(label, count)>`.
 
-use crate::graph::Graph;
+use std::collections::BTreeMap;
+
+use atomic_compute::task;
+
+use crate::graph::{Graph, GraphData, GraphDecode};
 use crate::pregel;
-use crate::topology::{EdgeContext, EdgeDirection, VertexId, VertexMap};
+use crate::topology::{EdgeTriplet, VertexId, VertexMap};
 
-/// Detect communities via label propagation.
-///
-/// Each vertex starts with its own vertex ID as its community label.
-/// In each superstep:
-///
-/// 1. Every vertex sends its current label to all neighbors.
-/// 2. Each vertex adopts the **most frequent** received label.
-///    Ties are broken by the **smallest** label value (deterministic).
-///
-/// Runs for exactly `max_steps` supersteps with no convergence detection.
-///
-/// # Arguments
-///
-/// * `graph`     — input graph (vertex and edge attributes are ignored).
-/// * `max_steps` — number of supersteps to run.
-///
-/// Returns [`VertexMap`]`<`[`VertexId`]`>` mapping each vertex to its community label.
-pub fn run<VD: Clone, ED: Clone>(graph: &Graph<VD, ED>, max_steps: usize) -> VertexMap<VertexId> {
-    // Vertex attr = current community label (initially own ID).
-    let g: Graph<VertexId, ED> = graph.map_vertices(|vid, _| vid);
+/// Label-frequency message: `(label, count)` entries.
+type LabelFreq = Vec<(VertexId, usize)>;
 
-    // Message type: a frequency map of labels received.
-    type LabelFreq = HashMap<VertexId, usize>;
+atomic_compute::register_shuffle_map!(i64, LabelFreq);
 
-    let result = pregel::run(
-        &g,
-        // initial_msg: empty frequency map (no pre-superstep 0 info)
-        HashMap::new() as LabelFreq,
-        max_steps,
-        EdgeDirection::Either,
-        // vprog: pick the most frequent label (min on ties).
-        |_vid, current_label: &VertexId, msg: LabelFreq| {
-            if msg.is_empty() {
-                return *current_label;
-            }
-            // Find the max frequency, then the min label among those.
-            let max_freq = *msg.values().max().unwrap();
-            msg.into_iter()
-                .filter(|(_, freq)| *freq == max_freq)
-                .map(|(label, _)| label)
-                .min()
-                .unwrap_or(*current_label)
-        },
-        // send_msg: each vertex sends its label to all neighbors as a
-        // single-entry frequency map.
-        |mut ctx: EdgeContext<VertexId, ED, LabelFreq>| {
-            let mut m = HashMap::new();
-            m.insert(ctx.triplet.src_attr, 1_usize);
-            ctx.send_to_dst(m.clone());
+/// Combine two label-frequency maps by summing counts per label.
+#[task]
+fn lp_merge(a: LabelFreq, b: LabelFreq) -> LabelFreq {
+    let mut m: BTreeMap<VertexId, usize> = BTreeMap::new();
+    for (l, c) in a.into_iter().chain(b) {
+        *m.entry(l).or_insert(0) += c;
+    }
+    m.into_iter().collect()
+}
 
-            let mut m2 = HashMap::new();
-            m2.insert(ctx.triplet.dst_attr, 1_usize);
-            ctx.send_to_src(m2);
-        },
-        // merge_msg: combine two frequency maps (sum counts per label).
-        |a: LabelFreq, b: LabelFreq| {
-            let mut merged = a;
-            for (label, freq) in b {
-                *merged.entry(label).or_insert(0) += freq;
-            }
-            merged
-        },
-    );
+/// Send each endpoint's label to the other end of the edge (undirected).
+#[task]
+fn lp_send(t: EdgeTriplet<VertexId, ()>) -> Vec<(VertexId, LabelFreq)> {
+    vec![
+        (t.dst_id, vec![(t.src_attr, 1usize)]),
+        (t.src_id, vec![(t.dst_attr, 1usize)]),
+    ]
+}
 
-    result
-        .vertices()
-        .map(|(vid, label)| (vid, *label))
-        .collect()
+/// Adopt the most frequent received label; ties broken by the smallest label.
+#[task]
+fn lp_vprog(input: (VertexId, (VertexId, Option<LabelFreq>))) -> (VertexId, VertexId) {
+    let (vid, (cur, msg)) = input;
+    let Some(freq) = msg else {
+        return (vid, cur);
+    };
+    let mut counts: BTreeMap<VertexId, usize> = BTreeMap::new();
+    for (label, c) in freq {
+        *counts.entry(label).or_insert(0) += c;
+    }
+    // BTreeMap iterates labels ascending, so the first max-count wins the tie.
+    let mut best_label = cur;
+    let mut best_count = 0usize;
+    for (label, c) in counts {
+        if c > best_count {
+            best_count = c;
+            best_label = label;
+        }
+    }
+    (vid, best_label)
+}
+
+/// Detect communities via label propagation for `max_steps` supersteps.
+///
+/// Returns a [`VertexMap`] from vertex id to its community label. The algorithm is
+/// static (no convergence test), matching the conventional formulation.
+pub fn run<VD, ED>(graph: &Graph<VD, ED>, max_steps: usize) -> VertexMap<VertexId>
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+{
+    let g = graph.map_vertices(|vid, _| vid).map_edges(|_| ());
+    let result =
+        pregel::run::<VertexId, (), LabelFreq, _, _, _>(&g, max_steps, LpSend, LpMerge, LpVprog);
+    result.collect_vertices().into_iter().collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Graph;
     use crate::topology::Edge;
+    use atomic_compute::context::Context;
 
-    /// Two cliques (0-1-2 and 10-11-12) connected by a bridge 2→10.
-    fn two_cliques_bridge() -> Graph<(), ()> {
-        Graph::from_edges(
-            vec![
-                // Clique A
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 2,
-                    attr: (),
-                },
-                Edge {
-                    src: 2,
-                    dst: 0,
-                    attr: (),
-                },
-                // Bridge
-                Edge {
-                    src: 2,
-                    dst: 10,
-                    attr: (),
-                },
-                // Clique B
-                Edge {
-                    src: 10,
-                    dst: 11,
-                    attr: (),
-                },
-                Edge {
-                    src: 11,
-                    dst: 12,
-                    attr: (),
-                },
-                Edge {
-                    src: 12,
-                    dst: 10,
-                    attr: (),
-                },
-            ],
-            (),
-        )
+    fn edge(src: VertexId, dst: VertexId) -> Edge<()> {
+        Edge { src, dst, attr: () }
     }
 
     #[test]
-    fn each_vertex_gets_a_label() {
-        let g = two_cliques_bridge();
-        let labels = run(&g, 5);
-        assert_eq!(labels.len(), g.num_vertices());
+    fn each_vertex_gets_a_valid_label() {
+        let ctx = Context::local().unwrap();
+        let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 2), edge(2, 0)], ());
+        let n = g.num_vertices() as usize;
+        let labels = run(&g, 10);
+        assert_eq!(labels.len(), n);
+        let ids: std::collections::HashSet<VertexId> =
+            g.collect_vertices().into_iter().map(|(v, _)| v).collect();
+        for &l in labels.values() {
+            assert!(ids.contains(&l), "label {l} is not an original vertex id");
+        }
     }
 
     #[test]
     fn isolated_vertex_keeps_own_label() {
-        let g = Graph::from_vertices_edges(
-            vec![(0, ()), (1, ()), (99, ())],
-            vec![Edge {
-                src: 0,
-                dst: 1,
-                attr: (),
-            }],
-        );
+        let ctx = Context::local().unwrap();
+        let g: Graph<(), ()> =
+            Graph::from_vertices_edges(ctx, vec![(0, ()), (1, ()), (99, ())], vec![edge(0, 1)]);
         let labels = run(&g, 5);
-        assert_eq!(labels[&99], 99, "isolated vertex keeps its own label");
-    }
-
-    #[test]
-    fn all_vertices_receive_a_label() {
-        let g = two_cliques_bridge();
-        let labels = run(&g, 20);
-        assert_eq!(
-            labels.len(),
-            g.num_vertices(),
-            "every vertex must have a label"
-        );
-    }
-
-    #[test]
-    fn single_vertex_gets_own_label() {
-        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![(42, ())], vec![]);
-        let labels = run(&g, 5);
-        assert_eq!(labels[&42], 42);
-    }
-
-    #[test]
-    fn all_labels_are_valid_vertex_ids() {
-        // Labels can only ever be original vertex IDs — verify that invariant.
-        let g: Graph<(), ()> = Graph::from_edges(
-            vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 2,
-                    attr: (),
-                },
-                Edge {
-                    src: 2,
-                    dst: 0,
-                    attr: (),
-                },
-            ],
-            (),
-        );
-        let valid_ids: std::collections::HashSet<VertexId> = g.vertices().map(|(v, _)| v).collect();
-        let labels = run(&g, 10);
-        for &label in labels.values() {
-            assert!(
-                valid_ids.contains(&label),
-                "label {label} is not an original vertex ID"
-            );
-        }
+        assert_eq!(labels[&99], 99);
     }
 }

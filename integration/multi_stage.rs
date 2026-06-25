@@ -75,7 +75,7 @@ fn run_driver(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let mut word_counts = ctx
         .parallelize_typed(corpus, 2)
         .flat_map_task(TokenizeToPairs)
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(SumCounts)
         .collect()?;
 
     // Sort by count descending, then alphabetically — deterministic output.

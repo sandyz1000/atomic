@@ -272,11 +272,19 @@ impl AgentRunner for PartitionAgentRunner {
     fn run_partition(&self, payload: &AgentStepPayload, inputs: &[u8]) -> Result<Vec<u8>, String> {
         let strings = decode_string_partition(inputs)?;
 
-        // Dispatch runs inside spawn_blocking; a Tokio runtime is reachable.
-        let handle = tokio::runtime::Handle::try_current()
-            .map_err(|e| format!("AgentStep: no tokio runtime available: {e}"))?;
-
-        let findings = handle.block_on(Self::run_partition_async(payload, strings));
+        // On the worker path, dispatch runs inside spawn_blocking and an ambient
+        // runtime is reachable. In local mode `agent_step` is called from a plain
+        // sync `main`, so fall back to a temporary current-thread runtime.
+        let findings = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle.block_on(Self::run_partition_async(payload, strings)),
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("AgentStep: failed to build runtime: {e}"))?;
+                rt.block_on(Self::run_partition_async(payload, strings))
+            }
+        };
 
         // Encode Vec<AgentFindings> back to rkyv bytes.
         findings

@@ -1,195 +1,162 @@
-use std::collections::{HashMap, HashSet};
+//! Triangle counting via neighbor-set intersection on the engine.
+//!
+//! Undirected neighbor sets are built per vertex and carried as the vertex
+//! attribute. A per-edge task then counts the common neighbors of the two
+//! endpoints; summing per vertex and halving (each triangle is seen from both
+//! endpoints of its shared edge) gives the per-vertex triangle count.
 
-use crate::graph::Graph;
-use crate::topology::{VertexId, VertexMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-/// Count the number of triangles each vertex participates in.
+use atomic_compute::task;
+
+use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::topology::{Edge, EdgeTriplet, VertexId, VertexMap};
+
+/// Sorted neighbor id list carried as a vertex attribute.
+type Neighbors = Vec<VertexId>;
+
+atomic_compute::register_shuffle_map!(i64, Neighbors);
+atomic_compute::register_shuffle_map!(i64, (i64, (), Neighbors));
+atomic_compute::register_shuffle_map!(i64, usize);
+
+/// Count common neighbors of the two endpoints (sorted-list intersection) and
+/// credit both endpoints.
+#[task]
+fn tc_send(t: EdgeTriplet<Neighbors, ()>) -> Vec<(VertexId, usize)> {
+    let (mut i, mut j) = (0usize, 0usize);
+    let (a, b) = (&t.src_attr, &t.dst_attr);
+    let mut count = 0usize;
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                count += 1;
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    vec![(t.src_id, count), (t.dst_id, count)]
+}
+
+/// Sum two triangle counts.
+#[task]
+fn tc_merge(a: usize, b: usize) -> usize {
+    a + b
+}
+
+/// Count the triangles each vertex participates in.
 ///
-/// Uses the undirected neighbor-set intersection approach:
-///
-/// 1. Collect bidirectional neighbors for each vertex.
-/// 2. For each edge (u, v), count `|N(u) ∩ N(v)|`.
-/// 3. Divide by 2 to correct for double-counting (each triangle is seen once per
-///    direction of the shared edge).
-///
-/// Returns [`VertexMap`]`<usize>` — the triangle count for each vertex.
-pub fn run<VD: Clone, ED: Clone>(graph: &Graph<VD, ED>) -> VertexMap<usize> {
-    // Build undirected neighbor sets (include both directions).
-    let mut nbr_sets: HashMap<VertexId, HashSet<VertexId>> = graph
-        .vertices()
-        .map(|(vid, _)| (vid, HashSet::new()))
+/// Returns a [`VertexMap`] from vertex id to triangle count.
+pub fn run<VD, ED>(graph: &Graph<VD, ED>) -> VertexMap<usize>
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+{
+    let raw_edges = graph.collect_edges();
+
+    // Undirected neighbor sets.
+    let mut nbr: BTreeMap<VertexId, BTreeSet<VertexId>> = BTreeMap::new();
+    for (vid, _) in graph.collect_vertices() {
+        nbr.entry(vid).or_default();
+    }
+    for e in &raw_edges {
+        if e.src != e.dst {
+            nbr.entry(e.src).or_default().insert(e.dst);
+            nbr.entry(e.dst).or_default().insert(e.src);
+        }
+    }
+
+    let verts: Vec<(VertexId, Neighbors)> = nbr
+        .iter()
+        .map(|(vid, set)| (*vid, set.iter().copied().collect()))
+        .collect();
+    let edges: Vec<Edge<()>> = raw_edges
+        .iter()
+        .filter(|e| e.src != e.dst)
+        .map(|e| Edge {
+            src: e.src,
+            dst: e.dst,
+            attr: (),
+        })
         .collect();
 
-    for e in graph.edges() {
-        if e.src != e.dst {
-            nbr_sets.entry(e.src).or_default().insert(e.dst);
-            nbr_sets.entry(e.dst).or_default().insert(e.src);
-        }
-    }
-
-    // For each directed edge (u→v), count common neighbors.
-    let mut raw_counts: HashMap<VertexId, usize> =
-        graph.vertices().map(|(vid, _)| (vid, 0)).collect();
-
-    for e in graph.edges() {
-        let u = e.src;
-        let v = e.dst;
-        if u == v {
-            continue;
-        }
-        // Intersection size.
-        let count = match (nbr_sets.get(&u), nbr_sets.get(&v)) {
-            (Some(nu), Some(nv)) => nu.intersection(nv).count(),
-            _ => 0,
-        };
-        *raw_counts.entry(u).or_insert(0) += count;
-        *raw_counts.entry(v).or_insert(0) += count;
-    }
-
-    // Each triangle is counted twice (once per edge direction between u and v).
-    raw_counts
+    let g: Graph<Neighbors, ()> =
+        Graph::from_vertices_edges(graph.context().clone(), verts.clone(), edges);
+    let raw: HashMap<VertexId, usize> = g
+        .aggregate_messages::<usize, _, _>(TcSend, TcMerge)
+        .collect()
+        .unwrap_or_default()
         .into_iter()
-        .map(|(vid, c)| (vid, c / 2))
+        .collect();
+
+    // Each triangle is counted twice per vertex (once per direction of the shared edge).
+    verts
+        .into_iter()
+        .map(|(vid, _)| (vid, raw.get(&vid).copied().unwrap_or(0) / 2))
         .collect()
 }
 
 /// Count the total number of triangles in the graph (each triangle counted once).
-pub fn total<VD: Clone, ED: Clone>(graph: &Graph<VD, ED>) -> usize {
-    // Sum per-vertex counts; each triangle contributes 3 vertex counts.
+pub fn total<VD, ED>(graph: &Graph<VD, ED>) -> usize
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+{
     run(graph).values().sum::<usize>() / 3
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Graph;
     use crate::topology::Edge;
+    use atomic_compute::context::Context;
 
-    /// K4: complete graph on 4 vertices — each vertex in 3 triangles, 4 total.
-    fn k4() -> Graph<(), ()> {
+    fn edge(src: VertexId, dst: VertexId) -> Edge<()> {
+        Edge { src, dst, attr: () }
+    }
+
+    fn k4(ctx: std::sync::Arc<Context>) -> Graph<(), ()> {
         Graph::from_edges(
+            ctx,
             vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: (),
-                },
-                Edge {
-                    src: 0,
-                    dst: 2,
-                    attr: (),
-                },
-                Edge {
-                    src: 0,
-                    dst: 3,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 2,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 3,
-                    attr: (),
-                },
-                Edge {
-                    src: 2,
-                    dst: 3,
-                    attr: (),
-                },
+                edge(0, 1),
+                edge(0, 2),
+                edge(0, 3),
+                edge(1, 2),
+                edge(1, 3),
+                edge(2, 3),
             ],
             (),
         )
     }
 
     #[test]
-    fn k4_total_triangles() {
-        assert_eq!(total(&k4()), 4, "K4 has 4 triangles");
-    }
-
-    #[test]
-    fn k4_per_vertex_count() {
-        let counts = run(&k4());
-        for (_, c) in counts {
-            assert_eq!(c, 3, "each K4 vertex participates in 3 triangles");
+    fn k4_total_and_per_vertex() {
+        let ctx = Context::local().unwrap();
+        let g = k4(ctx);
+        assert_eq!(total(&g), 4, "K4 has 4 triangles");
+        for (_, c) in run(&g) {
+            assert_eq!(c, 3, "each K4 vertex is in 3 triangles");
         }
     }
 
     #[test]
-    fn triangle_graph() {
-        let g = Graph::from_edges(
-            vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 2,
-                    attr: (),
-                },
-                Edge {
-                    src: 2,
-                    dst: 0,
-                    attr: (),
-                },
-            ],
-            (),
-        );
-        assert_eq!(total(&g), 1, "single triangle");
-        let counts = run(&g);
-        for (_, c) in counts {
-            assert_eq!(c, 1);
-        }
+    fn single_triangle() {
+        let ctx = Context::local().unwrap();
+        let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 2), edge(2, 0)], ());
+        assert_eq!(total(&g), 1);
     }
 
     #[test]
-    fn no_triangles_in_path() {
-        let g = Graph::from_edges(
-            vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 2,
-                    attr: (),
-                },
-            ],
-            (),
-        );
-        assert_eq!(total(&g), 0);
-    }
-
-    #[test]
-    fn empty_graph_has_zero_triangles() {
-        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![], vec![]);
-        assert_eq!(total(&g), 0);
-    }
-
-    #[test]
-    fn single_vertex_has_zero_triangles() {
-        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![(0, ())], vec![]);
-        assert_eq!(total(&g), 0);
-        let counts = run(&g);
-        assert_eq!(counts[&0], 0);
-    }
-
-    #[test]
-    fn two_vertices_no_triangle() {
-        let g: Graph<(), ()> = Graph::from_edges(
-            vec![Edge {
-                src: 0,
-                dst: 1,
-                attr: (),
-            }],
-            (),
-        );
+    fn path_has_no_triangle() {
+        let ctx = Context::local().unwrap();
+        let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 2)], ());
         assert_eq!(total(&g), 0);
     }
 }

@@ -274,22 +274,6 @@ impl<T: Data + Clone> TypedRdd<T> {
 }
 
 impl<T: Data> TypedRdd<T> {
-    pub fn key_by<K, F>(self, f: F) -> TypedRdd<(K, T)>
-    where
-        K: Data + Clone,
-        T: Clone,
-        F: Fn(&T) -> K + Clone + Send + Sync + 'static,
-    {
-        let id = self.context.new_rdd_id();
-        TypedRdd::new(
-            Arc::new(MapperRdd::new(id, self.rdd, move |x| {
-                let key = f(&x);
-                (key, x)
-            })),
-            self.context,
-        )
-    }
-
     /// Write each partition as a text file.
     ///
     /// URI schemes:
@@ -341,7 +325,7 @@ impl<T: Data> TypedRdd<T> {
                 BaseError::Other(format!("save_as_text_file: {}: {e}", file_path.display()))
             })?;
             for item in partition {
-                writeln!(f, "{item}").map_err(|e| BaseError::Other(e.to_string()))?;
+                writeln!(f, "{item}")?;
             }
         }
         Ok(())
@@ -420,41 +404,5 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
         };
         let rdd = PartitionwiseSampledRdd::new(id, self.rdd, sampler, false);
         TypedRdd::new(Arc::new(rdd), self.context)
-    }
-
-    /// Sort elements using a key function, returning a new RDD.
-    ///
-    /// Collects all data to the driver, sorts, and re-parallelizes into the same number
-    /// of partitions. For distributed mode this is a driver-side global sort; a proper
-    /// range-shuffle sort is tracked in ROADMAP P2.
-    pub fn sort_by<K, F>(self, key_fn: F, ascending: bool) -> Self
-    where
-        K: Ord,
-        F: Fn(&T) -> K,
-        Vec<T>: WireDecode,
-        T: WireEncode,
-    {
-        let num_partitions = self.rdd.number_of_splits();
-        let ctx = self.context.clone();
-        let mut data = self.collect().unwrap_or_default();
-        if ascending {
-            data.sort_by_key(|a| key_fn(a));
-        } else {
-            data.sort_by_key(|a| std::cmp::Reverse(key_fn(a)));
-        }
-        ctx.parallelize_typed(data, num_partitions)
-    }
-}
-
-impl<T: Data + Clone> TypedRdd<T> {
-    /// Group elements by a key function, returning `TypedRdd<(K, Vec<T>)>`.
-    pub fn group_by<K, F>(self, f: F) -> TypedRdd<(K, Vec<T>)>
-    where
-        K: Data + Eq + std::hash::Hash + Clone + bincode::Encode + bincode::Decode<()>,
-        T: Clone + bincode::Encode + bincode::Decode<()>,
-        F: Fn(&T) -> K + Clone + Send + Sync + 'static,
-        Vec<(K, T)>: WireEncode,
-    {
-        self.key_by(f).group_by_key()
     }
 }

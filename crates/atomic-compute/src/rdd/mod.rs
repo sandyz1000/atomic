@@ -7,7 +7,6 @@ pub(crate) mod core;
 pub mod flatmapper;
 pub mod map_partitions;
 pub mod mapper;
-pub mod pair;
 pub mod parallel_collection;
 pub mod partitionwise_sampled;
 pub mod rdd_val;

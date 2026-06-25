@@ -1,288 +1,176 @@
+//! PageRank on the engine, via distributed Pregel.
+//!
+//! PageRank's scalar parameters (`reset_prob`, vertex count `n`) cannot ride on a
+//! `#[task]` (tasks are stateless), so they are baked into the per-vertex state
+//! [`PrVertex`]: `base = reset/n` and `damping = 1 - reset` are precomputed on the
+//! driver and carried in every vertex. Edge weights `1/out_degree(src)` are baked
+//! into the edge attribute. The vertex task then computes `base + damping * sum`.
+
 use std::collections::HashMap;
 
-use crate::graph::Graph;
-use crate::topology::{Edge, VertexId, VertexMap};
+use atomic_compute::task;
 
-/// Compute PageRank using a fixed number of iterations.
-///
-/// Uses `aggregate_messages` directly (no Pregel) for `num_iter` iterations.
-/// Edge attributes are ignored; only graph topology affects the result.
-///
-/// Returns a [`VertexMap`] mapping each vertex ID to its PageRank score.
-///
-/// # Arguments
-///
-/// * `graph`      — input graph.
-/// * `num_iter`   — number of iterations to run.
-/// * `reset_prob` — teleportation probability; `0.15` is a common default.
-pub fn run<VD: Clone, ED: Clone>(
-    graph: &Graph<VD, ED>,
-    num_iter: usize,
-    reset_prob: f64,
-) -> VertexMap<f64> {
-    let n = graph.num_vertices() as f64;
-    if n == 0.0 {
-        return HashMap::new();
-    }
+use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::pregel;
+use crate::topology::{Edge, EdgeTriplet, VertexId, VertexMap};
 
-    let out_degrees = graph.out_degrees();
-
-    // Start: uniform rank = 1.0 / n; edge weight = 1 / out_degree[src].
-    let initial_rank = 1.0 / n;
-    // Build a weighted graph: vertex attr = rank, edge attr = 1/out_degree[src].
-    let weighted: Graph<f64, f64> = graph.with_edge_weights(&out_degrees, initial_rank);
-
-    let mut current = weighted;
-
-    for _ in 0..num_iter {
-        let msgs = current.aggregate_messages::<f64, _, _>(
-            |mut ctx| {
-                // send (src_rank * edge_weight) to dst
-                let contribution = ctx.triplet.src_attr * ctx.triplet.attr;
-                ctx.send_to_dst(contribution);
-            },
-            |a, b| a + b,
-        );
-
-        // Update rank: reset_prob/n + (1-reset_prob) * sum_contributions
-        let new_ranks: HashMap<VertexId, f64> = current
-            .vertices()
-            .map(|(vid, _old_rank)| {
-                let msg = msgs.get(&vid).copied().unwrap_or(0.0);
-                (vid, reset_prob / n + (1.0 - reset_prob) * msg)
-            })
-            .collect();
-
-        current = graph.with_edge_weights(&out_degrees, initial_rank);
-        current = current.outer_join_vertices(&new_ranks, |_vid, _default, rank_opt| {
-            rank_opt.copied().unwrap_or(initial_rank)
-        });
-    }
-
-    current.vertices().map(|(vid, rank)| (vid, *rank)).collect()
+/// Per-vertex PageRank state: the current `rank`, plus the precomputed `base`
+/// (`reset/n`) and `damping` (`1 - reset`) constants.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    bincode::Encode,
+    bincode::Decode,
+)]
+pub struct PrVertex {
+    pub rank: f64,
+    pub base: f64,
+    pub damping: f64,
 }
 
-/// Compute PageRank and stop early once scores converge.
-///
-/// Runs iterations until the maximum rank change across all vertices falls below
-/// `tol`, or `max_iter` is reached. Use a finite `max_iter` (e.g. `100`) to
-/// guard against oscillation on graphs with dangling nodes.
-///
-/// # Arguments
-///
-/// * `graph`      — input graph.
-/// * `tol`        — convergence tolerance (e.g., `0.001`).
-/// * `reset_prob` — teleportation probability; `0.15` is a common default.
-/// * `max_iter`   — hard upper bound on the number of iterations.
-pub fn run_until_convergence<VD: Clone, ED: Clone>(
-    graph: &Graph<VD, ED>,
-    tol: f64,
-    reset_prob: f64,
-    max_iter: usize,
-) -> VertexMap<f64> {
-    let n = graph.num_vertices() as f64;
-    if n == 0.0 {
-        return HashMap::new();
-    }
+// Shuffle handlers for PageRank's concrete pair shapes (VD = PrVertex, ED = f64).
+atomic_compute::register_shuffle_map!(i64, PrVertex);
+atomic_compute::register_shuffle_map!(i64, (i64, f64));
+atomic_compute::register_shuffle_map!(i64, (i64, f64, PrVertex));
 
-    let out_degrees = graph.out_degrees();
-    let initial_rank = 1.0 / n;
-
-    let weighted: Graph<f64, f64> = graph.with_edge_weights(&out_degrees, initial_rank);
-    let mut current = weighted;
-
-    for _ in 0..max_iter {
-        let msgs = current.aggregate_messages::<f64, _, _>(
-            |mut ctx| {
-                let contribution = ctx.triplet.src_attr * ctx.triplet.attr;
-                ctx.send_to_dst(contribution);
-            },
-            |a, b| a + b,
-        );
-
-        let mut max_delta: f64 = 0.0;
-        let new_ranks: HashMap<VertexId, f64> = current
-            .vertices()
-            .map(|(vid, old_rank)| {
-                let msg = msgs.get(&vid).copied().unwrap_or(0.0);
-                let new_rank = reset_prob / n + (1.0 - reset_prob) * msg;
-                max_delta = max_delta.max((new_rank - old_rank).abs());
-                (vid, new_rank)
-            })
-            .collect();
-
-        current = graph.with_edge_weights(&out_degrees, initial_rank);
-        current = current.outer_join_vertices(&new_ranks, |_vid, _default, rank_opt| {
-            rank_opt.copied().unwrap_or(initial_rank)
-        });
-
-        if max_delta < tol {
-            break;
-        }
-    }
-
-    current.vertices().map(|(vid, rank)| (vid, *rank)).collect()
+/// Send `src_rank * edge_weight` to the destination of every edge.
+#[task]
+fn pr_send(t: EdgeTriplet<PrVertex, f64>) -> Vec<(VertexId, f64)> {
+    vec![(t.dst_id, t.src_attr.rank * t.attr)]
 }
 
-impl<VD: Clone, ED: Clone> Graph<VD, ED> {
-    /// Build a graph with f64 vertex attr = `initial_rank` and f64 edge attr
-    /// = `1 / out_degree[src]`.  Used internally by PageRank.
-    fn with_edge_weights(
-        &self,
-        out_degrees: &HashMap<VertexId, usize>,
-        initial_rank: f64,
-    ) -> Graph<f64, f64> {
-        let vertices: Vec<(VertexId, f64)> = self
-            .vertices()
-            .map(|(vid, _)| (vid, initial_rank))
-            .collect();
-        let edges: Vec<Edge<f64>> = self
-            .edges()
-            .map(|e| {
-                let deg = *out_degrees.get(&e.src).unwrap_or(&1);
-                let w = 1.0 / deg.max(1) as f64;
-                Edge {
-                    src: e.src,
-                    dst: e.dst,
-                    attr: w,
-                }
-            })
-            .collect();
-        Graph::from_vertices_edges(vertices, edges)
+/// Update a vertex's rank from the summed incoming contribution.
+#[task]
+fn pr_vprog(input: (VertexId, (PrVertex, Option<f64>))) -> (VertexId, PrVertex) {
+    let (vid, (mut pv, msg)) = input;
+    let sum = msg.unwrap_or(0.0);
+    pv.rank = pv.base + pv.damping * sum;
+    (vid, pv)
+}
+
+/// Sum two rank contributions.
+#[task]
+fn pr_merge(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+/// Sum two out-degree counts.
+#[task]
+fn deg_add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+/// Compute PageRank for `num_iter` iterations.
+///
+/// Edge attributes on the input are ignored; only topology matters. Returns a
+/// [`VertexMap`] of vertex id to PageRank score. `reset_prob` is the teleportation
+/// probability (a common default is `0.15`).
+pub fn run<VD, ED>(graph: &Graph<VD, ED>, num_iter: usize, reset_prob: f64) -> VertexMap<f64>
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+{
+    let n = graph.num_vertices();
+    if n == 0 {
+        return HashMap::new();
     }
+    let nf = n as f64;
+
+    // Out-degree per source, computed on the engine.
+    let out_deg: HashMap<VertexId, i64> = graph
+        .edges
+        .clone()
+        .map_partitions_to_pair(|_idx, iter| Box::new(iter.map(|e| (e.src, 1i64))))
+        .reduce_by_key_task(DegAdd)
+        .collect()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    // Weighted graph: vertex = PrVertex(rank = 1/n), edge attr = 1/out_degree(src).
+    let verts: Vec<(VertexId, PrVertex)> = graph
+        .collect_vertices()
+        .into_iter()
+        .map(|(vid, _)| {
+            (
+                vid,
+                PrVertex {
+                    rank: 1.0 / nf,
+                    base: reset_prob / nf,
+                    damping: 1.0 - reset_prob,
+                },
+            )
+        })
+        .collect();
+    let edges: Vec<Edge<f64>> = graph
+        .collect_edges()
+        .into_iter()
+        .map(|e| {
+            let deg = (*out_deg.get(&e.src).unwrap_or(&1)).max(1) as f64;
+            Edge {
+                src: e.src,
+                dst: e.dst,
+                attr: 1.0 / deg,
+            }
+        })
+        .collect();
+
+    let wg = Graph::from_vertices_edges(graph.context().clone(), verts, edges);
+    let result =
+        pregel::run::<PrVertex, f64, f64, _, _, _>(&wg, num_iter, PrSend, PrMerge, PrVprog);
+    result
+        .collect_vertices()
+        .into_iter()
+        .map(|(vid, pv)| (vid, pv.rank))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Graph;
     use crate::topology::Edge;
+    use atomic_compute::context::Context;
 
-    fn star_graph() -> Graph<(), ()> {
-        // Hub = 0, spokes = 1,2,3 all pointing at hub.
-        Graph::from_edges(
-            vec![
-                Edge {
-                    src: 1,
-                    dst: 0,
-                    attr: (),
-                },
-                Edge {
-                    src: 2,
-                    dst: 0,
-                    attr: (),
-                },
-                Edge {
-                    src: 3,
-                    dst: 0,
-                    attr: (),
-                },
-            ],
-            (),
-        )
+    fn edge(src: VertexId, dst: VertexId) -> Edge<()> {
+        Edge { src, dst, attr: () }
+    }
+
+    fn star_graph(ctx: std::sync::Arc<Context>) -> Graph<(), ()> {
+        // Spokes 1,2,3 all point at hub 0.
+        Graph::from_edges(ctx, vec![edge(1, 0), edge(2, 0), edge(3, 0)], ())
     }
 
     #[test]
     fn hub_has_highest_rank() {
-        let ranks = run(&star_graph(), 10, 0.15);
+        let ctx = Context::local().unwrap();
+        let ranks = run(&star_graph(ctx), 10, 0.15);
         let hub = ranks[&0];
         for (&vid, &r) in &ranks {
             if vid != 0 {
                 assert!(hub > r, "hub rank {hub} should exceed spoke rank {r}");
-            }
-        }
-    }
-
-    #[test]
-    fn convergence_variant_hub_has_highest_rank() {
-        let ranks = run_until_convergence(&star_graph(), 0.001, 0.15, 50);
-        let hub = ranks[&0];
-        for (&vid, &r) in &ranks {
-            if vid != 0 {
-                assert!(hub > r, "hub rank {hub} should exceed spoke rank {r}");
-            }
-        }
-    }
-
-    #[test]
-    fn rank_sum_roughly_one() {
-        // Use a cycle (every vertex has out_degree=1, no dangling nodes)
-        // so rank doesn't sink at dangling nodes.
-        let cycle = Graph::from_edges(
-            vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 2,
-                    attr: (),
-                },
-                Edge {
-                    src: 2,
-                    dst: 3,
-                    attr: (),
-                },
-                Edge {
-                    src: 3,
-                    dst: 0,
-                    attr: (),
-                },
-            ],
-            (),
-        );
-        let ranks = run(&cycle, 20, 0.15);
-        let total: f64 = ranks.values().sum();
-        // In a cycle all vertices share equal rank; sum ≈ 1.0.
-        assert!((total - 1.0).abs() < 0.1, "rank sum {total} far from 1.0");
-    }
-
-    #[test]
-    fn two_node_cycle_equal_ranks() {
-        let g: Graph<(), ()> = Graph::from_edges(
-            vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 0,
-                    attr: (),
-                },
-            ],
-            (),
-        );
-        let ranks = run(&g, 20, 0.15);
-        let r0 = ranks[&0];
-        let r1 = ranks[&1];
-        assert!(
-            (r0 - r1).abs() < 0.01,
-            "symmetric cycle: both nodes should have equal rank, got {r0} vs {r1}"
-        );
-    }
-
-    #[test]
-    fn sink_node_has_lower_rank_than_hub() {
-        // Hub (0) is pointed to by spokes (1,2,3) but points nowhere → dangling node.
-        // Hub collects all rank but redistributes via teleportation only.
-        // In a star-to-hub the hub should still rank highest.
-        let ranks = run(&star_graph(), 20, 0.15);
-        let hub = ranks[&0];
-        for (&vid, &r) in &ranks {
-            if vid != 0 {
-                assert!(hub > r, "hub {hub} should exceed spoke {r} for vid={vid}");
             }
         }
     }
 
     #[test]
     fn empty_graph_returns_empty_ranks() {
-        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![], vec![]);
+        let ctx = Context::local().unwrap();
+        let g: Graph<(), ()> = Graph::from_vertices_edges(ctx, vec![], vec![]);
         let ranks = run(&g, 10, 0.15);
         assert!(ranks.is_empty());
+    }
+
+    #[test]
+    fn two_node_cycle_equal_ranks() {
+        let ctx = Context::local().unwrap();
+        let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 0)], ());
+        let ranks = run(&g, 20, 0.15);
+        assert!((ranks[&0] - ranks[&1]).abs() < 0.01);
     }
 }

@@ -20,6 +20,10 @@ pub enum BaseError {
     /// Rkyv serialization/deserialization error (wire encoding).
     #[error("wire encoding error: {0}")]
     WireError(#[from] rkyv::rancor::Error),
+
+    /// Filesystem or other I/O failure.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub type BaseResult<T> = Result<T, BaseError>;

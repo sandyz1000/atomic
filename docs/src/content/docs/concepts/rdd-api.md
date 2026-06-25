@@ -58,24 +58,33 @@ the staged pipeline and aggregate the results.
 
 RDDs of `(K, V)` pairs support keyed operations. The keyed reductions and joins
 are shuffle-based: they redistribute data by key across two stages rather than
-collecting the full dataset to the driver.
+collecting the full dataset to the driver. The reductions take a registered task,
+like the narrow transforms — there is no closure form, so a job runs identically
+in local and distributed mode.
 
-| Method | Description |
-|---|---|
-| `reduce_by_key(F)` | Combine values per key |
-| `group_by_key()` | Collect all values per key |
-| `join` / `left_outer_join` / `right_outer_join` / `full_outer_join` | Keyed joins |
-| `cogroup(other)` | Group both sides by key |
-| `sort_by_key()` | Globally ordered output by key |
-| `map_values(F)` / `flat_map_values(F)` | Transform values, keep keys |
-| `repartition_shuffle(n)` | Redistribute elements across `n` partitions |
+| Method | Trait | Description |
+|---|---|---|
+| `reduce_by_key_task(B)` | `BinaryTask<V>` | Combine values per key |
+| `fold_by_key_task(zero, B, n)` | `BinaryTask<V>` | Fold values per key from `zero` |
+| `group_by_key()` | — | Collect all values per key |
+| `join` / `left_outer_join` / `right_outer_join` / `full_outer_join` | — | Keyed joins |
+| `cogroup(other)` | — | Group both sides by key |
+| `sort_by_key()` / `sort_by_task(F, asc)` | `UnaryTask<T,(K,T)>` | Globally ordered output |
+| `repartition_shuffle(n)` | — | Redistribute elements across `n` partitions |
+
+To transform values while keeping keys, use `map_task` / `flat_map_task` with a
+pair-shaped task (`(K, V) -> (K, U)`); to key elements, map to `(K, T)` and then
+`group_by_key`.
 
 ```rust
+#[task]
+fn add(a: u32, b: u32) -> u32 { a + b }
+
 let counts = ctx
     .text_file("data/words.txt")?
     .flat_map_task(Tokenize)
     .map_task(PairOne)
-    .reduce_by_key(Add)
+    .reduce_by_key_task(Add)
     .collect()?;
 ```
 

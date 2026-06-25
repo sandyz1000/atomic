@@ -33,6 +33,11 @@ fn tokenize(line: String) -> Vec<(String, i32)> {
         .collect()
 }
 
+#[task]
+fn add_i32(a: i32, b: i32) -> i32 {
+    a + b
+}
+
 fn main() {
     let cli = IntegrationCli::parse();
     let _ = env_logger::try_init();
@@ -68,7 +73,7 @@ fn run_driver(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let mut word_counts = ctx
         .parallelize_typed(lines, 2)
         .flat_map_task(Tokenize)
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddI32)
         .collect()?;
 
     word_counts.sort_by_key(|(k, _)| k.clone());

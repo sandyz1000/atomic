@@ -14,19 +14,19 @@ bincode = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rayon = { workspace = true }
-petgraph = { version = "0.8.3" }
-bit-set = { version = "0.10.0" }
+petgraph = { workspace = true }
+bit-set = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 atomic-compute = { workspace = true }
 atomic-data = { workspace = true }
-uuid = { version = "1.6.1" }
+uuid = { workspace = true }
 num_cpus = { workspace = true }
 
 # Optional Kafka source (KafkaInputDStream). Off by default — enabling it pulls in
 # librdkafka (built from source via cmake). Build with `--features kafka`.
-rdkafka = { version = "0.36", optional = true, features = ["cmake-build"] }
+rdkafka = { workspace = true, optional = true, features = ["cmake-build"] }
 
 [features]
 default = []

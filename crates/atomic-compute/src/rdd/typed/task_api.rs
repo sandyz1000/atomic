@@ -173,26 +173,26 @@ where
         };
         ops.push(fold_op);
 
-        let partition_results_raw = self
+        let raw_partition_outputs = self
             .context
             .dispatch_pipeline(source_partitions, ops.clone())
             .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
 
-        let mut partition_values: Vec<T> = partition_results_raw
+        let mut part_values: Vec<T> = raw_partition_outputs
             .into_iter()
             .map(|bytes| {
                 T::decode_wire(&bytes).map_err(|e| BaseError::DowncastFailure(e.to_string()))
             })
             .collect::<Result<_, _>>()?;
 
-        if partition_values.is_empty() {
+        if part_values.is_empty() {
             return Ok(init);
         }
-        if partition_values.len() == 1 {
-            return Ok(partition_values.remove(0));
+        if part_values.len() == 1 {
+            return Ok(part_values.remove(0));
         }
 
-        Ok(partition_values.into_iter().reduce(F::call).unwrap_or(init))
+        Ok(part_values.into_iter().reduce(F::call).unwrap_or(init))
     }
 
     /// Reduce all elements using a `#[task]`-registered binary function.

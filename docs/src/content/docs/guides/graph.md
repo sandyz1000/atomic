@@ -4,17 +4,22 @@ description: Build graphs, run Pregel programs, and call built-in algorithms.
 ---
 
 `atomic-graph` processes directed graphs with typed vertex and edge data. A
-`Graph<VD, ED>` pairs a vertex set with an edge set. The Pregel engine runs
-vertex-centric message-passing programs, and several common algorithms are
-built on top of it.
+`Graph<VD, ED>` pairs a vertex RDD `(VertexId, VD)` with an edge RDD `Edge<ED>`,
+held against an Atomic [`Context`](/guides/configuration/). Every algorithm runs
+as RDD jobs on the compute engine — in local mode on the thread pool, in
+distributed mode dispatched to workers. The Pregel engine and
+`aggregate_messages` are the primitives the built-in algorithms build on.
 
 ## Building a graph
 
 ```rust
+use atomic_compute::context::Context;
 use atomic_graph::graph::Graph;
 use atomic_graph::topology::Edge;
 
+let ctx = Context::local()?;
 let g: Graph<i64, ()> = Graph::from_edges(
+    ctx,
     vec![
         Edge { src: 0, dst: 1, attr: () },
         Edge { src: 1, dst: 2, attr: () },
@@ -23,19 +28,25 @@ let g: Graph<i64, ()> = Graph::from_edges(
 ).map_vertices(|vid, _| vid);
 ```
 
-`from_vertices_edges` builds from explicit vertex and edge lists;
-`from_edges` creates missing vertices with a default attribute.
+`from_vertices_edges` builds from explicit vertex and edge lists; `from_edges`
+creates missing vertices with a default attribute; `from_rdds` wraps existing
+vertex and edge RDDs.
 
 ## Built-in algorithms
 
+All algorithms run on the engine. PageRank, connected components, label
+propagation, and shortest path are Pregel programs; triangle count uses
+neighbor-set joins; strongly connected components uses distributed color
+propagation (driver-coordinated rounds, two Pregel passes each).
+
 | Algorithm | Module | Method |
 |---|---|---|
-| PageRank | `algo::page_rank` | Fixed-iteration and convergence-based |
-| Connected components | `algo::connected_component` | Weakly connected, min-label via Pregel |
-| Strongly connected components | `algo::strongly_connected_component` | Tarjan's algorithm |
-| Label propagation | `algo::label_propagation` | Community detection |
-| Triangle count | `algo::triangle_count` | Per-vertex and total |
-| Shortest path | `algo::shortest_path` | Single-source via Pregel |
+| PageRank | `algo::page_rank` | Fixed-iteration, via `aggregate_messages` |
+| Connected components | `algo::connected_component` | Weakly connected, min-label Pregel |
+| Strongly connected components | `algo::strongly_connected_component` | Distributed color propagation |
+| Label propagation | `algo::label_propagation` | Community detection (Pregel) |
+| Triangle count | `algo::triangle_count` | Per-vertex and total (neighbor-set joins) |
+| Shortest path | `algo::shortest_path` | Multi-source to landmarks (Pregel) |
 
 ```rust
 use atomic_graph::algo::page_rank;
@@ -46,25 +57,43 @@ let ranks = page_rank::run(&g, 20, 0.15);   // 20 iterations, 0.15 reset probabi
 ## Pregel
 
 `pregel::run` runs supersteps until no messages remain or a maximum is reached.
-Each superstep applies a vertex program to vertices that received messages,
-sends messages along edges, and merges messages destined for the same vertex.
+Each superstep sends messages along edges, merges messages destined for the same
+vertex (a shuffle), and applies a vertex program.
+
+Because distributed work dispatches by compile-time identifier, the message
+(`send`) and vertex (`vprog`) functions are registered `#[task]`s, not closures.
+The combine (`merge`) is an ordinary closure run on the reduce side. A `#[task]`
+takes no captured state, so per-run parameters are baked into the vertex or edge
+data on the driver before the loop (see how `page_rank` precomputes its constants
+into a `PrVertex`).
 
 ```rust
+use atomic_compute::task;
 use atomic_graph::pregel;
-use atomic_graph::topology::EdgeDirection;
+use atomic_graph::topology::{EdgeTriplet, VertexId};
 
-let result = pregel::run(
+// Propagate the smaller endpoint label across each edge.
+#[task]
+fn min_send(t: EdgeTriplet<VertexId, ()>) -> Vec<(VertexId, VertexId)> {
+    if t.src_attr < t.dst_attr {
+        vec![(t.dst_id, t.src_attr)]
+    } else {
+        Vec::new()
+    }
+}
+
+#[task]
+fn min_vprog(input: (VertexId, (VertexId, Option<VertexId>))) -> (VertexId, VertexId) {
+    let (vid, (label, msg)) = input;
+    (vid, msg.map_or(label, |m| label.min(m)))
+}
+
+let result = pregel::run::<VertexId, (), VertexId, _, _, _>(
     &g,
-    i64::MAX,                                  // initial message
-    10,                                        // max supersteps
-    EdgeDirection::Either,
-    |_vid, vd, msg| (*vd).min(msg),            // vertex program
-    |mut ctx| {                                // send messages
-        if ctx.triplet.src_attr < ctx.triplet.dst_attr {
-            ctx.send_to_dst(ctx.triplet.src_attr);
-        }
-    },
-    |a, b| a.min(b),                           // merge messages
+    10,                          // max supersteps
+    MinSend,                     // message task (generated from `min_send`)
+    |a, b| a.min(b),             // merge (closure)
+    MinVprog,                    // vertex task (generated from `min_vprog`)
 );
 ```
 

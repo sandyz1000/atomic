@@ -61,9 +61,7 @@ impl Executor {
         &self,
         task: &TaskEnvelope,
     ) -> ComputeResult<atomic_data::distributed::TaskResultEnvelope> {
-        self.backend
-            .execute(&self.worker_id, task)
-            .map_err(|e| ComputeError::InvalidPayload(e.to_string()))
+        self.backend.execute(&self.worker_id, task)
     }
 
     pub fn worker_capabilities(&self) -> WorkerCapabilities {
@@ -392,8 +390,7 @@ mod tests {
     }
 
     fn shutdown_msg(stream: &mut std::net::TcpStream) -> ComputeResult<()> {
-        let json = serde_json::to_vec(&Signal::ShutDownGracefully)
-            .map_err(|e| ComputeError::Other(e.to_string()))?;
+        let json = serde_json::to_vec(&Signal::ShutDownGracefully)?;
         let len = (json.len() as u32).to_le_bytes();
         stream.write_all(&len).map_err(ComputeError::OutputWrite)?;
         stream.write_all(&json).map_err(ComputeError::OutputWrite)?;

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use atomic_compute::context::Context;
 use atomic_graph::{
     algo::{
         connected_component, label_propagation, page_rank, shortest_path,
@@ -12,10 +14,11 @@ use pyo3::prelude::*;
 
 type VId = i64;
 
-/// An in-process directed graph exposed to Python.
+/// A directed graph exposed to Python, backed by Atomic RDDs.
 ///
-/// Vertices carry a `float` weight; edges carry a `float` weight used as
-/// distance in shortest-path computations.
+/// Vertices carry a `float` weight; edges carry a `float` weight used as the
+/// distance in shortest-path computations. Graph algorithms run on the Atomic
+/// compute engine.
 ///
 /// # Construction
 /// ```python
@@ -27,7 +30,14 @@ type VId = i64;
 /// ```
 #[pyclass(name = "Graph")]
 pub struct PyGraph {
+    ctx: Arc<Context>,
     inner: Graph<f64, f64>,
+}
+
+impl PyGraph {
+    fn rebuild(ctx: Arc<Context>, inner: Graph<f64, f64>) -> Self {
+        PyGraph { ctx, inner }
+    }
 }
 
 #[pymethods]
@@ -38,7 +48,9 @@ impl PyGraph {
     /// * `edges`    — list of `(src_id: int, dst_id: int, weight: float)` tuples.
     #[new]
     #[pyo3(signature = (vertices, edges))]
-    pub fn new(vertices: Vec<(VId, f64)>, edges: Vec<(VId, VId, f64)>) -> Self {
+    pub fn new(vertices: Vec<(VId, f64)>, edges: Vec<(VId, VId, f64)>) -> PyResult<Self> {
+        let ctx = Context::local()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let edge_list: Vec<Edge<f64>> = edges
             .into_iter()
             .map(|(s, d, w)| Edge {
@@ -47,29 +59,32 @@ impl PyGraph {
                 attr: w,
             })
             .collect();
-        Self {
-            inner: Graph::from_vertices_edges(vertices, edge_list),
-        }
+        let inner = Graph::from_vertices_edges(ctx.clone(), vertices, edge_list);
+        Ok(PyGraph { ctx, inner })
     }
 
     /// Number of vertices in the graph.
     pub fn num_vertices(&self) -> usize {
-        self.inner.num_vertices()
+        self.inner.num_vertices() as usize
     }
 
     /// Number of edges in the graph.
     pub fn num_edges(&self) -> usize {
-        self.inner.num_edges()
+        self.inner.num_edges() as usize
     }
 
     /// Return vertices as a list of `(vertex_id, weight)` tuples.
     pub fn vertices(&self) -> Vec<(VId, f64)> {
-        self.inner.vertices().map(|(id, w)| (id, *w)).collect()
+        self.inner.collect_vertices()
     }
 
     /// Return edges as a list of `(src_id, dst_id, weight)` tuples.
     pub fn edges(&self) -> Vec<(VId, VId, f64)> {
-        self.inner.edges().map(|e| (e.src, e.dst, e.attr)).collect()
+        self.inner
+            .collect_edges()
+            .into_iter()
+            .map(|e| (e.src, e.dst, e.attr))
+            .collect()
     }
 
     /// Compute PageRank.
@@ -91,10 +106,9 @@ impl PyGraph {
         connected_component::run(&self.inner, usize::MAX)
     }
 
-    /// Strongly connected components (Tarjan's algorithm).
+    /// Strongly connected components (distributed color propagation).
     ///
-    /// Returns `dict[int, int]` mapping each vertex to the minimum vertex ID
-    /// in its SCC.
+    /// Returns `dict[int, int]` mapping each vertex to the representative of its SCC.
     pub fn strongly_connected_components(&self) -> HashMap<VId, VId> {
         strongly_connected_component::run(&self.inner, 0)
     }
@@ -118,58 +132,39 @@ impl PyGraph {
         triangle_count::run(&self.inner)
     }
 
-    /// Shortest paths from the given landmark vertices (Dijkstra, edge weights
-    /// used as distances).
+    /// Shortest paths from the given landmark vertices (edge weights are distances).
     ///
-    /// Returns `dict[int, dict[int, float]]` — for each vertex, a map from
-    /// landmark ID to the shortest distance.  Unreachable landmarks are absent
-    /// from the inner dict.
+    /// Returns `dict[int, dict[int, float]]` — for each vertex, a map from landmark
+    /// ID to the shortest distance. Unreachable landmarks are absent.
     ///
-    /// * `landmarks` — list of destination vertex IDs to compute distances to.
+    /// * `landmarks` — list of source vertex IDs to compute distances from.
     pub fn shortest_path(&self, landmarks: Vec<VId>) -> HashMap<VId, HashMap<VId, f64>> {
-        // shortest_path::run expects Graph<(), f64>; strip vertex attrs.
-        let verts: Vec<(VId, ())> = self.inner.vertices().map(|(id, _)| (id, ())).collect();
-        let edges: Vec<Edge<f64>> = self
+        // shortest_path::run expects Graph<(), f64>; strip vertex attributes.
+        let verts: Vec<(VId, ())> = self
             .inner
-            .edges()
-            .map(|e| Edge {
-                src: e.src,
-                dst: e.dst,
-                attr: e.attr,
-            })
+            .collect_vertices()
+            .into_iter()
+            .map(|(id, _)| (id, ()))
             .collect();
-        let unit_graph: Graph<(), f64> = Graph::from_vertices_edges(verts, edges);
+        let edges: Vec<Edge<f64>> = self.inner.collect_edges();
+        let unit_graph: Graph<(), f64> = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
         shortest_path::run(&unit_graph, &landmarks)
     }
 
     /// Run a custom Pregel vertex-centric computation.
     ///
-    /// All vertex data, edge data, and messages are `float` values.
+    /// Vertex data, edge data, and messages are `float` values. Because Python
+    /// callbacks cannot be compiled into engine tasks, this runs the message loop
+    /// on the driver over the materialized graph.
     ///
     /// Parameters:
     /// * `initial_msg`    — message sent to every vertex before superstep 0.
     /// * `max_iterations` — maximum number of supersteps.
-    /// * `vprog`          — `(vertex_id: int, vertex_data: float, msg: float) -> float`
-    ///                      Updates the vertex attribute given an incoming message.
-    /// * `send_msg`       — `(src_id, src_data, dst_id, dst_data, edge_data) -> list[(int, float)]`
-    ///                      Returns a list of `(target_vertex_id, message)` pairs to send.
-    ///                      Use `src_id` or `dst_id` as the target.
-    /// * `merge_msg`      — `(msg_a: float, msg_b: float) -> float`
-    ///                      Commutative combiner for messages arriving at the same vertex.
+    /// * `vprog`          — `(vertex_id, vertex_data, msg) -> float`.
+    /// * `send_msg`       — `(src_id, src_data, dst_id, dst_data, edge_data) -> list[(int, float)]`.
+    /// * `merge_msg`      — `(msg_a, msg_b) -> float`.
     ///
     /// Returns a new `Graph` with updated vertex attributes.
-    ///
-    /// # Example
-    /// ```python
-    /// # Propagate minimum vertex ID to all reachable vertices.
-    /// result = g.run_pregel(
-    ///     initial_msg=float('inf'),
-    ///     max_iterations=10,
-    ///     vprog=lambda vid, vdata, msg: min(vdata, msg),
-    ///     send_msg=lambda si, sd, di, dd, ed: [(di, sd)] if sd < dd else [],
-    ///     merge_msg=lambda a, b: min(a, b),
-    /// )
-    /// ```
     #[pyo3(signature = (initial_msg, max_iterations, vprog, send_msg, merge_msg))]
     pub fn run_pregel(
         &self,
@@ -180,25 +175,23 @@ impl PyGraph {
         send_msg: Py<PyAny>,
         merge_msg: Py<PyAny>,
     ) -> PyResult<PyGraph> {
-        // Implement the Pregel loop manually so the GIL token stays in scope
-        // throughout — Python::with_gil is not available in pyo3 0.22+.
-        let graph = &self.inner;
+        let vertices = self.inner.collect_vertices();
+        let edges = self.inner.collect_edges();
 
         // Superstep 0: apply vprog with initial_msg to every vertex.
-        let mut vdata: HashMap<VId, f64> = graph
-            .vertices()
+        let mut vdata: HashMap<VId, f64> = vertices
+            .iter()
             .map(|(vid, vd)| -> PyResult<(VId, f64)> {
                 let new_vd = vprog
-                    .call1(py, (vid, *vd, initial_msg))?
+                    .call1(py, (*vid, *vd, initial_msg))?
                     .extract::<f64>(py)?;
-                Ok((vid, new_vd))
+                Ok((*vid, new_vd))
             })
             .collect::<PyResult<_>>()?;
 
         for _ in 0..max_iterations {
             let mut msgs: HashMap<VId, f64> = HashMap::new();
-
-            for edge in graph.edges() {
+            for edge in &edges {
                 let src_vd = vdata.get(&edge.src).copied().unwrap_or(0.0);
                 let dst_vd = vdata.get(&edge.dst).copied().unwrap_or(0.0);
                 let result = send_msg.call1(py, (edge.src, src_vd, edge.dst, dst_vd, edge.attr))?;
@@ -228,8 +221,12 @@ impl PyGraph {
             }
         }
 
-        let result = graph.map_vertices(|vid, old_vd| *vdata.get(&vid).unwrap_or(old_vd));
-        Ok(PyGraph { inner: result })
+        let new_vertices: Vec<(VId, f64)> = vertices
+            .iter()
+            .map(|(vid, old)| (*vid, vdata.get(vid).copied().unwrap_or(*old)))
+            .collect();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), new_vertices, edges);
+        Ok(PyGraph::rebuild(self.ctx.clone(), inner))
     }
 
     pub fn __repr__(&self) -> String {

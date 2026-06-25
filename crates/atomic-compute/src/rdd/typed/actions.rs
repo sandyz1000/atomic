@@ -466,6 +466,7 @@ impl<T: Data + Clone> TypedRdd<T> {
             .context
             .dispatch_pipeline(source, ops)
             .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+
         result_bytes
             .into_iter()
             .map(|b| {

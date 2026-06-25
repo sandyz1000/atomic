@@ -1,8 +1,21 @@
-use atomic_compute::{context::Context, rdd::typed::TypedRdd};
+use atomic_compute::{context::Context, rdd::typed::TypedRdd, task};
 use std::sync::{Arc, Mutex};
 
 atomic_compute::register_shuffle_map!(String, i32);
 atomic_compute::register_shuffle_map!(usize, i32);
+atomic_compute::register_sort_shuffle_map!(i32, i32);
+
+/// Identity key for `sort_by_task` (sort `i32` by its own value).
+#[task]
+fn key_self_i32(x: i32) -> (i32, i32) {
+    (x, x)
+}
+
+/// Sum two counts — keyed-reduction merge.
+#[task]
+fn add_i32(a: i32, b: i32) -> i32 {
+    a + b
+}
 
 fn ctx() -> Arc<Context> {
     Context::local().unwrap()
@@ -165,7 +178,7 @@ async fn test_sort_by_descending() {
     let ctx = ctx();
     let result = ctx
         .parallelize_typed(vec![3i32, 1, 4, 1, 5], 2)
-        .sort_by(|x| *x, false)
+        .sort_by_task(KeySelfI32, false)
         .collect()
         .unwrap();
     assert_eq!(result, vec![5, 4, 3, 1, 1]);
@@ -176,7 +189,7 @@ async fn test_sort_by_ascending() {
     let ctx = ctx();
     let result = ctx
         .parallelize_typed(vec![3i32, 1, 4, 1, 5], 2)
-        .sort_by(|x| *x, true)
+        .sort_by_task(KeySelfI32, true)
         .collect()
         .unwrap();
     assert_eq!(result, vec![1, 1, 3, 4, 5]);
@@ -199,7 +212,7 @@ async fn test_partitions_pair_reduce() {
                     .collect::<Vec<_>>()
             })) as Box<dyn Iterator<Item = (String, i32)>>
         })
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddI32)
         .collect()
         .unwrap();
     result.sort_by_key(|(k, _)| k.clone());

@@ -71,6 +71,12 @@ fn pair_one(word: String) -> (String, u32) {
     (word, 1)
 }
 
+/// Sum two word counts — the keyed-reduction merge, dispatched by the shuffle.
+#[task]
+fn add_u32(a: u32, b: u32) -> u32 {
+    a + b
+}
+
 // ── Dataset ───────────────────────────────────────────────────────────────────
 
 fn corpus() -> Vec<String> {
@@ -128,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parallelize_typed(lines, num_partitions)
         .flat_map_task(Tokenize)
         .map_task(PairOne)
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddU32)
         .collect()?;
 
     // Sort by count descending, then word alphabetically.

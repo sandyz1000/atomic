@@ -146,10 +146,11 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
                 if let Some(store) = PARTITION_CACHE.get()
                     && let Some(cached) = store.get::<T>(rdd_id, idx)
                 {
-                    return Ok(Box::new(ArcVecIter {
+                    let cached_iter = Box::new(ArcVecIter {
                         data: cached,
                         pos: 0,
-                    }));
+                    });
+                    return Ok(cached_iter);
                 }
                 let items: Vec<T> = self.inner.iterator(split)?.collect();
                 let arc = Arc::new(items);
@@ -168,10 +169,11 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
                 if let Some(store) = PARTITION_CACHE.get()
                     && let Some(cached) = store.get::<T>(rdd_id, idx)
                 {
-                    return Ok(Box::new(ArcVecIter {
+                    let cached_iter = Box::new(ArcVecIter {
                         data: cached,
                         pos: 0,
-                    }));
+                    });
+                    return Ok(cached_iter);
                 }
                 let items: Vec<T> = self.inner.iterator(split)?.collect();
                 let arc = Arc::new(items);

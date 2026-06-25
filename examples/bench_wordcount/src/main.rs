@@ -31,6 +31,11 @@ fn pair_one(word: String) -> (String, u64) {
     (word, 1)
 }
 
+#[task]
+fn add_u64(a: u64, b: u64) -> u64 {
+    a + b
+}
+
 /// Same synthetic-corpus layout used by `benchmarks/spark/wordcount_benchmark.py`:
 /// `num_lines = TOTAL_WORDS / WORDS_PER_LINE` lines, each word a cyclic index
 /// into a `VOCAB_SIZE`-word vocabulary.
@@ -60,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parallelize_typed(lines, NUM_PARTITIONS)
         .flat_map_task(Tokenize)
         .map_task(PairOne)
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddU64)
         .collect()?;
     let job_elapsed = job_start.elapsed();
 

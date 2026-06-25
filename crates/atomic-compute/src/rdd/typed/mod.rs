@@ -4,7 +4,6 @@ use crate::rdd::coalesced::CoalescedRdd;
 use crate::rdd::flatmapper::FlatMapperRdd;
 use crate::rdd::map_partitions::{MapPartitionsPairRdd, MapPartitionsRdd};
 use crate::rdd::mapper::MapperRdd;
-use crate::rdd::pair::FlatMappedValuesRdd;
 use crate::rdd::parallel_collection::ParallelCollection;
 use crate::rdd::partitionwise_sampled::PartitionwiseSampledRdd;
 use crate::runtimes::Backend;

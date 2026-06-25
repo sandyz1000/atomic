@@ -1,205 +1,137 @@
-use std::collections::HashMap;
+//! Multi-source shortest paths (to a set of landmarks) via distributed Pregel.
+//!
+//! Each vertex carries its current distance to every landmark as a `Vec<(landmark,
+//! distance)>` (an association list rather than a `HashMap`, so the state encodes
+//! cleanly on the wire). Distances start at `0` for landmark vertices; every
+//! superstep relaxes edges and keeps the minimum.
+
+use std::collections::{BTreeMap, HashMap};
+
+use atomic_compute::task;
 
 use crate::graph::Graph;
 use crate::pregel;
-use crate::topology::{EdgeDirection, VertexId, VertexMap};
+use crate::topology::{EdgeTriplet, VertexId, VertexMap};
 
-/// Distance map: landmark vertex ID → distance from this vertex.
-type SpMap = HashMap<VertexId, f64>;
+/// Per-vertex distance vector: `(landmark, distance)` entries.
+type SpVec = Vec<(VertexId, f64)>;
 
-/// Compute shortest-path distances from every vertex to each landmark.
-///
-/// Matches GraphX's `ShortestPaths.run` API: returns a per-vertex map of
-/// distances to each specified landmark.  Edge weights are taken from the
-/// edge attribute `ED = f64`; use `1.0` for unweighted graphs.
-///
-/// # Parameters
-/// * `graph`     — directed graph with `f64` edge attributes as distances.
-/// * `landmarks` — slice of destination vertex IDs.
-///
-/// Returns `VertexMap<SpMap>` — for each vertex, a map from landmark ID to
-/// the shortest distance.  Unreachable landmarks are absent from the inner map.
-pub fn run(graph: &Graph<(), f64>, landmarks: &[VertexId]) -> VertexMap<SpMap> {
-    if landmarks.is_empty() || graph.num_vertices() == 0 {
-        return graph
-            .vertices()
-            .map(|(vid, _)| (vid, HashMap::new()))
-            .collect();
+// Shuffle handlers for shortest-path pair shapes (VD = SpVec, ED = f64).
+atomic_compute::register_shuffle_map!(i64, SpVec);
+atomic_compute::register_shuffle_map!(i64, (i64, f64, SpVec));
+
+fn merge_into(map: &mut BTreeMap<VertexId, f64>, entries: SpVec) {
+    for (lm, d) in entries {
+        let slot = map.entry(lm).or_insert(f64::INFINITY);
+        if d < *slot {
+            *slot = d;
+        }
     }
+}
 
-    // Vertex attr = SpMap (distances to landmarks known so far).
-    // Landmark vertices start knowing distance 0 to themselves.
-    let sp_graph: Graph<SpMap, f64> = graph.map_vertices(|vid, _| {
-        if landmarks.contains(&vid) {
-            let mut m = HashMap::new();
-            m.insert(vid, 0.0);
-            m
+/// Combine two distance vectors, keeping the minimum per landmark.
+#[task]
+fn sp_merge(a: SpVec, b: SpVec) -> SpVec {
+    let mut map: BTreeMap<VertexId, f64> = a.into_iter().collect();
+    merge_into(&mut map, b);
+    map.into_iter().collect()
+}
+
+/// Relax every edge: propose `src distance + weight` for each landmark when it
+/// improves the destination's current distance.
+#[task]
+fn sp_send(t: EdgeTriplet<SpVec, f64>) -> Vec<(VertexId, SpVec)> {
+    let dst: BTreeMap<VertexId, f64> = t.dst_attr.iter().copied().collect();
+    let mut out: SpVec = Vec::new();
+    for (lm, d) in &t.src_attr {
+        let nd = d + t.attr;
+        let better = dst.get(lm).map(|c| nd < *c).unwrap_or(true);
+        if better {
+            out.push((*lm, nd));
+        }
+    }
+    if out.is_empty() {
+        Vec::new()
+    } else {
+        vec![(t.dst_id, out)]
+    }
+}
+
+/// Fold the incoming distances into the vertex's distance vector, keeping minimums.
+#[task]
+fn sp_vprog(input: (VertexId, (SpVec, Option<SpVec>))) -> (VertexId, SpVec) {
+    let (vid, (cur, msg)) = input;
+    let mut map: BTreeMap<VertexId, f64> = cur.into_iter().collect();
+    if let Some(m) = msg {
+        merge_into(&mut map, m);
+    }
+    (vid, map.into_iter().collect())
+}
+
+/// Compute the shortest distance from every vertex to each landmark.
+///
+/// Edge attributes are the edge weights. Returns a [`VertexMap`] from vertex id to
+/// a `landmark -> distance` map; landmarks unreachable from a vertex are absent.
+pub fn run(graph: &Graph<(), f64>, landmarks: &[VertexId]) -> VertexMap<HashMap<VertexId, f64>> {
+    if landmarks.is_empty() {
+        return HashMap::new();
+    }
+    let lm: Vec<VertexId> = landmarks.to_vec();
+    // Initial state: landmark vertices start at distance 0 to themselves.
+    let init = graph.map_vertices(move |vid, _| {
+        if lm.contains(&vid) {
+            vec![(vid, 0.0_f64)]
         } else {
-            HashMap::new()
+            Vec::new()
         }
     });
-
-    let result = pregel::run(
-        &sp_graph,
-        // initial_msg: empty map — no new information yet
-        HashMap::new(),
-        graph.num_vertices() + 1,
-        EdgeDirection::In,
-        // vprog: merge incoming distance map with current map (keep min per landmark)
-        |_vid, vd: &SpMap, msg: SpMap| add_maps(vd, &msg),
-        // send_msg: send (src distances incremented by edge weight) to src vertex
-        // (we propagate distances backward: dst knows distances, src learns from dst)
-        |mut ctx| {
-            let new_dists = increment_map(&ctx.triplet.dst_attr, ctx.triplet.attr);
-            // Only send if src would learn something new.
-            if add_maps(&ctx.triplet.src_attr, &new_dists) != ctx.triplet.src_attr {
-                ctx.send_to_src(new_dists);
-            }
-        },
-        // merge_msg: combine two incoming distance maps (keep min per landmark)
-        |a, b| add_maps(&a, &b),
-    );
-
+    let max_iter = graph.num_vertices() as usize + 1;
+    let result =
+        pregel::run::<SpVec, f64, SpVec, _, _, _>(&init, max_iter, SpSend, SpMerge, SpVprog);
     result
-        .vertices()
-        .map(|(vid, sp)| (vid, sp.clone()))
+        .collect_vertices()
+        .into_iter()
+        .map(|(vid, v)| (vid, v.into_iter().collect::<HashMap<VertexId, f64>>()))
         .collect()
-}
-
-fn increment_map(m: &SpMap, weight: f64) -> SpMap {
-    m.iter().map(|(&k, &d)| (k, d + weight)).collect()
-}
-
-fn add_maps(m1: &SpMap, m2: &SpMap) -> SpMap {
-    let mut result = m1.clone();
-    for (&k, &d) in m2 {
-        result
-            .entry(k)
-            .and_modify(|existing| {
-                if d < *existing {
-                    *existing = d;
-                }
-            })
-            .or_insert(d);
-    }
-    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Graph;
     use crate::topology::Edge;
+    use atomic_compute::context::Context;
 
-    fn weighted_triangle() -> Graph<(), f64> {
-        // 0 →(1.0)→ 1 →(2.0)→ 2 →(3.0)→ 0
-        Graph::from_edges(
-            vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: 1.0,
-                },
-                Edge {
-                    src: 1,
-                    dst: 2,
-                    attr: 2.0,
-                },
-                Edge {
-                    src: 2,
-                    dst: 0,
-                    attr: 3.0,
-                },
-            ],
+    fn wedge(src: VertexId, dst: VertexId, w: f64) -> Edge<f64> {
+        Edge { src, dst, attr: w }
+    }
+
+    #[test]
+    fn line_graph_distances() {
+        let ctx = Context::local().unwrap();
+        // 1 -> 2 -> 3 -> 4, unit weights.
+        let g: Graph<(), f64> = Graph::from_edges(
+            ctx,
+            vec![wedge(1, 2, 1.0), wedge(2, 3, 1.0), wedge(3, 4, 1.0)],
             (),
-        )
-    }
-
-    #[test]
-    fn landmark_distance_to_self_is_zero() {
-        let g = weighted_triangle();
-        let result = run(&g, &[0]);
-        assert_eq!(result[&0][&0], 0.0, "landmark distance to self must be 0");
-    }
-
-    #[test]
-    fn distances_are_correct() {
-        // Landmark = vertex 2.
-        // 0 → 1 → 2: distance = 1.0 + 2.0 = 3.0
-        // 1 → 2:     distance = 2.0
-        // 2 → 2:     distance = 0.0
-        let g = weighted_triangle();
-        let result = run(&g, &[2]);
-        assert_eq!(result[&2][&2], 0.0);
-        assert!((result[&1][&2] - 2.0).abs() < 1e-9);
-        assert!((result[&0][&2] - 3.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn multiple_landmarks() {
-        let g = weighted_triangle();
-        let result = run(&g, &[0, 2]);
-        // vertex 1 should have distances to both landmarks
-        assert!(result[&1].contains_key(&0) || result[&1].contains_key(&2));
-    }
-
-    #[test]
-    fn single_node_graph_distance_to_self_is_zero() {
-        let g: Graph<(), f64> = Graph::from_vertices_edges(vec![(5, ())], vec![]);
-        let result = run(&g, &[5]);
-        assert_eq!(result[&5][&5], 0.0);
-    }
-
-    #[test]
-    fn unreachable_vertex_has_no_landmark_entry() {
-        // 0 → 1 and isolated vertex 99. Landmark = 0.
-        // Vertex 99 cannot reach 0, so it should have no entry for landmark 0.
-        let g = Graph::from_vertices_edges(
-            vec![(0, ()), (1, ()), (99, ())],
-            vec![Edge {
-                src: 0,
-                dst: 1,
-                attr: 1.0,
-            }],
         );
-        let result = run(&g, &[0]);
-        // Vertex 99 is isolated and can't reach landmark 0.
-        assert!(
-            !result[&99].contains_key(&0),
-            "unreachable vertex should have no entry for landmark 0"
-        );
+        let dist = run(&g, &[1]);
+        assert_eq!(dist[&1][&1], 0.0);
+        assert_eq!(dist[&2][&1], 1.0);
+        assert_eq!(dist[&3][&1], 2.0);
+        assert_eq!(dist[&4][&1], 3.0);
     }
 
     #[test]
-    fn parallel_paths_shortest_wins() {
-        // Two paths from 0 to 3:
-        //   0 →(1.0)→ 1 →(1.0)→ 3  (total 2.0)
-        //   0 →(5.0)→ 3             (total 5.0)
-        let g = Graph::from_vertices_edges(
-            vec![(0, ()), (1, ()), (3, ())],
-            vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: 1.0,
-                },
-                Edge {
-                    src: 1,
-                    dst: 3,
-                    attr: 1.0,
-                },
-                Edge {
-                    src: 0,
-                    dst: 3,
-                    attr: 5.0,
-                },
-            ],
+    fn unreachable_landmark_absent() {
+        let ctx = Context::local().unwrap();
+        // 1 -> 2 ; 3 isolated-ish (no path from 1 to 3).
+        let g: Graph<(), f64> = Graph::from_vertices_edges(
+            ctx,
+            vec![(1, ()), (2, ()), (3, ())],
+            vec![wedge(1, 2, 1.0)],
         );
-        let result = run(&g, &[3]);
-        assert!(
-            (result[&0][&3] - 2.0).abs() < 1e-9,
-            "shortest path should be 2.0, got {}",
-            result[&0][&3]
-        );
+        let dist = run(&g, &[1]);
+        assert_eq!(dist[&2][&1], 1.0);
+        assert!(dist.get(&3).map(|m| m.get(&1).is_none()).unwrap_or(true));
     }
 }

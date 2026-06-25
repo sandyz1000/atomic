@@ -9,3 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 atomic-graph.workspace = true
+atomic-compute.workspace = true

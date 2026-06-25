@@ -54,7 +54,7 @@ aws-credential-types = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
-rdkafka = { version = "0.36", optional = true, features = ["cmake-build"] }
+rdkafka = { workspace = true, optional = true, features = ["cmake-build"] }
 atomic-k8s = { workspace = true, optional = true }
 
 [features]

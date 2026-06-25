@@ -1,3 +1,4 @@
+use atomic_compute::context::Context;
 use atomic_graph::{
     algo::{
         connected_component, label_propagation, page_rank, shortest_path,
@@ -9,6 +10,7 @@ use atomic_graph::{
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // VertexId in atomic-graph is i64.
 type VertexId = i64;
@@ -19,6 +21,7 @@ type PregelSendFn<'a> = Function<'a, FnArgs<(f64, f64, f64, f64, f64)>, Vec<Vec<
 
 #[napi(js_name = "Graph")]
 pub struct JsGraph {
+    ctx: Arc<Context>,
     inner: Graph<f64, f64>,
 }
 
@@ -67,9 +70,9 @@ impl JsGraph {
             })
             .collect::<Result<_>>()?;
 
-        Ok(Self {
-            inner: Graph::from_vertices_edges(verts, edge_list),
-        })
+        let ctx = Context::local().map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        let inner = Graph::from_vertices_edges(ctx.clone(), verts, edge_list);
+        Ok(Self { ctx, inner })
     }
 
     /// Return the number of vertices.
@@ -89,7 +92,8 @@ impl JsGraph {
     pub fn vertices(&self) -> serde_json::Value {
         let arr: Vec<serde_json::Value> = self
             .inner
-            .vertices()
+            .collect_vertices()
+            .into_iter()
             .map(|(id, data)| serde_json::json!([id, data]))
             .collect();
         serde_json::Value::Array(arr)
@@ -100,7 +104,8 @@ impl JsGraph {
     pub fn edges(&self) -> serde_json::Value {
         let arr: Vec<serde_json::Value> = self
             .inner
-            .edges()
+            .collect_edges()
+            .into_iter()
             .map(|e| serde_json::json!([e.src, e.dst, e.attr]))
             .collect();
         serde_json::Value::Array(arr)
@@ -151,17 +156,14 @@ impl JsGraph {
     #[napi(ts_return_type = "Record<string, Record<string, number>>")]
     pub fn shortest_path(&self, landmarks: Vec<i64>) -> Result<serde_json::Value> {
         // shortest_path::run requires Graph<(), f64>; build one from our f64/f64 graph.
-        let verts: Vec<(VertexId, ())> = self.inner.vertices().map(|(id, _)| (id, ())).collect();
-        let edges: Vec<Edge<f64>> = self
+        let verts: Vec<(VertexId, ())> = self
             .inner
-            .edges()
-            .map(|e| Edge {
-                src: e.src,
-                dst: e.dst,
-                attr: e.attr,
-            })
+            .collect_vertices()
+            .into_iter()
+            .map(|(id, _)| (id, ()))
             .collect();
-        let unit_graph: Graph<(), f64> = Graph::from_vertices_edges(verts, edges);
+        let edges: Vec<Edge<f64>> = self.inner.collect_edges();
+        let unit_graph: Graph<(), f64> = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
 
         let result = shortest_path::run(&unit_graph, &landmarks);
 
@@ -222,16 +224,18 @@ impl JsGraph {
         send_msg: PregelSendFn<'_>,
         merge_msg: Function<FnArgs<(f64, f64)>, f64>,
     ) -> Result<JsGraph> {
-        // Implement the Pregel loop directly so JS functions stay on the current
-        // thread and no Send/Sync bounds are needed.
-        let graph = &self.inner;
+        // Run the Pregel loop on the driver so JS functions stay on the current
+        // thread and no Send/Sync bounds are needed. Python/JS closures cannot be
+        // compiled into engine tasks, so custom Pregel materializes the graph.
+        let vertices = self.inner.collect_vertices();
+        let edges = self.inner.collect_edges();
 
         // Superstep 0: apply vprog with initial_msg to every vertex.
-        let mut vdata: HashMap<VertexId, f64> = graph
-            .vertices()
+        let mut vdata: HashMap<VertexId, f64> = vertices
+            .iter()
             .map(|(vid, vd)| {
-                let new_vd = vprog.call(FnArgs::from((vid as f64, *vd, initial_msg)))?;
-                Ok((vid, new_vd))
+                let new_vd = vprog.call(FnArgs::from((*vid as f64, *vd, initial_msg)))?;
+                Ok((*vid, new_vd))
             })
             .collect::<Result<_>>()?;
 
@@ -239,7 +243,7 @@ impl JsGraph {
             // Collect messages using original graph structure + current vdata.
             let mut msgs: HashMap<VertexId, f64> = HashMap::new();
 
-            for edge in graph.edges() {
+            for edge in &edges {
                 let src_vd = vdata.get(&edge.src).copied().unwrap_or(0.0);
                 let dst_vd = vdata.get(&edge.dst).copied().unwrap_or(0.0);
                 let pairs = send_msg.call(FnArgs::from((
@@ -276,8 +280,15 @@ impl JsGraph {
         }
 
         // Rebuild graph with final vertex data.
-        let result = graph.map_vertices(|vid, old_vd| *vdata.get(&vid).unwrap_or(old_vd));
-        Ok(JsGraph { inner: result })
+        let new_vertices: Vec<(VertexId, f64)> = vertices
+            .iter()
+            .map(|(vid, old)| (*vid, vdata.get(vid).copied().unwrap_or(*old)))
+            .collect();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), new_vertices, edges);
+        Ok(JsGraph {
+            ctx: self.ctx.clone(),
+            inner,
+        })
     }
 }
 

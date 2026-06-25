@@ -26,7 +26,13 @@ atomic_compute::register_shuffle_map!(String, i32);
 
 use atomic_compute::context::Context;
 use atomic_compute::env::Config;
+use atomic_compute::task;
 use std::sync::Arc;
+
+#[task]
+fn add_i32(a: i32, b: i32) -> i32 {
+    a + b
+}
 
 fn ctx() -> Arc<Context> {
     Context::new_with_config(Config::local()).unwrap()
@@ -74,7 +80,7 @@ async fn test_first_shuffle_succeeds() {
             ],
             2,
         )
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddI32)
         .collect()
         .unwrap();
     result.sort_by_key(|(k, _)| k.clone());
@@ -100,7 +106,7 @@ async fn test_second_context_shuffle_fails() {
         let ctx = ctx();
         let mut r = ctx
             .parallelize_typed(vec![("x".to_string(), 1i32)], 1)
-            .reduce_by_key(|a, b| a + b)
+            .reduce_by_key_task(AddI32)
             .collect()
             .unwrap();
         r.sort_by_key(|(k, _)| k.clone());
@@ -115,7 +121,7 @@ async fn test_second_context_shuffle_fails() {
     let ctx2 = ctx();
     let result = ctx2
         .parallelize_typed(vec![("y".to_string(), 2i32)], 1)
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddI32)
         .collect();
 
     // This assertion documents the EXPECTED post-fix behaviour.

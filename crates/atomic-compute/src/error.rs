@@ -40,6 +40,9 @@ pub enum ComputeError {
     #[error("invalid distributed payload: {0}")]
     InvalidPayload(String),
 
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+
     #[error("invalid transport frame: {0}")]
     InvalidTransportFrame(String),
 

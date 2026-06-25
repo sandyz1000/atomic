@@ -13,25 +13,6 @@ where
         self.map_rdd(|id, rdd| MapperRdd::new(id, rdd, |(_k, v)| v))
     }
 
-    pub fn map_values<U, F>(self, f: F) -> TypedRdd<(K, U)>
-    where
-        U: Data + Clone,
-        F: Fn(V) -> U + Clone + Send + Sync + 'static,
-    {
-        self.map_rdd(|id, rdd| MapperRdd::new(id, rdd, move |(k, v)| (k, f(v))))
-    }
-
-    /// Like `flat_map` but only applied to values — keys are preserved and emitted once per output value.
-    pub fn flat_map_values<U, F>(self, f: F) -> TypedRdd<(K, U)>
-    where
-        K: Data + Clone,
-        V: Data + Clone,
-        U: Data + Clone,
-        F: Fn(V) -> Box<dyn Iterator<Item = U>> + Clone + Send + Sync + 'static,
-    {
-        self.map_rdd(|id, rdd| FlatMappedValuesRdd::new(id, rdd, f))
-    }
-
     /// Combine values for each key using three aggregation functions.
     ///
     /// - `create_combiner(V) -> C`: starts a combiner for the first value of a key.
@@ -189,7 +170,7 @@ where
     ///
     /// Equivalent to `combine_by_key` where the combiner type equals the value type.
     /// `zero` must be a neutral element: `f(zero.clone(), v) == v`.
-    pub fn fold_by_key<F>(self, zero: V, f: F, num_partitions: usize) -> TypedRdd<(K, V)>
+    pub(crate) fn fold_by_key<F>(self, zero: V, f: F, num_partitions: usize) -> TypedRdd<(K, V)>
     where
         F: Fn(V, V) -> V + Clone + Send + Sync + 'static,
         V: bincode::Encode + bincode::Decode<()>,
@@ -227,6 +208,39 @@ where
         self.combine_by_key(move |_v| z.clone(), seq_fn, comb_fn, num_partitions)
     }
 
+    /// Reduce values per key using a registered binary task — the content-addressed
+    /// form of [`reduce_by_key`](Self::reduce_by_key).
+    ///
+    /// Runs the same shuffle; the merge is a `#[task]`, so it is part of the registry
+    /// fingerprint and the job uses one task-based API for local and distributed runs.
+    ///
+    /// # Example
+    /// ```ignore
+    /// #[task] fn add(a: u32, b: u32) -> u32 { a + b }
+    /// let sums = pair_rdd.reduce_by_key_task(Add);
+    /// ```
+    pub fn reduce_by_key_task<B>(self, _task: B) -> TypedRdd<(K, V)>
+    where
+        B: BinaryTask<V>,
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        self.reduce_by_key(|a, b| B::call(a, b))
+    }
+
+    /// Fold values per key from `zero` using a registered binary task — the
+    /// content-addressed form of [`fold_by_key`](Self::fold_by_key).
+    pub fn fold_by_key_task<B>(self, zero: V, _task: B, num_partitions: usize) -> TypedRdd<(K, V)>
+    where
+        B: BinaryTask<V>,
+        V: bincode::Encode + bincode::Decode<()>,
+        K: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        self.fold_by_key(zero, |a, b| B::call(a, b), num_partitions)
+    }
+
     /// Return elements whose key is NOT present in `other`.
     ///
     /// Collects all keys from `other` to the driver, then filters `self` to exclude them.
@@ -260,11 +274,9 @@ where
     /// The shuffle stage repartitions data by key; each output partition is independently
     /// reduced. `collect()` triggers the full map → shuffle → reduce pipeline.
     ///
-    /// # Example
-    /// ```ignore
-    /// let sums = pair_rdd.reduce_by_key(|a, b| a + b);
-    /// ```
-    pub fn reduce_by_key<F>(self, f: F) -> TypedRdd<(K, V)>
+    /// Internal substrate for [`reduce_by_key_task`](Self::reduce_by_key_task) — the
+    /// public API takes a registered binary task, not a closure.
+    pub(crate) fn reduce_by_key<F>(self, f: F) -> TypedRdd<(K, V)>
     where
         F: Fn(V, V) -> V + Clone + Send + Sync + 'static,
         K: bincode::Encode + bincode::Decode<()>,

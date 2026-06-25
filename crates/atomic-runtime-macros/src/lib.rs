@@ -298,6 +298,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
             /// Zero-sized task struct for [`#fn_name`]. Implements
             /// `::atomic_compute::__macro_support::BinaryTask`.
             #[allow(non_camel_case_types)]
+            #[derive(Clone, Copy)]
             #fn_vis struct #struct_name;
 
             impl ::atomic_compute::__macro_support::BinaryTask<#input_type> for #struct_name {
@@ -312,6 +313,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
             /// Zero-sized task struct for [`#fn_name`]. Implements
             /// `::atomic_compute::__macro_support::UnaryTask`.
             #[allow(non_camel_case_types)]
+            #[derive(Clone, Copy)]
             #fn_vis struct #struct_name;
 
             impl ::atomic_compute::__macro_support::UnaryTask<#input_type, #output_type>

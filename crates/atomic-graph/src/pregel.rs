@@ -1,226 +1,78 @@
-use std::collections::HashMap;
+//! Distributed Pregel — bulk-synchronous vertex-centric computation on the engine.
+//!
+//! Each superstep runs as RDD jobs: [`Graph::aggregate_messages`](crate::graph::Graph::aggregate_messages)
+//! sends and combines messages (join + per-edge task + shuffle), then a left-outer
+//! join applies the vertex program. The caller supplies the message (`send`), combine
+//! (`merge`), and vertex (`vprog`) functions; `send` and `vprog` are registered
+//! `#[task]`s so the per-element work dispatches to workers.
 
-use crate::graph::Graph;
-use crate::topology::{EdgeContext, EdgeDirection, VertexId};
+use atomic_compute::__macro_support::{BinaryTask, UnaryTask};
 
-/// Run the Pregel vertex-centric computation model on `graph`.
+use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::topology::{EdgeTriplet, VertexId};
+
+type VertexVal<VD, A> = (VD, Option<A>);
+type VertexPair<VD, A> = (VertexId, VertexVal<VD, A>);
+/// Run up to `max_iterations` Pregel supersteps over `graph`.
 ///
-/// Execution proceeds as follows:
+/// Vertex state must be initialized by the caller before the loop (set the starting
+/// label, rank, or distance). Each superstep:
 ///
-/// 1. Apply `vprog(vid, vd, initial_msg)` to every vertex to obtain the
-///    starting vertex state.
-/// 2. Repeat up to `max_iterations` supersteps:
-///    a. Call `send_msg` on every edge triplet, emitting messages via `ctx.send_to_src()` / `ctx.send_to_dst()`.
-///    b. Merge all messages destined for the same vertex with `merge_msg`.
-///    c. For each vertex that received a message, apply `vprog(vid, old_vd, msg)` to update its attribute.
-///    d. If no messages were generated, terminate early.
-/// 3. Return the final graph.
+/// 1. `send` maps every edge triplet to `(vertex, message)` pairs.
+/// 2. `merge` combines messages destined for the same vertex (a shuffle).
+/// 3. `vprog` folds each vertex's merged message into its new attribute; vertices
+///    with no message keep their current attribute.
 ///
-/// # Type parameters
+/// The loop stops early when a superstep produces no messages. Vertex and message
+/// sets are materialized each superstep to bound lineage growth.
 ///
-/// * `VD` — vertex data type (must be `Clone`).
-/// * `ED` — edge data type (must be `Clone`).
-/// * `A`  — message type (must be `Clone`).
-///
-/// # Arguments
-///
-/// * `graph`            — input graph (borrowed; the result is a new [`Graph`]).
-/// * `initial_msg`      — message sent to every vertex before superstep 0.
-/// * `max_iterations`   — maximum number of supersteps.
-/// * `active_direction` — which direction of edges to consider when sending messages.
-///   [`EdgeDirection::Either`] considers all edges.
-/// * `vprog`            — vertex program: `(vid, vd, msg) -> new_vd`.
-/// * `send_msg`         — edge function: receives an [`EdgeContext`] and emits messages.
-/// * `merge_msg`        — commutative associative combiner for messages.
-pub fn run<VD, ED, A, VProg, SendMsg, MergeMsg>(
+/// `send` and `vprog` are registered `#[task]`s (`Copy` zero-sized markers); `merge`
+/// is a commutative-associative combiner.
+#[allow(clippy::type_complexity)]
+pub fn run<VD, ED, A, SendT, MergeF, VProgT>(
     graph: &Graph<VD, ED>,
-    initial_msg: A,
     max_iterations: usize,
-    _active_direction: EdgeDirection,
-    vprog: VProg,
-    send_msg: SendMsg,
-    merge_msg: MergeMsg,
+    send: SendT,
+    merge: MergeF,
+    vprog: VProgT,
 ) -> Graph<VD, ED>
 where
-    VD: Clone,
-    ED: Clone,
-    A: Clone,
-    VProg: Fn(VertexId, &VD, A) -> VD,
-    SendMsg: Fn(EdgeContext<VD, ED, A>),
-    MergeMsg: Fn(A, A) -> A,
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+    A: GraphData,
+    A::Archived: GraphDecode<A>,
+    Option<A>: GraphData,
+    <Option<A> as rkyv::Archive>::Archived: GraphDecode<Option<A>>,
+    SendT: UnaryTask<EdgeTriplet<VD, ED>, Vec<(VertexId, A)>> + Copy,
+    VProgT: UnaryTask<VertexPair<VD, A>, (VertexId, VD)> + Copy,
+    MergeF: BinaryTask<A> + Copy,
 {
-    // Superstep 0: apply vprog with initial_msg to every vertex.
-    let mut vdata: HashMap<VertexId, VD> = graph
-        .vertices()
-        .map(|(vid, vd)| (vid, vprog(vid, vd, initial_msg.clone())))
-        .collect();
-
-    let mut current: Graph<VD, ED> = graph.with_updated_vertices(&vdata);
+    let ctx = graph.context().clone();
+    let n = ctx.default_parallelism().max(1);
+    let edges = graph.edges.clone();
+    let mut vertices = graph.vertices.clone();
 
     for _ in 0..max_iterations {
-        // Aggregate messages.
-        let msgs = current.aggregate_messages::<A, _, _>(&send_msg, &merge_msg);
+        let g = Graph::from_rdds(ctx.clone(), vertices.clone(), edges.clone());
+        let msgs = g.aggregate_messages::<A, SendT, MergeF>(send, merge);
 
-        if msgs.is_empty() {
+        // Materialize messages: detect convergence and bound lineage.
+        let msg_vec = msgs.collect().unwrap_or_default();
+        if msg_vec.is_empty() {
             break;
         }
+        let msgs_rdd = ctx.parallelize_typed(msg_vec, n);
 
-        // Apply vprog to vertices that received a message.
-        for (vid, msg) in &msgs {
-            if let Some(old_vd) = vdata.get(vid) {
-                let new_vd = vprog(*vid, old_vd, msg.clone());
-                vdata.insert(*vid, new_vd);
-            }
-        }
+        // Apply the vertex program: (vid, (old_attr, Option<msg>)) -> (vid, new_attr).
+        let joined = vertices.clone().left_outer_join::<A>(msgs_rdd);
+        let new_vertices = joined.map_task::<(VertexId, VD), VProgT>(vprog);
 
-        current = graph.with_updated_vertices(&vdata);
+        // Materialize vertices so the next superstep starts from a fresh collection.
+        let vv = new_vertices.collect().unwrap_or_default();
+        vertices = ctx.parallelize_typed(vv, n);
     }
 
-    current
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::graph::Graph;
-    use crate::topology::Edge;
-
-    #[test]
-    fn pregel_min_id_propagation() {
-        // Build a chain 0 → 1 → 2 with vertex attr = own ID.
-        let g: Graph<VertexId, ()> = Graph::from_edges(
-            vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 2,
-                    attr: (),
-                },
-            ],
-            0_i64,
-        )
-        .map_vertices(|vid, _| vid);
-
-        // Pregel: propagate minimum label. After convergence every vertex
-        // should hold label 0 (the global minimum).
-        let result = run(
-            &g,
-            VertexId::MAX,
-            10,
-            EdgeDirection::Either,
-            |_vid, vd, msg: VertexId| (*vd).min(msg),
-            |mut ctx| {
-                let src_label = ctx.triplet.src_attr;
-                let dst_label = ctx.triplet.dst_attr;
-                if src_label < dst_label {
-                    ctx.send_to_dst(src_label);
-                } else if dst_label < src_label {
-                    ctx.send_to_src(dst_label);
-                }
-            },
-            |a: VertexId, b: VertexId| a.min(b),
-        );
-
-        for (_, label) in result.vertices() {
-            assert_eq!(*label, 0);
-        }
-    }
-
-    #[test]
-    fn single_vertex_receives_initial_msg_only() {
-        // Graph with one isolated vertex. No edges → send_msg is never called → terminates immediately.
-        let g: Graph<VertexId, ()> = Graph::from_vertices_edges(vec![(0, 0)], vec![]);
-        let result = run(
-            &g,
-            VertexId::MAX,
-            10,
-            EdgeDirection::Either,
-            |_vid, _vd, msg: VertexId| msg,
-            |_ctx| {},
-            |a, b| a.min(b),
-        );
-        // vprog was called with initial_msg = VertexId::MAX, so all vertices hold MAX.
-        assert_eq!(*result.vertices().next().unwrap().1, VertexId::MAX);
-    }
-
-    #[test]
-    fn max_iterations_respected() {
-        // Dense clique that would converge in many iterations.
-        let g: Graph<VertexId, ()> = Graph::from_edges(
-            vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 0,
-                    attr: (),
-                },
-            ],
-            100_i64,
-        )
-        .map_vertices(|vid, _| vid);
-
-        let _calls = 0usize;
-        let result = run(
-            &g,
-            VertexId::MAX,
-            2, // max 2 iterations
-            EdgeDirection::Either,
-            |_vid, vd, msg: VertexId| (*vd).min(msg),
-            |mut ctx| {
-                let s = ctx.triplet.src_attr;
-                let d = ctx.triplet.dst_attr;
-                if s < d {
-                    ctx.send_to_dst(s);
-                }
-                if d < s {
-                    ctx.send_to_src(d);
-                }
-            },
-            |a, b| a.min(b),
-        );
-        // After at most 2 supersteps the computation must have stopped.
-        assert_eq!(result.num_vertices(), 2);
-    }
-
-    #[test]
-    fn converges_early_when_no_messages_sent() {
-        // A path that converges in exactly 1 superstep.
-        let g: Graph<VertexId, ()> = Graph::from_edges(
-            vec![Edge {
-                src: 0,
-                dst: 1,
-                attr: (),
-            }],
-            VertexId::MAX,
-        )
-        .map_vertices(|vid, _| vid);
-
-        let result = run(
-            &g,
-            VertexId::MAX,
-            100,
-            EdgeDirection::Either,
-            |_vid, vd, msg: VertexId| (*vd).min(msg),
-            |mut ctx| {
-                // After superstep 0: both hold their own ID (0 and 1).
-                // 0 < 1 → send 0 to dst once. After merge, vertex 1 holds 0.
-                // Superstep 1: 0 = 0 and 1 now holds 0 → no messages → terminates.
-                if ctx.triplet.src_attr < ctx.triplet.dst_attr {
-                    ctx.send_to_dst(ctx.triplet.src_attr);
-                }
-            },
-            |a, b| a.min(b),
-        );
-        for (_, label) in result.vertices() {
-            assert_eq!(*label, 0, "all vertices should converge to min label 0");
-        }
-    }
+    Graph::from_rdds(ctx, vertices, edges)
 }

@@ -1,10 +1,27 @@
+//! Core graph value types shared across the engine-backed graph layer.
+//!
+//! Vertex and edge attributes travel as RDD elements, so every type here derives
+//! the wire (`rkyv`) and shuffle (`bincode`) encodings the compute engine requires,
+//! alongside `serde` for the language bindings.
+
 use std::collections::HashMap;
 
 /// Vertex identifier — a 64-bit signed integer uniquely naming a vertex in the graph.
 pub type VertexId = i64;
 
-/// A directed edge with associated attribute.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// A directed edge with an associated attribute.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    bincode::Encode,
+    bincode::Decode,
+)]
 pub struct Edge<ED> {
     pub src: VertexId,
     pub dst: VertexId,
@@ -12,7 +29,23 @@ pub struct Edge<ED> {
 }
 
 /// An edge together with the attribute data of both endpoint vertices.
-#[derive(Clone, Debug)]
+///
+/// This is the element a message-sending task receives in [`aggregate_messages`].
+/// The task inspects the endpoints and returns the messages to deliver.
+///
+/// [`aggregate_messages`]: crate::graph::Graph::aggregate_messages
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    bincode::Encode,
+    bincode::Decode,
+)]
 pub struct EdgeTriplet<VD, ED> {
     pub src_id: VertexId,
     pub dst_id: VertexId,
@@ -21,7 +54,7 @@ pub struct EdgeTriplet<VD, ED> {
     pub attr: ED,
 }
 
-/// Which edges are considered when restricting message passing.
+/// Which edges are considered when restricting message passing in Pregel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EdgeDirection {
     /// Consider only in-edges of a vertex.
@@ -34,26 +67,5 @@ pub enum EdgeDirection {
     Both,
 }
 
-/// Passed to the `send_msg` closure in Pregel and `aggregate_messages`.
-///
-/// The closure can send zero or more messages to the src or dst vertex of
-/// the current edge.
-pub struct EdgeContext<'a, VD, ED, A> {
-    pub triplet: EdgeTriplet<VD, ED>,
-    pub(crate) msgs: &'a mut Vec<(VertexId, A)>,
-}
-
-impl<'a, VD: Clone, ED: Clone, A> EdgeContext<'a, VD, ED, A> {
-    /// Send a message to the source vertex of this edge.
-    pub fn send_to_src(&mut self, msg: A) {
-        self.msgs.push((self.triplet.src_id, msg));
-    }
-
-    /// Send a message to the destination vertex of this edge.
-    pub fn send_to_dst(&mut self, msg: A) {
-        self.msgs.push((self.triplet.dst_id, msg));
-    }
-}
-
-/// A per-vertex map — the standard return type for most algorithms.
+/// A per-vertex map — the standard return type for the built-in algorithms.
 pub type VertexMap<A> = HashMap<VertexId, A>;

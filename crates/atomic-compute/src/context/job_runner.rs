@@ -200,8 +200,7 @@ impl Context {
 
         for dep in rdd.get_dependencies() {
             if let Dependency::Shuffle(shuffle_dep) = dep {
-                let parent_partitions = (shuffle_dep.encode_partitions)()
-                    .map_err(|e| ComputeError::InvalidPayload(e.to_string()))?;
+                let parent_partitions = (shuffle_dep.encode_partitions)()?;
 
                 let shuffle_op = PipelineOp {
                     op_id: format!("shuffle-map-{}", shuffle_dep.shuffle_id),
@@ -261,9 +260,9 @@ impl Context {
         let cl = move |(_task_context, iter)| (func)(iter);
         let sched = self.driver_scheduler.clone();
         let partitions = (0..rdd.number_of_splits()).collect();
-        Ok(env::Env::run_in_async_rt(|| {
-            sched.run_job(Arc::new(cl), rdd, partitions, false)
-        })?)
+        let res =
+            env::Env::run_in_async_rt(|| sched.run_job(Arc::new(cl), rdd, partitions, false))?;
+        Ok(res)
     }
 
     pub fn run_job_with_partitions<T: Data, U: Data + Clone, F, P>(
@@ -279,9 +278,9 @@ impl Context {
         let cl = move |(_task_context, iter)| (func)(iter);
         let sched = self.driver_scheduler.clone();
         let partitions: Vec<usize> = partitions.into_iter().collect();
-        Ok(env::Env::run_in_async_rt(|| {
-            sched.run_job(Arc::new(cl), rdd, partitions, false)
-        })?)
+        let res =
+            env::Env::run_in_async_rt(|| sched.run_job(Arc::new(cl), rdd, partitions, false))?;
+        Ok(res)
     }
 
     pub fn run_job_with_context<T: Data, U: Data + Clone, F>(
@@ -295,9 +294,8 @@ impl Context {
         let func = Arc::new(func);
         let sched = self.driver_scheduler.clone();
         let partitions = (0..rdd.number_of_splits()).collect();
-        Ok(env::Env::run_in_async_rt(|| {
-            sched.run_job(func, rdd, partitions, false)
-        })?)
+        let res = env::Env::run_in_async_rt(|| sched.run_job(func, rdd, partitions, false))?;
+        Ok(res)
     }
 
     pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
@@ -312,9 +310,10 @@ impl Context {
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + Debug + Send + Sync + 'static,
     {
-        Ok(self
+        let res = self
             .scheduler
-            .run_approximate_job(Arc::new(func), rdd, evaluator, timeout)?)
+            .run_approximate_job(Arc::new(func), rdd, evaluator, timeout)?;
+        Ok(res)
     }
 
     /// Collect all elements of an RDD into a `Vec`, distribution-aware.

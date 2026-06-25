@@ -1,10 +1,10 @@
-//! Graph processing — `atomic-graph` (GraphX-style) example.
+//! Graph processing example — `atomic-graph` on the Atomic engine.
 //!
-//! Mirrors Spark GraphX's `PageRankExample` / `ConnectedComponentsExample`:
-//! build a directed graph, then run three built-in algorithms over it —
-//! PageRank, Connected Components, and Triangle Count — via the Pregel engine.
+//! Build a directed graph, then run three built-in algorithms over it — PageRank,
+//! Connected Components, and Triangle Count. Each runs as RDD jobs on the compute
+//! engine via the Pregel / aggregate-messages primitives.
 //!
-//! The graph (vertex ids are `i64`, GraphX's `VertexId`):
+//! The graph (vertex ids are `i64`):
 //! ```text
 //!   1 → 2 → 3 → 1      (a 3-cycle: 1,2,3 all reachable from each other)
 //!   3 → 4              (4 hangs off the cycle)
@@ -16,6 +16,9 @@
 //! ```bash
 //! cargo run -p graph
 //! ```
+use std::collections::HashMap;
+
+use atomic_compute::context::Context;
 use atomic_graph::algo::{connected_component, page_rank, triangle_count};
 use atomic_graph::graph::Graph;
 use atomic_graph::topology::{Edge, VertexId};
@@ -26,7 +29,7 @@ fn edge(src: VertexId, dst: VertexId) -> Edge<()> {
 }
 
 /// Print a `VertexId -> value` map sorted by vertex id.
-fn print_by_vertex<V: std::fmt::Display>(map: &std::collections::HashMap<VertexId, V>) {
+fn print_by_vertex<V: std::fmt::Display>(map: &HashMap<VertexId, V>) {
     let mut rows: Vec<_> = map.iter().collect();
     rows.sort_by_key(|(vid, _)| **vid);
     for (vid, value) in rows {
@@ -35,9 +38,11 @@ fn print_by_vertex<V: std::fmt::Display>(map: &std::collections::HashMap<VertexI
 }
 
 fn main() {
+    let ctx = Context::local().expect("failed to build local context");
+
     // Build a directed graph from an edge list; vertex attribute is `()`.
     let edges = vec![edge(1, 2), edge(2, 3), edge(3, 1), edge(3, 4), edge(5, 6)];
-    let g: Graph<(), ()> = Graph::from_edges(edges, ());
+    let g: Graph<(), ()> = Graph::from_edges(ctx, edges, ());
 
     println!(
         "Graph: {} vertices, {} edges\n",

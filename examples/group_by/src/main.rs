@@ -1,18 +1,21 @@
 /// Key-value grouping — demonstrates pair RDD operations.
 ///
-/// Shows: reduce_by_key, group_by_key, map_values, count_by_key.
+/// Shows: reduce_by_key_task, group_by_key, value mapping via map_task, count_by_key.
+/// Every transform is a registered task, so the same code runs locally and on workers.
 ///
-/// **Local-only operations**: all aggregations use closure-based functions that run
-/// on the driver's local scheduler and cannot be dispatched to remote workers.
-/// For distributed grouping, use `flat_map_task` / `map_task` to prepare key-value
-/// pairs on workers, then collect and aggregate on the driver.
-///
-/// The binary still respects `--worker` / `--driver` flags for structural consistency
+/// The binary respects `--worker` / `--driver` flags for structural consistency
 /// with other Atomic examples (the same driver/worker pattern as task_wordcount).
 ///
 /// Run locally:
 ///   cargo run -p group_by
 use atomic_compute::app::{AppRole, AtomicApp};
+use atomic_compute::{task, task_fn};
+
+/// Sum two counts — the keyed-reduction merge.
+#[task]
+fn add_i32(a: i32, b: i32) -> i32 {
+    a + b
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,19 +32,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("rust".to_string(), 1i32),
         ("atomic".to_string(), 1),
         ("rust".to_string(), 1),
-        ("spark".to_string(), 1),
+        ("engine".to_string(), 1),
         ("atomic".to_string(), 1),
         ("rust".to_string(), 1),
         ("distributed".to_string(), 1),
-        ("spark".to_string(), 1),
+        ("engine".to_string(), 1),
     ];
 
     let word_counts = ctx
         .parallelize_typed(words, 1) // single partition for correct global reduce
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddI32)
         .collect()?;
 
-    println!("=== Word counts (reduce_by_key) ===");
+    println!("=== Word counts (reduce_by_key_task) ===");
     let mut sorted = word_counts.clone();
     sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (word, count) in &sorted {
@@ -82,10 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ],
             2,
         )
-        .map_values(|scores| scores.iter().sum::<i32>() as f64 / scores.len() as f64)
+        .map_task(task_fn!(|kv: (String, Vec<i32>)| -> (String, f64) {
+            let (k, scores) = kv;
+            (k, scores.iter().sum::<i32>() as f64 / scores.len() as f64)
+        }))
         .collect()?;
 
-    println!("\n=== Averages (map_values) ===");
+    println!("\n=== Averages (map_task on values) ===");
     let mut avgs_sorted = averages;
     avgs_sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (name, avg) in &avgs_sorted {

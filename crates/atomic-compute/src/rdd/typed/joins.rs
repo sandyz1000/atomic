@@ -321,7 +321,7 @@ where
     {
         let n = self.rdd.number_of_splits();
         self.cogroup_shuffle(other, n).map_partitions(|iter| {
-            Box::new(iter.flat_map(|(k, vs, us)| {
+            let flattened_join = iter.flat_map(|(k, vs, us)| {
                 if us.is_empty() {
                     let k = k.clone();
                     Box::new(vs.into_iter().map(move |v| (k.clone(), (v, None))))
@@ -334,7 +334,8 @@ where
                             .map(move |u| (k.clone(), (v.clone(), Some(u))))
                     })) as Box<dyn Iterator<Item = (K, (V, Option<U>))>>
                 }
-            })) as Box<dyn Iterator<Item = (K, (V, Option<U>))>>
+            });
+            Box::new(flattened_join) as Box<dyn Iterator<Item = (K, (V, Option<U>))>>
         })
     }
 
@@ -349,7 +350,7 @@ where
     {
         let n = self.rdd.number_of_splits();
         self.cogroup_shuffle(other, n).map_partitions(|iter| {
-            Box::new(iter.flat_map(|(k, vs, us)| {
+            let flattened_join = iter.flat_map(|(k, vs, us)| {
                 if vs.is_empty() {
                     let k = k.clone();
                     Box::new(us.into_iter().map(move |u| (k.clone(), (None, u))))
@@ -362,7 +363,8 @@ where
                             .map(move |v| (k.clone(), (Some(v), u.clone())))
                     })) as Box<dyn Iterator<Item = (K, (Option<V>, U))>>
                 }
-            })) as Box<dyn Iterator<Item = (K, (Option<V>, U))>>
+            });
+            Box::new(flattened_join) as Box<dyn Iterator<Item = (K, (Option<V>, U))>>
         })
     }
 
@@ -377,27 +379,25 @@ where
     {
         let n = self.rdd.number_of_splits();
         self.cogroup_shuffle(other, n).map_partitions(|iter| {
-            Box::new(
-                iter.flat_map(|(k, vs, us)| match (vs.is_empty(), us.is_empty()) {
-                    (true, false) => {
-                        let k = k.clone();
-                        Box::new(us.into_iter().map(move |u| (k.clone(), (None, Some(u)))))
-                            as Box<dyn Iterator<Item = (K, (Option<V>, Option<U>))>>
-                    }
-                    (false, true) => {
-                        let k = k.clone();
-                        Box::new(vs.into_iter().map(move |v| (k.clone(), (Some(v), None))))
-                            as Box<dyn Iterator<Item = (K, (Option<V>, Option<U>))>>
-                    }
-                    _ => Box::new(vs.into_iter().flat_map(move |v| {
-                        let k = k.clone();
-                        let us = us.clone();
-                        us.into_iter()
-                            .map(move |u| (k.clone(), (Some(v.clone()), Some(u))))
-                    }))
-                        as Box<dyn Iterator<Item = (K, (Option<V>, Option<U>))>>,
-                }),
-            ) as Box<dyn Iterator<Item = (K, (Option<V>, Option<U>))>>
+            let flattened = iter.flat_map(|(k, vs, us)| match (vs.is_empty(), us.is_empty()) {
+                (true, false) => {
+                    let k = k.clone();
+                    Box::new(us.into_iter().map(move |u| (k.clone(), (None, Some(u)))))
+                        as Box<dyn Iterator<Item = (K, (Option<V>, Option<U>))>>
+                }
+                (false, true) => {
+                    let k = k.clone();
+                    Box::new(vs.into_iter().map(move |v| (k.clone(), (Some(v), None))))
+                        as Box<dyn Iterator<Item = (K, (Option<V>, Option<U>))>>
+                }
+                _ => Box::new(vs.into_iter().flat_map(move |v| {
+                    let k = k.clone();
+                    let us = us.clone();
+                    us.into_iter()
+                        .map(move |u| (k.clone(), (Some(v.clone()), Some(u))))
+                })) as Box<dyn Iterator<Item = (K, (Option<V>, Option<U>))>>,
+            });
+            Box::new(flattened) as Box<dyn Iterator<Item = (K, (Option<V>, Option<U>))>>
         })
     }
 }

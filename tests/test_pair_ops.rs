@@ -6,6 +6,11 @@ fn ctx() -> Arc<Context> {
     Context::local().unwrap()
 }
 
+#[task]
+fn add_i32(a: i32, b: i32) -> i32 {
+    a + b
+}
+
 fn word_pairs(ctx: &Arc<Context>) -> atomic_compute::rdd::typed::TypedRdd<(String, i32)> {
     ctx.parallelize_typed(
         vec![
@@ -24,7 +29,7 @@ fn word_pairs(ctx: &Arc<Context>) -> atomic_compute::rdd::typed::TypedRdd<(Strin
 async fn test_reduce_by_key_sum() {
     let ctx = ctx();
     let mut result = word_pairs(&ctx)
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddI32)
         .collect()
         .unwrap();
     result.sort_by_key(|(k, _)| k.clone());
@@ -43,7 +48,7 @@ async fn test_reduce_by_key_empty() {
     let ctx = ctx();
     let result = ctx
         .parallelize_typed(Vec::<(String, i32)>::new(), 2)
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddI32)
         .collect()
         .unwrap();
     assert!(result.is_empty());
@@ -71,7 +76,12 @@ async fn test_group_by_key() {
 #[tokio::test]
 async fn test_map_values_doubles() {
     let ctx = ctx();
-    let mut result = word_pairs(&ctx).map_values(|v| v * 2).collect().unwrap();
+    let mut result = word_pairs(&ctx)
+        .map_task(atomic_compute::task_fn!(|kv: (String, i32)| -> (String, i32) {
+            (kv.0, kv.1 * 2)
+        }))
+        .collect()
+        .unwrap();
     result.sort_by_key(|(k, _)| k.clone());
     assert_eq!(
         result,
@@ -318,7 +328,7 @@ async fn test_key_by() {
     let ctx = ctx();
     let mut result = ctx
         .parallelize_typed(vec![1i32, 2, 3], 1)
-        .key_by(|x| x % 2)
+        .map_task(atomic_compute::task_fn!(|x: i32| -> (i32, i32) { (x % 2, x) }))
         .collect()
         .unwrap();
     result.sort_by_key(|(k, _)| *k);
@@ -377,7 +387,7 @@ async fn test_word_count() {
     let mut result = ctx
         .parallelize_typed(lines, 2)
         .flat_map_task(TokenizeLine)
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddI32)
         .collect()
         .unwrap();
 
@@ -402,7 +412,7 @@ async fn test_reduce_chained() {
     let mut result = ctx
         .parallelize_typed(vec![1i32, 2, 3, 4, 5, 6], 2)
         .map_task(BucketByParity)
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddI32)
         .collect()
         .unwrap();
 
@@ -464,7 +474,7 @@ async fn test_reduce_empty() {
     ];
     let mut result = ctx
         .parallelize_typed(pairs, 6)
-        .reduce_by_key(|a, b| a + b)
+        .reduce_by_key_task(AddI32)
         .collect()
         .unwrap();
 
@@ -535,7 +545,9 @@ async fn test_flat_map_values() {
     let data = vec![("a".to_string(), 3u32), ("b".to_string(), 2u32)];
     let rdd = ctx.parallelize_typed(data, 1);
     let mut result = rdd
-        .flat_map_values(|n| Box::new(1..=n) as Box<dyn Iterator<Item = u32>>)
+        .flat_map_task(atomic_compute::task_fn!(|kv: (String, u32)| -> Vec<(String, u32)> {
+            (1..=kv.1).map(|u| (kv.0.clone(), u)).collect()
+        }))
         .collect()
         .unwrap();
     result.sort();

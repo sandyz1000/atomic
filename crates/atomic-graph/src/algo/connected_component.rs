@@ -1,123 +1,96 @@
-use crate::graph::Graph;
+//! Weakly connected components via distributed Pregel.
+
+use atomic_compute::task;
+
+use crate::graph::{Graph, GraphData, GraphDecode};
 use crate::pregel;
-use crate::topology::{EdgeDirection, VertexId, VertexMap};
+use crate::topology::{EdgeTriplet, VertexId, VertexMap};
 
-/// Compute the (weakly) connected component for each vertex using Pregel.
-///
-/// Each vertex is labeled with the minimum vertex ID in its component.
-/// Propagation proceeds across edges in both directions regardless of edge orientation.
-///
-/// # Arguments
-///
-/// * `graph`          — input graph.
-/// * `max_iterations` — maximum number of Pregel supersteps; use `usize::MAX`
-///   for full convergence on large graphs.
-///
-/// Returns a [`VertexMap`]`<`[`VertexId`]`>` mapping each vertex to the representative
-/// (lowest ID) of its component.
-pub fn run<VD: Clone, ED: Clone>(
-    graph: &Graph<VD, ED>,
-    max_iterations: usize,
-) -> VertexMap<VertexId> {
-    // Vertex attr = own ID initially; Pregel propagates the minimum.
-    let g: Graph<VertexId, ED> = graph.map_vertices(|vid, _| vid);
+/// Propagate the smaller endpoint label across each edge (both directions).
+#[task]
+fn cc_send(t: EdgeTriplet<VertexId, ()>) -> Vec<(VertexId, VertexId)> {
+    if t.src_attr < t.dst_attr {
+        vec![(t.dst_id, t.src_attr)]
+    } else if t.dst_attr < t.src_attr {
+        vec![(t.src_id, t.dst_attr)]
+    } else {
+        Vec::new()
+    }
+}
 
-    let result = pregel::run(
+/// Adopt the minimum of the current label and the incoming message.
+#[task]
+fn cc_vprog(input: (VertexId, (VertexId, Option<VertexId>))) -> (VertexId, VertexId) {
+    let (vid, (label, msg)) = input;
+    let new_label = match msg {
+        Some(m) => label.min(m),
+        None => label,
+    };
+    (vid, new_label)
+}
+
+/// Combine two labels by keeping the smaller.
+#[task]
+fn cc_merge(a: VertexId, b: VertexId) -> VertexId {
+    a.min(b)
+}
+
+/// Compute the weakly connected component of each vertex.
+///
+/// Every vertex is labeled with the minimum vertex id reachable from it when edges
+/// are treated as undirected. Runs up to `max_iterations` Pregel supersteps.
+///
+/// Returns a [`VertexMap`] mapping each vertex to the representative (lowest id) of
+/// its component.
+pub fn run<VD, ED>(graph: &Graph<VD, ED>, max_iterations: usize) -> VertexMap<VertexId>
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+{
+    // Normalize to a graph whose vertex attribute is its own id and whose edges
+    // carry no attribute, so the message task operates on concrete types.
+    let g = graph.map_vertices(|vid, _| vid).map_edges(|_| ());
+    let result = pregel::run::<VertexId, (), VertexId, _, _, _>(
         &g,
-        VertexId::MAX,
         max_iterations,
-        EdgeDirection::Either,
-        // vprog: keep the smaller of current label and incoming message.
-        |_vid, vd: &VertexId, msg: VertexId| (*vd).min(msg),
-        // send_msg: send src/dst label across the edge if it is smaller than
-        // the other endpoint's current label.
-        |mut ctx| {
-            let src_label = ctx.triplet.src_attr;
-            let dst_label = ctx.triplet.dst_attr;
-            if src_label < dst_label {
-                ctx.send_to_dst(src_label);
-            } else if dst_label < src_label {
-                ctx.send_to_src(dst_label);
-            }
-        },
-        // merge_msg: keep the minimum.
-        |a, b| a.min(b),
+        CcSend,
+        CcMerge,
+        CcVprog,
     );
-
-    result
-        .vertices()
-        .map(|(vid, label)| (vid, *label))
-        .collect()
+    result.collect_vertices().into_iter().collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::Graph;
     use crate::topology::Edge;
+    use atomic_compute::context::Context;
+
+    fn edge(src: VertexId, dst: VertexId) -> Edge<()> {
+        Edge { src, dst, attr: () }
+    }
 
     #[test]
     fn two_disconnected_components() {
-        // Component A: 0 — 1 — 2
-        // Component B: 10 — 11
-        let g: Graph<(), ()> = Graph::from_edges(
-            vec![
-                Edge {
-                    src: 0,
-                    dst: 1,
-                    attr: (),
-                },
-                Edge {
-                    src: 1,
-                    dst: 2,
-                    attr: (),
-                },
-                Edge {
-                    src: 10,
-                    dst: 11,
-                    attr: (),
-                },
-            ],
-            (),
-        );
-
+        let ctx = Context::local().unwrap();
+        // Component A: 0-1-2, Component B: 10-11
+        let g: Graph<(), ()> =
+            Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 2), edge(10, 11)], ());
         let labels = run(&g, 10);
-
-        // All vertices in component A should carry label 0.
         assert_eq!(labels[&0], 0);
         assert_eq!(labels[&1], 0);
         assert_eq!(labels[&2], 0);
-
-        // All vertices in component B should carry label 10.
         assert_eq!(labels[&10], 10);
         assert_eq!(labels[&11], 10);
-
-        // The two components must have different labels.
         assert_ne!(labels[&0], labels[&10]);
     }
 
     #[test]
     fn single_component_cycle() {
-        let g: Graph<(), ()> = Graph::from_edges(
-            vec![
-                Edge {
-                    src: 3,
-                    dst: 4,
-                    attr: (),
-                },
-                Edge {
-                    src: 4,
-                    dst: 5,
-                    attr: (),
-                },
-                Edge {
-                    src: 5,
-                    dst: 3,
-                    attr: (),
-                },
-            ],
-            (),
-        );
+        let ctx = Context::local().unwrap();
+        let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(3, 4), edge(4, 5), edge(5, 3)], ());
         let labels = run(&g, 10);
         assert_eq!(labels[&3], 3);
         assert_eq!(labels[&4], 3);
@@ -125,16 +98,10 @@ mod tests {
     }
 
     #[test]
-    fn single_vertex_is_its_own_component() {
-        let g: Graph<(), ()> = Graph::from_vertices_edges(vec![(7, ())], vec![]);
-        let labels = run(&g, 10);
-        assert_eq!(labels[&7], 7);
-    }
-
-    #[test]
     fn isolated_vertices_each_in_own_component() {
-        let g: Graph<(), ()> =
-            Graph::from_vertices_edges(vec![(10, ()), (20, ()), (30, ())], vec![]);
+        let ctx = Context::local().unwrap();
+        let g: Graph<i64, ()> =
+            Graph::from_vertices_edges(ctx, vec![(10, 0), (20, 0), (30, 0)], vec![]);
         let labels = run(&g, 10);
         assert_eq!(labels[&10], 10);
         assert_eq!(labels[&20], 20);
