@@ -129,6 +129,67 @@ where
         let sorted: Vec<(K, V)> = partitions.into_iter().flatten().collect();
         ctx.parallelize_typed(sorted, num_partitions)
     }
+
+    /// Repartition by a registered [`NamedPartitioner`] **and** sort by key within
+    /// each resulting partition — in a single shuffle.
+    ///
+    /// Unlike [`sort_by_key`](Self::sort_by_key) (global order via a range partitioner),
+    /// this uses *your* partitioner to place keys and only orders within each bucket.
+    /// It is the "secondary sort" primitive: partition by the primary part of a
+    /// composite key, then iterate each partition in key order. Doing it as one
+    /// shuffle is cheaper than `partition_by_named(...).sort_by_key(...)` (two shuffles)
+    /// and, unlike a per-partition re-sort, the ordering is produced by the shuffle's
+    /// sort-merge itself.
+    ///
+    /// The partitioner ships to workers by name (register it with
+    /// `atomic_compute::register_partitioner!(P)`); for the distributed sorted result,
+    /// register the value wire type with `register_sort_shuffle_map!(K, V)`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Partition by `key % 4`, key-sorted within each partition.
+    /// let secondary = pairs.repartition_and_sort(ModPartitioner { n: 4 }, true);
+    /// ```
+    pub fn repartition_and_sort<P>(self, partitioner: P, ascending: bool) -> TypedRdd<(K, V)>
+    where
+        P: atomic_data::partitioner::NamedPartitioner,
+        Vec<(K, V)>: WireDecode + WireEncode,
+        K: WireEncode + bincode::Encode + bincode::Decode<()> + std::hash::Hash + Eq,
+        V: WireEncode + bincode::Encode + bincode::Decode<()>,
+        Vec<(K, Vec<V>)>: WireEncode,
+    {
+        let p = Partitioner::from_named::<P>(partitioner.num_partitions());
+
+        // Sort-shuffle: the comparator makes each partition's bucket key-ordered via
+        // the reduce-side k-way merge — no post-shuffle re-sort. Grouped values are
+        // then flattened back to pairs in key order.
+        let cmp: atomic_data::dependency::KeyComparator<K> = if ascending {
+            Arc::new(|a: &K, b: &K| a.cmp(b))
+        } else {
+            Arc::new(|a: &K, b: &K| b.cmp(a))
+        };
+        self.combine_by_key_with_partitioner(
+            |v| vec![v],
+            |mut buf, v| {
+                buf.push(v);
+                buf
+            },
+            |mut a, mut b| {
+                a.append(&mut b);
+                a
+            },
+            p,
+            Some(cmp),
+        )
+        .map_partitions(move |iter| {
+            let flattened_vals = iter.flat_map(|(k, vs): (K, Vec<V>)| {
+                vs.into_iter()
+                    .map(move |v| (k.clone(), v))
+                    .collect::<Vec<_>>()
+            });
+            Box::new(flattened_vals) as Box<dyn Iterator<Item = (K, V)>>
+        })
+    }
 }
 
 impl<T> TypedRdd<T>

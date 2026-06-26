@@ -66,10 +66,13 @@ in local and distributed mode.
 |---|---|---|
 | `reduce_by_key_task(B)` | `BinaryTask<V>` | Combine values per key |
 | `fold_by_key_task(zero, B, n)` | `BinaryTask<V>` | Fold values per key from `zero` |
+| `aggregate_by_key_task(L, M, n)` | `UnaryTask<V,C>` + `BinaryTask<C>` | Aggregate per key into a different accumulator type `C` (lift each value, then merge) |
+| `reduce_by_key_locally_task(B)` | `BinaryTask<V>` | Reduce per key to a driver `HashMap` — no shuffle (map-side combine, then merge on driver) |
 | `group_by_key()` | — | Collect all values per key |
 | `join` / `left_outer_join` / `right_outer_join` / `full_outer_join` | — | Keyed joins |
 | `cogroup(other)` | — | Group both sides by key |
 | `sort_by_key()` / `sort_by_task(F, asc)` | `UnaryTask<T,(K,T)>` | Globally ordered output |
+| `repartition_and_sort(P, asc)` | — | Partition by a registered `NamedPartitioner` and key-sort within each partition, one shuffle (secondary sort) |
 | `repartition_shuffle(n)` | — | Redistribute elements across `n` partitions |
 
 To transform values while keeping keys, use `map_task` / `flat_map_task` with a

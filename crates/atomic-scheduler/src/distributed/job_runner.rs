@@ -46,6 +46,17 @@ struct DispatchContext<'a> {
     pipeline_label: &'a str,
 }
 
+/// A failed result whose error marks a lost broadcast cache on the worker — the driver
+/// clears its sent record for that worker and retries so the bytes are re-sent.
+fn is_broadcast_cache_miss(result: &TaskResultEnvelope) -> bool {
+    use atomic_data::distributed::ResultStatus::{FatalFailure, RetryableFailure};
+    matches!(result.status, RetryableFailure | FatalFailure)
+        && result
+            .error
+            .as_deref()
+            .is_some_and(|m| m.contains(atomic_data::broadcast::BROADCAST_CACHE_MISS))
+}
+
 impl DistributedScheduler {
     /// Store `result` into `slot` if the slot is not yet filled, and register
     /// cache/state locality for subsequent batches. Called by both the primary
@@ -183,7 +194,28 @@ impl DistributedScheduler {
             self.server_uris.lock().retain(|&ep| ep != target);
             self.inflight.remove(&target);
             self.worker_failures.remove(&target);
+            self.broadcast_sent.remove(&target);
         }
+    }
+
+    /// Project `task` for `target`, dropping broadcast bytes the worker has already
+    /// cached so they cross the wire only on the first task to reach it. Returns the
+    /// projected envelope and the ids it newly carries, or `None` when the task has no
+    /// broadcasts, in which case it is dispatched as-is with no envelope clone.
+    fn project_broadcasts_for(
+        &self,
+        task: &TaskEnvelope,
+        target: SocketAddrV4,
+    ) -> Option<(TaskEnvelope, Vec<usize>)> {
+        if task.broadcast_ids.is_empty() {
+            return None;
+        }
+        let already = self
+            .broadcast_sent
+            .get(&target)
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        Some(task.project_broadcasts(&already))
     }
 
     /// Submit a single `TaskEnvelope` to a worker, retrying up to `max_failures` times.
@@ -211,6 +243,12 @@ impl DistributedScheduler {
                 continue 'retry;
             }
 
+            let projected = self.project_broadcasts_for(task, target);
+            let (dispatch_task, newly_sent): (&TaskEnvelope, &[usize]) = match &projected {
+                Some((env, newly)) => (env, newly.as_slice()),
+                None => (task, &[]),
+            };
+
             // Track in-flight count; guard decrements on drop regardless of outcome.
             let counter = Arc::clone(
                 &*self
@@ -221,9 +259,22 @@ impl DistributedScheduler {
             counter.fetch_add(1, Ordering::Relaxed);
             let _guard = InflightGuard(counter);
 
-            match self.send_task_once(task, target).await {
+            match self.send_task_once(dispatch_task, target).await {
                 Ok(result) => {
+                    if is_broadcast_cache_miss(&result) {
+                        self.broadcast_sent.remove(&target);
+                        last_err = Some(SchedulerError::Transport(
+                            "broadcast cache miss on worker; re-sending".to_string(),
+                        ));
+                        continue 'retry;
+                    }
                     self.worker_failures.remove(&target);
+                    if !newly_sent.is_empty() {
+                        self.broadcast_sent
+                            .entry(target)
+                            .or_default()
+                            .extend(newly_sent.iter().copied());
+                    }
                     return Ok((result, target));
                 }
                 Err(e) => {

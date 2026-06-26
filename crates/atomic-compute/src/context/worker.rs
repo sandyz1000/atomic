@@ -413,22 +413,19 @@ pub fn start_worker(config: Config) -> ! {
             #[cfg_attr(not(feature = "tls"), allow(unused_mut))]
             let mut executor = Executor::new(port, max_tasks);
             #[cfg(feature = "tls")]
-            if crate::tls::tls_is_configured(
-                config.tls_ca_cert.as_deref(),
-                config.tls_cert.as_deref(),
-                config.tls_key.as_deref(),
-            ) {
-                executor = executor
-                    .with_tls(
-                        config.tls_cert.as_ref().unwrap(),
-                        config.tls_key.as_ref().unwrap(),
-                        config.tls_ca_cert.as_ref().unwrap(),
-                    )
-                    .map_err(|e| {
-                        ComputeError::GetOrCreateConfig(Box::leak(
-                            format!("TLS init: {e}").into_boxed_str(),
-                        ))
-                    })?;
+            {
+                let ca_cert = config.tls_ca_cert.as_deref();
+                let cert = config.tls_cert.as_deref();
+                let key = config.tls_key.as_deref();
+                if crate::tls::tls_is_configured(ca_cert, cert, key) {
+                    executor = executor
+                        .with_tls(ca_cert.unwrap(), key.unwrap(), ca_cert.unwrap())
+                        .map_err(|e| {
+                            ComputeError::GetOrCreateConfig(Box::leak(
+                                format!("TLS init: {e}").into_boxed_str(),
+                            ))
+                        })?;
+                }
             }
             let executor = Arc::new(executor);
             executor.worker()

@@ -91,148 +91,6 @@ where
         ctx.parallelize_typed(result, num_partitions)
     }
 
-    /// Right outer join — collects both sides to the driver (small-data path).
-    pub fn right_outer_join_local<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, (Option<V>, U))>
-    where
-        U: Data + Clone,
-        K: std::hash::Hash + Eq,
-        Vec<(K, V)>: Data + Clone,
-        Vec<(K, U)>: Data + Clone,
-    {
-        use std::collections::HashMap;
-        let ctx = self.context.clone();
-        let num_partitions = self.rdd.number_of_splits();
-
-        let left_parts = ctx
-            .run_job(self.rdd, |iter| iter.collect::<Vec<(K, V)>>())
-            .unwrap_or_default();
-        let mut left_map: HashMap<K, Vec<V>> = HashMap::new();
-        for partition in left_parts {
-            for (k, v) in partition {
-                left_map.entry(k).or_default().push(v);
-            }
-        }
-
-        let right_parts = other
-            .context
-            .run_job(other.rdd, |iter| iter.collect::<Vec<(K, U)>>())
-            .unwrap_or_default();
-        let mut result: Vec<(K, (Option<V>, U))> = Vec::new();
-        for partition in right_parts {
-            for (k, u) in partition {
-                match left_map.get(&k) {
-                    Some(vs) => {
-                        for v in vs {
-                            result.push((k.clone(), (Some(v.clone()), u.clone())));
-                        }
-                    }
-                    None => result.push((k.clone(), (None, u))),
-                }
-            }
-        }
-        ctx.parallelize_typed(result, num_partitions)
-    }
-
-    /// Full outer join — collects both sides to the driver (small-data path).
-    pub fn full_outer_join_local<U>(
-        self,
-        other: TypedRdd<(K, U)>,
-    ) -> TypedRdd<FullOuterJoined<K, V, U>>
-    where
-        U: Data + Clone,
-        K: std::hash::Hash + Eq,
-        Vec<(K, V)>: Data + Clone,
-        Vec<(K, U)>: Data + Clone,
-    {
-        use std::collections::HashMap;
-        let ctx = self.context.clone();
-        let num_partitions = self.rdd.number_of_splits();
-
-        let left_parts = ctx
-            .run_job(self.rdd, |iter| iter.collect::<Vec<(K, V)>>())
-            .unwrap_or_default();
-        let right_parts = other
-            .context
-            .run_job(other.rdd, |iter| iter.collect::<Vec<(K, U)>>())
-            .unwrap_or_default();
-
-        let mut left_map: HashMap<K, Vec<V>> = HashMap::new();
-        for partition in left_parts {
-            for (k, v) in partition {
-                left_map.entry(k).or_default().push(v);
-            }
-        }
-        let mut right_map: HashMap<K, Vec<U>> = HashMap::new();
-        for partition in right_parts {
-            for (k, u) in partition {
-                right_map.entry(k).or_default().push(u);
-            }
-        }
-
-        let mut result: Vec<FullOuterJoined<K, V, U>> = Vec::new();
-        for (k, vs) in &left_map {
-            match right_map.get(k) {
-                Some(us) => {
-                    for v in vs {
-                        for u in us {
-                            result.push((k.clone(), (Some(v.clone()), Some(u.clone()))));
-                        }
-                    }
-                }
-                None => {
-                    for v in vs {
-                        result.push((k.clone(), (Some(v.clone()), None)));
-                    }
-                }
-            }
-        }
-        for (k, us) in &right_map {
-            if !left_map.contains_key(k) {
-                for u in us {
-                    result.push((k.clone(), (None, Some(u.clone()))));
-                }
-            }
-        }
-        ctx.parallelize_typed(result, num_partitions)
-    }
-
-    /// Cogroup — collects both sides to the driver (small-data path).
-    pub fn cogroup_local<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, Vec<V>, Vec<U>)>
-    where
-        U: Data + Clone,
-        K: Eq + std::hash::Hash,
-        Vec<(K, V)>: Data + Clone,
-        Vec<(K, U)>: Data + Clone,
-    {
-        use std::collections::HashMap;
-        let ctx = self.context.clone();
-        let num_partitions = self.rdd.number_of_splits();
-
-        let left_parts = ctx
-            .run_job(self.rdd, |iter| iter.collect::<Vec<(K, V)>>())
-            .unwrap_or_default();
-        let right_parts = other
-            .context
-            .run_job(other.rdd, |iter| iter.collect::<Vec<(K, U)>>())
-            .unwrap_or_default();
-
-        let mut agg: HashMap<K, (Vec<V>, Vec<U>)> = HashMap::new();
-        for partition in left_parts {
-            for (k, v) in partition {
-                agg.entry(k).or_default().0.push(v);
-            }
-        }
-        for partition in right_parts {
-            for (k, u) in partition {
-                agg.entry(k).or_default().1.push(u);
-            }
-        }
-
-        let result: Vec<(K, Vec<V>, Vec<U>)> =
-            agg.into_iter().map(|(k, (vs, us))| (k, vs, us)).collect();
-        ctx.parallelize_typed(result, num_partitions)
-    }
-
     /// Co-group two pair RDDs using two shuffle stages — no full-dataset collect on the driver.
     ///
     /// Both sides are shuffled into `num_partitions` buckets using the same hash partitioner.
@@ -266,11 +124,12 @@ where
         // After group_by_key_n each key appears at most once per partition, so outer vecs
         // have length 0 (absent) or 1 (present). Flatten to (K, Vec<V>, Vec<U>).
         TypedRdd::new(Arc::new(cogroup_rdd), ctx).map_partitions(|iter| {
-            Box::new(iter.map(|(k, vvs, vus)| {
+            let flattened = iter.map(|(k, vvs, vus)| {
                 let vs: Vec<V> = vvs.into_iter().flatten().collect();
                 let us: Vec<U> = vus.into_iter().flatten().collect();
                 (k, vs, us)
-            })) as Box<dyn Iterator<Item = (K, Vec<V>, Vec<U>)>>
+            });
+            Box::new(flattened) as Box<dyn Iterator<Item = (K, Vec<V>, Vec<U>)>>
         })
     }
 

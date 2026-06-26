@@ -64,6 +64,11 @@ pub struct DistributedScheduler {
     pub(crate) inflight: Arc<DashMap<SocketAddrV4, Arc<AtomicI16>>>,
     /// Consecutive TCP-level failure count per worker — reset on success, triggers removal at MAX_WORKER_FAILURES.
     pub(crate) worker_failures: Arc<DashMap<SocketAddrV4, u32>>,
+    /// Broadcast ids already shipped to each worker. The driver sends a broadcast's
+    /// bytes only on the first task that reaches a given endpoint; later tasks carry
+    /// just the ids and the worker reads from its process-global cache. Cleared when a
+    /// worker is removed or re-registers, so a restarted (cache-empty) worker is re-sent.
+    pub(crate) broadcast_sent: Arc<DashMap<SocketAddrV4, HashSet<usize>>>,
     /// Per-task timeout. `None` means no timeout (useful in tests / local mode).
     pub(crate) task_timeout: Option<Duration>,
     /// Per-task timeout for pipelines containing an `AgentStep` op. Multi-round LLM
@@ -116,6 +121,7 @@ impl DistributedScheduler {
             worker_capabilities: Arc::new(DashMap::new()),
             inflight: Arc::new(DashMap::new()),
             worker_failures: Arc::new(DashMap::new()),
+            broadcast_sent: Arc::new(DashMap::new()),
             task_timeout: Some(Duration::from_secs(300)),
             agent_step_timeout: None,
             speculation_multiplier: None,

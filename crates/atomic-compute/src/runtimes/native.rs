@@ -253,8 +253,15 @@ fn resolve_input(task: &TaskEnvelope, worker_id: &str) -> ComputeResult<InputDat
     Ok(InputData::Pipeline(data))
 }
 
-/// Run each op in sequence, threading data through the pipeline. Returns the
-/// final output bytes, or `Err` if any dispatcher call fails.
+/// Run each op in sequence, threading data through the pipeline. Returns the final
+/// output bytes, or `Err` if any dispatcher call fails.
+///
+/// Broadcasts arrive as bytes only on the first task to reach this worker; they are
+/// cached process-globally and survive across tasks (no per-task clear). A task whose
+/// declared `broadcast_ids` are not all cached fails with a [`BroadcastError`] so the
+/// driver re-sends — the recovery path for a restarted, cache-empty worker.
+///
+/// [`BroadcastError`]: atomic_data::broadcast::BroadcastError
 fn run_pipeline(
     dispatchers: &HashMap<TaskRuntime, Box<dyn OpDispatcher>>,
     task: &TaskEnvelope,
@@ -262,7 +269,11 @@ fn run_pipeline(
     mut data: Vec<u8>,
 ) -> ComputeResult<Vec<u8>> {
     if !task.broadcast_values.is_empty() {
-        broadcast::load_broadcast_values(&task.broadcast_values);
+        broadcast::cache_broadcast_values(&task.broadcast_values);
+    }
+    if !task.broadcast_ids.is_empty() {
+        broadcast::ensure_broadcasts_cached(&task.broadcast_ids)
+            .map_err(|e| ComputeError::InvalidPayload(e.to_string()))?;
     }
 
     for op in &task.ops {
@@ -277,10 +288,6 @@ fn run_pipeline(
             ComputeError::UnknownOperation(format!("unknown TaskRuntime: {:?}", op.runtime))
         })?;
         data = dispatcher.dispatch(op, task.partition_id, &data)?;
-    }
-
-    if !task.broadcast_values.is_empty() {
-        broadcast::clear_broadcast_values();
     }
 
     Ok(data)

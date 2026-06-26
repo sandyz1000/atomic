@@ -20,7 +20,6 @@ pub fn get_dynamic_port() -> u16 {
     FIRST_DYNAMIC_PORT + rand::rng().random_range(0..LAST_DYNAMIC_PORT - FIRST_DYNAMIC_PORT)
 }
 
-#[allow(unused_must_use)]
 pub fn clean_up_work_dir(work_dir: &Path, log_cleanup: bool) {
     if log_cleanup {
         // Remove created files.
@@ -28,22 +27,15 @@ pub fn clean_up_work_dir(work_dir: &Path, log_cleanup: bool) {
             log::error!("failed removing tmp work dir: {}", work_dir.display());
         }
     } else if let Ok(dir) = fs::read_dir(work_dir) {
-        for e in dir {
-            if let Ok(p) = e
-                && let Ok(m) = p.metadata()
-            {
-                if m.is_dir() {
-                    fs::remove_dir_all(p.path());
-                } else {
-                    let file = p.path();
-                    if let Some(ext) = file.extension() {
-                        if ext.to_str() != "log".into() {
-                            fs::remove_file(file);
-                        }
-                    } else {
-                        fs::remove_file(file);
-                    }
-                }
+        for entry in dir.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            let path = entry.path();
+            if meta.is_dir() {
+                let _ = fs::remove_dir_all(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+                let _ = fs::remove_file(path);
             }
         }
     }

@@ -1,34 +1,48 @@
-//! Self-contained distributed integration test helper.
+//! Distributed integration test binary — one process, dispatched by scenario.
+//!
+//! Driver and worker are the same binary; the scenario only selects which
+//! `run_driver` runs on the driver side. Worker mode is scenario-agnostic: it
+//! just dispatches whatever task envelope the driver sends.
 //!
 //! Run as worker:
 //!   ./integration --worker --port 19201
 //!
 //! Run as driver:
-//!   ./integration --driver --workers 127.0.0.1:19201
-//!   Output: {"doubled":[2,4,6,8],"sum":10}
+//!   ./integration shuffle_wordcount --driver --workers 127.0.0.1:19201
 
 use atomic_compute::context::{Context, start_worker};
 use atomic_compute::env::Config;
-use atomic_compute::task;
 use clap::Parser;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 
-#[path = "cli.rs"]
-mod cli;
-use cli::IntegrationCli;
+mod scenarios;
+use scenarios::Scenario;
 
-#[task]
-fn double(x: i32) -> i32 {
-    x * 2
-}
+#[derive(Parser, Debug)]
+struct Cli {
+    /// Which scenario to run (driver mode only).
+    #[arg(value_enum)]
+    scenario: Option<Scenario>,
 
-#[task]
-fn add(a: i32, b: i32) -> i32 {
-    a + b
+    /// Run as a worker, listening on `--port`.
+    #[arg(long)]
+    worker: bool,
+
+    /// Run as a driver, dispatching to `--workers`.
+    #[arg(long)]
+    driver: bool,
+
+    /// Listening port (worker mode).
+    #[arg(long)]
+    port: Option<u16>,
+
+    /// Comma-separated `host:port` worker list (driver mode).
+    #[arg(long, value_delimiter = ',')]
+    workers: Vec<SocketAddrV4>,
 }
 
 fn main() {
-    let cli = IntegrationCli::parse();
+    let cli = Cli::parse();
     let _ = env_logger::try_init();
 
     if cli.worker {
@@ -37,34 +51,25 @@ fn main() {
         // start_worker enters the TCP loop and never returns.
         start_worker(config);
     } else if cli.driver {
+        let scenario = cli.scenario.expect("--driver requires a scenario argument");
         let config = Config::distributed_driver(Ipv4Addr::LOCALHOST, cli.workers);
 
-        if let Err(e) = run_driver(config) {
+        if let Err(e) = run_driver(scenario, config) {
             eprintln!("driver error: {e}");
             std::process::exit(1);
         }
     } else {
         eprintln!(
-            "usage:\n  integration --worker --port N\n  integration --driver --workers host:port[,...]"
+            "usage:\n  integration --worker --port N\n  \
+             integration <scenario> --driver --workers host:port[,...]\n\n\
+             scenarios: map_fold, shuffle_wordcount, multi_stage, fault_tolerance, \
+             cache_locality, named_partitioner, sort_by_task"
         );
         std::process::exit(1);
     }
 }
 
-fn run_driver(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+fn run_driver(scenario: Scenario, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Context::new_with_config(config)?;
-
-    let input = vec![1i32, 2, 3, 4];
-
-    let doubled = ctx
-        .parallelize_typed(input.clone(), 2)
-        .map_task(Double)
-        .collect()?;
-
-    let sum = ctx.parallelize_typed(input, 2).fold_task(0i32, Add)?;
-
-    // Machine-readable JSON output — parsed by the integration test.
-    println!("{}", serde_json::json!({ "doubled": doubled, "sum": sum }));
-
-    Ok(())
+    scenarios::run(scenario, &ctx)
 }

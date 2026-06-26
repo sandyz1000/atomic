@@ -134,6 +134,7 @@ impl DistributedScheduler {
             }
         }
         self.worker_capabilities.insert(endpoint, capabilities);
+        self.broadcast_sent.remove(&endpoint);
         let mut servers = self.server_uris.lock();
         if !servers.contains(&endpoint) {
             servers.push_back(endpoint);
@@ -146,6 +147,7 @@ impl DistributedScheduler {
         self.server_uris.lock().retain(|e| *e != endpoint);
         self.inflight.remove(&endpoint);
         self.worker_failures.remove(&endpoint);
+        self.broadcast_sent.remove(&endpoint);
         // Cached partitions on the dead worker are gone — forget their locations so
         // the next job recomputes them instead of dispatching a doomed cache read.
         self.invalidate_cache_for_worker(endpoint);

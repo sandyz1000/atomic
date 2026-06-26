@@ -43,7 +43,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 thread_local! {
-    static JS_RT: RefCell<Option<deno_core::JsRuntime>> = RefCell::new(None);
+    static JS_RT: RefCell<Option<deno_core::JsRuntime>> = const { RefCell::new(None) };
     /// FxHash64(fn_source) → JS globalThis identifier (e.g. "__f0a1b2c3d4e5f678").
     /// Entries persist for the thread's lifetime; valid as long as JS_RT is Some.
     static FN_CACHE: RefCell<HashMap<u64, String>> = RefCell::new(HashMap::new());
@@ -151,9 +151,9 @@ impl JsDispatcher {
             };
             let hs = &mut hs;
             let ctx_local = deno_core::v8::Local::new(&*hs, context);
-            let mut cs = deno_core::v8::ContextScope::new(hs, ctx_local);
-            let local = deno_core::v8::Local::new(&**cs, result);
-            Ok(local.to_rust_string_lossy(&*cs).into_bytes())
+            let cs = deno_core::v8::ContextScope::new(hs, ctx_local);
+            let local = deno_core::v8::Local::new(&cs, result);
+            Ok(local.to_rust_string_lossy(&cs).into_bytes())
         })
     }
 }

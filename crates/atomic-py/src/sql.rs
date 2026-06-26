@@ -624,9 +624,7 @@ impl PySqlContext {
                 &self,
                 args: datafusion::logical_expr::ScalarFunctionArgs,
             ) -> datafusion::common::Result<ColumnarValue> {
-                use datafusion::arrow::array::{
-                    ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray,
-                };
+                use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array};
                 // For each row, call the Python function and collect results.
                 let first_arg = args.args.first().ok_or_else(|| {
                     datafusion::common::DataFusionError::Execution(

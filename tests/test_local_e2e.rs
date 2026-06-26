@@ -307,15 +307,28 @@ async fn test_broadcast_store_and_snapshot() {
 }
 
 #[tokio::test]
-async fn test_broadcast_load_and_read() {
-    use atomic_data::broadcast::{BroadcastVar, clear_broadcast_values, load_broadcast_values};
+async fn test_broadcast_cache_and_read() {
+    use atomic_data::broadcast::{
+        BroadcastVar, cache_broadcast_values, ensure_broadcasts_cached, evict_broadcast,
+    };
     use atomic_data::distributed::WireEncode;
 
     let bytes = 42i32.encode_wire().unwrap();
     let var: BroadcastVar<i32> = BroadcastVar::new(9000);
-    load_broadcast_values(&[(9000usize, bytes)]);
+    // First send caches the bytes on this (process-global) worker cache.
+    cache_broadcast_values(&[(9000usize, bytes)]);
+    assert!(ensure_broadcasts_cached(&[9000]).is_ok());
     assert_eq!(var.value(), 42i32);
-    clear_broadcast_values();
+
+    // A later task carrying only the id (no bytes) still resolves from cache.
+    cache_broadcast_values(&[]);
+    assert_eq!(var.value(), 42i32);
+
+    // An id that was never cached is a miss — the dispatcher would fail and the
+    // driver would re-send.
+    assert!(ensure_broadcasts_cached(&[9001]).is_err());
+
+    evict_broadcast(9000);
 }
 
 // ── Accumulators ─────────────────────────────────────────────────────────────
@@ -351,27 +364,29 @@ async fn test_accumulator_string_concat() {
 
 #[tokio::test]
 async fn test_broadcast_embedded_in_pipeline() {
-    // Verify broadcasts are included in TaskEnvelope dispatched during dispatch_pipeline.
-    // In local mode the NativeBackend loads and clears the thread-local BroadcastRegistry
-    // for each task, so consecutive tasks don't see each other's broadcasts.
+    // Broadcasts are cached per worker (process-global) keyed by id. Once cached, the
+    // value persists across tasks — the driver need only send the bytes once per worker.
     let ctx = ctx();
     let bcast = ctx.broadcast(10i32);
     let bcast_id = bcast.id;
 
-    // Use a closure filter (local-scheduler path) that reads the broadcast value
-    // via the load_broadcast_values API, simulating what a #[task] struct would do.
+    // Simulate the first task on a worker caching the broadcast bytes.
     let bytes = {
         use atomic_data::distributed::WireEncode;
         10i32.encode_wire().unwrap()
     };
-    atomic_data::broadcast::load_broadcast_values(&[(bcast_id, bytes)]);
+    atomic_data::broadcast::cache_broadcast_values(&[(bcast_id, bytes)]);
 
     let threshold = atomic_data::broadcast::BroadcastVar::<i32>::new(bcast_id).value();
     assert_eq!(threshold, 10i32);
 
-    atomic_data::broadcast::clear_broadcast_values();
+    // The value stays cached for subsequent tasks (no per-task clear) — read again.
+    let again = atomic_data::broadcast::BroadcastVar::<i32>::new(bcast_id).value();
+    assert_eq!(again, 10i32);
 
-    // The snapshot should still hold the broadcast for future task dispatch.
+    // The driver snapshot still holds the broadcast for first-send to other workers.
     let snap = ctx.broadcast_snapshot();
     assert!(snap.iter().any(|(id, _)| *id == bcast_id));
+
+    atomic_data::broadcast::evict_broadcast(bcast_id);
 }

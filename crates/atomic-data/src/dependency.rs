@@ -80,7 +80,7 @@ impl Dependency {
                 ..
             } => {
                 if partition_id >= *out_start && partition_id < out_start + length {
-                    vec![partition_id - out_start + in_start]
+                    vec![(partition_id - out_start) + in_start]
                 } else {
                     Vec::new()
                 }

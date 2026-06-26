@@ -1,3 +1,7 @@
+// `task_fn!(|x| -> T { .. })` requires block bodies (return-typed closures);
+// clippy's unused_braces is a false positive on these macro inputs.
+#![allow(unused_braces)]
+
 use atomic_compute::context::Context;
 use atomic_compute::task;
 use std::sync::Arc;
@@ -77,9 +81,9 @@ async fn test_group_by_key() {
 async fn test_map_values_doubles() {
     let ctx = ctx();
     let mut result = word_pairs(&ctx)
-        .map_task(atomic_compute::task_fn!(|kv: (String, i32)| -> (String, i32) {
-            (kv.0, kv.1 * 2)
-        }))
+        .map_task(atomic_compute::task_fn!(
+            |kv: (String, i32)| -> (String, i32) { (kv.0, kv.1 * 2) }
+        ))
         .collect()
         .unwrap();
     result.sort_by_key(|(k, _)| k.clone());
@@ -181,6 +185,33 @@ async fn test_left_outer_join() {
     result.sort_by_key(|(k, _)| k.clone());
     assert_eq!(result[0], ("a".to_string(), (1, Some(10))));
     assert_eq!(result[1], ("b".to_string(), (2, None)));
+}
+
+/// Right outer join: every right key is preserved; a missing left key yields `None`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_right_outer_join() {
+    let ctx = ctx();
+    let left = ctx.parallelize_typed(vec![("a".to_string(), 1i32)], 1);
+    let right = ctx.parallelize_typed(vec![("a".to_string(), 10i32), ("c".to_string(), 30)], 2);
+    let mut result = left.right_outer_join(right).collect().unwrap();
+    result.sort_by_key(|(k, _)| k.clone());
+    // "a" matches on both sides; "c" exists only on the right → left is None.
+    assert_eq!(result[0], ("a".to_string(), (Some(1), 10)));
+    assert_eq!(result[1], ("c".to_string(), (None, 30)));
+}
+
+/// Full outer join: keys from either side survive; the absent side is `None`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_full_outer_join() {
+    let ctx = ctx();
+    let left = ctx.parallelize_typed(vec![("a".to_string(), 1i32), ("b".to_string(), 2)], 2);
+    let right = ctx.parallelize_typed(vec![("a".to_string(), 10i32), ("c".to_string(), 30)], 2);
+    let mut result = left.full_outer_join(right).collect().unwrap();
+    result.sort_by_key(|(k, _)| k.clone());
+    // a → both, b → left only, c → right only.
+    assert_eq!(result[0], ("a".to_string(), (Some(1), Some(10))));
+    assert_eq!(result[1], ("b".to_string(), (Some(2), None)));
+    assert_eq!(result[2], ("c".to_string(), (None, Some(30))));
 }
 
 // ── Range partitioner ─────────────────────────────────────────────────────────
@@ -328,7 +359,9 @@ async fn test_key_by() {
     let ctx = ctx();
     let mut result = ctx
         .parallelize_typed(vec![1i32, 2, 3], 1)
-        .map_task(atomic_compute::task_fn!(|x: i32| -> (i32, i32) { (x % 2, x) }))
+        .map_task(atomic_compute::task_fn!(|x: i32| -> (i32, i32) {
+            (x % 2, x)
+        }))
         .collect()
         .unwrap();
     result.sort_by_key(|(k, _)| *k);
@@ -545,9 +578,11 @@ async fn test_flat_map_values() {
     let data = vec![("a".to_string(), 3u32), ("b".to_string(), 2u32)];
     let rdd = ctx.parallelize_typed(data, 1);
     let mut result = rdd
-        .flat_map_task(atomic_compute::task_fn!(|kv: (String, u32)| -> Vec<(String, u32)> {
-            (1..=kv.1).map(|u| (kv.0.clone(), u)).collect()
-        }))
+        .flat_map_task(atomic_compute::task_fn!(
+            |kv: (String, u32)| -> Vec<(String, u32)> {
+                (1..=kv.1).map(|u| (kv.0.clone(), u)).collect()
+            }
+        ))
         .collect()
         .unwrap();
     result.sort();
@@ -561,4 +596,155 @@ async fn test_flat_map_values() {
             ("b".to_string(), 2),
         ]
     );
+}
+
+// ── aggregate_by_key_task(): accumulator type C != value type V ──────────────
+// The shuffle ships the value wire type (String, f64); the accumulator (f64, u64)
+// is produced on the reduce side and never crosses the shuffle as a key-value pair.
+atomic_compute::register_shuffle_map!(String, f64);
+
+/// Lift one rating into a (sum, count) accumulator.
+#[task]
+fn to_sum_count(r: f64) -> (f64, u64) {
+    (r, 1)
+}
+
+/// Merge two (sum, count) accumulators component-wise — associative and commutative.
+#[task]
+fn add_sum_count(a: (f64, u64), b: (f64, u64)) -> (f64, u64) {
+    (a.0 + b.0, a.1 + b.1)
+}
+
+/// Mean rating per key: lift each value into the (sum, count) monoid, merge, divide.
+/// This is the canonical `C != V` case `reduce_by_key_task` cannot express.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_aggregate_by_key_mean() {
+    let ctx = ctx();
+    // a → [1, 3]  (mean 2.0),  b → [2, 4, 6]  (mean 4.0),  c → [5]  (mean 5.0)
+    let ratings = ctx.parallelize_typed(
+        vec![
+            ("a".to_string(), 1.0f64),
+            ("b".to_string(), 2.0),
+            ("a".to_string(), 3.0),
+            ("b".to_string(), 4.0),
+            ("c".to_string(), 5.0),
+            ("b".to_string(), 6.0),
+        ],
+        3,
+    );
+
+    let mut means = ratings
+        .aggregate_by_key_task(ToSumCount, AddSumCount, 4)
+        .map_task(atomic_compute::task_fn!(
+            |kv: (String, (f64, u64))| -> (String, f64) { (kv.0, kv.1.0 / kv.1.1 as f64) }
+        ))
+        .collect()
+        .unwrap();
+    means.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+
+    assert_eq!(
+        means,
+        vec![
+            ("a".to_string(), 2.0),
+            ("b".to_string(), 4.0),
+            ("c".to_string(), 5.0),
+        ]
+    );
+}
+
+// ── reduce_by_key_locally_task(): driver-side reduce, no shuffle ──────────────
+
+/// Reduce per key into a `HashMap` on the driver without a shuffle. Map-side
+/// combine per partition, then merge the partial maps on the driver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_reduce_by_key_locally() {
+    let ctx = ctx();
+    let totals = word_pairs(&ctx).reduce_by_key_locally_task(AddI32).unwrap();
+
+    // word_pairs: a→[1,3]=4, b→[2,4]=6, c→[5]=5
+    let mut entries: Vec<(String, i32)> = totals.into_iter().collect();
+    entries.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+    assert_eq!(
+        entries,
+        vec![
+            ("a".to_string(), 4),
+            ("b".to_string(), 6),
+            ("c".to_string(), 5),
+        ]
+    );
+}
+
+// ── repartition_and_sort(): secondary sort, one shuffle ──────────────────────
+// i64 value wire type avoids colliding with the i32/String/u32/f64 handlers above.
+atomic_compute::register_sort_shuffle_map!(i64, i64);
+
+/// Places an `i64` key into `key % n` — ships to workers by name.
+struct ModPartitioner {
+    n: usize,
+}
+
+impl atomic_data::partitioner::CustomPartitioner for ModPartitioner {
+    fn num_partitions(&self) -> usize {
+        self.n
+    }
+    fn get_partition_for_key(&self, key: &dyn std::any::Any) -> usize {
+        let k = key.downcast_ref::<i64>().copied().unwrap_or(0);
+        k.rem_euclid(self.n as i64) as usize
+    }
+}
+
+impl atomic_data::partitioner::NamedPartitioner for ModPartitioner {
+    const NAME: &'static str = "pair_ops_test_mod";
+    fn create(n: usize) -> Self {
+        ModPartitioner { n }
+    }
+}
+
+atomic_compute::register_partitioner!(ModPartitioner);
+
+/// Each output partition holds only keys `≡ p (mod n)` and is internally key-sorted —
+/// the partitioner placement and the within-partition order both hold in one shuffle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_repartition_and_sort() {
+    let ctx = ctx();
+    let pairs = ctx.parallelize_typed(
+        vec![
+            (7i64, 70i64),
+            (1, 10),
+            (4, 40),
+            (2, 20),
+            (5, 50),
+            (0, 0),
+            (3, 30),
+            (6, 60),
+        ],
+        3,
+    );
+
+    let parts = pairs
+        .repartition_and_sort(ModPartitioner { n: 3 }, true)
+        .collect_partitions()
+        .unwrap();
+
+    assert_eq!(
+        parts.len(),
+        3,
+        "must honor the partitioner's partition count"
+    );
+    for (p, bucket) in parts.iter().enumerate() {
+        let keys: Vec<i64> = bucket.iter().map(|(k, _)| *k).collect();
+        // Internally key-sorted.
+        assert!(
+            keys.windows(2).all(|w| w[0] <= w[1]),
+            "partition {p} not key-sorted: {keys:?}"
+        );
+        // Every key lands in its `key % 3` partition.
+        for k in &keys {
+            assert_eq!(
+                k.rem_euclid(3) as usize,
+                p,
+                "key {k} landed in partition {p}"
+            );
+        }
+    }
 }

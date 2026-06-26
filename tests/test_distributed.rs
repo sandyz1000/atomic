@@ -23,53 +23,32 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// All scenarios live in one binary (`integration/main.rs`); a scenario name
+/// selects which `run_driver` runs. Worker mode is scenario-agnostic, so every
+/// helper below takes the scenario only where it spawns a driver.
 fn integration_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration"))
 }
 
-fn shuffle_wordcount_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration_shuffle_wordcount"))
-}
-
-fn multi_stage_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration_multi_stage"))
-}
-
-fn fault_tolerance_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration_fault_tolerance"))
-}
-
-fn cache_locality_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration_cache_locality"))
-}
-
-fn named_partitioner_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration_named_partitioner"))
-}
-
-fn sort_by_task_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_integration_sort_by_task"))
-}
-
 /// Spawns the driver as a non-blocking child so the caller can interleave
 /// actions (e.g. killing a worker) while the driver process is still running.
-fn spawn_driver(bin: &std::path::Path, workers: &[u16]) -> Child {
+fn spawn_driver(scenario: &str, workers: &[u16]) -> Child {
     let worker_list = workers
         .iter()
         .map(|p| format!("127.0.0.1:{p}"))
         .collect::<Vec<_>>()
         .join(",");
-    Command::new(bin)
-        .args(["--driver", "--workers", &worker_list])
+    Command::new(integration_bin())
+        .args([scenario, "--driver", "--workers", &worker_list])
         .env("RUST_LOG", "warn")
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn driver {}: {e}", bin.display()))
+        .unwrap_or_else(|e| panic!("failed to spawn driver ({scenario}): {e}"))
 }
 
-fn spawn_worker(bin: &std::path::Path, port: u16) -> Child {
-    Command::new(bin)
+fn spawn_worker(port: u16) -> Child {
+    Command::new(integration_bin())
         .args(["--worker", "--port", &port.to_string()])
         .env("RUST_LOG", "warn")
         .stdout(Stdio::null())
@@ -94,17 +73,17 @@ fn wait_for_port(port: u16, timeout: Duration) {
     }
 }
 
-fn run_driver(bin: &std::path::Path, workers: &[u16]) -> std::process::Output {
+fn run_driver(scenario: &str, workers: &[u16]) -> std::process::Output {
     let worker_list = workers
         .iter()
         .map(|p| format!("127.0.0.1:{p}"))
         .collect::<Vec<_>>()
         .join(",");
-    Command::new(bin)
-        .args(["--driver", "--workers", &worker_list])
+    Command::new(integration_bin())
+        .args([scenario, "--driver", "--workers", &worker_list])
         .env("RUST_LOG", "warn")
         .output()
-        .unwrap_or_else(|e| panic!("failed to run driver {}: {e}", bin.display()))
+        .unwrap_or_else(|e| panic!("failed to run driver ({scenario}): {e}"))
 }
 
 // ── Test 1: baseline map + fold ───────────────────────────────────────────────
@@ -118,10 +97,10 @@ fn run_driver(bin: &std::path::Path, workers: &[u16]) -> std::process::Output {
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_map_and_fold() {
     let port = free_port();
-    let mut worker = spawn_worker(&integration_bin(), port);
+    let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
 
-    let driver_out = run_driver(&integration_bin(), &[port]);
+    let driver_out = run_driver("map_fold", &[port]);
     worker.kill().ok();
     worker.wait().ok();
 
@@ -152,11 +131,10 @@ fn distributed_map_and_fold() {
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_shuffle_wordcount() {
     let port = free_port();
-    let bin = shuffle_wordcount_bin();
-    let mut worker = spawn_worker(&bin, port);
+    let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
 
-    let driver_out = run_driver(&bin, &[port]);
+    let driver_out = run_driver("shuffle_wordcount", &[port]);
     worker.kill().ok();
     worker.wait().ok();
 
@@ -187,11 +165,10 @@ fn distributed_shuffle_wordcount() {
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_multi_stage_pipeline() {
     let port = free_port();
-    let bin = multi_stage_bin();
-    let mut worker = spawn_worker(&bin, port);
+    let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
 
-    let driver_out = run_driver(&bin, &[port]);
+    let driver_out = run_driver("multi_stage", &[port]);
     worker.kill().ok();
     worker.wait().ok();
 
@@ -240,15 +217,14 @@ fn distributed_multi_stage_pipeline() {
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_fault_tolerance_one_dead_worker() {
-    let bin = fault_tolerance_bin();
     let healthy_port = free_port();
     let dead_port = free_port();
     // Worker 1: healthy
-    let mut worker1 = spawn_worker(&bin, healthy_port);
+    let mut worker1 = spawn_worker(healthy_port);
     wait_for_port(healthy_port, Duration::from_secs(10));
     // Worker 2 (dead_port): NOT started — simulates a dead/unreachable worker.
 
-    let driver_out = run_driver(&bin, &[healthy_port, dead_port]);
+    let driver_out = run_driver("fault_tolerance", &[healthy_port, dead_port]);
     worker1.kill().ok();
     worker1.wait().ok();
 
@@ -280,7 +256,7 @@ fn distributed_fault_tolerance_one_dead_worker() {
 // ── Test 5: distributed cache locality ────────────────────────────────────────
 
 /// Builds a `value -> call_id` map from the `[[value, call_id], ...]` JSON array
-/// produced by `integration_cache_locality`.
+/// produced by the `cache_locality` scenario.
 fn call_id_map(arr: &[serde_json::Value]) -> std::collections::HashMap<i64, i64> {
     arr.iter()
         .map(|pair| (pair[0].as_i64().unwrap(), pair[1].as_i64().unwrap()))
@@ -292,15 +268,14 @@ fn call_id_map(arr: &[serde_json::Value]) -> std::collections::HashMap<i64, i64>
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_cache_no_recompute() {
-    let bin = cache_locality_bin();
     let port_a = free_port();
     let port_b = free_port();
-    let mut worker_a = spawn_worker(&bin, port_a);
-    let mut worker_b = spawn_worker(&bin, port_b);
+    let mut worker_a = spawn_worker(port_a);
+    let mut worker_b = spawn_worker(port_b);
     wait_for_port(port_a, Duration::from_secs(10));
     wait_for_port(port_b, Duration::from_secs(10));
 
-    let driver_out = run_driver(&bin, &[port_a, port_b]);
+    let driver_out = run_driver("cache_locality", &[port_a, port_b]);
     worker_a.kill().ok();
     worker_a.wait().ok();
     worker_b.kill().ok();
@@ -334,15 +309,14 @@ fn distributed_cache_no_recompute() {
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_cache_recompute_on_worker_death() {
-    let bin = cache_locality_bin();
     let port_a = free_port();
     let port_b = free_port();
-    let mut worker_a = spawn_worker(&bin, port_a);
-    let mut worker_b = spawn_worker(&bin, port_b);
+    let mut worker_a = spawn_worker(port_a);
+    let mut worker_b = spawn_worker(port_b);
     wait_for_port(port_a, Duration::from_secs(10));
     wait_for_port(port_b, Duration::from_secs(10));
 
-    let driver = spawn_driver(&bin, &[port_a, port_b]);
+    let driver = spawn_driver("cache_locality", &[port_a, port_b]);
 
     // Let the first collect complete, then kill worker B mid-sleep so the
     // second collect must recompute B's partitions on the survivor.
@@ -408,11 +382,10 @@ fn distributed_cache_recompute_on_worker_death() {
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_named_partitioner_buckets() {
     let port = free_port();
-    let bin = named_partitioner_bin();
-    let mut worker = spawn_worker(&bin, port);
+    let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
 
-    let driver_out = run_driver(&bin, &[port]);
+    let driver_out = run_driver("named_partitioner", &[port]);
     worker.kill().ok();
     worker.wait().ok();
 
@@ -458,11 +431,10 @@ fn distributed_named_partitioner_buckets() {
 #[ignore = "requires pre-built integration binary and free TCP ports"]
 fn distributed_sort_by_task_ordered() {
     let port = free_port();
-    let bin = sort_by_task_bin();
-    let mut worker = spawn_worker(&bin, port);
+    let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
 
-    let driver_out = run_driver(&bin, &[port]);
+    let driver_out = run_driver("sort_by_task", &[port]);
     worker.kill().ok();
     worker.wait().ok();
 

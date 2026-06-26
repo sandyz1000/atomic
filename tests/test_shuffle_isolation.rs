@@ -145,7 +145,7 @@ fn test_subprocess_isolation() {
 
     // Run the driver in a subprocess — it exits before any stale URI issue.
     let out = std::process::Command::new(&bin)
-        .args(["--driver", "--workers", "127.0.0.1:39999"])
+        .args(["map_fold", "--driver", "--workers", "127.0.0.1:39999"])
         .env("RUST_LOG", "warn")
         .output();
 

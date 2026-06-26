@@ -184,30 +184,6 @@ where
         self.combine_by_key(move |v| f1(z1.clone(), v), f2, f3, num_partitions)
     }
 
-    /// Aggregate values for each key with a different accumulator type.
-    ///
-    /// `zero` is the initial accumulator value per partition.
-    /// `seq_fn(acc, value)` merges a value into the partition accumulator.
-    /// `comb_fn(acc1, acc2)` merges two partition accumulators on the driver.
-    pub fn aggregate_by_key<C, SF, CF>(
-        self,
-        zero: C,
-        seq_fn: SF,
-        comb_fn: CF,
-        num_partitions: usize,
-    ) -> TypedRdd<(K, C)>
-    where
-        C: Data + Clone + bincode::Encode + bincode::Decode<()>,
-        SF: Fn(C, V) -> C + Clone + Send + Sync + 'static,
-        CF: Fn(C, C) -> C + Clone + Send + Sync + 'static,
-        V: bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
-    {
-        let z = zero;
-        self.combine_by_key(move |_v| z.clone(), seq_fn, comb_fn, num_partitions)
-    }
-
     /// Reduce values per key using a registered binary task — the content-addressed
     /// form of [`reduce_by_key`](Self::reduce_by_key).
     ///
@@ -239,6 +215,59 @@ where
         Vec<(K, V)>: WireEncode,
     {
         self.fold_by_key(zero, |a, b| B::call(a, b), num_partitions)
+    }
+
+    /// Aggregate values per key into a different accumulator type `C`, using two
+    /// registered tasks — the `C != V` generalisation of
+    /// [`reduce_by_key_task`](Self::reduce_by_key_task).
+    ///
+    /// - `lift: UnaryTask<V, C>` turns one value into a single-element accumulator.
+    /// - `merge: BinaryTask<C>` combines two accumulators. It must be associative and
+    ///   commutative: it runs both per-partition (map side) and across partitions
+    ///   (reduce side) after the shuffle.
+    ///
+    /// This expresses the canonical "lift each value into a monoid, then sum in the
+    /// monoid" shape — averages, min/max-by, set union, histograms, top-k — the cases
+    /// where the accumulator is not the value type and so `reduce_by_key_task` cannot
+    /// apply. Both functions are `#[task]`s, so the merge is part of the registry
+    /// fingerprint and the job runs identically in local and distributed mode.
+    ///
+    /// Register the shuffle handler for the *value* wire type, as with any keyed
+    /// reduction: `register_shuffle_map!(K, V)`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Mean rating per movie: lift each rating into (sum, count), merge component-wise.
+    /// #[task] fn to_sum_count(r: f64) -> (f64, u64) { (r, 1) }
+    /// #[task] fn add_sum_count(a: (f64, u64), b: (f64, u64)) -> (f64, u64) {
+    ///     (a.0 + b.0, a.1 + b.1)
+    /// }
+    /// let means = ratings // TypedRdd<(MovieId, f64)>
+    ///     .aggregate_by_key_task(ToSumCount, AddSumCount, 8)
+    ///     .map_task(task_fn!(|kv: (MovieId, (f64, u64))| -> (MovieId, f64) {
+    ///         (kv.0, kv.1.0 / kv.1.1 as f64)
+    ///     }));
+    /// ```
+    pub fn aggregate_by_key_task<C, L, M>(
+        self,
+        _lift: L,
+        _merge: M,
+        num_partitions: usize,
+    ) -> TypedRdd<(K, C)>
+    where
+        C: Data + Clone + bincode::Encode + bincode::Decode<()>,
+        L: UnaryTask<V, C>,
+        M: BinaryTask<C>,
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        self.combine_by_key(
+            |v| L::call(v),
+            |c, v| M::call(c, L::call(v)),
+            |c1, c2| M::call(c1, c2),
+            num_partitions,
+        )
     }
 
     /// Return elements whose key is NOT present in `other`.
@@ -443,5 +472,61 @@ where
             }
         }
         Ok(map)
+    }
+
+    /// Reduce values per key with a registered binary task and return the result
+    /// as a `HashMap` on the driver — **no shuffle**.
+    ///
+    /// Each partition combines its own keys first (map-side combine), then the
+    /// per-partition maps are merged on the driver. This is the cheap counterpart
+    /// to [`reduce_by_key_task`](Self::reduce_by_key_task) when the reduced key set
+    /// is small enough to hold on the driver: it avoids the shuffle entirely. For a
+    /// distributed result that stays partitioned, use `reduce_by_key_task`.
+    ///
+    /// `merge` must be associative and commutative — it runs both per-partition and
+    /// across partitions.
+    ///
+    /// # Example
+    /// ```ignore
+    /// #[task] fn add(a: i32, b: i32) -> i32 { a + b }
+    /// let totals: HashMap<String, i32> = pairs.reduce_by_key_locally_task(Add)?;
+    /// ```
+    pub fn reduce_by_key_locally_task<B>(
+        &self,
+        _merge: B,
+    ) -> Result<std::collections::HashMap<K, V>, BaseError>
+    where
+        B: BinaryTask<V>,
+        K: std::hash::Hash + Eq,
+    {
+        use std::collections::HashMap;
+
+        // Map-side combine: each partition reduces its own keys independently.
+        let combine_partition = move |iter: Box<dyn Iterator<Item = (K, V)>>| {
+            let mut acc: HashMap<K, V> = HashMap::new();
+            for (k, v) in iter {
+                let merged = match acc.remove(&k) {
+                    Some(existing) => B::call(existing, v),
+                    None => v,
+                };
+                acc.insert(k, merged);
+            }
+            acc
+        };
+
+        let partials = self.context.run_job(self.rdd.clone(), combine_partition)?;
+
+        // Driver-side merge of the per-partition maps.
+        let mut result: HashMap<K, V> = HashMap::new();
+        for partial in partials {
+            for (k, v) in partial {
+                let merged = match result.remove(&k) {
+                    Some(existing) => B::call(existing, v),
+                    None => v,
+                };
+                result.insert(k, merged);
+            }
+        }
+        Ok(result)
     }
 }

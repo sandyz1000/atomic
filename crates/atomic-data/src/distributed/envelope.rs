@@ -352,7 +352,13 @@ pub struct TaskEnvelope {
     pub ops: Vec<PipelineOp>,
     /// Serialized partition elements (rkyv-encoded `Vec<T>`).
     pub data: Vec<u8>,
-    /// Broadcast variable payloads: `(broadcast_id, rkyv-encoded value)` pairs.
+    /// Every broadcast id this task reads. Always the full set the task needs; the
+    /// worker resolves each id from its process-global broadcast cache.
+    pub broadcast_ids: Vec<usize>,
+    /// Broadcast payloads `(broadcast_id, rkyv-encoded value)` the **target worker does
+    /// not yet hold**. A worker caches each broadcast by id for its process lifetime, so
+    /// the driver sends the bytes only on the first task that reaches a given worker;
+    /// later tasks carry just `broadcast_ids` and the worker reads from cache.
     pub broadcast_values: Vec<(usize, Vec<u8>)>,
     /// When `Some(rdd_id)`, the worker loads this partition's input from its local
     /// cache instead of `data` — a locality-scheduled read of a previously-cached partition.
@@ -381,6 +387,7 @@ impl TaskEnvelope {
             trace_id,
             ops,
             data,
+            broadcast_ids: vec![],
             broadcast_values: vec![],
             cache_source: None,
         }
@@ -393,9 +400,35 @@ impl TaskEnvelope {
     }
 
     /// Attach broadcast variable payloads to this envelope.
+    ///
+    /// Records the full id set in `broadcast_ids` and the bytes in `broadcast_values`.
+    /// The driver later strips the bytes per target worker via
+    /// [`project_broadcasts`](Self::project_broadcasts), keeping only ids that worker
+    /// has not yet cached.
     pub fn with_broadcasts(mut self, values: Vec<(usize, Vec<u8>)>) -> Self {
+        self.broadcast_ids = values.iter().map(|(id, _)| *id).collect();
         self.broadcast_values = values;
         self
+    }
+
+    /// Clone this envelope keeping broadcast **bytes** only for ids the target worker
+    /// has not yet received (`already_cached` excluded); `broadcast_ids` is preserved in
+    /// full so the worker still resolves every needed broadcast from its cache. Returns
+    /// the projected envelope and the ids whose bytes it carries (newly sent to that worker).
+    pub fn project_broadcasts(
+        &self,
+        already_cached: &std::collections::HashSet<usize>,
+    ) -> (Self, Vec<usize>) {
+        let mut projected = self.clone();
+        projected
+            .broadcast_values
+            .retain(|(id, _)| !already_cached.contains(id));
+        let newly_sent = projected
+            .broadcast_values
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        (projected, newly_sent)
     }
 }
 
