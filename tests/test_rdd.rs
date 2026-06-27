@@ -17,6 +17,56 @@ async fn test_parallelize_and_collect() {
     assert_eq!(result, data);
 }
 
+/// Even split: each partition holds the half-open index range `[i*len/n, (i+1)*len/n)`.
+#[tokio::test]
+async fn test_slice_even() {
+    let ctx = ctx();
+    let parts = ctx
+        .parallelize_typed(vec![1i32, 2, 3, 4], 2)
+        .collect_partitions()
+        .unwrap();
+    assert_eq!(parts, vec![vec![1, 2], vec![3, 4]]);
+}
+
+/// Uneven split: the remainder lands in the later partitions, sizes differ by at most one.
+#[tokio::test]
+async fn test_slice_uneven() {
+    let ctx = ctx();
+    let parts = ctx
+        .parallelize_typed(vec![1i32, 2, 3], 2)
+        .collect_partitions()
+        .unwrap();
+    assert_eq!(parts, vec![vec![1], vec![2, 3]]);
+}
+
+/// More partitions than elements: the requested count is honored with empty partitions,
+/// matching Spark's `parallelize`. `[4,5]` over 5 slices → `[[],[],[4],[],[5]]`.
+#[tokio::test]
+async fn test_slice_more_partitions_than_elements() {
+    let ctx = ctx();
+    let parts = ctx
+        .parallelize_typed(vec![4i32, 5], 5)
+        .collect_partitions()
+        .unwrap();
+    assert_eq!(
+        parts,
+        vec![vec![], vec![], vec![4], vec![], vec![5]],
+        "num_slices must be honored exactly, padding with empty partitions"
+    );
+    assert_eq!(parts.len(), 5);
+}
+
+/// A single slice keeps everything in one partition.
+#[tokio::test]
+async fn test_slice_single() {
+    let ctx = ctx();
+    let parts = ctx
+        .parallelize_typed(vec![1i32, 2, 3], 1)
+        .collect_partitions()
+        .unwrap();
+    assert_eq!(parts, vec![vec![1, 2, 3]]);
+}
+
 #[tokio::test]
 async fn test_map_task() {
     let ctx = ctx();

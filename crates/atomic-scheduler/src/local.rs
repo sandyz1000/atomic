@@ -1,5 +1,5 @@
 use atomic_data::data::Data;
-use atomic_data::dependency::ShuffleDependencyBox;
+use atomic_data::dependency::ErasedShuffleDependency;
 use atomic_data::partial::result::PartialResult;
 use atomic_data::partial::{ApproxListener, ApproximateEvaluator};
 use atomic_data::rdd::Rdd;
@@ -399,7 +399,7 @@ impl NativeScheduler for LocalScheduler {
         Ok(())
     }
 
-    async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependencyBox>) -> LibResult<Stage> {
+    async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage> {
         log::debug!("getting shuffle map stage");
         let stage_id = self
             .mutators

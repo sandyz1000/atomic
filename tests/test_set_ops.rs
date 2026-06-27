@@ -1,6 +1,9 @@
 use atomic_compute::context::Context;
 use std::sync::Arc;
 
+// distinct() is shuffle-based (global dedup), so the element wire type must be registered.
+atomic_compute::register_shuffle_map!(i32, ());
+
 fn ctx() -> Arc<Context> {
     Context::local().unwrap()
 }
@@ -50,7 +53,7 @@ async fn test_zip_pairs() {
 
 // ── distinct() ────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_distinct_removes_duplicates() {
     let ctx = ctx();
     let mut result = ctx
@@ -62,7 +65,7 @@ async fn test_distinct_removes_duplicates() {
     assert_eq!(result, vec![1, 2, 3]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_distinct_already_unique() {
     let ctx = ctx();
     let mut result = ctx
@@ -72,6 +75,20 @@ async fn test_distinct_already_unique() {
         .unwrap();
     result.sort();
     assert_eq!(result, vec![10, 20, 30]);
+}
+
+/// The same value placed in *different* partitions must collapse to one — the global
+/// guarantee the old per-partition dedup got wrong. `[1,1,1,1]` over 4 partitions puts
+/// one `1` in each; only a shuffle yields a single `1`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_distinct_cross_partition() {
+    let ctx = ctx();
+    let result = ctx
+        .parallelize_typed(vec![1i32, 1, 1, 1], 4)
+        .distinct()
+        .collect()
+        .unwrap();
+    assert_eq!(result, vec![1]);
 }
 
 // ── subtract() ────────────────────────────────────────────────────────────────

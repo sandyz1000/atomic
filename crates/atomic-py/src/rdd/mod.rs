@@ -14,6 +14,14 @@ mod transforms;
 
 use errors::PyTaskStageError;
 
+/// Spark-compatible partition boundaries: exactly `np` half-open ranges
+/// `[i * total / np, (i + 1) * total / np)`. Surplus ranges are empty when `np > total`,
+/// so the requested partition count is always honored (it drives task parallelism).
+pub(crate) fn slice_positions(total: usize, np: usize) -> impl Iterator<Item = (usize, usize)> {
+    let np = np.max(1);
+    (0..np).map(move |i| (i * total / np, (i + 1) * total / np))
+}
+
 /// Verify that `f` survives the same pickle round-trip distributed-mode staging
 /// performs. Distributed `Context` construction requires real reachable workers,
 /// so this is the only way to exercise `pickle_fn`'s round-trip check from a test
@@ -119,17 +127,16 @@ impl PyRdd {
         let json_mod = PyModule::import(py, "json")?;
         let total = self.elements.len();
         let np = self.num_partitions.max(1);
-        let chunk_size = (total + np - 1) / np;
 
         let mut partitions = Vec::with_capacity(np);
-        for chunk in self.elements.chunks(chunk_size.max(1)) {
-            let py_list = PyList::new(py, chunk.iter().map(|e| e.bind(py).clone()))?;
+        for (start, end) in slice_positions(total, np) {
+            let py_list = PyList::new(
+                py,
+                self.elements[start..end].iter().map(|e| e.bind(py).clone()),
+            )?;
             let json_bytes: Bound<'_, PyAny> = json_mod.call_method1("dumps", (py_list,))?;
             let json_str: String = json_bytes.extract()?;
             partitions.push(json_str.into_bytes());
-        }
-        while partitions.len() < np {
-            partitions.push(b"[]".to_vec());
         }
         Ok(partitions)
     }

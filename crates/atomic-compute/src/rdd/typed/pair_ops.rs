@@ -334,7 +334,7 @@ where
         let fetcher = Arc::new(ShuffleFetcher::new(tracker));
 
         // In distributed mode, if a staged pipeline precedes the shuffle, carry its
-        // source partitions + ops into the ShuffleDependencyBox so the workers receive
+        // source partitions + ops into the ErasedShuffleDependency so the workers receive
         // real data and the correct preceding ops (instead of the placeholder RDD).
         let staged_info = if self.context.is_distributed() {
             self.staged

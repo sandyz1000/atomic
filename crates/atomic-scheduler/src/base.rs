@@ -5,7 +5,7 @@ use crate::job::JobTracker;
 use crate::listener::JobListener;
 use crate::stage::Stage;
 use atomic_data::data::Data;
-use atomic_data::dependency::{Dependency, ShuffleDependencyBox};
+use atomic_data::dependency::{Dependency, ErasedShuffleDependency};
 use atomic_data::rdd::RddBase;
 use atomic_data::shuffle::MapOutputTracker;
 use atomic_data::task::TaskOption;
@@ -54,7 +54,7 @@ pub trait NativeScheduler: Send + Sync {
     async fn new_stage(
         &self,
         rdd_base: Arc<dyn RddBase>,
-        shuffle_dependency: Option<Arc<ShuffleDependencyBox>>,
+        shuffle_dependency: Option<Arc<ErasedShuffleDependency>>,
     ) -> LibResult<Stage> {
         log::debug!("creating new stage");
         // TODO: Cache tracker - for LocalScheduler, cache is managed locally
@@ -538,7 +538,7 @@ pub trait NativeScheduler: Send + Sync {
         }
     }
 
-    async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependencyBox>) -> LibResult<Stage>;
+    async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage>;
 }
 
 #[derive(Clone, Default)]

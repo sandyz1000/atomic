@@ -200,19 +200,20 @@ impl Context {
 
         for dep in rdd.get_dependencies() {
             if let Dependency::Shuffle(shuffle_dep) = dep {
-                let parent_partitions = (shuffle_dep.encode_partitions)()?;
+                let parent_partitions = shuffle_dep.encode_partitions()?;
+                let spec = &shuffle_dep.spec;
 
                 let shuffle_op = PipelineOp {
-                    op_id: format!("shuffle-map-{}", shuffle_dep.shuffle_id),
+                    op_id: format!("shuffle-map-{}", spec.shuffle_id),
                     action: TaskAction::ShuffleMap {
-                        shuffle_id: shuffle_dep.shuffle_id,
-                        num_output_partitions: shuffle_dep.num_output_partitions,
+                        shuffle_id: spec.shuffle_id,
+                        num_output_partitions: spec.num_output_partitions,
                     },
                     runtime: TaskRuntime::Native,
                     payload: bincode::encode_to_vec(
                         crate::shuffle_map::ShuffleMapPayload {
-                            type_id: shuffle_dep.type_id.to_string(),
-                            partitioner_spec: shuffle_dep.partitioner_spec.clone(),
+                            type_id: spec.type_id.to_string(),
+                            partitioner_spec: spec.partitioner_spec.clone(),
                         },
                         bincode::config::standard(),
                     )
@@ -221,7 +222,7 @@ impl Context {
                     })?,
                 };
 
-                let dep_preceding = shuffle_dep.preceding_ops.clone();
+                let dep_preceding = spec.preceding_ops.clone();
                 let base_ops = if !dep_preceding.is_empty() {
                     dep_preceding
                 } else {
@@ -230,18 +231,19 @@ impl Context {
                 let mut ops = base_ops;
                 ops.push(shuffle_op);
 
+                let shuffle_id = spec.shuffle_id;
+                let num_output_partitions = spec.num_output_partitions;
                 env::Env::run_in_async_rt(|| {
                     futures::executor::block_on(sched.run_shuffle_map_stage(
-                        shuffle_dep.shuffle_id,
+                        shuffle_id,
                         ops,
                         parent_partitions,
                     ))
                 })?;
 
                 log::info!(
-                    "shuffle map stage complete: shuffle_id={} num_reduce_partitions={}",
-                    shuffle_dep.shuffle_id,
-                    shuffle_dep.num_output_partitions,
+                    "shuffle map stage complete: shuffle_id={shuffle_id} \
+                     num_reduce_partitions={num_output_partitions}",
                 );
             }
         }

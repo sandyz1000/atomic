@@ -152,9 +152,8 @@ impl JsRdd {
     pub fn for_each_partition(&self, f: Function<Vec<JsonValue>, Unknown>) -> Result<()> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = total.div_ceil(np).max(1);
-        for chunk in self.elements.chunks(chunk_size) {
-            f.call(chunk.to_vec())?;
+        for (start, end) in super::slice_positions(total, np) {
+            f.call(self.elements[start..end].to_vec())?;
         }
         Ok(())
     }
@@ -295,12 +294,11 @@ impl JsRdd {
     ) -> Result<JsonValue> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = total.div_ceil(np).max(1);
 
         let mut partition_results = Vec::new();
-        for chunk in self.elements.chunks(chunk_size) {
+        for (start, end) in super::slice_positions(total, np) {
             let mut acc = zero.clone();
-            for elem in chunk {
+            for elem in &self.elements[start..end] {
                 acc = seq_fn.call(FnArgs::from((acc, elem.clone())))?;
             }
             partition_results.push(acc);
@@ -318,16 +316,9 @@ impl JsRdd {
     pub fn glom(&self) -> Vec<Vec<JsonValue>> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = total.div_ceil(np).max(1);
-        let mut result: Vec<Vec<JsonValue>> = self
-            .elements
-            .chunks(chunk_size)
-            .map(|c| c.to_vec())
-            .collect();
-        while result.len() < np {
-            result.push(Vec::new());
-        }
-        result
+        super::slice_positions(total, np)
+            .map(|(start, end)| self.elements[start..end].to_vec())
+            .collect()
     }
 
     /// Mark this RDD to be cached in memory on first action (no-op in local mode).

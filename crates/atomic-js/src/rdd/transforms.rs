@@ -204,10 +204,9 @@ impl JsRdd {
     pub fn map_partitions(&self, f: Function<Vec<JsonValue>, Vec<JsonValue>>) -> Result<JsRdd> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = total.div_ceil(np).max(1);
         let mut elements = Vec::new();
-        for chunk in self.elements.chunks(chunk_size) {
-            let result = f.call(chunk.to_vec())?;
+        for (start, end) in super::slice_positions(total, np) {
+            let result = f.call(self.elements[start..end].to_vec())?;
             elements.extend(result);
         }
         Ok(JsRdd::from_data(

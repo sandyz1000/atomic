@@ -185,9 +185,11 @@ impl PyRdd {
     pub fn for_each_partition(&self, py: Python, f: Py<PyAny>) -> PyResult<()> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = (total + np - 1) / np;
-        for chunk in self.elements.chunks(chunk_size.max(1)) {
-            let py_list = PyList::new(py, chunk.iter().map(|e| e.bind(py).clone()))?;
+        for (start, end) in super::slice_positions(total, np) {
+            let py_list = PyList::new(
+                py,
+                self.elements[start..end].iter().map(|e| e.bind(py).clone()),
+            )?;
             f.call1(py, (py_list,))?;
         }
         Ok(())
@@ -346,12 +348,11 @@ impl PyRdd {
     ) -> PyResult<Py<PyAny>> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = (total + np - 1) / np;
 
         let mut partition_results = Vec::new();
-        for chunk in self.elements.chunks(chunk_size.max(1)) {
+        for (start, end) in super::slice_positions(total, np) {
             let mut acc = zero.clone_ref(py);
-            for item in chunk {
+            for item in &self.elements[start..end] {
                 acc = seq_fn.call1(py, (acc, item.clone_ref(py)))?;
             }
             partition_results.push(acc);
@@ -369,24 +370,12 @@ impl PyRdd {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
         let outer = PyList::empty(py);
-
-        if total == 0 {
-            for _ in 0..np {
-                outer.append(PyList::empty(py))?;
-            }
-            return Ok(outer.into_any().unbind());
-        }
-
-        let chunk_size = (total + np - 1) / np;
-        let mut emitted = 0usize;
-        for chunk in self.elements.chunks(chunk_size.max(1)) {
-            let inner = PyList::new(py, chunk.iter().map(|e| e.bind(py).clone()))?;
+        for (start, end) in super::slice_positions(total, np) {
+            let inner = PyList::new(
+                py,
+                self.elements[start..end].iter().map(|e| e.bind(py).clone()),
+            )?;
             outer.append(inner)?;
-            emitted += 1;
-        }
-        while emitted < np {
-            outer.append(PyList::empty(py))?;
-            emitted += 1;
         }
         Ok(outer.into_any().unbind())
     }

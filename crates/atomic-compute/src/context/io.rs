@@ -48,7 +48,12 @@ impl Context {
         Arc::new(ParallelCollection::new(id, seq, num_slices))
     }
 
-    /// Create a TypedRdd from a collection with explicit typing.
+    /// Create a `TypedRdd` from a collection, split into exactly `num_slices` partitions.
+    ///
+    /// Partition `i` holds the index range `[i * len / num_slices, (i + 1) * len / num_slices)`,
+    /// so sizes differ by at most one. The count is always honored — `num_slices` greater than
+    /// the element count yields empty partitions rather than fewer partitions, since the slice
+    /// count drives task parallelism (mirrors Spark's `parallelize`).
     pub fn parallelize_typed<T: Data + Clone, I>(
         self: &Arc<Self>,
         seq: I,

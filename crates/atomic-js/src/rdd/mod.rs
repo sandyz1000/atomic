@@ -15,6 +15,14 @@ mod sort;
 mod transforms;
 mod with_context;
 
+/// Spark-compatible partition boundaries: exactly `np` half-open ranges
+/// `[i * total / np, (i + 1) * total / np)`. Surplus ranges are empty when `np > total`,
+/// so the requested partition count is always honored (it drives task parallelism).
+pub(crate) fn slice_positions(total: usize, np: usize) -> impl Iterator<Item = (usize, usize)> {
+    let np = np.max(1);
+    (0..np).map(move |i| (i * total / np, (i + 1) * total / np))
+}
+
 #[derive(Clone)]
 struct StagedJsPipeline {
     source_partitions: Vec<Vec<u8>>,
@@ -66,16 +74,12 @@ impl JsRdd {
     fn encode_source_partitions(&self) -> Result<Vec<Vec<u8>>> {
         let total = self.elements.len();
         let np = self.num_partitions.max(1);
-        let chunk_size = total.div_ceil(np).max(1);
 
         let mut partitions = Vec::with_capacity(np);
-        for chunk in self.elements.chunks(chunk_size) {
-            let json = serde_json::to_vec(chunk)
+        for (start, end) in slice_positions(total, np) {
+            let json = serde_json::to_vec(&self.elements[start..end])
                 .map_err(|e| Error::from_reason(format!("encode_partition: {e}")))?;
             partitions.push(json);
-        }
-        while partitions.len() < np {
-            partitions.push(b"[]".to_vec());
         }
         Ok(partitions)
     }

@@ -48,7 +48,7 @@ pub enum Dependency {
         /// Used to track the lineage of transformations leading to this coalesced split.
         prev: Arc<dyn RddBase>,
     },
-    Shuffle(Arc<ShuffleDependencyBox>),
+    Shuffle(Arc<ErasedShuffleDependency>),
 }
 
 impl Dependency {
@@ -126,7 +126,7 @@ impl Dependency {
         }
     }
 
-    pub fn get_shuffle_dep(&self) -> Option<&ShuffleDependencyBox> {
+    pub fn get_shuffle_dep(&self) -> Option<&ErasedShuffleDependency> {
         match self {
             Dependency::Shuffle(dep) => Some(dep),
             _ => None,
@@ -134,8 +134,11 @@ impl Dependency {
     }
 }
 
+/// Plain, cloneable description of a shuffle boundary — everything the scheduler and the
+/// wire layer need to know about a shuffle without its `K`/`V`/`C` generics. The behaviour
+/// (encoding parent partitions, running the map task) lives behind [`ShuffleExecutor`].
 #[derive(Clone)]
-pub struct ShuffleDependencyBox {
+pub struct ShuffleSpec {
     pub shuffle_id: usize,
     pub rdd_base: Arc<dyn RddBase>,
     pub is_cogroup: bool,
@@ -143,66 +146,85 @@ pub struct ShuffleDependencyBox {
     /// Serializable partitioner spec, shipped to workers so they partition shuffle output using
     /// the RDD's real partitioner (e.g. range for `sort_by_key`) instead of plain hash.
     pub partitioner_spec: crate::partitioner::PartitionerSchema,
-    /// Identifies the registered `SHUFFLE_MAP_REGISTRY` handler for the `(K, V)` type pair.
-    ///
-    /// Set to `std::any::type_name::<(K, V)>()` when the dependency is created.
-    /// Workers look this up to find the correctly-typed shuffle-write function.
-    /// Required for distributed shuffle; unused in local mode.
+    /// Identifies the registered `SHUFFLE_MAP_REGISTRY` handler for the `(K, V)` type pair —
+    /// the `register_shuffle_map!` key the worker looks up. Required for distributed shuffle.
     pub type_id: &'static str,
-    /// Encodes all parent RDD partitions as rkyv bytes (one `Vec<u8>` per partition).
-    ///
-    /// Used by the driver in distributed mode to build the shuffle-map `TaskEnvelope`
-    /// sent to workers. Captures the typed parent RDD so encoding is exact.
-    pub encode_partitions: Arc<dyn Fn() -> BaseResult<Vec<Vec<u8>>> + Send + Sync>,
-    /// Pipeline ops that must run on workers *before* the ShuffleMap op.
-    ///
-    /// Non-empty when a staged pipeline (from `map_task`/`flat_map_task`) precedes
-    /// the shuffle stage. `encode_partitions` then returns the staged source partitions
-    /// whose element type matches the first op's input type.
+    /// Ops that run on workers *before* the ShuffleMap op, non-empty when a `_task` pipeline
+    /// precedes the shuffle. Paired with [`staged_partitions`](Self::staged_partitions).
     pub preceding_ops: Vec<PipelineOp>,
-    // Type-erased executor: stores a closure that runs the actual shuffle task (local mode)
-    do_shuffle: Arc<dyn Fn(usize) -> String + Send + Sync>,
+    /// Pre-encoded worker input for a staged-pipeline shuffle. When `Some`, these bytes are the
+    /// shuffle input instead of encoding the parent RDD through the executor.
+    pub staged_partitions: Option<Vec<Vec<u8>>>,
 }
 
-impl ShuffleDependencyBox {
+/// Type-erased behaviour of a shuffle: the two operations that need the concrete `K`/`V`/`C`,
+/// implemented by [`ShuffleDependency`] and stored as a trait object so the generics drop away.
+pub trait ShuffleExecutor: Send + Sync {
+    /// Encode every parent RDD partition as rkyv bytes (one `Vec<u8>` per partition) — the
+    /// non-staged distributed input.
+    fn encode_parent_partitions(&self) -> BaseResult<Vec<Vec<u8>>>;
+    /// Run the shuffle-map task for one partition in-process (local mode), returning the
+    /// shuffle server URI that now holds its buckets.
+    fn run_local(&self, partition_id: usize) -> String;
+}
+
+/// The type-erased form of a [`ShuffleDependency`] stored in the RDD DAG: its [`ShuffleSpec`]
+/// (data) plus a [`ShuffleExecutor`] (behaviour).
+#[derive(Clone)]
+pub struct ErasedShuffleDependency {
+    pub spec: ShuffleSpec,
+    exec: Arc<dyn ShuffleExecutor>,
+}
+
+impl ErasedShuffleDependency {
     pub fn get_shuffle_id(&self) -> usize {
-        self.shuffle_id
+        self.spec.shuffle_id
     }
 
     pub fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        self.rdd_base.clone()
+        self.spec.rdd_base.clone()
     }
 
     pub fn is_cogroup(&self) -> bool {
-        self.is_cogroup
-    }
-
-    pub fn do_shuffle_task(&self, partition: usize) -> String {
-        (self.do_shuffle)(partition)
+        self.spec.is_cogroup
     }
 
     pub fn get_num_output_partitions(&self) -> usize {
-        self.num_output_partitions
+        self.spec.num_output_partitions
+    }
+
+    /// Run the shuffle-map task for `partition` in-process (local mode).
+    pub fn do_shuffle_task(&self, partition: usize) -> String {
+        self.exec.run_local(partition)
+    }
+
+    /// Worker input for the distributed shuffle-map stage: the staged pipeline's pre-encoded
+    /// partitions when present, otherwise the parent RDD encoded on demand.
+    pub fn encode_partitions(&self) -> BaseResult<Vec<Vec<u8>>> {
+        match &self.spec.staged_partitions {
+            Some(parts) => Ok(parts.clone()),
+            None => self.exec.encode_parent_partitions(),
+        }
     }
 }
 
-impl PartialOrd for ShuffleDependencyBox {
-    fn partial_cmp(&self, other: &ShuffleDependencyBox) -> Option<Ordering> {
+impl PartialOrd for ErasedShuffleDependency {
+    fn partial_cmp(&self, other: &ErasedShuffleDependency) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for ShuffleDependencyBox {
-    fn eq(&self, other: &ShuffleDependencyBox) -> bool {
-        self.shuffle_id == other.shuffle_id
+impl PartialEq for ErasedShuffleDependency {
+    fn eq(&self, other: &ErasedShuffleDependency) -> bool {
+        self.spec.shuffle_id == other.spec.shuffle_id
     }
 }
 
-impl Eq for ShuffleDependencyBox {}
+impl Eq for ErasedShuffleDependency {}
 
-impl Ord for ShuffleDependencyBox {
-    fn cmp(&self, other: &ShuffleDependencyBox) -> Ordering {
-        self.shuffle_id.cmp(&other.shuffle_id)
+impl Ord for ErasedShuffleDependency {
+    fn cmp(&self, other: &ErasedShuffleDependency) -> Ordering {
+        self.spec.shuffle_id.cmp(&other.spec.shuffle_id)
     }
 }
 
@@ -212,7 +234,6 @@ impl Ord for ShuffleDependencyBox {
 pub type KeyComparator<K> = Arc<dyn Fn(&K, &K) -> Ordering + Send + Sync>;
 
 /// Generic shuffle dependency with full type information
-/// This struct is fully typed and doesn't require iterator_any or unsafe downcasting
 pub struct ShuffleDependency<K: Data, V: Data, C: Data> {
     shuffle_id: usize,
     is_cogroup_flag: bool,
@@ -277,7 +298,7 @@ where
         })
     }
 
-    /// Execute shuffle task with full type information - NO unsafe code needed!
+    /// Execute shuffle task with full type information
     fn do_shuffle_task_typed(&self, partition: usize) -> String {
         log::debug!(
             "executing shuffle task #{} for partition #{}",
@@ -300,7 +321,6 @@ where
             partition
         );
 
-        // Use typed compute() - no iterator_any, no unsafe downcasting!
         match self.rdd.compute(split) {
             Ok(iter) => {
                 for (count, (k, v)) in iter.enumerate() {
@@ -382,12 +402,12 @@ where
     }
 }
 
-/// Convert typed ShuffleDependency to type-erased ShuffleDependencyBox.
+/// Convert typed ShuffleDependency to type-erased ErasedShuffleDependency.
 ///
 /// Sets `type_id` to `std::any::type_name::<(K, V)>()`. This is a fallback path;
-/// prefer [`ShuffleDependencyBox::from_typed_with_key`] when a stable key is
+/// prefer [`ErasedShuffleDependency::from_typed_with_key`] when a stable key is
 /// available from the compile-time `SHUFFLE_KEY_REGISTRY`.
-impl<K, V, C> From<Arc<ShuffleDependency<K, V, C>>> for ShuffleDependencyBox
+impl<K, V, C> From<Arc<ShuffleDependency<K, V, C>>> for ErasedShuffleDependency
 where
     K: Data + Eq + Hash + Encode + Clone,
     V: Data + Clone,
@@ -395,12 +415,12 @@ where
     Vec<(K, V)>: WireEncode,
 {
     fn from(dep: Arc<ShuffleDependency<K, V, C>>) -> Self {
-        ShuffleDependencyBox::from_typed_with_key(dep, std::any::type_name::<(K, V)>())
+        ErasedShuffleDependency::from_typed_with_key(dep, std::any::type_name::<(K, V)>())
     }
 }
 
-impl ShuffleDependencyBox {
-    /// Build a type-erased [`ShuffleDependencyBox`] from a typed [`ShuffleDependency`],
+impl ErasedShuffleDependency {
+    /// Build a type-erased [`ErasedShuffleDependency`] from a typed [`ShuffleDependency`],
     /// using an explicit, stable `shuffle_key` string as the dispatch key.
     ///
     /// The `shuffle_key` is embedded in the `ShuffleMap` pipeline-op payload sent to
@@ -420,46 +440,52 @@ impl ShuffleDependencyBox {
         C: Data + Encode + Clone,
         Vec<(K, V)>: WireEncode,
     {
-        let cloned = Arc::clone(&dep);
-
-        let enc_rdd = dep.rdd.clone();
-        let encode_partitions: Arc<dyn Fn() -> BaseResult<Vec<Vec<u8>>> + Send + Sync> =
-            Arc::new(move || {
-                enc_rdd
-                    .splits()
-                    .iter()
-                    .map(|split| {
-                        let items: Vec<(K, V)> = enc_rdd.compute(split.clone())?.collect();
-                        items.encode_wire()
-                    })
-                    .collect()
-            });
-
-        ShuffleDependencyBox {
+        let spec = ShuffleSpec {
             shuffle_id: dep.shuffle_id,
             rdd_base: dep.rdd.get_rdd_base(),
             is_cogroup: dep.is_cogroup_flag,
             num_output_partitions: dep.partitioner.get_num_of_partitions(),
             partitioner_spec: dep.partitioner.to_spec(),
             type_id: shuffle_key,
-            encode_partitions,
             preceding_ops: vec![],
-            do_shuffle: Arc::new(move |partition| cloned.do_shuffle_task_typed(partition)),
-        }
+            staged_partitions: None,
+        };
+        ErasedShuffleDependency { spec, exec: dep }
     }
 
-    /// Override `encode_partitions` and set `preceding_ops` for staged-pipeline shuffles.
-    ///
-    /// Used when a `_task`-based pipeline precedes a shuffle: the staged source partitions
-    /// (already rkyv-encoded) become the worker input, and the staged ops run on workers
-    /// before the ShuffleMap op.
+    /// Attach a staged `_task` pipeline that precedes the shuffle: `source_partitions`
+    /// (already rkyv-encoded) become the worker input and `preceding_ops` run before the
+    /// ShuffleMap op, in place of encoding the parent RDD.
     pub fn with_staged_pipeline(
         mut self,
         source_partitions: Vec<Vec<u8>>,
         preceding_ops: Vec<PipelineOp>,
     ) -> Self {
-        self.encode_partitions = Arc::new(move || Ok(source_partitions.clone()));
-        self.preceding_ops = preceding_ops;
+        self.spec.staged_partitions = Some(source_partitions);
+        self.spec.preceding_ops = preceding_ops;
         self
+    }
+}
+
+impl<K, V, C> ShuffleExecutor for ShuffleDependency<K, V, C>
+where
+    K: Data + Eq + Hash + Encode + Clone,
+    V: Data + Clone,
+    C: Data + Encode + Clone,
+    Vec<(K, V)>: WireEncode,
+{
+    fn encode_parent_partitions(&self) -> BaseResult<Vec<Vec<u8>>> {
+        self.rdd
+            .splits()
+            .iter()
+            .map(|split| {
+                let items: Vec<(K, V)> = self.rdd.compute(split.clone())?.collect();
+                items.encode_wire()
+            })
+            .collect()
+    }
+
+    fn run_local(&self, partition_id: usize) -> String {
+        self.do_shuffle_task_typed(partition_id)
     }
 }

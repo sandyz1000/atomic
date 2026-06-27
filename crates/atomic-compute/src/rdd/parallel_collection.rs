@@ -72,38 +72,33 @@ impl<T: Data> ParallelCollection<T> {
         }
     }
 
+    /// Split `data` into exactly `num_slices` partitions, mirroring Spark's
+    /// `ParallelCollectionRDD.slice`: partition `i` holds the half-open index range
+    /// `[i * len / num_slices, (i + 1) * len / num_slices)`. Sizes differ by at most one,
+    /// and when `num_slices > len` the surplus partitions are empty — the requested
+    /// partition count is always honored (it drives task parallelism, e.g. Monte-Carlo
+    /// jobs over a tiny input).
     fn slice<I>(data: I, num_slices: usize) -> Vec<Arc<Vec<T>>>
     where
         I: IntoIterator<Item = T>,
     {
         assert!(
             num_slices >= 1,
-            "num_slices must be at least 1, got {}",
-            num_slices
+            "num_slices must be at least 1, got {num_slices}"
         );
-        {
-            let mut slice_count = 0;
-            let data: Vec<_> = data.into_iter().collect();
-            let data_len = data.len();
-            let mut end = ((slice_count + 1) * data_len) / num_slices;
-            let mut output = Vec::new();
-            let mut tmp = Vec::new();
-            let mut iter_count = 0;
-            for i in data {
-                if iter_count < end {
-                    tmp.push(i);
-                    iter_count += 1;
-                } else {
-                    slice_count += 1;
-                    end = ((slice_count + 1) * data_len) / num_slices;
-                    output.push(Arc::new(std::mem::take(&mut tmp)));
-                    tmp.push(i);
-                    iter_count += 1;
-                }
-            }
-            output.push(Arc::new(std::mem::take(&mut tmp)));
-            output
+        let mut data: Vec<T> = data.into_iter().collect();
+        let len = data.len();
+        let mut output = Vec::with_capacity(num_slices);
+        let mut prev_end = 0;
+        for i in 0..num_slices {
+            let end = ((i + 1) * len) / num_slices;
+            // Each slice is the contiguous front chunk `[prev_end, end)`; draining it moves
+            // the elements out (no `Clone` bound) and leaves the next slice at the front.
+            let chunk: Vec<T> = data.drain(0..end - prev_end).collect();
+            output.push(Arc::new(chunk));
+            prev_end = end;
         }
+        output
     }
 }
 

@@ -57,19 +57,24 @@ impl<T: Data> TypedRdd<T> {
         TypedRdd::new(Arc::new(zipped_rdd), self.context)
     }
 
+    /// Return the globally-distinct elements.
+    ///
+    /// Mirrors Spark's `distinct` (`map(x => (x, ())).reduce_by_key(keep).map(key)`): each
+    /// element is keyed by itself and shuffled, so every equal element lands in the same
+    /// reduce partition and collapses to one — duplicates across *different* input
+    /// partitions are removed, not just within a partition. Like any shuffle op, the
+    /// element wire type must be registered once in the binary: `register_shuffle_map!(T, ())`.
     pub fn distinct(self) -> TypedRdd<T>
     where
-        T: Eq + std::hash::Hash + Clone,
+        T: Eq + std::hash::Hash + Clone + bincode::Encode + bincode::Decode<()>,
+        Vec<(T, ())>: WireEncode,
     {
-        use std::collections::HashSet;
-
-        let dedup =
-            move |_idx: usize, iter: Box<dyn Iterator<Item = T>>| -> Box<dyn Iterator<Item = T>> {
-                let set: HashSet<T> = iter.collect();
-                Box::new(set.into_iter())
-            };
-
-        self.map_rdd(|id, rdd| MapPartitionsRdd::new(id, rdd, dedup))
+        let num_partitions = self.rdd.number_of_splits().max(1);
+        self.map_partitions_to_pair(|_idx, iter| {
+            Box::new(iter.map(|x| (x, ()))) as Box<dyn Iterator<Item = (T, ())>>
+        })
+        .combine_by_key(|_v| (), |_c, _v| (), |_c1, _c2| (), num_partitions)
+        .keys()
     }
 
     /// Return a new RDD containing elements only in this RDD but not in `other`.

@@ -11,7 +11,7 @@ use std::{
 
 use atomic_data::{
     data::Data,
-    dependency::ShuffleDependencyBox,
+    dependency::ErasedShuffleDependency,
     distributed::WorkerCapabilities,
     partial::{ApproximateEvaluator, result::PartialResult},
     rdd::Rdd,
@@ -289,7 +289,7 @@ impl NativeScheduler for DistributedScheduler {
         Ok(())
     }
 
-    async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependencyBox>) -> LibResult<Stage> {
+    async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage> {
         let stage = self
             .mutators
             .shuffle_to_map_stage

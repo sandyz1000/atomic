@@ -3,7 +3,9 @@ use crate::rdd::{Rdd, RddBase};
 use crate::task_registry::SHUFFLE_KEY_REGISTRY;
 use atomic_data::aggregator::{Aggregator, MergeCombinersFn};
 use atomic_data::data::Data;
-use atomic_data::dependency::{Dependency, KeyComparator, ShuffleDependency, ShuffleDependencyBox};
+use atomic_data::dependency::{
+    Dependency, ErasedShuffleDependency, KeyComparator, ShuffleDependency,
+};
 use atomic_data::distributed::WireEncode;
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
@@ -161,7 +163,7 @@ where
                     std::any::type_name::<V>(),
                 )
             });
-        let dep_box = ShuffleDependencyBox::from_typed_with_key(shuffle_dep, shuffle_key);
+        let dep_box = ErasedShuffleDependency::from_typed_with_key(shuffle_dep, shuffle_key);
         let dep_box = if let Some((src_parts, ops)) = staged {
             dep_box.with_staged_pipeline(src_parts, ops)
         } else {

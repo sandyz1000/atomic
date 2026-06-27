@@ -263,10 +263,12 @@ impl PyRdd {
     pub fn map_partitions(&self, py: Python, f: Py<PyAny>) -> PyResult<PyRdd> {
         let np = self.num_partitions.max(1);
         let total = self.elements.len();
-        let chunk_size = (total + np - 1) / np;
         let mut elements = Vec::new();
-        for chunk in self.elements.chunks(chunk_size.max(1)) {
-            let py_list = PyList::new(py, chunk.iter().map(|e| e.bind(py).clone()))?;
+        for (start, end) in super::slice_positions(total, np) {
+            let py_list = PyList::new(
+                py,
+                self.elements[start..end].iter().map(|e| e.bind(py).clone()),
+            )?;
             let result = f.call1(py, (py_list,))?;
             let iter = pyo3::types::PyIterator::from_object(result.bind(py))?;
             for val in iter {
