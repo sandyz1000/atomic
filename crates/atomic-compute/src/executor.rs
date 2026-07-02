@@ -40,11 +40,11 @@ impl Executor {
         }
     }
 
+    crate::cfg_tls! {
     /// Configure mutual TLS using cert/key/CA PEM files.
     ///
     /// Only available with the `tls` feature. When called, all incoming
     /// connections will be upgraded to mTLS before processing.
-    #[cfg(feature = "tls")]
     pub fn with_tls(
         mut self,
         cert: &std::path::Path,
@@ -56,6 +56,7 @@ impl Executor {
         self.tls_acceptor = Some(Arc::new(tokio_rustls::TlsAcceptor::from(cfg)));
         Ok(self)
     }
+    } // cfg_tls!
 
     pub fn execute_task(
         &self,
@@ -78,10 +79,12 @@ impl Executor {
                 .map(|k| format!("shuffle:{k}")),
         );
         // Advertise dynamic task runtimes so the scheduler can route Python/JS ops.
-        #[cfg(feature = "python")]
-        registered_ops.push("atomic::task::python".to_string());
-        #[cfg(feature = "js")]
-        registered_ops.push("atomic::task::js".to_string());
+        registered_ops.extend(
+            [python_op(), js_op()]
+                .into_iter()
+                .flatten()
+                .map(str::to_string),
+        );
         log::debug!(
             "worker {} advertising {} registered ops ({} shuffle types)",
             self.worker_id,
@@ -148,20 +151,9 @@ impl Executor {
                     match accepted {
                         Ok((stream, _peer)) => {
                             let exec = Arc::clone(&self);
-                            #[cfg(feature = "tls")]
-                            if let Some(acceptor) = &exec.tls_acceptor {
-                                let acceptor = acceptor.clone();
-                                tasks.spawn(async move {
-                                    match acceptor.accept(stream).await {
-                                        Ok(tls_stream) => exec.handle_connection(tls_stream).await,
-                                        Err(e) => {
-                                            log::warn!("TLS handshake failed: {e}");
-                                            Ok(crate::executor::Signal::Continue)
-                                        }
-                                    }
-                                });
+                            let Some(stream) = Self::try_spawn_tls(&exec, stream, &mut tasks) else {
                                 continue;
-                            }
+                            };
                             tasks.spawn(async move { exec.handle_connection(stream).await });
                         }
                         Err(_) => break,
@@ -192,6 +184,42 @@ impl Executor {
             .await?;
         log::debug!("sent result data to driver");
         Ok(Signal::Continue)
+    }
+
+    crate::cfg_tls! {
+        /// Try to accept `stream` as a TLS connection. Returns `None` when handled (a
+        /// task was spawned), or gives `stream` back so the caller falls through to
+        /// the plain-TCP path.
+        fn try_spawn_tls(
+            exec: &Arc<Self>,
+            stream: tokio::net::TcpStream,
+            tasks: &mut JoinSet<ComputeResult<Signal>>,
+        ) -> Option<tokio::net::TcpStream> {
+            let Some(acceptor) = &exec.tls_acceptor else {
+                return Some(stream);
+            };
+            let acceptor = acceptor.clone();
+            let exec = Arc::clone(exec);
+            tasks.spawn(async move {
+                match acceptor.accept(stream).await {
+                    Ok(tls_stream) => exec.handle_connection(tls_stream).await,
+                    Err(e) => {
+                        log::warn!("TLS handshake failed: {e}");
+                        Ok(Signal::Continue)
+                    }
+                }
+            });
+            None
+        }
+    }
+    crate::cfg_not_tls! {
+        fn try_spawn_tls(
+            _exec: &Arc<Self>,
+            stream: tokio::net::TcpStream,
+            _tasks: &mut JoinSet<ComputeResult<Signal>>,
+        ) -> Option<tokio::net::TcpStream> {
+            Some(stream)
+        }
     }
 
     fn handle_transport_frame(
@@ -329,6 +357,28 @@ fn propagate_task_result(
         }
         Ok(Err(e)) => Err(e),
         Err(_join_err) => Ok(()),
+    }
+}
+
+crate::cfg_python! {
+    fn python_op() -> Option<&'static str> {
+        Some("atomic::task::python")
+    }
+}
+crate::cfg_not_python! {
+    fn python_op() -> Option<&'static str> {
+        None
+    }
+}
+
+crate::cfg_js! {
+    fn js_op() -> Option<&'static str> {
+        Some("atomic::task::js")
+    }
+}
+crate::cfg_not_js! {
+    fn js_op() -> Option<&'static str> {
+        None
     }
 }
 

@@ -30,32 +30,32 @@ fn parse_tool_call(response: &str) -> Option<(String, String)> {
     Some((tool_ref.to_string(), json_args.to_string()))
 }
 
-/// Run a Python tool's source against `args_json`. Requires the `python` feature.
-#[cfg(feature = "python")]
-fn dispatch_python_tool(source: &str, args_json: &str) -> Result<String, String> {
-    atomic_compute::runtimes::py::run_tool_call(source, args_json).map_err(|e| e.to_string())
+// cfg_python!/cfg_not_python!/cfg_js!/cfg_not_js! are defined once in `atomic_data` and
+// shared workspace-wide — see that crate's `lib.rs`.
+use atomic_data::{cfg_js, cfg_not_js, cfg_not_python, cfg_python};
+
+cfg_python! {
+    fn dispatch_python_tool(source: &str, args_json: &str) -> Result<String, String> {
+        atomic_compute::runtimes::py::run_tool_call(source, args_json).map_err(|e| e.to_string())
+    }
 }
 
-#[cfg(not(feature = "python"))]
-fn dispatch_python_tool(_source: &str, _args_json: &str) -> Result<String, String> {
-    Err(
-        "this binary was not built with the 'python' feature; Python tools are unavailable"
-            .to_string(),
-    )
+cfg_not_python! {
+    fn dispatch_python_tool(_source: &str, _args_json: &str) -> Result<String, String> {
+        Err("not built with 'python' feature; Python tools unavailable".to_string())
+    }
 }
 
-/// Run a JS tool's source against `args_json`. Requires the `js` feature.
-#[cfg(feature = "js")]
-fn dispatch_js_tool(source: &str, args_json: &str) -> Result<String, String> {
-    atomic_compute::runtimes::js::run_tool_call(source, args_json)
+cfg_js! {
+    fn dispatch_js_tool(source: &str, args_json: &str) -> Result<String, String> {
+        atomic_compute::runtimes::js::run_tool_call(source, args_json)
+    }
 }
 
-#[cfg(not(feature = "js"))]
-fn dispatch_js_tool(_source: &str, _args_json: &str) -> Result<String, String> {
-    Err(
-        "this binary was not built with the 'js' feature; JavaScript tools are unavailable"
-            .to_string(),
-    )
+cfg_not_js! {
+    fn dispatch_js_tool(_source: &str, _args_json: &str) -> Result<String, String> {
+        Err("not built with 'js' feature; JavaScript tools unavailable".to_string())
+    }
 }
 
 /// Dispatch one `TOOL_CALL:` to a Rust `#[task]` (by op_id, via `TASK_REGISTRY`) or a
@@ -371,17 +371,21 @@ mod tests {
             runtime: ScriptRuntime::Python,
             source: "def run(args): return args".to_string(),
         });
-        // Without the `python` feature compiled in, dispatch_python_tool returns
-        // an error string rather than panicking — exactly the "binary not built
-        // with this feature" path real deployments hit when features are off.
-        #[cfg(not(feature = "python"))]
-        {
-            let result = dispatch_tool(&payload, "py_tool", "{}");
+        check_dispatch(&payload);
+    }
+
+    // Without the `python` feature compiled in, dispatch_python_tool returns an error
+    // string rather than panicking — exactly the "binary not built with this feature"
+    // path real deployments hit when features are off.
+    atomic_data::cfg_not_python! {
+        fn check_dispatch(payload: &AgentStepPayload) {
+            let result = dispatch_tool(payload, "py_tool", "{}");
             assert!(result.starts_with("error:"), "got: {result}");
         }
-        #[cfg(feature = "python")]
-        {
-            let _ = &payload; // exercised by the python feature's own integration tests
+    }
+    atomic_data::cfg_python! {
+        fn check_dispatch(_payload: &AgentStepPayload) {
+            // exercised by the python feature's own integration tests
         }
     }
 

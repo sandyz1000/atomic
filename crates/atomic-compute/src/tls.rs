@@ -1,3 +1,4 @@
+crate::cfg_tls! {
 /// TLS helpers for mutual TLS (mTLS) between driver and workers.
 ///
 /// Enabled via the `tls` feature flag.  When `Config::tls_ca_cert` is `None`,
@@ -17,7 +18,6 @@
 /// let acceptor = TlsAcceptor::from(server_cfg);
 /// let tls_stream = acceptor.accept(tcp_stream).await?;
 /// ```
-#[cfg(feature = "tls")]
 pub mod tls_impl {
     use std::io::{self, BufReader};
     use std::path::Path;
@@ -112,6 +112,7 @@ pub mod tls_impl {
         Ok(Arc::new(cfg))
     }
 }
+} // cfg_tls!
 
 /// Returns `true` if TLS is configured in the given cert/key/ca paths.
 pub fn tls_is_configured(

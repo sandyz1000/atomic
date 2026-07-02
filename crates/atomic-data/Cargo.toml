@@ -6,8 +6,8 @@ edition.workspace = true
 [features]
 default = []
 python = []                                                    # enables TaskRuntime::Python
-javascript = []                                                # enables TaskRuntime::JavaScript
-scripted = ["python", "javascript"]                            # both shipped (non-native) task runtimes
+js = []                                                         # enables TaskRuntime::JavaScript
+scripted = ["python", "js"]                                    # both shipped (non-native) task runtimes
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile"]
 kafka = []                                                     # enables TaskAction::KafkaConsume
 

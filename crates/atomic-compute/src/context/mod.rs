@@ -115,7 +115,7 @@ impl Context {
 
     /// Shut down the compute context, releasing shuffle infrastructure.
     pub fn shutdown(&self) {
-        atomic_data::env::clear_shuffle_infrastructure();
+        atomic_data::env::clear_shuffle_infra();
     }
 
     /// Gracefully stop this context, draining in-flight tasks then signaling workers.
@@ -133,7 +133,7 @@ impl Context {
         if !self.config.workers.is_empty() {
             Context::drop_executors(&self.config.workers);
         }
-        atomic_data::env::clear_shuffle_infrastructure();
+        atomic_data::env::clear_shuffle_infra();
     }
 
     /// Cancel a running distributed job by its `run_id`. No-op in local mode.

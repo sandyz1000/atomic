@@ -11,6 +11,7 @@
 //! the driver cascades to its workers. Bare-process drivers (no owner) must rely on
 //! `release` or manual cleanup of `atomic.dev/role=worker` pods.
 
+mod driver_job;
 mod pod_spec;
 
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -22,6 +23,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{DeleteParams, ListParams, PostParams};
 use kube::{Api, Client};
 
+pub use driver_job::{DriverJobSpec, InitFetch, build_driver_job};
 pub use pod_spec::{ALLOC_ID_LABEL, DriverOwner, ROLE_LABEL};
 use pod_spec::{PodTemplate, build_pod, ready_ip};
 

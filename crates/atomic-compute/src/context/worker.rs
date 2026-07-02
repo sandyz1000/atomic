@@ -190,7 +190,7 @@ impl Context {
         }
     }
 
-    #[cfg(feature = "k8s")]
+    crate::cfg_k8s! {
     fn build_kube_allocator(
         config: &Config,
         _address_map: &[SocketAddrV4],
@@ -212,8 +212,9 @@ impl Context {
         };
         Arc::new(atomic_k8s::KubeWorkerAllocator::new(kube_config))
     }
+    } // cfg_k8s!
 
-    #[cfg(not(feature = "k8s"))]
+    crate::cfg_not_k8s! {
     fn build_kube_allocator(
         _config: &Config,
         address_map: &[SocketAddrV4],
@@ -224,6 +225,7 @@ impl Context {
         );
         Arc::new(atomic_scheduler::StaticAllocator::new(address_map.to_vec()))
     }
+    } // cfg_not_k8s!
 
     pub(super) fn worker_clean_up_directives(
         run_result: ComputeResult<Signal>,
@@ -383,8 +385,26 @@ pub fn start_worker(config: Config) -> ! {
         log::warn!("shuffle service could not start on worker: {e}");
     }
 
-    #[cfg(feature = "js")]
-    {
+    warmup_js();
+
+    let result = config
+        .worker
+        .as_ref()
+        .map(|w| (w.port, w.max_concurrent_tasks))
+        .ok_or(ComputeError::GetOrCreateConfig(
+            "start_worker called without a WorkerConfig — use Config::worker(ip, port)",
+        ))
+        .and_then(|(port, max_tasks)| {
+            let executor = configure_tls(Executor::new(port, max_tasks), &config)?;
+            let executor = Arc::new(executor);
+            executor.worker()
+        });
+
+    Context::worker_clean_up_directives(result, work_dir)
+}
+
+crate::cfg_js! {
+    fn warmup_js() {
         let n = num_cpus::get().max(1);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let handles: Vec<_> = (0..n)
@@ -401,35 +421,31 @@ pub fn start_worker(config: Config) -> ! {
             log::debug!("JS V8 warmup skipped: no tokio runtime available");
         }
     }
+}
+crate::cfg_not_js! {
+    fn warmup_js() {}
+}
 
-    let result = config
-        .worker
-        .as_ref()
-        .map(|w| (w.port, w.max_concurrent_tasks))
-        .ok_or(ComputeError::GetOrCreateConfig(
-            "start_worker called without a WorkerConfig — use Config::worker(ip, port)",
-        ))
-        .and_then(|(port, max_tasks)| {
-            #[cfg_attr(not(feature = "tls"), allow(unused_mut))]
-            let mut executor = Executor::new(port, max_tasks);
-            #[cfg(feature = "tls")]
-            {
-                let ca_cert = config.tls_ca_cert.as_deref();
-                let cert = config.tls_cert.as_deref();
-                let key = config.tls_key.as_deref();
-                if crate::tls::tls_is_configured(ca_cert, cert, key) {
-                    executor = executor
-                        .with_tls(ca_cert.unwrap(), key.unwrap(), ca_cert.unwrap())
-                        .map_err(|e| {
-                            ComputeError::GetOrCreateConfig(Box::leak(
-                                format!("TLS init: {e}").into_boxed_str(),
-                            ))
-                        })?;
-                }
-            }
-            let executor = Arc::new(executor);
-            executor.worker()
-        });
-
-    Context::worker_clean_up_directives(result, work_dir)
+crate::cfg_tls! {
+    fn configure_tls(executor: Executor, config: &Config) -> ComputeResult<Executor> {
+        let ca_cert = config.tls_ca_cert.as_deref();
+        let cert = config.tls_cert.as_deref();
+        let key = config.tls_key.as_deref();
+        if crate::tls::tls_is_configured(ca_cert, cert, key) {
+            executor
+                .with_tls(ca_cert.unwrap(), key.unwrap(), ca_cert.unwrap())
+                .map_err(|e| {
+                    ComputeError::GetOrCreateConfig(Box::leak(
+                        format!("TLS init: {e}").into_boxed_str(),
+                    ))
+                })
+        } else {
+            Ok(executor)
+        }
+    }
+}
+crate::cfg_not_tls! {
+    fn configure_tls(executor: Executor, _config: &Config) -> ComputeResult<Executor> {
+        Ok(executor)
+    }
 }

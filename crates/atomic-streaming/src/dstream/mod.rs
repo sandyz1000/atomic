@@ -1,9 +1,10 @@
 pub mod distributed_source;
 pub mod input;
-#[cfg(feature = "kafka")]
-pub mod kafka;
-#[cfg(feature = "kafka")]
-pub mod kafka_direct;
+
+crate::cfg_kafka! {
+    pub mod kafka;
+    pub mod kafka_direct;
+}
 pub mod mapped;
 pub mod pair;
 pub mod shuffle;

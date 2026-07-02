@@ -13,6 +13,9 @@ pub use runtime::*;
 /// tasks to drain before proceeding with shutdown.
 pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 30_000;
 
+/// Env var namespace shared by [`Config::from_env`] and [`allocator_from_env`].
+const PREFIX: &str = "ATOMIC_";
+
 /// Configuration for a worker process.
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
@@ -187,6 +190,37 @@ pub enum ConfigError {
     ZeroPort(String),
 }
 
+/// Read `ATOMIC_ALLOCATOR`/`ATOMIC_K8S_*` from the environment. Shared by
+/// [`Config::from_env`] and [`crate::app::AtomicApp::build`] — the latter otherwise has no
+/// path to `AllocatorKind::Kube` since it builds its `Config` via [`Config::local`] /
+/// [`Config::distributed_driver`], not `from_env`.
+pub(crate) fn allocator_from_env() -> (AllocatorKind, KubeAllocatorConfig) {
+    let allocator = std::env::var(format!("{PREFIX}ALLOCATOR"))
+        .ok()
+        .and_then(|s| {
+            serde_json::from_str::<AllocatorKind>(&format!("\"{}\"", s.to_lowercase())).ok()
+        })
+        .unwrap_or_default();
+
+    let kube = KubeAllocatorConfig {
+        namespace: std::env::var(format!("{PREFIX}K8S_NAMESPACE"))
+            .unwrap_or_else(|_| "default".to_string()),
+        worker_image: std::env::var(format!("{PREFIX}K8S_WORKER_IMAGE")).unwrap_or_default(),
+        service_account: std::env::var(format!("{PREFIX}K8S_SERVICE_ACCOUNT")).ok(),
+        task_port: std::env::var(format!("{PREFIX}K8S_TASK_PORT"))
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(10001),
+        ready_timeout_secs: std::env::var(format!("{PREFIX}K8S_READY_TIMEOUT_SECS"))
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(120),
+        command: Vec::new(),
+    };
+
+    (allocator, kube)
+}
+
 impl Config {
     /// Local-mode driver: all tasks run in-process on the driver.
     pub fn local() -> Self {
@@ -282,7 +316,6 @@ impl Config {
     /// new Rust programs.
     pub fn from_env() -> Self {
         let _ = dotenvy::dotenv();
-        const PREFIX: &str = "ATOMIC_";
 
         let mode = std::env::var(format!("{PREFIX}DEPLOYMENT_MODE"))
             .ok()
@@ -400,28 +433,7 @@ impl Config {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(DEFAULT_DRAIN_TIMEOUT_MS);
 
-        let allocator = std::env::var(format!("{PREFIX}ALLOCATOR"))
-            .ok()
-            .and_then(|s| {
-                serde_json::from_str::<AllocatorKind>(&format!("\"{}\"", s.to_lowercase())).ok()
-            })
-            .unwrap_or_default();
-
-        let kube = KubeAllocatorConfig {
-            namespace: std::env::var(format!("{PREFIX}K8S_NAMESPACE"))
-                .unwrap_or_else(|_| "default".to_string()),
-            worker_image: std::env::var(format!("{PREFIX}K8S_WORKER_IMAGE")).unwrap_or_default(),
-            service_account: std::env::var(format!("{PREFIX}K8S_SERVICE_ACCOUNT")).ok(),
-            task_port: std::env::var(format!("{PREFIX}K8S_TASK_PORT"))
-                .ok()
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(10001),
-            ready_timeout_secs: std::env::var(format!("{PREFIX}K8S_READY_TIMEOUT_SECS"))
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(120),
-            command: Vec::new(),
-        };
+        let (allocator, kube) = allocator_from_env();
 
         // In env-var mode, workers come from hosts.conf — resolved by the caller.
         Config {
@@ -581,5 +593,74 @@ mod config_validate_tests {
         config.tls_cert = Some(PathBuf::from("/nonexistent/cert.pem"));
         config.tls_key = Some(PathBuf::from("/nonexistent/key.pem"));
         assert!(config.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod allocator_from_env_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // `allocator_from_env` reads process-global env vars; serialize the tests that
+    // touch them so parallel test threads don't clobber each other's values.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const KEYS: &[&str] = &[
+        "ATOMIC_ALLOCATOR",
+        "ATOMIC_K8S_NAMESPACE",
+        "ATOMIC_K8S_WORKER_IMAGE",
+        "ATOMIC_K8S_SERVICE_ACCOUNT",
+        "ATOMIC_K8S_TASK_PORT",
+        "ATOMIC_K8S_READY_TIMEOUT_SECS",
+    ];
+
+    fn clear_env() {
+        for key in KEYS {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    #[test]
+    fn defaults_to_static() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let (allocator, kube) = allocator_from_env();
+        assert_eq!(allocator, AllocatorKind::Static);
+        assert_eq!(kube.namespace, "default");
+        assert_eq!(kube.task_port, 10001);
+        assert_eq!(kube.ready_timeout_secs, 120);
+    }
+
+    #[test]
+    fn reads_kube_settings() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        unsafe {
+            std::env::set_var("ATOMIC_ALLOCATOR", "kube");
+            std::env::set_var("ATOMIC_K8S_NAMESPACE", "jobs");
+            std::env::set_var("ATOMIC_K8S_WORKER_IMAGE", "myrepo/atomic:0.1");
+            std::env::set_var("ATOMIC_K8S_TASK_PORT", "12345");
+        }
+        let (allocator, kube) = allocator_from_env();
+        clear_env();
+        assert_eq!(allocator, AllocatorKind::Kube);
+        assert_eq!(kube.namespace, "jobs");
+        assert_eq!(kube.worker_image, "myrepo/atomic:0.1");
+        assert_eq!(kube.task_port, 12345);
+    }
+
+    /// `AtomicApp::build()` itself parses real process argv and isn't unit-testable
+    /// directly; this confirms the overlay line it runs doesn't disturb the rest of
+    /// a `Config` built via the non-`from_env` constructors it actually uses.
+    #[test]
+    fn overlay_preserves_other_fields() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let mut config = Config::local();
+        let work_dir_before = config.work_dir.clone();
+        (config.allocator, config.kube) = allocator_from_env();
+        assert_eq!(config.mode, DeploymentMode::Local);
+        assert_eq!(config.work_dir, work_dir_before);
+        assert_eq!(config.allocator, AllocatorKind::Static);
     }
 }

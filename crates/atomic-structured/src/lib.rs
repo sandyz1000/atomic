@@ -18,11 +18,15 @@
 //! query.await_termination()?;
 //! ```
 
+// cfg_kafka!/cfg_not_kafka! are defined once in `atomic_data` and shared workspace-wide.
+pub use atomic_data::{cfg_kafka, cfg_not_kafka};
+
 pub mod distributed_state;
 pub mod errors;
 pub mod frame;
-#[cfg(feature = "kafka")]
-pub mod kafka;
+cfg_kafka! {
+    pub mod kafka;
+}
 pub mod query;
 pub mod session_window;
 pub mod sink;

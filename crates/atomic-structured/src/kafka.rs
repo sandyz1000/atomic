@@ -104,8 +104,7 @@ impl KafkaSource {
     pub fn pending_offsets(&self) -> Option<OffsetCommit> {
         let tpl = {
             let mut guard = self.pending_tpl.lock();
-            let tpl = std::mem::replace(&mut *guard, TopicPartitionList::new());
-            tpl
+            std::mem::replace(&mut *guard, TopicPartitionList::new())
         };
         if tpl.elements().is_empty() {
             return None;
@@ -225,10 +224,10 @@ impl StreamSource for KafkaSource {
             return;
         }
         let consumer_guard = self.consumer.lock();
-        if let Some(consumer) = consumer_guard.as_ref() {
-            if let Err(e) = consumer.commit(&tpl, CommitMode::Sync) {
-                log::warn!("KafkaSource: offset commit failed: {e}");
-            }
+        if let Some(consumer) = consumer_guard.as_ref()
+            && let Err(e) = consumer.commit(&tpl, CommitMode::Sync)
+        {
+            log::warn!("KafkaSource: offset commit failed: {e}");
         }
     }
 }

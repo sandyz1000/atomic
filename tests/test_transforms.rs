@@ -173,7 +173,10 @@ async fn test_sample_fraction_bounds() {
 
 // ── sort_by() ─────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+// sort_by_task's shuffle path needs a multi-thread runtime — plain #[tokio::test]
+// (current-thread flavor) deadlocks: the one worker thread blocks waiting on a
+// spawned task that never gets scheduled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sort_by_descending() {
     let ctx = ctx();
     let result = ctx
@@ -184,7 +187,7 @@ async fn test_sort_by_descending() {
     assert_eq!(result, vec![5, 4, 3, 1, 1]);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_sort_by_ascending() {
     let ctx = ctx();
     let result = ctx

@@ -43,7 +43,7 @@ pub enum TaskRuntime {
     #[cfg(feature = "python")]
     Python = 1,
     /// Partition-level JavaScript function evaluated in the embedded V8 (deno_core) runtime.
-    #[cfg(feature = "javascript")]
+    #[cfg(feature = "js")]
     JavaScript = 2,
 }
 
@@ -249,33 +249,34 @@ pub struct JsTaskPayload {
     pub context_json: Option<String>,
 }
 
-/// Config for one Kafka Direct consume op shipped inside `PipelineOp.payload`.
-///
-/// The worker creates a one-shot consumer, assigns to `(topic, partition)`,
-/// seeks to `start_offset`, polls until it reaches `end_offset` or `max_records`
-/// (whichever comes first), then closes the consumer and returns the messages.
-#[cfg(feature = "kafka")]
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-    bincode::Encode,
-    bincode::Decode,
-)]
-pub struct KafkaConsumePayload {
-    pub brokers: String,
-    pub topic: String,
-    /// Kafka partition index (0-based).
-    pub partition: i32,
-    /// Inclusive start offset (`assign`+`seek` here).
-    pub start_offset: i64,
-    /// Exclusive end offset — stop before consuming this offset.
-    pub end_offset: i64,
-    /// Upper bound on messages consumed regardless of offset gap.
-    pub max_records: usize,
+crate::cfg_kafka! {
+    /// Config for one Kafka Direct consume op shipped inside `PipelineOp.payload`.
+    ///
+    /// The worker creates a one-shot consumer, assigns to `(topic, partition)`,
+    /// seeks to `start_offset`, polls until it reaches `end_offset` or `max_records`
+    /// (whichever comes first), then closes the consumer and returns the messages.
+    #[derive(
+        Debug,
+        Clone,
+        PartialEq,
+        Eq,
+        serde::Serialize,
+        serde::Deserialize,
+        bincode::Encode,
+        bincode::Decode,
+    )]
+    pub struct KafkaConsumePayload {
+        pub brokers: String,
+        pub topic: String,
+        /// Kafka partition index (0-based).
+        pub partition: i32,
+        /// Inclusive start offset (`assign`+`seek` here).
+        pub start_offset: i64,
+        /// Exclusive end offset — stop before consuming this offset.
+        pub end_offset: i64,
+        /// Upper bound on messages consumed regardless of offset gap.
+        pub max_records: usize,
+    }
 }
 
 /// Config for one file-split read op shipped as `data` in a task envelope.

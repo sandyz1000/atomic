@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "3.9.0", features = ["napi8", "serde-json"] }
 napi-derive = "3.5.6"
-atomic-data = { workspace = true, features = ["javascript"] }
+atomic-data = { workspace = true, features = ["js"] }
 atomic-compute = { workspace = true }
 atomic-graph = { workspace = true }
 atomic-sql = { workspace = true }

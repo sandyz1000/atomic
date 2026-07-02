@@ -1,10 +1,12 @@
 pub mod native;
 
-#[cfg(feature = "python")]
-pub mod py;
+crate::cfg_python! {
+    pub mod py;
+}
 
-#[cfg(feature = "js")]
-pub mod js;
+crate::cfg_js! {
+    pub mod js;
+}
 
 pub use native::ComputeEngine;
 

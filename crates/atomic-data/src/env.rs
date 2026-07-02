@@ -77,29 +77,34 @@ pub fn get_rdd_cache_spill_dir() -> Option<std::path::PathBuf> {
 
 /// Clear all shuffle infrastructure state.
 /// Called from `Context::drop()` so the next Context starts with a clean slate.
-pub fn clear_shuffle_infrastructure() {
+pub fn clear_shuffle_infra() {
     *SHUFFLE_SERVER_URI.write().unwrap() = None;
     *SHUFFLE_CACHE.write().unwrap() = None;
     *MAP_OUTPUT_TRACKER.write().unwrap() = None;
     *SORT_SHUFFLE_THRESHOLD.write().unwrap() = None;
-    #[cfg(feature = "tls")]
-    {
+    clear_tls_connector();
+}
+
+crate::cfg_tls! {
+    fn clear_tls_connector() {
         *SHUFFLE_TLS_CONNECTOR.write().unwrap() = None;
     }
 }
-
-/// Global TLS connector used by `ShuffleFetcher` when the shuffle server URI is `https://`.
-/// Set by `atomic_compute::env::init_shuffle()` when TLS is configured.
-#[cfg(feature = "tls")]
-pub static SHUFFLE_TLS_CONNECTOR: RwLock<Option<std::sync::Arc<tokio_rustls::TlsConnector>>> =
-    RwLock::new(None);
-
-#[cfg(feature = "tls")]
-pub fn set_shuffle_tls_connector(c: std::sync::Arc<tokio_rustls::TlsConnector>) {
-    *SHUFFLE_TLS_CONNECTOR.write().unwrap() = Some(c);
+crate::cfg_not_tls! {
+    fn clear_tls_connector() {}
 }
 
-#[cfg(feature = "tls")]
-pub fn get_shuffle_tls_connector() -> Option<std::sync::Arc<tokio_rustls::TlsConnector>> {
-    SHUFFLE_TLS_CONNECTOR.read().unwrap().clone()
+crate::cfg_tls! {
+    /// Global TLS connector used by `ShuffleFetcher` when the shuffle server URI is `https://`.
+    /// Set by `atomic_compute::env::init_shuffle()` when TLS is configured.
+    pub static SHUFFLE_TLS_CONNECTOR: RwLock<Option<std::sync::Arc<tokio_rustls::TlsConnector>>> =
+        RwLock::new(None);
+
+    pub fn set_shuffle_tls_connector(c: std::sync::Arc<tokio_rustls::TlsConnector>) {
+        *SHUFFLE_TLS_CONNECTOR.write().unwrap() = Some(c);
+    }
+
+    pub fn get_shuffle_tls_connector() -> Option<std::sync::Arc<tokio_rustls::TlsConnector>> {
+        SHUFFLE_TLS_CONNECTOR.read().unwrap().clone()
+    }
 }

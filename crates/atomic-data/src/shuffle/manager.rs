@@ -124,14 +124,7 @@ impl ShuffleManager {
         cache: Arc<dyn ShuffleCache>,
         shuffle_config: &ShuffleConfig,
     ) -> LibResult<(String, u16)> {
-        #[cfg(feature = "tls")]
-        let tls_acceptor = if shuffle_config.tls_enabled() {
-            Some(Self::make_tls_acceptor(shuffle_config)?)
-        } else {
-            None
-        };
-        #[cfg(not(feature = "tls"))]
-        let tls_acceptor: Option<std::convert::Infallible> = None;
+        let tls_acceptor = Self::tls_acceptor(shuffle_config)?;
 
         let bind_port = if let Some(p) = port {
             let conn = TcpListener::bind(SocketAddr::from((bind_ip, p))).map_err(|_| {
@@ -156,7 +149,24 @@ impl ShuffleManager {
         Ok((server_uri, bind_port))
     }
 
-    #[cfg(feature = "tls")]
+    crate::cfg_tls! {
+    fn tls_acceptor(config: &ShuffleConfig) -> LibResult<Option<tokio_rustls::TlsAcceptor>> {
+        if config.tls_enabled() {
+            Ok(Some(Self::make_tls_acceptor(config)?))
+        } else {
+            Ok(None)
+        }
+    }
+    }
+    crate::cfg_not_tls! {
+    fn tls_acceptor(
+        _config: &ShuffleConfig,
+    ) -> LibResult<Option<std::convert::Infallible>> {
+        Ok(None)
+    }
+    }
+
+    crate::cfg_tls! {
     fn make_tls_acceptor(config: &ShuffleConfig) -> LibResult<tokio_rustls::TlsAcceptor> {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
         use rustls::{RootCertStore, ServerConfig};
@@ -200,7 +210,6 @@ impl ShuffleManager {
         Ok(tokio_rustls::TlsAcceptor::from(StdArc::new(cfg)))
     }
 
-    #[cfg(feature = "tls")]
     fn launch_async_server(
         conn: TcpListener,
         cache: Arc<dyn ShuffleCache>,
@@ -266,8 +275,9 @@ impl ShuffleManager {
         };
         Ok(())
     }
+    } // cfg_tls!
 
-    #[cfg(not(feature = "tls"))]
+    crate::cfg_not_tls! {
     fn launch_async_server(
         conn: TcpListener,
         cache: Arc<dyn ShuffleCache>,
@@ -314,6 +324,7 @@ impl ShuffleManager {
         };
         Ok(())
     }
+    } // cfg_not_tls!
 
     fn init_status_checker(
         server_uri: &str,

@@ -18,3 +18,31 @@ russh-sftp = "2.1"
 # Binary integrity check
 sha2 = { workspace = true }
 hex = { workspace = true }
+
+# Lightweight type/macro crate (RDD traits, wire types, the shared cfg_x! feature-gate
+# macros) — not optional, same as every other crate in the workspace. Unlike the
+# `#[cfg(feature = "k8s")]` attribute, a `atomic_data::cfg_k8s! { ... }` macro *call* must
+# resolve at compile time regardless of whether `k8s` is enabled here — the invocation
+# itself needs the crate linked even when its expansion is empty.
+atomic-data = { workspace = true }
+
+# `submit-k8s` — optional, keeps the default SSH-only CLI lightweight
+atomic-k8s = { workspace = true, optional = true }
+kube = { version = "4.0.0", default-features = false, features = [
+    "client",
+    "rustls-tls",
+], optional = true }
+k8s-openapi = { version = "0.28.0", features = ["latest"], optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+[features]
+k8s = [
+    "dep:atomic-k8s",
+    "dep:kube",
+    "dep:k8s-openapi",
+    "dep:aws-sdk-s3",
+    "dep:aws-config",
+    "dep:uuid",
+]

@@ -30,6 +30,7 @@ pub trait StreamSource: Send + Sync {
     /// Default no-op.
     fn post_batch_commit(&self, _epoch: u64) {}
 
+    crate::cfg_kafka! {
     /// Consumed offsets for the last batch, suitable for committing inside a Kafka
     /// producer transaction (exactly-once). Returns `None` for all non-Kafka sources
     /// and for Kafka sources before any batch has been consumed.
@@ -38,10 +39,10 @@ pub trait StreamSource: Send + Sync {
     /// `Some` here, it routes the batch through `add_batch_with_offsets` instead of
     /// `add_batch + post_batch_commit`, ensuring source offsets and output records are
     /// committed atomically.
-    #[cfg(feature = "kafka")]
     fn pending_offsets(&self) -> Option<crate::kafka::OffsetCommit> {
         None
     }
+    } // cfg_kafka!
 }
 
 /// A deterministic in-memory queue of pre-built batches. The primary test source:

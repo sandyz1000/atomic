@@ -192,17 +192,109 @@ See [docs/.../architecture/](docs/src/content/docs/architecture/) for detail.
 
 ## Deployment
 
+No cluster manager, no container daemon, no language runtime to install on
+workers. One binary, shipped over SSH, running in under a minute.
+
+### Ship to bare-metal or VMs
+
 ```bash
+# 1. Install the CLI (once)
 cargo install --path crates/atomic-cli
-atomic build --target x86_64-unknown-linux-musl    # static Linux binary
+
+# 2. Cross-compile a static Linux binary from your dev machine
+atomic build --target x86_64-unknown-linux-musl
+
+# 3. Upload to workers and verify checksum
 atomic ship --workers user@10.0.0.101,user@10.0.0.102
-./my_app --worker --port 10001                     # same binary, worker mode
 ```
 
-`ship` verifies the remote host against `~/.ssh/known_hosts`, uploads via SFTP,
-verifies the SHA-256 checksum, and renames atomically. Kubernetes deployment is
-available through the Helm chart in [`deploy/`](deploy/). See the
-[deployment guide](docs/src/content/docs/guides/deployment.md).
+`ship` connects over SSH, uploads via SFTP, verifies the SHA-256 checksum, and
+renames atomically — the old binary is never replaced until the new one lands
+intact.
+
+Then start workers (same binary, `--worker` flag):
+
+```bash
+# On each worker host
+./my_app --worker --port 10001
+```
+
+And run the driver from your machine:
+
+```bash
+./my_app --driver --workers 10.0.0.101:10001,10.0.0.102:10001
+```
+
+That's the full deployment. No Dockerfile, no registry, no YAML until you need
+Kubernetes.
+
+### Kubernetes
+
+For managed clusters, the Helm chart in [`deploy/`](deploy/) provisions workers
+as a StatefulSet and wires up the headless Service for discovery. For per-job
+elasticity — different resource profiles per job, pods created on demand and
+deleted after — set `allocator: kube` and the driver allocates pods through the
+Kubernetes API directly:
+
+```bash
+helm install atomic deploy/helm/atomic \
+  --set allocator=kube \
+  --set k8s.workerImage=myregistry/my-app:latest
+```
+
+Workers for each job are created with exactly the resources that job requested
+(`ResourceProfile`) and deleted when it finishes.
+
+### Submit a one-off job
+
+`helm install`/`helm upgrade` is for standing deployments. For a single ad-hoc run —
+the `spark-submit` equivalent — `atomic submit-k8s` (requires `atomic-cli --features
+k8s`) creates one `Job`, runs it, and exits. No Helm release needed for the run itself,
+but the target namespace needs the RBAC from `helm install ... --set allocator=kube`
+(or `--set driver.enabled=false` to install just the RBAC/ServiceAccount).
+
+Two ways to get the driver binary into the pod:
+
+```bash
+# Already have an image (built via deploy/Dockerfile, pushed to a registry):
+atomic submit-k8s --image myregistry/my-app:0.1 \
+  --dynamic-workers --worker-image myregistry/my-app:0.1 \
+  -- --my-job-flag foo
+
+# No image at all — stage the binary to S3, run it through the project's generic
+# fetch-and-exec bootstrap image:
+atomic build --target x86_64-unknown-linux-musl
+atomic submit-k8s --binary target/x86_64-unknown-linux-musl/release/my_app \
+  --s3-bucket my-staging-bucket \
+  --dynamic-workers --worker-image myregistry/my-app:0.1 \
+  -- --my-job-flag foo
+```
+
+`--dynamic-workers` makes the Kubernetes allocator available to the submitted driver
+(`ctx.with_workers(...)` inside the job's own code decides how many workers and what
+size). Without it, point the driver at an existing worker StatefulSet instead by
+passing `--workers dns:<svc>:<port>` as one of the trailing job args:
+
+```bash
+atomic submit-k8s --image myregistry/my-app:0.1 \
+  -- --workers dns:my-atomic-worker:10001 --my-job-flag foo
+```
+
+Follow the run with `kubectl logs -f job/<name> -n <namespace> -c driver` — printed
+after submission.
+
+### Advanced: mutual TLS, S3
+
+```bash
+# TLS between driver and workers
+atomic build --target x86_64-unknown-linux-musl --features tls
+
+# S3 as checkpoint / text_file source
+atomic build --target x86_64-unknown-linux-musl --features s3
+```
+
+See the [deployment guide](docs/src/content/docs/guides/deployment.md) for
+TLS certificate setup, S3 credentials, and Helm values reference.
 
 ## Documentation
 

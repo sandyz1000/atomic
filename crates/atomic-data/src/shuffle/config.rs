@@ -63,14 +63,15 @@ impl ShuffleConfig {
             .unwrap_or_else(|| self.local_dir.join("shuffle-spill"))
     }
 
-    /// Returns `true` when all three TLS fields are set and the `tls` feature is active.
-    pub fn tls_enabled(&self) -> bool {
-        #[cfg(feature = "tls")]
-        {
+    crate::cfg_tls! {
+        /// Returns `true` when all three TLS fields are set and the `tls` feature is active.
+        pub fn tls_enabled(&self) -> bool {
             self.tls_cert.is_some() && self.tls_key.is_some() && self.tls_ca.is_some()
         }
-        #[cfg(not(feature = "tls"))]
-        {
+    }
+    crate::cfg_not_tls! {
+        /// Returns `true` when all three TLS fields are set and the `tls` feature is active.
+        pub fn tls_enabled(&self) -> bool {
             false
         }
     }

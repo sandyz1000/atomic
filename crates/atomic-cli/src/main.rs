@@ -4,9 +4,15 @@ use clap::{Args, Parser, Subcommand};
 
 mod cluster;
 mod commands;
+atomic_data::cfg_k8s! {
+    mod k8s;
+}
 mod ssh;
 
 use commands::{cmd_build, cmd_ship, cmd_stop, cmd_submit};
+atomic_data::cfg_k8s! {
+    use k8s::cmd_submit_k8s;
+}
 
 type Result<T, E = CliError> = std::result::Result<T, E>;
 
@@ -105,6 +111,46 @@ pub(crate) enum CliError {
     #[error("no local driver binary — run `cargo build` first")]
     NoLocalBinary,
 
+    // submit-k8s
+    #[cfg(feature = "k8s")]
+    #[error("--binary requires --s3-bucket to stage the driver binary")]
+    MissingS3Bucket,
+
+    #[cfg(feature = "k8s")]
+    #[error(
+        "--dynamic-workers needs a worker image: pass --worker-image, or --image \
+         (workers default to the driver's own image)"
+    )]
+    MissingWorkerImage,
+
+    #[cfg(feature = "k8s")]
+    #[error("failed to read binary {0}: {1}")]
+    BinaryReadFailed(PathBuf, std::io::Error),
+
+    #[cfg(feature = "k8s")]
+    #[error("S3 upload to s3://{bucket}/{key} failed: {source}")]
+    S3Upload {
+        bucket: String,
+        key: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    // `kube::Error` is a large enum; box it so `CliError` (and every `Result<_,
+    // CliError>` in this crate, including non-k8s ones) doesn't inherit its size.
+    #[cfg(feature = "k8s")]
+    #[error("failed to connect to the Kubernetes API: {0}")]
+    KubeClient(#[source] Box<kube::Error>),
+
+    #[cfg(feature = "k8s")]
+    #[error("failed to create Job {name} in namespace {namespace}: {source}")]
+    KubeJobCreate {
+        name: String,
+        namespace: String,
+        #[source]
+        source: Box<kube::Error>,
+    },
+
     // Transparent wrappers
     #[error(transparent)]
     Russh(#[from] russh::Error),
@@ -150,6 +196,9 @@ enum Commands {
     Submit(SubmitArgs),
     /// Send a graceful shutdown to all workers in .atomic/cluster.toml
     Stop(StopArgs),
+    /// Run the driver as an ad-hoc Kubernetes Job — no Helm release needed
+    #[cfg(feature = "k8s")]
+    SubmitK8s(SubmitK8sArgs),
 }
 
 #[derive(Args)]
@@ -202,6 +251,58 @@ pub(crate) struct StopArgs {
     pub(crate) workers: Vec<String>,
 }
 
+atomic_data::cfg_k8s! {
+/// Exactly one of `--image` (pre-built, already pushed) or `--binary` (staged to S3,
+/// run through the generic `atomic-bootstrap` fetch-and-exec image — no image build).
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+pub(crate) struct ImageSource {
+    #[arg(long)]
+    pub(crate) image: Option<String>,
+    #[arg(long)]
+    pub(crate) binary: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub(crate) struct SubmitK8sArgs {
+    #[command(flatten)]
+    pub(crate) source: ImageSource,
+
+    // --binary only: where to stage the binary before the Job can fetch it.
+    #[arg(long)]
+    pub(crate) s3_bucket: Option<String>,
+    #[arg(long)]
+    pub(crate) s3_prefix: Option<String>,
+    /// Fetch-and-exec image; defaults to the project's published `atomic-bootstrap`.
+    #[arg(long)]
+    pub(crate) bootstrap_image: Option<String>,
+
+    #[arg(long, default_value = "default")]
+    pub(crate) namespace: String,
+    #[arg(long)]
+    pub(crate) service_account: Option<String>,
+
+    /// Let the submitted driver provision its own per-job worker pods via
+    /// `ctx.with_workers(...)` (sets `ATOMIC_ALLOCATOR=kube` on the driver). The
+    /// worker count/CPU/memory is a `ResourceProfile` the job's own code constructs —
+    /// this flag only makes the Kube allocator available to it.
+    #[arg(long)]
+    pub(crate) dynamic_workers: bool,
+    /// Image for per-job worker pods when `--dynamic-workers` is set. Defaults to
+    /// `--image` (workers run the driver's own image) — required with `--binary`,
+    /// since the fetch-and-exec bootstrap path only applies to the driver Job.
+    #[arg(long)]
+    pub(crate) worker_image: Option<String>,
+    #[arg(long, default_value_t = 10001)]
+    pub(crate) task_port: u16,
+
+    #[arg(long)]
+    pub(crate) ttl_seconds_after_finished: Option<i32>,
+    #[arg(last = true)]
+    pub(crate) job_args: Vec<String>,
+}
+} // cfg_k8s!
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -210,5 +311,7 @@ async fn main() -> Result<()> {
         Commands::Ship(args) => cmd_ship(args).await,
         Commands::Submit(args) => cmd_submit(args).await,
         Commands::Stop(args) => cmd_stop(args),
+        #[cfg(feature = "k8s")]
+        Commands::SubmitK8s(args) => cmd_submit_k8s(args).await,
     }
 }

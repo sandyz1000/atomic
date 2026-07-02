@@ -104,9 +104,9 @@ impl StreamingContext {
         stream
     }
 
+    crate::cfg_kafka! {
     /// Create a DStream that consumes message payloads (as UTF-8 strings) from
     /// Kafka topics. Requires the `kafka` feature.
-    #[cfg(feature = "kafka")]
     pub fn kafka_stream(
         self: &Arc<Self>,
         brokers: &str,
@@ -136,7 +136,6 @@ impl StreamingContext {
     ///   backpressure. `None` uses the default (10 000).
     ///
     /// Requires the `kafka` feature.
-    #[cfg(feature = "kafka")]
     pub fn direct_kafka_stream(
         self: &Arc<Self>,
         brokers: &str,
@@ -157,6 +156,7 @@ impl StreamingContext {
             .add_input_stream(stream.clone() as Arc<dyn InputStreamBase>);
         stream
     }
+    } // cfg_kafka!
 
     /// Create a DStream that watches a local directory for new text files.
     pub fn text_file_stream(

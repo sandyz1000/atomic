@@ -1,9 +1,9 @@
+crate::cfg_s3! {
 /// S3 I/O helpers using the official AWS SDK.
 ///
 /// Requires the `s3` feature flag. Credentials are loaded by `aws-config` from the
 /// standard chain: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` env vars,
 /// `~/.aws/credentials`, EC2 instance profile, etc.
-#[cfg(feature = "s3")]
 pub mod s3_impl {
     use aws_config::BehaviorVersion;
     use aws_sdk_s3::Client;
@@ -146,3 +146,4 @@ pub mod s3_impl {
         }
     }
 }
+} // cfg_s3!

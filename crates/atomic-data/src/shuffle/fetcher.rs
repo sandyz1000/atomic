@@ -95,6 +95,9 @@ impl ShuffleFetcher {
                     let mut chunk_uri_str = String::with_capacity(server_uri.len() + 12);
                     chunk_uri_str.push_str(&server_uri);
                     let mut shuffle_chunks = Vec::with_capacity(input_ids.len());
+                    // Reused across every chunk from this server instead of dialing fresh
+                    // per chunk (that pattern exhausted local ephemeral ports under load).
+                    let mut conn = None;
                     for input_id in input_ids {
                         if failure.load(atomic::Ordering::Acquire) {
                             // Abort early since the work failed in an other future
@@ -109,20 +112,21 @@ impl ShuffleFetcher {
                         )?;
 
                         // Fetch with retry + exponential backoff.
-                        let data_bytes = match Self::fetch_chunk_with_retry(chunk_uri).await {
-                            Ok(bytes) => bytes,
-                            Err(e) => {
-                                log::error!("Failed to fetch chunk: {:?}", e);
-                                failure.store(true, atomic::Ordering::Release);
-                                // Host unreachable after retries → the map output is
-                                // lost; surface its identity so the scheduler recomputes it.
-                                return Err(ShuffleError::FetchFailed {
-                                    shuffle_id,
-                                    map_id: input_id,
-                                    server_uri: base_server_uri.clone(),
-                                });
-                            }
-                        };
+                        let data_bytes =
+                            match Self::fetch_chunk_with_retry(&mut conn, chunk_uri).await {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    log::error!("Failed to fetch chunk: {:?}", e);
+                                    failure.store(true, atomic::Ordering::Release);
+                                    // Host unreachable after retries → the map output is
+                                    // lost; surface its identity so the scheduler recomputes it.
+                                    return Err(ShuffleError::FetchFailed {
+                                        shuffle_id,
+                                        map_id: input_id,
+                                        server_uri: base_server_uri.clone(),
+                                    });
+                                }
+                            };
 
                         // bincode 2.0 API
                         let config = bincode::config::standard();
@@ -204,6 +208,7 @@ impl ShuffleFetcher {
                     let mut chunk_uri_str = String::with_capacity(server_uri.len() + 12);
                     chunk_uri_str.push_str(&server_uri);
                     let mut runs = Vec::with_capacity(input_ids.len());
+                    let mut conn = None;
                     for input_id in input_ids {
                         if failure.load(atomic::Ordering::Acquire) {
                             return Err(ShuffleError::Other);
@@ -214,21 +219,22 @@ impl ShuffleFetcher {
                             input_id,
                             reduce_id,
                         )?;
-                        let data_bytes = match Self::fetch_chunk_with_retry(chunk_uri).await {
-                            Ok(bytes) => bytes,
-                            Err(e) => {
-                                log::error!("Failed to fetch chunk: {:?}", e);
-                                failure.store(true, atomic::Ordering::Release);
-                                // Same lineage-recovery contract as `fetch_runs`:
-                                // surface the lost map output so the scheduler
-                                // recomputes it.
-                                return Err(ShuffleError::FetchFailed {
-                                    shuffle_id,
-                                    map_id: input_id,
-                                    server_uri: base_server_uri.clone(),
-                                });
-                            }
-                        };
+                        let data_bytes =
+                            match Self::fetch_chunk_with_retry(&mut conn, chunk_uri).await {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    log::error!("Failed to fetch chunk: {:?}", e);
+                                    failure.store(true, atomic::Ordering::Release);
+                                    // Same lineage-recovery contract as `fetch_runs`:
+                                    // surface the lost map output so the scheduler
+                                    // recomputes it.
+                                    return Err(ShuffleError::FetchFailed {
+                                        shuffle_id,
+                                        map_id: input_id,
+                                        server_uri: base_server_uri.clone(),
+                                    });
+                                }
+                            };
                         match SpilledRunIter::<K, V>::spill(&data_bytes) {
                             Ok(run) => runs.push(run),
                             Err(e) => {
@@ -289,34 +295,52 @@ impl ShuffleFetcher {
         Ok(Uri::try_from(chunk.as_str())?)
     }
 
-    /// Retry wrapper around [`fetch_chunk`] with exponential backoff.
-    ///
-    /// Attempts the fetch up to `MAX_FETCH_RETRIES` times. On each transient
-    /// failure, waits `delay` ms (doubling each time) before the next attempt.
-    /// The final failure is returned as-is.
-    async fn fetch_chunk_with_retry(uri: Uri) -> LibResult<Vec<u8>> {
+    /// Retry wrapper. Reuses `*sender` (a keep-alive connection) across calls instead
+    /// of dialing fresh per chunk; `None` (first call, or after a failed send) reconnects.
+    async fn fetch_chunk_with_retry(
+        sender: &mut Option<hyper::client::conn::http1::SendRequest<Body>>,
+        uri: Uri,
+    ) -> LibResult<Vec<u8>> {
         let mut delay_ms = INITIAL_RETRY_MS;
         for attempt in 0..MAX_FETCH_RETRIES {
-            match Self::fetch_chunk(uri.clone()).await {
+            let result = match sender {
+                Some(s) => Self::send_on(s, uri.clone()).await,
+                None => match Self::open_connection(&uri).await {
+                    Ok(s) => {
+                        *sender = Some(s);
+                        Self::send_on(sender.as_mut().unwrap(), uri.clone()).await
+                    }
+                    Err(e) => Err(e),
+                },
+            };
+            match result {
                 Ok(bytes) => return Ok(bytes),
-                Err(e) if attempt + 1 < MAX_FETCH_RETRIES => {
-                    log::warn!(
-                        "shuffle fetch attempt {}/{} failed: {:?}; retrying in {}ms",
-                        attempt + 1,
-                        MAX_FETCH_RETRIES,
-                        e,
-                        delay_ms,
-                    );
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    delay_ms = delay_ms.saturating_mul(2);
+                Err(e) => {
+                    *sender = None; // drop a bad connection so the next attempt reconnects
+                    if attempt + 1 < MAX_FETCH_RETRIES {
+                        log::warn!(
+                            "shuffle fetch attempt {}/{} failed: {:?}; retrying in {}ms",
+                            attempt + 1,
+                            MAX_FETCH_RETRIES,
+                            e,
+                            delay_ms,
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        delay_ms = delay_ms.saturating_mul(2);
+                    } else {
+                        return Err(e);
+                    }
                 }
-                Err(e) => return Err(e),
             }
         }
         unreachable!()
     }
 
-    async fn fetch_chunk(uri: Uri) -> LibResult<Vec<u8>> {
+    /// Dial `uri`'s host and complete the HTTP/1.1 handshake, returning a sender that
+    /// can issue multiple requests over the one connection (keep-alive).
+    async fn open_connection(
+        uri: &Uri,
+    ) -> LibResult<hyper::client::conn::http1::SendRequest<Body>> {
         let host = uri.host().ok_or(ShuffleError::FailedFetchOp)?;
         let is_https = uri.scheme_str() == Some("https");
         let port = uri.port_u16().unwrap_or(if is_https { 443 } else { 80 });
@@ -326,32 +350,70 @@ impl ShuffleFetcher {
             tokio::net::TcpStream::connect((host, port)),
         )
         .await
-        .map_err(|_| ShuffleError::FailedFetchOp)? // elapsed → FailedFetchOp
-        .map_err(|_| ShuffleError::FailedFetchOp)?; // connect error → FailedFetchOp
+        .map_err(|e| {
+            log::error!("connect timeout to {host}:{port}: {e}");
+            ShuffleError::FailedFetchOp
+        })?
+        .map_err(|e| {
+            log::error!("connect error to {host}:{port}: {e} (kind={:?})", e.kind());
+            ShuffleError::FailedFetchOp
+        })?;
 
         // When TLS is compiled in and the URI scheme is https, use the global
         // TLS connector (set by init_shuffle when TLS is configured).
-        #[cfg(feature = "tls")]
-        if is_https && let Some(connector) = crate::env::get_shuffle_tls_connector() {
-            let domain = rustls::pki_types::ServerName::try_from(host.to_owned())
-                .map_err(|_| ShuffleError::FailedFetchOp)?;
-            let tls_stream = connector
-                .connect(domain, stream)
-                .await
-                .map_err(|_| ShuffleError::FailedFetchOp)?;
-            return Self::do_http_request(TokioIo::new(tls_stream), uri).await;
-        }
-
-        Self::do_http_request(TokioIo::new(stream), uri).await
+        let stream = match Self::try_tls_open(is_https, host, stream).await {
+            Ok(result) => return result,
+            Err(stream) => stream,
+        };
+        Self::handshake(TokioIo::new(stream)).await
     }
 
-    async fn do_http_request<IO>(io: TokioIo<IO>, uri: Uri) -> LibResult<Vec<u8>>
+    crate::cfg_tls! {
+    /// Attempt the handshake over TLS when `is_https` and a TLS connector is configured.
+    /// Returns `Err(stream)` (still holding the connection) so the caller falls
+    /// through to plain HTTP; `Ok(result)` if the TLS path was taken.
+    async fn try_tls_open(
+        is_https: bool,
+        host: &str,
+        stream: tokio::net::TcpStream,
+    ) -> Result<LibResult<hyper::client::conn::http1::SendRequest<Body>>, tokio::net::TcpStream> {
+        let Some(connector) = is_https.then(crate::env::get_shuffle_tls_connector).flatten()
+        else {
+            return Err(stream);
+        };
+        let domain = match rustls::pki_types::ServerName::try_from(host.to_owned()) {
+            Ok(d) => d,
+            Err(_) => return Ok(Err(ShuffleError::FailedFetchOp)),
+        };
+        let tls_stream = match connector.connect(domain, stream).await {
+            Ok(s) => s,
+            Err(_) => return Ok(Err(ShuffleError::FailedFetchOp)),
+        };
+        Ok(Self::handshake(TokioIo::new(tls_stream)).await)
+    }
+    }
+    crate::cfg_not_tls! {
+    async fn try_tls_open(
+        _is_https: bool,
+        _host: &str,
+        stream: tokio::net::TcpStream,
+    ) -> Result<LibResult<hyper::client::conn::http1::SendRequest<Body>>, tokio::net::TcpStream> {
+        Err(stream)
+    }
+    }
+
+    async fn handshake<IO>(
+        io: TokioIo<IO>,
+    ) -> LibResult<hyper::client::conn::http1::SendRequest<Body>>
     where
         IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        let (sender, conn) = hyper::client::conn::http1::handshake(io)
             .await
-            .map_err(|_| ShuffleError::FailedFetchOp)?;
+            .map_err(|e| {
+                log::error!("http1 handshake failed: {e}");
+                ShuffleError::FailedFetchOp
+            })?;
 
         tokio::spawn(async move {
             if let Err(err) = conn.await {
@@ -359,21 +421,35 @@ impl ShuffleFetcher {
             }
         });
 
+        Ok(sender)
+    }
+
+    /// Issue one request over an already-open keep-alive connection.
+    async fn send_on(
+        sender: &mut hyper::client::conn::http1::SendRequest<Body>,
+        uri: Uri,
+    ) -> LibResult<Vec<u8>> {
         let request = hyper::Request::builder()
             .uri(uri)
             .body(Body::default())
-            .map_err(|_| ShuffleError::FailedFetchOp)?;
+            .map_err(|e| {
+                log::error!("request build failed: {e}");
+                ShuffleError::FailedFetchOp
+            })?;
 
-        let response = sender
-            .send_request(request)
-            .await
-            .map_err(|_| ShuffleError::FailedFetchOp)?;
+        let response = sender.send_request(request).await.map_err(|e| {
+            log::error!("send_request failed: {e}");
+            ShuffleError::FailedFetchOp
+        })?;
 
         let body_bytes = response
             .into_body()
             .collect()
             .await
-            .map_err(|_| ShuffleError::FailedFetchOp)?
+            .map_err(|e| {
+                log::error!("response body collect failed: {e}");
+                ShuffleError::FailedFetchOp
+            })?
             .to_bytes();
 
         Ok(body_bytes.to_vec())

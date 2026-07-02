@@ -291,29 +291,7 @@ impl<T: Data> TypedRdd<T> {
         T: std::fmt::Display + Clone,
     {
         if uri.starts_with("s3://") {
-            #[cfg(feature = "s3")]
-            {
-                use crate::io::s3::s3_impl::{S3Uri, write_text};
-                let s3uri = S3Uri::parse(uri).ok_or_else(|| {
-                    BaseError::Other(format!("save_as_text_file: invalid S3 URI: {uri}"))
-                })?;
-                for (idx, partition) in self.collect_partitions()?.into_iter().enumerate() {
-                    let key = format!("{}/part-{idx}", s3uri.key.trim_end_matches('/'));
-                    let content: String = partition
-                        .into_iter()
-                        .map(|item| format!("{item}\n"))
-                        .collect();
-                    write_text(&s3uri.bucket, &key, content)
-                        .map_err(|e| BaseError::Other(e.to_string()))?;
-                }
-                return Ok(());
-            }
-            #[cfg(not(feature = "s3"))]
-            {
-                return Err(BaseError::Other(
-                    "save_as_text_file: s3:// URI requires the 's3' feature flag".to_owned(),
-                ));
-            }
+            return self.write_s3(uri);
         }
 
         let path = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri));
@@ -335,6 +313,38 @@ impl<T: Data> TypedRdd<T> {
         }
         Ok(())
     }
+
+    crate::cfg_s3! {
+    fn write_s3(&self, uri: &str) -> Result<(), BaseError>
+    where
+        T: std::fmt::Display + Clone,
+    {
+        use crate::io::s3::s3_impl::{S3Uri, write_text};
+        let s3uri = S3Uri::parse(uri).ok_or_else(|| {
+            BaseError::Other(format!("save_as_text_file: invalid S3 URI: {uri}"))
+        })?;
+        for (idx, partition) in self.collect_partitions()?.into_iter().enumerate() {
+            let key = format!("{}/part-{idx}", s3uri.key.trim_end_matches('/'));
+            let content: String = partition
+                .into_iter()
+                .map(|item| format!("{item}\n"))
+                .collect();
+            write_text(&s3uri.bucket, &key, content)
+                .map_err(|e| BaseError::Other(e.to_string()))?;
+        }
+        Ok(())
+    }
+    } // cfg_s3!
+    crate::cfg_not_s3! {
+    fn write_s3(&self, _uri: &str) -> Result<(), BaseError>
+    where
+        T: std::fmt::Display + Clone,
+    {
+        Err(BaseError::Other(
+            "save_as_text_file: s3:// URI requires the 's3' feature flag".to_owned(),
+        ))
+    }
+    } // cfg_not_s3!
 }
 
 impl<T: Data> TypedRdd<T> {

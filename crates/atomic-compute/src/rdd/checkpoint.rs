@@ -49,15 +49,8 @@ impl CheckpointStore {
     /// Parse a URI into a `CheckpointStore`.
     pub fn from_uri(uri: &str) -> Self {
         if uri.starts_with("s3://") {
-            #[cfg(feature = "s3")]
-            {
-                use crate::io::s3::s3_impl::S3Uri;
-                if let Some(s3) = S3Uri::parse(uri) {
-                    return CheckpointStore::S3 {
-                        bucket: s3.bucket,
-                        prefix: s3.key,
-                    };
-                }
+            if let Some(store) = s3_checkpoint_store(uri) {
+                return store;
             }
             log::warn!("CheckpointStore: s3:// URI requires 's3' feature; falling back to /tmp");
             CheckpointStore::Local(std::env::temp_dir())
@@ -78,8 +71,8 @@ impl CheckpointStore {
         }
     }
 
+    crate::cfg_s3! {
     /// S3 key for a given rdd_id / partition (S3 only).
-    #[cfg(feature = "s3")]
     pub fn s3_partition_key(&self, rdd_id: usize, partition: usize) -> Option<(&str, String)> {
         match self {
             CheckpointStore::S3 { bucket, prefix } => {
@@ -87,6 +80,23 @@ impl CheckpointStore {
             }
             CheckpointStore::Local(_) => None,
         }
+    }
+    } // cfg_s3!
+}
+
+crate::cfg_s3! {
+    fn s3_checkpoint_store(uri: &str) -> Option<CheckpointStore> {
+        use crate::io::s3::s3_impl::S3Uri;
+        let s3 = S3Uri::parse(uri)?;
+        Some(CheckpointStore::S3 {
+            bucket: s3.bucket,
+            prefix: s3.key,
+        })
+    }
+}
+crate::cfg_not_s3! {
+    fn s3_checkpoint_store(_uri: &str) -> Option<CheckpointStore> {
+        None
     }
 }
 

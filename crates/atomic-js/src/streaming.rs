@@ -24,6 +24,7 @@ use serde_json::Value as JV;
 /// blanket impl that would serialize `(A, B)` as one JS array argument.
 type ReduceFnRef = FunctionRef<FnArgs<(JV, JV)>, JV>;
 type StateUpdateFnRef = FunctionRef<FnArgs<(Vec<JV>, Option<JV>)>, Option<JV>>;
+type StateUpdateFn<'a> = Function<'a, FnArgs<(Vec<JV>, Option<JV>)>, Option<JV>>;
 
 /// A JS callback stored as a persistent napi reference so it can be called
 /// across scope boundaries.  `FunctionRef` implements `Send + Sync` and drops
@@ -60,8 +61,7 @@ impl StoredFn {
 
     fn from_state_update(f: Function<(Vec<JV>, Option<JV>), Option<JV>>) -> Result<Self> {
         // Same transmute rationale as from_reduce.
-        let f_fnargs: Function<FnArgs<(Vec<JV>, Option<JV>)>, Option<JV>> =
-            unsafe { std::mem::transmute(f) };
+        let f_fnargs: StateUpdateFn<'_> = unsafe { std::mem::transmute(f) };
         Ok(StoredFn::StateUpdate(f_fnargs.create_ref()?))
     }
 

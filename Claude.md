@@ -87,8 +87,13 @@ ID instead of shipping serialized closures. Distributed wire payloads use rkyv.
   DataFusion nodes + vector index. Uses OpenAI.
 - `atomic-py` / `atomic-js`: Python (PyO3/maturin) and Node.js (NAPI) bindings; mirror `TypedRdd`.
 - `atomic-worker`: standalone worker binary with embedded PyO3 + V8.
-- `atomic-cli`: cross-compilation and secure binary distribution to workers.
-- `atomic-k8s`: Kubernetes per-job worker allocator (`KubeWorkerAllocator`); behind the `k8s` feature.
+- `atomic-cli`: cross-compilation, secure binary distribution to workers, and ad-hoc
+  Kubernetes job submission (`atomic submit-k8s`); the latter behind the `k8s` feature.
+- `atomic-k8s`: Kubernetes per-job worker allocator (`KubeWorkerAllocator`) and the
+  driver `Job` spec builder for `atomic submit-k8s`; behind the `k8s` feature.
+- `atomic-bootstrap`: tiny fetch-and-exec binary, published as a generic container
+  image, that lets `atomic submit-k8s --binary` stage a driver binary to S3 and run it
+  with no per-job image build.
 - `atomic-utils`, `atomic-tests`: shared utilities and the integration suite.
 
 ## RDD API Convention

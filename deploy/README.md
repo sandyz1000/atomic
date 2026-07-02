@@ -54,6 +54,38 @@ ctx.with_workers(
 ).await?;
 ```
 
+## Ad-hoc submission (`atomic submit-k8s`)
+
+`helm install`/`helm upgrade` is for standing deployments — running one job still
+means editing `driver.args` and re-releasing. `atomic submit-k8s` (`atomic-cli` built
+with `--features k8s`) instead creates a single `batch/v1 Job` for one run and exits;
+the `spark-submit` equivalent. It needs the same RBAC as `allocator: kube` above —
+either a full `helm install --set allocator=kube`, or just the RBAC/ServiceAccount via
+`--set driver.enabled=false`.
+
+Two ways to get the driver binary into the pod — `--image` reuses the `docker
+build`/`push` flow below; `--binary` skips it entirely by staging the compiled binary
+to S3 and running it through `atomic-bootstrap`, a small generic fetch-and-exec image
+published once by the project (never built per job, never built per user):
+
+```bash
+# --image: same as the Build & deploy flow below, wrapped in a one-off Job.
+atomic submit-k8s --image myrepo/atomic:0.1.0 --namespace demo \
+  --dynamic-workers --worker-image myrepo/atomic:0.1.0 -- --my-job-flag foo
+
+# --binary: no image build at all.
+atomic build --target x86_64-unknown-linux-musl
+atomic submit-k8s --binary target/x86_64-unknown-linux-musl/release/my_app \
+  --namespace demo --s3-bucket my-staging-bucket \
+  --dynamic-workers --worker-image myrepo/atomic:0.1.0 -- --my-job-flag foo
+```
+
+`--dynamic-workers` makes the Kube allocator available to the submitted driver — the
+job's own `ctx.with_workers(...)` call still decides the count/CPU/memory, exactly as
+above. Omit it and pass `--workers dns:<svc>:<port>` as a trailing job arg instead to
+point at an existing worker StatefulSet. `kubectl logs -f job/<name> -n <namespace>
+-c driver` follows the run; there is no log-streaming built into the CLI itself.
+
 ## Build & deploy
 
 ```bash

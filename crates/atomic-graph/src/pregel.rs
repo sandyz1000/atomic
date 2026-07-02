@@ -50,7 +50,10 @@ where
     MergeF: BinaryTask<A> + Copy,
 {
     let ctx = graph.context().clone();
-    let n = ctx.default_parallelism().max(1);
+    // Cap fan-out at the vertex count so small graphs don't over-shuffle.
+    let n = (ctx.default_parallelism() as u64)
+        .min(graph.num_vertices())
+        .max(1) as usize;
     let edges = graph.edges.clone();
     let mut vertices = graph.vertices.clone();
 

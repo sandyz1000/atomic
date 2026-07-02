@@ -32,13 +32,14 @@ pub(crate) trait BatchEngine: Send + Sync {
     /// (e.g. Kafka offsets) only once delivery is confirmed. Default no-op.
     fn post_commit(&self, _epoch: u64) {}
 
+    crate::cfg_kafka! {
     /// Consumed offsets for the last batch from a Kafka source, ready to be
     /// committed inside a producer transaction. Returns `None` for non-Kafka sources
     /// and before the first batch. Delegates to the underlying `StreamSource`.
-    #[cfg(feature = "kafka")]
     fn pending_offsets(&self) -> Option<crate::kafka::OffsetCommit> {
         None
     }
+    } // cfg_kafka!
 }
 
 /// Stateless engine (4a): register the batch as `input`, run the SQL, emit the
@@ -55,10 +56,11 @@ impl BatchEngine for StatelessEngine {
         self.source.post_batch_commit(epoch);
     }
 
-    #[cfg(feature = "kafka")]
+    crate::cfg_kafka! {
     fn pending_offsets(&self) -> Option<crate::kafka::OffsetCommit> {
         self.source.pending_offsets()
     }
+    } // cfg_kafka!
 
     fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
         let batches = self.source.next_batch(epoch);
@@ -102,16 +104,31 @@ impl QueryRunner {
         // inside the sink's producer transaction instead of in a separate `post_commit`
         // call. This makes source-offset advancement and output-record visibility atomic —
         // a crash-restart neither re-produces the batch nor skips the source messages.
-        #[cfg(feature = "kafka")]
-        if let Some(offsets) = self.engine.pending_offsets() {
-            self.sink.add_batch_with_offsets(epoch, &out, &offsets)?;
-            // Offsets already committed inside the transaction — do NOT call post_commit.
+        // Offsets already committed inside the transaction — do NOT call post_commit.
+        if self.commit_kafka_offsets(epoch, &out)? {
             return Ok(());
         }
 
         self.sink.add_batch(epoch, &out)?;
         self.engine.post_commit(epoch);
         Ok(())
+    }
+
+    crate::cfg_kafka! {
+        /// Returns `true` if handled via a Kafka exactly-once transaction (caller must
+        /// not also call `post_commit`); `false` when there were no pending offsets.
+        fn commit_kafka_offsets(&self, epoch: u64, out: &[RecordBatch]) -> StructuredResult<bool> {
+            let Some(offsets) = self.engine.pending_offsets() else {
+                return Ok(false);
+            };
+            self.sink.add_batch_with_offsets(epoch, out, &offsets)?;
+            Ok(true)
+        }
+    }
+    crate::cfg_not_kafka! {
+        fn commit_kafka_offsets(&self, _epoch: u64, _out: &[RecordBatch]) -> StructuredResult<bool> {
+            Ok(false)
+        }
     }
 }
 

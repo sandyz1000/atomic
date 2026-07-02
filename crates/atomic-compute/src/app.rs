@@ -128,6 +128,10 @@ impl AtomicApp {
         // If discovery was via `dns:host:port`, keep the spec so the driver can
         // re-resolve it and pick up workers that scale in/out (K8s autoscaling).
         config.worker_dns = Self::worker_dns(&args).map(|d| (d.host, d.port));
+        // `Config::local`/`distributed_driver` default to AllocatorKind::Static; overlay
+        // ATOMIC_ALLOCATOR/ATOMIC_K8S_* so a driver launched by `atomic submit-k8s
+        // --dynamic-workers` can still reach AllocatorKind::Kube through this entry point.
+        (config.allocator, config.kube) = crate::env::allocator_from_env();
 
         let ctx = Context::new_with_config(config)?;
         Ok(AtomicApp {

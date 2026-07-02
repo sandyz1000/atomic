@@ -295,36 +295,8 @@ impl PyRdd {
     /// Accepts a local file path or, when built with the `s3` feature, an
     /// S3 URI (`s3://bucket/prefix`).
     pub fn save_as_text_file(&self, py: Python, path: String) -> PyResult<()> {
-        #[cfg(feature = "s3")]
         if path.starts_with("s3://") {
-            use atomic_compute::io::s3::s3_impl::{S3Uri, write_text};
-            let s3uri = S3Uri::parse(&path).ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "save_as_text_file: invalid S3 URI: {path}"
-                ))
-            })?;
-            let content: String = self
-                .elements
-                .iter()
-                .map(|item| {
-                    let s = item
-                        .bind(py)
-                        .str()
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-                    format!("{s}\n")
-                })
-                .collect();
-            let key = format!("{}/part-0", s3uri.key.trim_end_matches('/'));
-            write_text(&s3uri.bucket, &key, content)
-                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-            return Ok(());
-        }
-        #[cfg(not(feature = "s3"))]
-        if path.starts_with("s3://") {
-            return Err(pyo3::exceptions::PyIOError::new_err(
-                "save_as_text_file: s3:// URIs require the 's3' feature flag",
-            ));
+            return self.write_s3(py, &path);
         }
         use std::io::Write;
         let mut file = std::fs::File::create(&path)
@@ -457,5 +429,43 @@ impl PyRdd {
             self.num_partitions,
             self.context.is_distributed(),
         )
+    }
+}
+
+// A plain (non-`#[pymethods]`) impl block for private helpers — pyo3's proc-macro
+// only processes items inside a `#[pymethods]`-annotated block.
+impl PyRdd {
+    atomic_data::cfg_s3! {
+        fn write_s3(&self, py: Python, path: &str) -> PyResult<()> {
+            use atomic_compute::io::s3::s3_impl::{S3Uri, write_text};
+            let s3uri = S3Uri::parse(path).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "save_as_text_file: invalid S3 URI: {path}"
+                ))
+            })?;
+            let content: String = self
+                .elements
+                .iter()
+                .map(|item| {
+                    let s = item
+                        .bind(py)
+                        .str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    format!("{s}\n")
+                })
+                .collect();
+            let key = format!("{}/part-0", s3uri.key.trim_end_matches('/'));
+            write_text(&s3uri.bucket, &key, content)
+                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+            Ok(())
+        }
+    }
+    atomic_data::cfg_not_s3! {
+        fn write_s3(&self, _py: Python, _path: &str) -> PyResult<()> {
+            Err(pyo3::exceptions::PyIOError::new_err(
+                "save_as_text_file: s3:// URIs require the 's3' feature flag",
+            ))
+        }
     }
 }

@@ -61,7 +61,7 @@ atomic-k8s = { workspace = true, optional = true }
 # Embedded PyO3 thread-pool — each worker thread acquires the GIL per task.
 python = ["pyo3", "pythonize", "atomic-data/python"]
 # Embedded V8 (deno_core) — thread-local JsRuntime per tokio blocking thread.
-js = ["deno_core", "atomic-data/javascript"]
+js = ["deno_core", "atomic-data/js"]
 embedded-runtime = ["python", "js"]
 s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types", "base64"]
 # Enable TLS (mutual TLS) for driver↔worker TCP communication.

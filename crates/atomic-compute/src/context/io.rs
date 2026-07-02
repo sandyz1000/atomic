@@ -93,33 +93,7 @@ impl Context {
         use crate::io::{TextFileRdd, TextFileSource};
 
         let sources: Vec<TextFileSource> = if uri.starts_with("s3://") {
-            #[cfg(feature = "s3")]
-            {
-                use crate::io::s3::s3_impl::S3Uri;
-                if let Some(s3uri) = S3Uri::parse(uri) {
-                    let keys = crate::io::s3::s3_impl::list_keys(&s3uri.bucket, &s3uri.key);
-                    if keys.is_empty() {
-                        vec![TextFileSource::S3 {
-                            bucket: s3uri.bucket,
-                            key: s3uri.key,
-                        }]
-                    } else {
-                        keys.into_iter()
-                            .map(|k| TextFileSource::S3 {
-                                bucket: s3uri.bucket.clone(),
-                                key: k,
-                            })
-                            .collect()
-                    }
-                } else {
-                    vec![]
-                }
-            }
-            #[cfg(not(feature = "s3"))]
-            {
-                log::warn!("text_file: s3:// URI requested but 's3' feature is disabled");
-                vec![]
-            }
+            s3_sources(uri)
         } else {
             let path = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri));
             if path.is_dir() {
@@ -144,5 +118,37 @@ impl Context {
         rdds: &[Arc<dyn Rdd<Item = T>>],
     ) -> crate::error::ComputeResult<UnionRdd<T>> {
         UnionRdd::new(self.new_rdd_id(), rdds)
+    }
+}
+
+crate::cfg_s3! {
+    fn s3_sources(uri: &str) -> Vec<crate::io::TextFileSource> {
+        use crate::io::TextFileSource;
+        use crate::io::s3::s3_impl::S3Uri;
+        let Some(s3uri) = S3Uri::parse(uri) else {
+            return vec![];
+        };
+        let keys = crate::io::s3::s3_impl::list_keys(&s3uri.bucket, &s3uri.key);
+        if keys.is_empty() {
+            vec![TextFileSource::S3 {
+                bucket: s3uri.bucket,
+                key: s3uri.key,
+            }]
+        } else {
+            keys.into_iter()
+                .map(|k| TextFileSource::S3 {
+                    bucket: s3uri.bucket.clone(),
+                    key: k,
+                })
+                .collect()
+        }
+    }
+}
+
+crate::cfg_not_s3! {
+    fn s3_sources(uri: &str) -> Vec<crate::io::TextFileSource> {
+        let _ = uri;
+        log::warn!("text_file: s3:// URI requested but 's3' feature is disabled");
+        vec![]
     }
 }

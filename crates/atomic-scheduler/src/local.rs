@@ -167,7 +167,8 @@ impl LocalScheduler {
             .insert(jt.run_id, VecDeque::new());
 
         let mut results: Vec<Option<U>> = (0..jt.num_output_parts).map(|_| None).collect();
-        let mut fetch_failure_duration = Duration::new(0, 0);
+        // Timestamp of the oldest unresubmitted failure; None when jt.failed is empty.
+        let mut fetch_failure_start: Option<Instant> = None;
         let mut task_failure_counts: HashMap<(usize, usize), usize> = HashMap::new();
 
         self.submit_stage(jt.final_stage.clone(), jt.clone())
@@ -184,7 +185,6 @@ impl LocalScheduler {
         let mut num_finished = 0;
         while num_finished != jt.num_output_parts {
             let event_option = self.wait_for_event(jt.run_id, self.poll_timeout);
-            let start = Instant::now();
 
             if let Some(evt) = event_option {
                 log::debug!("event starting");
@@ -213,7 +213,7 @@ impl LocalScheduler {
                     FetchFailed(failed_vals) => {
                         self.on_event_failure(jt.clone(), failed_vals, evt.task.get_stage_id())
                             .await;
-                        fetch_failure_duration = start.elapsed();
+                        fetch_failure_start.get_or_insert_with(Instant::now);
                     }
                     Error(error) => {
                         let key = (evt.task.get_stage_id(), evt.task.get_task_id());
@@ -230,10 +230,11 @@ impl LocalScheduler {
                             self.max_failures,
                         );
                         let m = self.get_mutators();
-                        jt.failed
-                            .lock()
-                            .insert(m.fetch_from_stage_cache(evt.task.get_stage_id()));
-                        fetch_failure_duration = start.elapsed();
+                        let failed_stage = m.fetch_from_stage_cache(evt.task.get_stage_id());
+                        // submit_stage() no-ops for a stage still marked running.
+                        jt.running.lock().remove(&failed_stage);
+                        jt.failed.lock().insert(failed_stage);
+                        fetch_failure_start.get_or_insert_with(Instant::now);
                     }
                     OtherFailure(msg) => {
                         let key = (evt.task.get_stage_id(), evt.task.get_task_id());
@@ -250,24 +251,28 @@ impl LocalScheduler {
                             self.max_failures,
                         );
                         let m = self.get_mutators();
-                        jt.failed
-                            .lock()
-                            .insert(m.fetch_from_stage_cache(evt.task.get_stage_id()));
-                        fetch_failure_duration = start.elapsed();
+                        let failed_stage = m.fetch_from_stage_cache(evt.task.get_stage_id());
+                        jt.running.lock().remove(&failed_stage);
+                        jt.failed.lock().insert(failed_stage);
+                        fetch_failure_start.get_or_insert_with(Instant::now);
                     }
                 }
             }
-        }
 
-        if !jt.failed.lock().is_empty()
-            && fetch_failure_duration.as_millis() > self.resubmit_timeout
-        {
-            self.update_cache_locs().await?;
-            let failed_stages: Vec<Stage> = jt.failed.lock().iter().cloned().collect();
-            for stage in failed_stages {
-                self.submit_stage(stage, jt.clone()).await?;
+            // Checked every iteration, not just on fresh events, so a failure with no
+            // further events to wake the loop still gets resubmitted.
+            if let Some(since) = fetch_failure_start
+                && !jt.failed.lock().is_empty()
+                && since.elapsed().as_millis() > self.resubmit_timeout
+            {
+                self.update_cache_locs().await?;
+                let failed_stages: Vec<Stage> = jt.failed.lock().iter().cloned().collect();
+                for stage in failed_stages {
+                    self.submit_stage(stage, jt.clone()).await?;
+                }
+                jt.failed.lock().clear();
+                fetch_failure_start = None;
             }
-            jt.failed.lock().clear();
         }
 
         self.mutators.event_queues.remove(&jt.run_id);

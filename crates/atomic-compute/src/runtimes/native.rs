@@ -183,7 +183,14 @@ impl Default for ComputeEngine {
     fn default() -> Self {
         let mut dispatchers: HashMap<TaskRuntime, Box<dyn OpDispatcher>> = HashMap::new();
         dispatchers.insert(TaskRuntime::Native, Box::new(NativeDispatcher::new()));
-        #[cfg(feature = "python")]
+        add_python(&mut dispatchers);
+        add_js(&mut dispatchers);
+        ComputeEngine { dispatchers }
+    }
+}
+
+crate::cfg_python! {
+    fn add_python(dispatchers: &mut HashMap<TaskRuntime, Box<dyn OpDispatcher>>) {
         dispatchers.insert(
             TaskRuntime::Python,
             Box::new(crate::runtimes::py::PythonDispatcher::new(
@@ -192,13 +199,22 @@ impl Default for ComputeEngine {
                     .unwrap_or(4),
             )),
         );
-        #[cfg(feature = "js")]
+    }
+}
+crate::cfg_not_python! {
+    fn add_python(_dispatchers: &mut HashMap<TaskRuntime, Box<dyn OpDispatcher>>) {}
+}
+
+crate::cfg_js! {
+    fn add_js(dispatchers: &mut HashMap<TaskRuntime, Box<dyn OpDispatcher>>) {
         dispatchers.insert(
             TaskRuntime::JavaScript,
             Box::new(crate::runtimes::js::JsDispatcher::new()),
         );
-        ComputeEngine { dispatchers }
     }
+}
+crate::cfg_not_js! {
+    fn add_js(_dispatchers: &mut HashMap<TaskRuntime, Box<dyn OpDispatcher>>) {}
 }
 
 /// Disambiguates `resolve_input` output: either proceed with pipeline bytes, or
@@ -372,12 +388,12 @@ impl Backend for ComputeEngine {
     }
 }
 
+crate::cfg_kafka! {
 /// Worker-side Kafka Direct consume: assign+seek to offset range, poll to end, return messages.
 ///
 /// Returns rkyv-encoded `Vec<String>`.  Each message payload is decoded as UTF-8; invalid bytes
 /// are replaced with the Unicode replacement character so the pipeline is never aborted by one
 /// bad message.
-#[cfg(feature = "kafka")]
 pub(crate) fn kafka_consume_handler(
     payload: &atomic_data::distributed::KafkaConsumePayload,
 ) -> ComputeResult<Vec<u8>> {
@@ -443,6 +459,7 @@ pub(crate) fn kafka_consume_handler(
         .map(|b| b.to_vec())
         .map_err(|e| ComputeError::InvalidPayload(format!("KafkaConsume rkyv encode: {e}")))
 }
+} // cfg_kafka!
 
 /// Worker-side file-split read: open `path`, seek to `start_byte`, read UTF-8 lines
 /// up to `end_byte` (exclusive, or EOF when `None`), return rkyv-encoded `Vec<String>`.

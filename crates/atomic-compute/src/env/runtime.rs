@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use atomic_data::shuffle::config::ShuffleConfig;
 use once_cell::sync::Lazy;
 use tokio::runtime::{Handle, Runtime};
 
@@ -68,7 +69,6 @@ pub fn init_shuffle(
     config: &super::Config,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use atomic_data::shuffle::cache::{DashMapShuffleCache, SpillableShuffleCache};
-    use atomic_data::shuffle::config::ShuffleConfig;
     use atomic_data::shuffle::manager::ShuffleManager;
 
     // Serialize initialisation so the check-then-set below is atomic. Without this,
@@ -82,19 +82,13 @@ pub fn init_shuffle(
         return Ok(());
     }
 
-    #[cfg_attr(not(feature = "tls"), allow(unused_mut))]
     let mut shuffle_config = ShuffleConfig::new(
         config.local_ip,
         config.work_dir.clone(),
         config.shuffle_port,
         config.log.log_cleanup,
     );
-    #[cfg(feature = "tls")]
-    {
-        shuffle_config.tls_cert = config.tls_cert.clone();
-        shuffle_config.tls_key = config.tls_key.clone();
-        shuffle_config.tls_ca = config.tls_ca_cert.clone();
-    }
+    apply_tls_config(&mut shuffle_config, config);
 
     let cache: Arc<dyn atomic_data::shuffle::cache::ShuffleCache> =
         if let Some(threshold) = config.shuffle_spill_threshold {
@@ -131,11 +125,32 @@ pub fn init_shuffle(
 
     // When TLS is active, build and store a client-side TLS connector so that
     // ShuffleFetcher can fetch from https:// shuffle server URIs.
-    #[cfg(feature = "tls")]
-    if shuffle_config.tls_enabled()
-        && let (Some(cert), Some(key), Some(ca)) =
+    set_tls_connector(&shuffle_config, config);
+
+    Ok(())
+}
+
+crate::cfg_tls! {
+    fn apply_tls_config(shuffle_config: &mut ShuffleConfig, config: &super::Config) {
+        shuffle_config.tls_cert = config.tls_cert.clone();
+        shuffle_config.tls_key = config.tls_key.clone();
+        shuffle_config.tls_ca = config.tls_ca_cert.clone();
+    }
+}
+crate::cfg_not_tls! {
+    fn apply_tls_config(_shuffle_config: &mut ShuffleConfig, _config: &super::Config) {}
+}
+
+crate::cfg_tls! {
+    fn set_tls_connector(shuffle_config: &ShuffleConfig, config: &super::Config) {
+        if !shuffle_config.tls_enabled() {
+            return;
+        }
+        let (Some(cert), Some(key), Some(ca)) =
             (&config.tls_cert, &config.tls_key, &config.tls_ca_cert)
-    {
+        else {
+            return;
+        };
         use crate::tls::tls_impl::{TlsConnector, make_client_config};
         match make_client_config(cert, key, ca) {
             Ok(client_cfg) => {
@@ -145,6 +160,7 @@ pub fn init_shuffle(
             Err(e) => log::warn!("Failed to build shuffle TLS connector: {e}"),
         }
     }
-
-    Ok(())
+}
+crate::cfg_not_tls! {
+    fn set_tls_connector(_shuffle_config: &ShuffleConfig, _config: &super::Config) {}
 }
