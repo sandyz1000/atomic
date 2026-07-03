@@ -69,7 +69,7 @@ impl DistributedScheduler {
     /// Forget every cache location held by `endpoint` — the worker is gone, so its
     /// cached partitions no longer exist. Affected partitions lose their holder, so
     /// `plan_cache_dispatch` falls back to `Recompute` for them.
-    pub(crate) fn invalidate_cache_for_worker(&self, endpoint: SocketAddrV4) {
+    pub(crate) fn invalidate_worker_cache(&self, endpoint: SocketAddrV4) {
         for mut entry in self.cache_endpoints.iter_mut() {
             for locs in entry.value_mut().iter_mut() {
                 locs.retain(|a| *a != endpoint);
@@ -94,7 +94,16 @@ impl DistributedScheduler {
     /// Forget every state shard held by `endpoint` — the worker is gone (or its
     /// in-memory state is lost). Affected shards fall back to `pin_state_shard` (modulo)
     /// and reload from their checkpoint on the next batch.
-    pub(crate) fn invalidate_state_for_worker(&self, endpoint: SocketAddrV4) {
+    pub(crate) fn invalidate_worker_state(&self, endpoint: SocketAddrV4) {
+        let before = self.state_locs.len();
         self.state_locs.retain(|_, v| *v != endpoint);
+        let dropped = before - self.state_locs.len();
+        if dropped > 0 {
+            log::warn!(
+                "worker {endpoint} removed: {dropped} state shard(s) re-route to other \
+                 workers; they recover from the query's checkpoint_dir when it is on \
+                 shared storage, otherwise their accumulated state resets"
+            );
+        }
     }
 }

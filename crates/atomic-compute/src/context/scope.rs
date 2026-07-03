@@ -99,6 +99,7 @@ impl Context {
             accumulator_store: Arc::clone(&self.accumulator_store),
             allocator: self.allocator.clone(),
             scoped: true,
+            active_shuffle_stages: Arc::clone(&self.active_shuffle_stages),
         }
     }
 }

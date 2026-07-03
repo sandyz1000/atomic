@@ -14,14 +14,16 @@ pub struct FetchFailedVals {
     pub reduce_id: usize,
 }
 
+/// Task-completion event consumed by the local scheduler's event loop.
+/// Accumulator deltas travel in `TaskResultEnvelope::accumulator_deltas` on the
+/// task-dispatch path, not here.
 pub struct CompletionEvent {
     pub task: TaskOption,
-    pub reason: TastEndReason,
+    pub reason: TaskEndReason,
     pub result: Option<Box<dyn Data>>,
-    pub accum_updates: HashMap<i64, Box<dyn Any + Send + Sync>>,
 }
 
-pub enum TastEndReason {
+pub enum TaskEndReason {
     Success,
     FetchFailed(FetchFailedVals),
     Error(Box<dyn Error + Send + Sync>),
@@ -33,7 +35,7 @@ pub trait DAGScheduler: Scheduler {
 
     fn task_ended(
         task: TaskOption,
-        reason: TastEndReason,
+        reason: TaskEndReason,
         result: Box<dyn Any>,
         accum_updates: HashMap<i64, Box<dyn Any>>,
     );

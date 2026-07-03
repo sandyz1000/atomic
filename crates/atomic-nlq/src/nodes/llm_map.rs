@@ -21,7 +21,7 @@ use futures::StreamExt;
 
 use crate::config::NlqConfig;
 use crate::llm::LlmClient;
-use crate::nodes::llm_filter::record_batch_to_json_rows;
+use crate::nodes::llm_filter::batch_to_json_rows;
 
 /// LLM-based row transformer. Adds a new column to each row.
 #[derive(Debug, Clone)]
@@ -326,7 +326,7 @@ async fn llm_map_chunk(
     max_chunk_bytes: usize,
     batch: &RecordBatch,
 ) -> crate::errors::Result<Vec<serde_json::Value>> {
-    let rows = record_batch_to_json_rows(batch);
+    let rows = batch_to_json_rows(batch);
     let type_hint = match output_type {
         DataType::Utf8 => "strings",
         DataType::Int64 | DataType::Int32 => "integers",

@@ -73,13 +73,20 @@ impl Context {
 
     /// Merge incoming accumulator deltas from a completed task result into driver-side values.
     pub fn merge_accumulator_deltas(&self, deltas: &[(usize, Vec<u8>)]) {
-        for (id, delta_bytes) in deltas {
-            if let Some(mut entry) = self.accumulator_store.get_mut(id) {
-                let merge_fn = entry.value().1.clone();
-                match merge_fn(entry.value().0.clone(), delta_bytes.clone()) {
-                    Ok(new_bytes) => entry.value_mut().0 = new_bytes,
-                    Err(e) => log::error!("accumulator id={id}: dropping bad delta: {e}"),
-                }
+        merge_deltas_into(&self.accumulator_store, deltas);
+    }
+}
+
+/// Store-level delta merge, shared by the context method and the
+/// `DistributedScheduler`'s accumulator sink (which captures the store by `Arc`
+/// before the `Context` exists).
+pub(crate) fn merge_deltas_into(store: &super::AccumulatorStore, deltas: &[(usize, Vec<u8>)]) {
+    for (id, delta_bytes) in deltas {
+        if let Some(mut entry) = store.get_mut(id) {
+            let merge_fn = entry.value().1.clone();
+            match merge_fn(entry.value().0.clone(), delta_bytes.clone()) {
+                Ok(new_bytes) => entry.value_mut().0 = new_bytes,
+                Err(e) => log::error!("accumulator id={id}: dropping bad delta: {e}"),
             }
         }
     }

@@ -202,37 +202,19 @@ impl Context {
             if let Dependency::Shuffle(shuffle_dep) = dep {
                 let parent_partitions = shuffle_dep.encode_partitions()?;
                 let spec = &shuffle_dep.spec;
-
-                let shuffle_op = PipelineOp {
-                    op_id: format!("shuffle-map-{}", spec.shuffle_id),
-                    action: TaskAction::ShuffleMap {
-                        shuffle_id: spec.shuffle_id,
-                        num_output_partitions: spec.num_output_partitions,
-                    },
-                    runtime: TaskRuntime::Native,
-                    payload: bincode::encode_to_vec(
-                        crate::shuffle_map::ShuffleMapPayload {
-                            type_id: spec.type_id.to_string(),
-                            partitioner_spec: spec.partitioner_spec.clone(),
-                        },
-                        bincode::config::standard(),
-                    )
-                    .map_err(|e| {
-                        ComputeError::InvalidPayload(format!("shuffle-map payload encode: {e}"))
-                    })?,
-                };
-
-                let dep_preceding = spec.preceding_ops.clone();
-                let base_ops = if !dep_preceding.is_empty() {
-                    dep_preceding
-                } else {
-                    preceding_ops.clone()
-                };
-                let mut ops = base_ops;
-                ops.push(shuffle_op);
+                let ops = Self::shuffle_map_ops(spec, &preceding_ops)?;
 
                 let shuffle_id = spec.shuffle_id;
                 let num_output_partitions = spec.num_output_partitions;
+                // Recorded before dispatch so the fetch-failure recovery hook can
+                // replay a single map partition if a worker dies before the reduce.
+                self.active_shuffle_stages.insert(
+                    shuffle_id,
+                    super::ActiveShuffleStage {
+                        dep: shuffle_dep.clone(),
+                        ops: ops.clone(),
+                    },
+                );
                 env::Env::run_in_async_rt(|| {
                     futures::executor::block_on(sched.run_shuffle_map_stage(
                         shuffle_id,
@@ -249,6 +231,106 @@ impl Context {
         }
 
         Ok(())
+    }
+
+    /// The exact op pipeline a shuffle-map task runs for `spec`: the staged (or
+    /// caller-supplied) preceding ops followed by the `ShuffleMap` op itself.
+    fn shuffle_map_ops(
+        spec: &atomic_data::dependency::ShuffleSpec,
+        fallback_preceding: &[PipelineOp],
+    ) -> ComputeResult<Vec<PipelineOp>> {
+        let shuffle_op = PipelineOp {
+            op_id: format!("shuffle-map-{}", spec.shuffle_id),
+            action: TaskAction::ShuffleMap {
+                shuffle_id: spec.shuffle_id,
+                num_output_partitions: spec.num_output_partitions,
+            },
+            runtime: TaskRuntime::Native,
+            payload: bincode::encode_to_vec(
+                crate::shuffle_map::ShuffleMapPayload {
+                    type_id: spec.type_id.to_string(),
+                    partitioner_spec: spec.partitioner_spec.clone(),
+                },
+                bincode::config::standard(),
+            )
+            .map_err(|e| {
+                ComputeError::InvalidPayload(format!("shuffle-map payload encode: {e}"))
+            })?,
+        };
+        let mut ops = if spec.preceding_ops.is_empty() {
+            fallback_preceding.to_vec()
+        } else {
+            spec.preceding_ops.clone()
+        };
+        ops.push(shuffle_op);
+        Ok(ops)
+    }
+
+    /// Wire the driver's fetch-failure recovery: when a reduce task reports a lost
+    /// map output, recompute that one map partition on a live worker and re-register
+    /// its fresh shuffle URI so only the fetching stage retries. Without this, the
+    /// local scheduler would recompute the map partition on the driver — wrong for
+    /// staged pipelines, whose driver-side parent RDD is an empty placeholder.
+    pub(super) fn install_map_output_recovery(
+        driver_scheduler: &atomic_scheduler::LocalScheduler,
+        dist: Arc<atomic_scheduler::DistributedScheduler>,
+        stages: super::ActiveShuffleStages,
+    ) {
+        driver_scheduler.set_map_output_recovery(Arc::new(move |shuffle_id, map_id| {
+            let (dep, ops) = match stages.get(&shuffle_id) {
+                Some(entry) => (Arc::clone(&entry.dep), entry.ops.clone()),
+                None => {
+                    log::error!(
+                        "map-output recovery: no dispatched stage recorded for \
+                         shuffle {shuffle_id}"
+                    );
+                    return false;
+                }
+            };
+            let partition = match dep.encode_partitions() {
+                Ok(mut parts) if map_id < parts.len() => parts.swap_remove(map_id),
+                Ok(parts) => {
+                    log::error!(
+                        "map-output recovery: map {map_id} out of bounds for \
+                         shuffle {shuffle_id} ({} partitions)",
+                        parts.len()
+                    );
+                    return false;
+                }
+                Err(e) => {
+                    log::error!(
+                        "map-output recovery: re-encoding shuffle {shuffle_id} input \
+                         failed: {e}"
+                    );
+                    return false;
+                }
+            };
+
+            // The hook runs inside the local scheduler's blocking event loop, so the
+            // dispatch future is spawned onto the shared runtime and awaited over a
+            // channel instead of a nested `block_on`.
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let dist = Arc::clone(&dist);
+            env::Env::run_in_async_rt(move || {
+                tokio::spawn(async move {
+                    let res = dist
+                        .rerun_shuffle_map_partition(shuffle_id, map_id, ops, partition)
+                        .await;
+                    let _ = tx.send(res);
+                });
+            });
+            match rx.recv() {
+                Ok(Ok(())) => true,
+                Ok(Err(e)) => {
+                    log::error!("map-output recovery dispatch failed: {e}");
+                    false
+                }
+                Err(e) => {
+                    log::error!("map-output recovery task dropped: {e}");
+                    false
+                }
+            }
+        }));
     }
 
     pub fn run_job<T: Data, U: Data + Clone, F>(

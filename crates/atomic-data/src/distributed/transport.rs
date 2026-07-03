@@ -9,6 +9,9 @@ pub enum TransportFrameKind {
     TaskEnvelope = 3,
     TaskResultEnvelope = 4,
     WorkerCapabilities = 5,
+    /// Connection-opening auth frame; payload is the raw cluster token bytes.
+    /// Required as the first frame when the receiver has an auth token configured.
+    Auth = 6,
 }
 
 impl TryFrom<u8> for TransportFrameKind {
@@ -19,6 +22,7 @@ impl TryFrom<u8> for TransportFrameKind {
             3 => Ok(Self::TaskEnvelope),
             4 => Ok(Self::TaskResultEnvelope),
             5 => Ok(Self::WorkerCapabilities),
+            6 => Ok(Self::Auth),
             _ => Err(BaseError::Other(format!(
                 "unknown transport frame kind: {}",
                 value

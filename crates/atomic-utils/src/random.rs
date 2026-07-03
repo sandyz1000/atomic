@@ -43,12 +43,12 @@ pub fn get_default_rng() -> Pcg64 {
     )
 }
 
-pub fn get_default_rng_from_seed(seed: u64) -> Pcg64 {
+pub fn rng_from_seed(seed: u64) -> Pcg64 {
     Pcg64::seed_from_u64(seed)
 }
 
 /// Get a new rng with random thread local random seed
-fn get_rng_with_random_seed() -> Pcg64 {
+fn random_rng() -> Pcg64 {
     Pcg64::seed_from_u64(rand::random::<u64>())
 }
 
@@ -94,8 +94,8 @@ impl<T: Clone + 'static> RandomSampler<T> for PoissonSampler {
                     let dist = Poisson::new(prob).unwrap();
 
                     let mut rng: Pcg64 = match seed {
-                        Some(s) => get_default_rng_from_seed(s),
-                        None => get_rng_with_random_seed(),
+                        Some(s) => rng_from_seed(s),
+                        None => random_rng(),
                     };
 
                     Box::new(items.flat_map(move |item| {
@@ -152,8 +152,8 @@ impl<T: 'static> RandomSampler<T> for BernoulliSampler {
                 };
 
                 let mut rng: Pcg64 = match seed {
-                    Some(s) => get_default_rng_from_seed(s),
-                    None => get_rng_with_random_seed(),
+                    Some(s) => rng_from_seed(s),
+                    None => random_rng(),
                 };
 
                 Box::new(items.filter(move |_| mine.sample(gap_sampling.as_mut(), &mut rng) > 0))
@@ -218,8 +218,8 @@ impl<T: 'static> RandomSampler<T> for BernoulliCellSampler {
         Box::new(
             move |items: Box<dyn Iterator<Item = T>>| -> Box<dyn Iterator<Item = T>> {
                 let mut rng: Pcg64 = match seed {
-                    Some(s) => get_default_rng_from_seed(s),
-                    None => get_rng_with_random_seed(),
+                    Some(s) => rng_from_seed(s),
+                    None => random_rng(),
                 };
 
                 Box::new(items.filter(move |_| mine.sample(&mut rng) > 0))
@@ -245,7 +245,7 @@ impl GapSamplingReplacement {
             q: (-fraction).exp(),
             fraction,
             epsilon,
-            rng: get_rng_with_random_seed(),
+            rng: random_rng(),
             count_for_dropping: 0,
         };
         // Advance to first sample as part of object construction.
@@ -310,11 +310,7 @@ impl GapSamplingReplacement {
 ///
 /// The smallest sampling rate supported is 1e-10 (in order to avoid running into the limit of the
 /// RNG's resolution).
-pub fn compute_fraction_for_sample_size(
-    sample_size_lower_bound: u64,
-    total: u64,
-    with_replacement: bool,
-) -> f64 {
+pub fn sample_fraction(sample_size_lower_bound: u64, total: u64, with_replacement: bool) -> f64 {
     if with_replacement {
         poisson_bounds::get_upper_bound(sample_size_lower_bound as f64) / total as f64
     } else {

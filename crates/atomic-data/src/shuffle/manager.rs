@@ -483,6 +483,14 @@ impl ShuffleService {
     }
 }
 
+fn request_is_authorized(req: &Request<Incoming>) -> bool {
+    crate::env::bearer_authorized(
+        req.headers()
+            .get(hyper::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
 impl Service<Request<Incoming>> for ShuffleService {
     type Response = Response<Body>;
     type Error = ShuffleError;
@@ -493,8 +501,16 @@ impl Service<Request<Incoming>> for ShuffleService {
     fn call(&self, req: Request<Incoming>) -> Self::Future {
         let uri = req.uri().clone();
         let cache = self.cache.clone();
+        let authorized = request_is_authorized(&req);
 
         Box::pin(async move {
+            if !authorized {
+                log::warn!("shuffle server: rejected unauthenticated request for {uri}");
+                return Response::builder()
+                    .status(401)
+                    .body(Full::new(Bytes::new()))
+                    .map_err(|_| ShuffleError::InternalError);
+            }
             let service = ShuffleService::new(cache);
             match service.response_type(&uri) {
                 Ok(response) => match response {

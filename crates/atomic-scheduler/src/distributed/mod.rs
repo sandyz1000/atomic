@@ -52,6 +52,12 @@ pub(crate) const MAX_WORKER_FAILURES: u32 = 3;
 /// inside the agent runner) need far more headroom than the 5-minute CPU-task default.
 pub(crate) const AGENT_STEP_DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
 
+/// Driver-side merge of `TaskResultEnvelope::accumulator_deltas`, installed by the
+/// compute context. Called once per committed task result (duplicate speculative
+/// results are dropped before the sink fires); a retried stage re-runs its tasks,
+/// so accumulators in retried stages may over-count — same caveat as local mode.
+pub type AccumulatorSink = Arc<dyn Fn(&[(usize, Vec<u8>)]) + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct DistributedScheduler {
     pub(crate) mutators: Mutators,
@@ -106,6 +112,10 @@ pub struct DistributedScheduler {
 
     pub(crate) scheduler_lock: Arc<Mutex<bool>>,
     pub(crate) live_listener_bus: LiveListenerBus,
+
+    /// Merges worker-reported accumulator deltas into the driver store; `None`
+    /// until the compute context installs it.
+    pub(crate) accumulator_sink: Arc<std::sync::OnceLock<AccumulatorSink>>,
 }
 
 impl DistributedScheduler {
@@ -138,6 +148,21 @@ impl DistributedScheduler {
             live_listener_bus,
             job_cancel_tokens: Arc::new(DashMap::new()),
             driver_fingerprint: 0,
+            accumulator_sink: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// Install the driver-side accumulator-delta merge. First call wins.
+    pub fn set_accumulator_sink(&self, sink: AccumulatorSink) {
+        let _ = self.accumulator_sink.set(sink);
+    }
+
+    /// Forward non-empty accumulator deltas to the installed sink, if any.
+    pub(crate) fn merge_accumulator_deltas(&self, deltas: &[(usize, Vec<u8>)]) {
+        if !deltas.is_empty()
+            && let Some(sink) = self.accumulator_sink.get()
+        {
+            sink(deltas);
         }
     }
 
@@ -372,7 +397,18 @@ pub fn start_register_server(port: u16, scheduler: Arc<DistributedScheduler>) {
                         service_fn(move |req: Request<hyper::body::Incoming>| {
                             let sched = Arc::clone(&sched);
                             async move {
-                                let resp = if req.method() == Method::POST
+                                let authorized = atomic_data::env::bearer_authorized(
+                                    req.headers()
+                                        .get(hyper::header::AUTHORIZATION)
+                                        .and_then(|value| value.to_str().ok()),
+                                );
+                                let resp = if !authorized {
+                                    log::warn!("register: rejected unauthenticated request");
+                                    Response::builder()
+                                        .status(StatusCode::UNAUTHORIZED)
+                                        .body(Full::new(Bytes::from("unauthorized")))
+                                        .unwrap()
+                                } else if req.method() == Method::POST
                                     && req.uri().path() == "/register"
                                 {
                                     let body_bytes = match req.collect().await {
@@ -445,6 +481,22 @@ mod tests {
         TaskResultEnvelope, TaskRuntime, TransportFrameKind, WireDecode, WireEncode,
         encode_transport_frame, parse_transport_header,
     };
+
+    #[test]
+    fn accumulator_sink_merges() {
+        let sched = DistributedScheduler::new(4, true);
+        // No sink installed: silently ignored.
+        sched.merge_accumulator_deltas(&[(1, vec![1])]);
+
+        let seen: Arc<Mutex<Vec<(usize, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = Arc::clone(&seen);
+        sched.set_accumulator_sink(Arc::new(move |deltas| {
+            sink_seen.lock().extend_from_slice(deltas);
+        }));
+        sched.merge_accumulator_deltas(&[(7, vec![42])]);
+        sched.merge_accumulator_deltas(&[]);
+        assert_eq!(*seen.lock(), vec![(7, vec![42_u8])]);
+    }
 
     #[test]
     fn drain_idle() {
@@ -688,7 +740,7 @@ mod tests {
         sched.register_state_locs(&[4u64], w2);
 
         // Invalidate w1.
-        sched.invalidate_state_for_worker(w1);
+        sched.invalidate_worker_state(w1);
 
         // w1's shards are gone.
         assert!(!sched.state_locs.contains_key(&1));

@@ -36,7 +36,10 @@ pub use crate::distributed::{
     WorkerAllocator, start_register_server,
 };
 pub use crate::{base::NativeScheduler, error::LibResult};
-pub use crate::{distributed::DistributedScheduler, local::LocalScheduler};
+pub use crate::{
+    distributed::DistributedScheduler,
+    local::{LocalScheduler, MapOutputRecovery},
+};
 
 pub trait Scheduler {
     fn start(&self);

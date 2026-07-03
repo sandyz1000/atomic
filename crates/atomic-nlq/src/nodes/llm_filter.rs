@@ -276,7 +276,7 @@ async fn llm_filter_chunk(
     max_chunk_bytes: usize,
     batch: &RecordBatch,
 ) -> crate::errors::Result<Vec<bool>> {
-    let rows = record_batch_to_json_rows(batch);
+    let rows = batch_to_json_rows(batch);
     let rows_str = serde_json::to_string(&rows).unwrap_or_default();
 
     if rows_str.len() > max_chunk_bytes {
@@ -306,7 +306,7 @@ async fn llm_filter_chunk(
     Ok(bools)
 }
 
-pub fn record_batch_to_json_rows(batch: &RecordBatch) -> Vec<serde_json::Value> {
+pub fn batch_to_json_rows(batch: &RecordBatch) -> Vec<serde_json::Value> {
     let mut rows = Vec::with_capacity(batch.num_rows());
     for row_idx in 0..batch.num_rows() {
         let mut map = serde_json::Map::new();

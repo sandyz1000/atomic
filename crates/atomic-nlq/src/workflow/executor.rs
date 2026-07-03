@@ -345,7 +345,7 @@ async fn run_javascript(
 /// IPC is written with `FileWriter` in `run_builtin`, so we read with `FileReader`.
 /// Fields with unsupported types fall back to the string representation of the type name.
 fn ipc_to_json_rows(bufs: &[Vec<u8>], limit: usize) -> Vec<serde_json::Value> {
-    use crate::nodes::llm_filter::record_batch_to_json_rows;
+    use crate::nodes::llm_filter::batch_to_json_rows;
     use datafusion::arrow::ipc::reader::FileReader;
 
     let mut rows: Vec<serde_json::Value> = Vec::new();
@@ -354,7 +354,7 @@ fn ipc_to_json_rows(bufs: &[Vec<u8>], limit: usize) -> Vec<serde_json::Value> {
             continue;
         };
         for batch in reader.flatten() {
-            for row in record_batch_to_json_rows(&batch) {
+            for row in batch_to_json_rows(&batch) {
                 rows.push(row);
                 if rows.len() >= limit {
                     break 'outer;

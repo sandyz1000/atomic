@@ -62,6 +62,42 @@ pub fn sort_shuffle_threshold() -> usize {
         .unwrap_or(200)
 }
 
+/// Shared cluster auth token. When set, worker TCP connections must open with a
+/// matching `Auth` transport frame and shuffle/registration HTTP requests must
+/// carry `Authorization: Bearer <token>`. Set on both driver and workers from
+/// `Config::auth_token` (`ATOMIC_AUTH_TOKEN`); `None` disables authentication
+/// (trusted-network deployments).
+pub static AUTH_TOKEN: RwLock<Option<String>> = RwLock::new(None);
+
+pub fn set_auth_token(token: String) {
+    *AUTH_TOKEN.write().unwrap() = Some(token);
+}
+
+pub fn get_auth_token() -> Option<String> {
+    AUTH_TOKEN.read().unwrap().clone()
+}
+
+/// Constant-time check of `candidate` against the configured token.
+/// Returns `true` when no token is configured (auth disabled).
+pub fn auth_token_matches(candidate: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    match &*AUTH_TOKEN.read().unwrap() {
+        Some(token) => token.as_bytes().ct_eq(candidate).into(),
+        None => true,
+    }
+}
+
+/// Validate an HTTP `Authorization` header value (`"Bearer <token>"`) against the
+/// configured token. Returns `true` when no token is configured (auth disabled).
+pub fn bearer_authorized(auth_header: Option<&str>) -> bool {
+    if AUTH_TOKEN.read().unwrap().is_none() {
+        return true;
+    }
+    auth_header
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| auth_token_matches(token.as_bytes()))
+}
+
 /// Base directory for `MemoryAndDisk` / `DiskOnly` partition spill files.
 /// Set by `Context` during init (`rdd-cache/` under the job work_dir).
 /// `None` means disk storage levels fall back to `MemoryOnly`.

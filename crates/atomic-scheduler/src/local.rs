@@ -20,13 +20,23 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 
 use crate::base::{Mutators, NativeScheduler};
-use crate::dag::{CompletionEvent, FetchFailedVals, TastEndReason};
+use crate::dag::{CompletionEvent, FetchFailedVals, TaskEndReason};
 use crate::error::{LibResult, SchedulerError};
 use crate::job::JobTracker;
 use crate::listener::{
     JobEndListener, JobListener, JobStartListener, LiveListenerBus, NoOpListener,
 };
 use crate::stage::Stage;
+
+/// Recovery hook for lost distributed map outputs: `(shuffle_id, map_id) → recovered`.
+///
+/// Installed by a distributed driver context. On a reduce-side fetch failure the
+/// scheduler clears the stale tracker slot and calls this hook, which recomputes
+/// the lost map partition on a live worker and re-registers its fresh URI. When it
+/// returns `true` only the fetching stage is retried; the map stage is never
+/// recomputed on the driver (distributed lineage may be a staged placeholder with
+/// no local data).
+pub type MapOutputRecovery = Arc<dyn Fn(usize, usize) -> bool + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub struct LocalScheduler {
@@ -41,6 +51,8 @@ pub struct LocalScheduler {
     master: bool,
     scheduler_lock: Arc<Mutex<()>>,
     live_listener_bus: LiveListenerBus,
+    /// Distributed map-output recovery hook; `None` in pure local mode.
+    map_output_recovery: Arc<std::sync::OnceLock<MapOutputRecovery>>,
 }
 
 impl LocalScheduler {
@@ -64,7 +76,14 @@ impl LocalScheduler {
             master,
             scheduler_lock: Arc::new(Mutex::new(())),
             live_listener_bus,
+            map_output_recovery: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Install the distributed map-output recovery hook. First call wins;
+    /// later calls are ignored (the hook is process-lifetime, like the tracker).
+    pub fn set_map_output_recovery(&self, hook: MapOutputRecovery) {
+        let _ = self.map_output_recovery.set(hook);
     }
 
     /// Run an approximate job on the given RDD and pass all the results to an ApproximateEvaluator
@@ -184,6 +203,10 @@ impl LocalScheduler {
 
         let mut num_finished = 0;
         while num_finished != jt.num_output_parts {
+            if let Some(reason) = self.mutators.take_job_abort(jt.run_id) {
+                self.mutators.event_queues.remove(&jt.run_id);
+                return Err(SchedulerError::JobAborted(reason));
+            }
             let event_option = self.wait_for_event(jt.run_id, self.poll_timeout);
 
             if let Some(evt) = event_option {
@@ -204,7 +227,7 @@ impl LocalScheduler {
                     .get_mut(&stage)
                     .unwrap()
                     .remove(&evt.task);
-                use super::dag::TastEndReason::*;
+                use super::dag::TaskEndReason::*;
                 match evt.reason {
                     Success => {
                         self.on_event_success(evt, &mut results, &mut num_finished, jt.clone())
@@ -301,7 +324,7 @@ impl LocalScheduler {
                 LocalScheduler::handle_completion_event(
                     event_queues,
                     task,
-                    TastEndReason::Success,
+                    TaskEndReason::Success,
                     result_data,
                 );
             }
@@ -314,13 +337,13 @@ impl LocalScheduler {
                         shuffle_id,
                         map_id,
                         server_uri,
-                    }) => TastEndReason::FetchFailed(FetchFailedVals {
+                    }) => TaskEndReason::FetchFailed(FetchFailedVals {
                         server_uri: server_uri.clone(),
                         shuffle_id: *shuffle_id,
                         map_id: *map_id,
                         reduce_id: 0,
                     }),
-                    _ => TastEndReason::OtherFailure(format!("Task execution failed: {}", err)),
+                    _ => TaskEndReason::OtherFailure(format!("Task execution failed: {}", err)),
                 };
                 LocalScheduler::handle_completion_event(
                     event_queues,
@@ -335,9 +358,8 @@ impl LocalScheduler {
     fn handle_completion_event(
         event_queues: Arc<DashMap<usize, VecDeque<CompletionEvent>>>,
         task: TaskOption,
-        reason: TastEndReason,
+        reason: TaskEndReason,
         result: Box<dyn Data>,
-        // TODO: accumvalues needs to be done
     ) {
         let result = Some(result);
         let run_id = match &task {
@@ -349,7 +371,6 @@ impl LocalScheduler {
                 task,
                 reason,
                 result,
-                accum_updates: HashMap::new(),
             });
         } else {
             log::debug!("ignoring completion event for DAG Job");
@@ -361,6 +382,74 @@ impl LocalScheduler {
 impl NativeScheduler for LocalScheduler {
     fn get_mutators(&self) -> Mutators {
         self.mutators.clone()
+    }
+
+    /// Overrides the base handler to route lost *distributed* map outputs to the
+    /// installed [`MapOutputRecovery`] hook. The base behavior — recompute the map
+    /// partition on the driver from lineage — is only correct in local mode: a
+    /// distributed staged pipeline's parent RDD is an empty placeholder, so a
+    /// driver-local recompute would register an empty bucket and silently drop data.
+    async fn on_event_failure<T: Data, U: Data, F, L>(
+        &self,
+        jt: Arc<JobTracker<F, U, T, L>>,
+        failed_vals: FetchFailedVals,
+        stage_id: usize,
+    ) where
+        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync,
+        L: JobListener,
+    {
+        let FetchFailedVals {
+            server_uri,
+            shuffle_id,
+            map_id,
+            ..
+        } = failed_vals;
+
+        let m = self.get_mutators();
+        // The stage that hit the fetch failure re-runs once recovery is done.
+        let failed_stage = m.fetch_from_stage_cache(stage_id);
+        jt.running.lock().remove(&failed_stage);
+        jt.failed.lock().insert(failed_stage);
+
+        if let Some(recover) = self.map_output_recovery.get() {
+            // Another reduce partition may have already recovered this map output.
+            let current = m.get_map_output_uri(shuffle_id, map_id);
+            if current.is_some() && current.as_deref() != Some(server_uri.as_str()) {
+                log::info!(
+                    "fetch failed: shuffle {shuffle_id} map {map_id} already re-registered \
+                     at {current:?}; retrying the fetching stage only"
+                );
+                return;
+            }
+            m.unregister_map_output(shuffle_id, map_id, server_uri.clone());
+            if recover(shuffle_id, map_id) {
+                log::warn!(
+                    "fetch failed: shuffle {shuffle_id} map {map_id} on {server_uri} — \
+                     recomputed on a live worker; retrying the fetching stage"
+                );
+                return;
+            }
+            // No local fallback: an unfilled tracker slot is silently skipped by the
+            // reduce fetch, so completing the job would drop that partition's data.
+            m.abort_job(
+                jt.run_id,
+                format!(
+                    "lost map output (shuffle {shuffle_id} map {map_id} on {server_uri}) \
+                     could not be recomputed on any live worker"
+                ),
+            );
+            return;
+        }
+
+        log::warn!(
+            "fetch failed: shuffle {shuffle_id} map {map_id} on {server_uri} — \
+             invalidating the lost map output and resubmitting its stage for recompute"
+        );
+        m.remove_output_loc_from_stage(shuffle_id, map_id, &server_uri);
+        m.unregister_map_output(shuffle_id, map_id, server_uri);
+        jt.failed
+            .lock()
+            .insert(m.fetch_from_shuffle_to_cache(shuffle_id));
     }
 
     /// Every single task is run in the local thread pool

@@ -144,6 +144,12 @@ pub struct Config {
     pub tls_cert: Option<std::path::PathBuf>,
     /// Path to this process's TLS private key (PEM). Required when `tls_ca_cert` is set.
     pub tls_key: Option<std::path::PathBuf>,
+    /// Shared cluster auth token. When set, worker TCP connections must open with a
+    /// matching `Auth` frame and shuffle/registration HTTP requests must carry
+    /// `Authorization: Bearer <token>`. Must be identical on the driver and every
+    /// worker. `None` (default) disables authentication — only safe on a trusted
+    /// network. Env var: `ATOMIC_AUTH_TOKEN`.
+    pub auth_token: Option<String>,
     /// TCP port for the worker self-registration HTTP endpoint (`POST /register`).
     /// When set, the driver starts an HTTP listener; workers can POST a
     /// `RegisterRequest` JSON body to dynamically join the cluster at runtime.
@@ -243,6 +249,7 @@ impl Config {
             tls_ca_cert: None,
             tls_cert: None,
             tls_key: None,
+            auth_token: std::env::var(format!("{PREFIX}AUTH_TOKEN")).ok(),
             register_port: None,
             sort_shuffle_threshold: None,
             drain_timeout_ms: DEFAULT_DRAIN_TIMEOUT_MS,
@@ -272,6 +279,7 @@ impl Config {
             tls_ca_cert: None,
             tls_cert: None,
             tls_key: None,
+            auth_token: std::env::var(format!("{PREFIX}AUTH_TOKEN")).ok(),
             register_port: None,
             sort_shuffle_threshold: None,
             drain_timeout_ms: DEFAULT_DRAIN_TIMEOUT_MS,
@@ -301,6 +309,7 @@ impl Config {
             tls_ca_cert: None,
             tls_cert: None,
             tls_key: None,
+            auth_token: std::env::var(format!("{PREFIX}AUTH_TOKEN")).ok(),
             register_port: None,
             sort_shuffle_threshold: None,
             drain_timeout_ms: DEFAULT_DRAIN_TIMEOUT_MS,
@@ -420,6 +429,8 @@ impl Config {
             .ok()
             .map(std::path::PathBuf::from);
 
+        let auth_token = std::env::var(format!("{PREFIX}AUTH_TOKEN")).ok();
+
         let register_port = std::env::var(format!("{PREFIX}REGISTER_PORT"))
             .ok()
             .and_then(|s| s.parse::<u16>().ok());
@@ -458,6 +469,7 @@ impl Config {
             tls_ca_cert,
             tls_cert,
             tls_key,
+            auth_token,
             register_port,
             sort_shuffle_threshold,
             drain_timeout_ms,

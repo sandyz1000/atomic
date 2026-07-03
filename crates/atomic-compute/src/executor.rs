@@ -170,12 +170,30 @@ impl Executor {
     /// Handle a single accepted connection (plain TCP or TLS): read one transport frame,
     /// execute it, write the response. This runs concurrently for up to `max_concurrent_tasks`
     /// connections.
+    ///
+    /// When a cluster auth token is configured, the connection must open with a
+    /// matching `Auth` frame; anything else is dropped without a response.
     async fn handle_connection<S>(self: Arc<Self>, mut stream: S) -> ComputeResult<Signal>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         log::debug!("received new task @{} executor", self.port);
-        let (frame_kind, payload) = self.read_transport_frame(&mut stream).await?;
+        let (mut frame_kind, mut payload) = self.read_transport_frame(&mut stream).await?;
+        if atomic_data::env::get_auth_token().is_some() {
+            if frame_kind != TransportFrameKind::Auth
+                || !atomic_data::env::auth_token_matches(&payload)
+            {
+                log::warn!(
+                    "executor @{}: rejected unauthenticated connection",
+                    self.port
+                );
+                return Ok(Signal::Continue);
+            }
+            (frame_kind, payload) = self.read_transport_frame(&mut stream).await?;
+        } else if frame_kind == TransportFrameKind::Auth {
+            // Client sends a token but this worker has none configured: ignore it.
+            (frame_kind, payload) = self.read_transport_frame(&mut stream).await?;
+        }
         let exec_clone = Arc::clone(&self);
         let (result_kind, result_payload) =
             spawn_blocking(move || exec_clone.handle_transport_frame(frame_kind, payload))
@@ -314,9 +332,30 @@ impl Executor {
             if stream.read_exact(&mut buf).await.is_err() {
                 continue;
             }
-            let data: Signal = match serde_json::from_slice(&buf) {
-                Ok(s) => s,
-                Err(_) => continue,
+            let data: Signal = match serde_json::from_slice::<SignalEnvelope>(&buf) {
+                Ok(envelope) => {
+                    let token = envelope.token.as_deref().unwrap_or("");
+                    if !atomic_data::env::auth_token_matches(token.as_bytes()) {
+                        log::warn!(
+                            "signal handler @{}: rejected signal with bad token",
+                            self.port
+                        );
+                        continue;
+                    }
+                    envelope.signal
+                }
+                // Bare `Signal` payload: valid only while auth is disabled.
+                Err(_) => match serde_json::from_slice::<Signal>(&buf) {
+                    Ok(s) if atomic_data::env::get_auth_token().is_none() => s,
+                    Ok(_) => {
+                        log::warn!(
+                            "signal handler @{}: rejected unauthenticated signal",
+                            self.port
+                        );
+                        continue;
+                    }
+                    Err(_) => continue,
+                },
             };
             match data {
                 Signal::ShutDownError => {
@@ -387,6 +426,15 @@ pub enum Signal {
     ShutDownError,
     ShutDownGracefully,
     Continue,
+}
+
+/// Wire form of a shutdown signal. `token` must match the cluster auth token
+/// when one is configured; a bare `Signal` payload is accepted only with auth
+/// disabled.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SignalEnvelope {
+    pub token: Option<String>,
+    pub signal: Signal,
 }
 
 #[cfg(test)]

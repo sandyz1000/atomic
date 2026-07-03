@@ -29,6 +29,10 @@ pub enum SchedulerError {
     #[error("max task failures reached: {0}")]
     MaxTaskFailures(String),
 
+    /// A job was aborted because lost shuffle output could not be recovered.
+    #[error("job aborted: {0}")]
+    JobAborted(String),
+
     #[error(transparent)]
     PartialJobError(#[from] PartialJobError),
 

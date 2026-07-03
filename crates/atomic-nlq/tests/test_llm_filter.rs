@@ -1,4 +1,4 @@
-use atomic_nlq::nodes::llm_filter::{LlmFilterNode, record_batch_to_json_rows};
+use atomic_nlq::nodes::llm_filter::{LlmFilterNode, batch_to_json_rows};
 use atomic_nlq::optimizer::llm_batching_rule::LlmBatchingRule;
 use datafusion::arrow::array::{Int64Array, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -54,7 +54,7 @@ fn test_batch_to_json() {
     )
     .unwrap();
 
-    let rows = record_batch_to_json_rows(&batch);
+    let rows = batch_to_json_rows(&batch);
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["name"], serde_json::json!("alice"));
     assert_eq!(rows[0]["score"], serde_json::json!(10));
@@ -66,6 +66,6 @@ fn test_record_batch_empty() {
     let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
     let batch =
         RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(Vec::<i64>::new()))]).unwrap();
-    let rows = record_batch_to_json_rows(&batch);
+    let rows = batch_to_json_rows(&batch);
     assert!(rows.is_empty());
 }

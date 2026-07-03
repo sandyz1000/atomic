@@ -1,3 +1,7 @@
+use atomic_data::accumulator::MergeFn;
+use atomic_data::dependency::ErasedShuffleDependency;
+use atomic_data::distributed::PipelineOp;
+use atomic_scheduler::{LocalScheduler, Schedulers};
 use std::net::SocketAddrV4;
 use std::path::PathBuf;
 use std::sync::{
@@ -5,9 +9,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
-
-use atomic_data::accumulator::MergeFn;
-use atomic_scheduler::{LocalScheduler, Schedulers};
 
 use crate::env::{Config, DeploymentMode};
 use crate::error::{ComputeError, ComputeResult};
@@ -50,7 +51,21 @@ pub struct Context {
     /// Its `Drop` must not run driver cleanup — it shares `work_dir`/`address_map`
     /// with the parent context, which still owns them.
     pub(crate) scoped: bool,
+    /// Distributed shuffle stages seen by `run_pending_shuffle_stages`, keyed by
+    /// shuffle id. The fetch-failure recovery hook replays a single lost map
+    /// partition from the stored dependency + ops. Entries live as long as the
+    /// context (like the `MapOutputTracker`'s per-shuffle state).
+    pub(crate) active_shuffle_stages: ActiveShuffleStages,
 }
+
+/// One distributed shuffle-map stage as dispatched: the dependency supplies the
+/// input partition bytes, `ops` is the exact pipeline each map task ran.
+pub(crate) struct ActiveShuffleStage {
+    pub(crate) dep: Arc<ErasedShuffleDependency>,
+    pub(crate) ops: Vec<PipelineOp>,
+}
+
+pub(crate) type ActiveShuffleStages = Arc<dashmap::DashMap<usize, ActiveShuffleStage>>;
 
 impl Drop for Context {
     fn drop(&mut self) {

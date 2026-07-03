@@ -78,6 +78,12 @@ pub fn init_shuffle(
     static INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _init_guard = INIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
+    // Both driver and worker call init_shuffle, so this is the one place the
+    // cluster auth token becomes visible to the transport and shuffle layers.
+    if let Some(token) = &config.auth_token {
+        atomic_data::env::set_auth_token(token.clone());
+    }
+
     if atomic_data::env::get_shuffle_server_uri().is_some() {
         return Ok(());
     }

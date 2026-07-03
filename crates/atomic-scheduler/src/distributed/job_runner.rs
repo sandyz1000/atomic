@@ -76,6 +76,7 @@ impl DistributedScheduler {
             if !result.held_state_ids.is_empty() {
                 self.register_state_locs(&result.held_state_ids, worker_addr);
             }
+            self.merge_accumulator_deltas(&result.accumulator_deltas);
             *guard = Some(result);
             self.taskid_to_slaveid
                 .insert(format!("{partition_id}"), worker_addr.to_string());
@@ -502,7 +503,7 @@ impl DistributedScheduler {
                                         "cache evict-miss: rdd partition {partition_id}; \
                                          falling back to recompute"
                                     );
-                                    sched.invalidate_cache_for_worker(worker_addr);
+                                    sched.invalidate_worker_cache(worker_addr);
                                     *holder_ip_cell.lock() = None;
                                     task = fb;
                                     continue;

@@ -224,9 +224,6 @@ pub trait NativeScheduler: Send + Sync {
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
         L: JobListener,
     {
-        // TODO: logging
-        // TODO: add to Accumulator
-
         match &completed_event.task {
             TaskOption::ResultTask(rt) => {
                 let result = completed_event.result.take().ok_or(SchedulerError::Other)?;
@@ -559,6 +556,11 @@ pub struct Mutators {
     /// Adaptive coalescing threshold in bytes (0 = disabled).
     /// Copied from `Config::coalesce_shuffle_threshold_bytes` at context init.
     pub coalesce_threshold_bytes: u64,
+    /// Per-job abort reasons (`run_id → reason`). Set by failure handlers that
+    /// cannot recover (e.g. lost distributed map output with no live recompute
+    /// path); drained by the event loop, which fails the job loudly instead of
+    /// completing with silently missing partitions.
+    pub job_aborts: Arc<DashMap<usize, String>>,
 }
 
 impl Mutators {
@@ -573,6 +575,7 @@ impl Mutators {
             next_task_id: Arc::new(AtomicUsize::new(0)),
             next_stage_id: Arc::new(AtomicUsize::new(0)),
             coalesce_threshold_bytes: 0,
+            job_aborts: Arc::new(DashMap::new()),
         }
     }
 
@@ -609,6 +612,46 @@ impl Mutators {
         if let Some(tracker) = &self.map_output_tracker {
             tracker.unregister_map_output(shuffle_id, map_id, server_uri)
         }
+    }
+
+    /// Register a single recovered map-output slot. Returns `false` when no
+    /// tracker is installed or the slot is unknown.
+    #[inline]
+    pub fn register_map_output(
+        &self,
+        shuffle_id: usize,
+        map_id: usize,
+        server_uri: String,
+    ) -> bool {
+        match &self.map_output_tracker {
+            Some(tracker) => tracker
+                .register_map_output(shuffle_id, map_id, server_uri)
+                .is_ok(),
+            None => false,
+        }
+    }
+
+    /// Current URI registered for one map output, if any.
+    #[inline]
+    pub fn get_map_output_uri(&self, shuffle_id: usize, map_id: usize) -> Option<String> {
+        self.map_output_tracker
+            .as_ref()?
+            .server_uris
+            .get(&shuffle_id)?
+            .get(map_id)?
+            .clone()
+    }
+
+    /// Mark `run_id` for loud failure; the event loop returns `JobAborted`.
+    #[inline]
+    pub fn abort_job(&self, run_id: usize, reason: String) {
+        self.job_aborts.insert(run_id, reason);
+    }
+
+    /// Take (and clear) the abort reason for `run_id`, if one was set.
+    #[inline]
+    pub fn take_job_abort(&self, run_id: usize) -> Option<String> {
+        self.job_aborts.remove(&run_id).map(|(_, reason)| reason)
     }
 
     #[inline]

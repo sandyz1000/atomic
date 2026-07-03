@@ -115,8 +115,34 @@ impl OpDispatcher for NativeDispatcher {
                     && let Some(dir) = &payload.checkpoint_dir
                 {
                     let path = shard_checkpoint_path(dir, payload.state_id);
-                    if let Ok(bytes) = std::fs::read(&path) {
-                        prev = Some(bytes);
+                    match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            log::info!(
+                                "state shard {}: cold start, reloaded {} bytes from {}",
+                                payload.state_id,
+                                bytes.len(),
+                                path.display(),
+                            );
+                            prev = Some(bytes);
+                        }
+                        // First batch of a fresh query — or a reassigned shard whose
+                        // checkpoint lives on another worker's local disk; a shared
+                        // checkpoint_dir is required for cross-worker recovery.
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            log::debug!(
+                                "state shard {}: no checkpoint at {}, starting empty",
+                                payload.state_id,
+                                path.display(),
+                            );
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "state shard {}: checkpoint at {} unreadable ({e}); \
+                                 starting empty — accumulated state is lost",
+                                payload.state_id,
+                                path.display(),
+                            );
+                        }
                     }
                 }
                 let (new_state, emitted) =

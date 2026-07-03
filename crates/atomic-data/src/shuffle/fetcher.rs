@@ -429,13 +429,14 @@ impl ShuffleFetcher {
         sender: &mut hyper::client::conn::http1::SendRequest<Body>,
         uri: Uri,
     ) -> LibResult<Vec<u8>> {
-        let request = hyper::Request::builder()
-            .uri(uri)
-            .body(Body::default())
-            .map_err(|e| {
-                log::error!("request build failed: {e}");
-                ShuffleError::FailedFetchOp
-            })?;
+        let mut builder = hyper::Request::builder().uri(uri);
+        if let Some(token) = crate::env::get_auth_token() {
+            builder = builder.header(hyper::header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let request = builder.body(Body::default()).map_err(|e| {
+            log::error!("request build failed: {e}");
+            ShuffleError::FailedFetchOp
+        })?;
 
         let response = sender.send_request(request).await.map_err(|e| {
             log::error!("send_request failed: {e}");

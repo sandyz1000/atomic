@@ -20,6 +20,10 @@ impl DistributedScheduler {
         target: SocketAddrV4,
     ) -> LibResult<TaskResultEnvelope> {
         let mut stream = TcpStream::connect(target).await?;
+        if let Some(token) = atomic_data::env::get_auth_token() {
+            Self::write_transport_frame(&mut stream, TransportFrameKind::Auth, token.as_bytes())
+                .await?;
+        }
         let payload = task.encode_wire()?;
         Self::write_transport_frame(&mut stream, TransportFrameKind::TaskEnvelope, &payload)
             .await?;

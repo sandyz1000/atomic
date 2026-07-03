@@ -93,6 +93,14 @@ and recovery. Each shard reports back to the driver so it stays on the same
 worker across batches. The source read distributes independently through the
 direct-pull model.
 
+Each shard writes its post-merge state to `<checkpoint_dir>/shard-<id>.bin`
+after every batch and reloads it when the shard has no in-memory state. When a
+worker dies, the driver re-routes its shards to surviving workers on the next
+batch. Those workers can only reload the checkpoints they can read: put
+`checkpoint_dir` on storage shared by all workers (NFS, a mounted volume) to
+recover state across workers. With a worker-local directory, a re-routed
+shard restarts empty and logs a warning.
+
 ### Exactly-once Kafka
 
 With the Kafka feature, a Kafka source running with auto-commit disabled and a

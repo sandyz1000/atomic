@@ -74,6 +74,7 @@ impl Context {
             accumulator_store: Arc::new(dashmap::DashMap::new()),
             allocator: None,
             scoped: false,
+            active_shuffle_stages: Arc::new(dashmap::DashMap::new()),
         }))
     }
 
@@ -152,12 +153,24 @@ impl Context {
             log::info!("worker registration endpoint started on port {port}");
         }
 
-        let scheduler = atomic_scheduler::Schedulers::Distributed(scheduler);
         let driver_scheduler = Arc::new(LocalScheduler::new_with_coalesce(
             20,
             false,
             config.coalesce_shuffle_threshold_bytes,
         ));
+        let active_shuffle_stages: super::ActiveShuffleStages = Arc::new(dashmap::DashMap::new());
+        Context::install_map_output_recovery(
+            &driver_scheduler,
+            Arc::clone(&scheduler),
+            Arc::clone(&active_shuffle_stages),
+        );
+
+        let accumulator_store: super::AccumulatorStore = Arc::new(dashmap::DashMap::new());
+        let sink_store = Arc::clone(&accumulator_store);
+        scheduler.set_accumulator_sink(Arc::new(move |deltas| {
+            super::broadcast::merge_deltas_into(&sink_store, deltas);
+        }));
+        let scheduler = atomic_scheduler::Schedulers::Distributed(scheduler);
 
         let allocator = Context::build_allocator(&config, &address_map);
 
@@ -170,9 +183,10 @@ impl Context {
             distributed_driver: true,
             work_dir: job_work_dir,
             broadcast_store: Arc::new(dashmap::DashMap::new()),
-            accumulator_store: Arc::new(dashmap::DashMap::new()),
+            accumulator_store,
             allocator: Some(allocator),
             scoped: false,
+            active_shuffle_stages,
         }))
     }
 
@@ -287,7 +301,17 @@ impl Context {
     /// TCP handshake with a worker: send a `WorkerCapabilities` request frame and
     /// decode the response. Retries for up to 10 seconds on transient failures.
     pub(crate) fn probe_worker(endpoint: SocketAddrV4) -> ComputeResult<WorkerCapabilities> {
-        let frame = encode_transport_frame(TransportFrameKind::WorkerCapabilities, &[]);
+        let mut frame = Vec::new();
+        if let Some(token) = atomic_data::env::get_auth_token() {
+            frame.extend_from_slice(&encode_transport_frame(
+                TransportFrameKind::Auth,
+                token.as_bytes(),
+            ));
+        }
+        frame.extend_from_slice(&encode_transport_frame(
+            TransportFrameKind::WorkerCapabilities,
+            &[],
+        ));
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut last_err = None;
 
@@ -348,7 +372,11 @@ impl Context {
                 socket_addr.ip(),
                 socket_addr.port()
             );
-            match serde_json::to_vec(&Signal::ShutDownGracefully) {
+            let envelope = crate::executor::SignalEnvelope {
+                token: atomic_data::env::get_auth_token(),
+                signal: Signal::ShutDownGracefully,
+            };
+            match serde_json::to_vec(&envelope) {
                 Err(e) => error!("Failed to serialise shutdown signal: {}", e),
                 Ok(json) => {
                     let addr = format!("{}:{}", socket_addr.ip(), socket_addr.port() + 10);

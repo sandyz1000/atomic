@@ -47,6 +47,28 @@ The `Config::builder()` fluent API maps directly to the env vars below.
 | `ATOMIC_HEARTBEAT_INTERVAL_SECS` | `heartbeat_interval_secs` | `0` (disabled) | How often the driver probes each worker's `/health` endpoint |
 | `ATOMIC_HEARTBEAT_TIMEOUT_MS` | `heartbeat_timeout_ms` | `2000` | Per-probe timeout in milliseconds |
 
+When a worker dies after a shuffle-map stage completes, the driver recomputes the
+lost map partitions on live workers and retries the fetching stage. If no live
+worker can recompute a lost partition, the job fails with `JobAborted` rather
+than completing with missing data.
+
+---
+
+## Authentication
+
+| Env var | Config field | Default | Description |
+|---|---|---|---|
+| `ATOMIC_AUTH_TOKEN` | `auth_token` | `None` (disabled) | Shared cluster secret. Must be identical on the driver and every worker. |
+
+When set, every worker TCP connection must open with a matching auth frame, and
+shuffle-server and worker-registration HTTP requests must carry
+`Authorization: Bearer <token>`. Requests without a valid token are rejected.
+
+When unset, any process that can reach a worker's task port can execute
+registered tasks and read shuffle data. Run without a token only on a network
+where every peer is trusted. The token authenticates peers but does not encrypt
+traffic — combine it with TLS (below) on untrusted networks.
+
 ---
 
 ## TLS (mTLS for worker communication)

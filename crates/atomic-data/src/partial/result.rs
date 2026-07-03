@@ -46,7 +46,7 @@ where
 }
 
 #[inline(always)]
-fn _internal_get_final_value<R>(this: Arc<PartialResult<R>>) -> Result<R>
+fn final_value_blocking<R>(this: Arc<PartialResult<R>>) -> Result<R>
 where
     R: Clone + Debug + Send + Sync + 'static,
 {
@@ -113,9 +113,8 @@ where
     R: Clone + Debug + Send + Sync + 'static,
 {
     pub fn new(initial_value: R, is_final: bool) -> PartialResult<R> {
-        let _get_final_value = Arc::new(|this: Arc<PartialResult<R>>| -> Result<R> {
-            _internal_get_final_value(this)
-        });
+        let _get_final_value =
+            Arc::new(|this: Arc<PartialResult<R>>| -> Result<R> { final_value_blocking(this) });
 
         let on_complete = Arc::new(
             |this: Arc<PartialResult<R>>,
