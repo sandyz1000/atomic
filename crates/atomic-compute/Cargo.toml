@@ -24,6 +24,7 @@ rand.workspace = true
 parking_lot.workspace = true
 log.workspace = true
 env_logger = { workspace = true }
+clap = { workspace = true }
 uuid.workspace = true
 async-trait.workspace = true
 statrs.workspace = true

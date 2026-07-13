@@ -35,24 +35,22 @@ pub struct NlqContext {
 }
 
 impl NlqContext {
-    pub fn build(config: NlqConfig) -> Self {
+    pub fn build(config: NlqConfig) -> Result<Self> {
         Self::build_inner(config, None)
     }
 
     pub fn build_with_compute(
         config: NlqConfig,
         sc: Arc<atomic_compute::context::Context>,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::build_inner(config, Some(sc))
     }
 
     fn build_inner(
         config: NlqConfig,
         compute: Option<Arc<atomic_compute::context::Context>>,
-    ) -> Self {
-        if let Err(e) = config.validate() {
-            panic!("NlqConfig is invalid: {e}");
-        }
+    ) -> Result<Self> {
+        config.validate()?;
         let config = Arc::new(config);
         let client: Arc<dyn LlmClient> = match config.provider {
             LlmProvider::OpenAi => Arc::new(OpenAiClient::new(
@@ -93,13 +91,13 @@ impl NlqContext {
         ));
         let agent_loop = AgentLoop::new(planner, executor, config.clone());
 
-        Self {
+        Ok(Self {
             sql_ctx,
             agent_loop,
             registry,
             config,
             vector_indexes,
-        }
+        })
     }
 
     /// Register an RDD-backed table (requires `build_with_compute`).

@@ -9,7 +9,7 @@
 //! ```rust,ignore
 //! use atomic_nlq::{NlqContext, NlqConfig};
 //!
-//! let ctx = NlqContext::build_with_compute(NlqConfig::default(), compute_ctx);
+//! let ctx = NlqContext::build_with_compute(NlqConfig::default(), compute_ctx)?;
 //! ctx.register_rdd("orders", orders_rdd)?;
 //! let result = ctx.query("find customers who bought luxury items").await?;
 //! println!("{}", result.answer);

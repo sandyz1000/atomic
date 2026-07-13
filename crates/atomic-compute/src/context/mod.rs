@@ -102,7 +102,7 @@ impl Context {
     /// Prefer [`Context::new_with_config`] for new Rust programs; this exists for
     /// Python/JS bindings and legacy code where explicit config is not practical.
     pub fn new() -> ComputeResult<Arc<Self>> {
-        let mut config = Config::from_env();
+        let mut config = Config::from_env()?;
         if config.mode == DeploymentMode::Distributed
             && config.workers.is_empty()
             && let Ok(hosts) = crate::hosts::Hosts::get()

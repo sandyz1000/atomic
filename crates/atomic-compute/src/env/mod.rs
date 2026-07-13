@@ -16,6 +16,14 @@ pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 30_000;
 /// Env var namespace shared by [`Config::from_env`] and [`allocator_from_env`].
 const PREFIX: &str = "ATOMIC_";
 
+/// Read `ATOMIC_<suffix>` and parse it as `T`, yielding `None` when the variable
+/// is unset or unparseable.
+fn env_opt<T: std::str::FromStr>(suffix: &str) -> Option<T> {
+    std::env::var(format!("{PREFIX}{suffix}"))
+        .ok()
+        .and_then(|s| s.parse().ok())
+}
+
 /// Configuration for a worker process.
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
@@ -194,6 +202,12 @@ pub enum ConfigError {
 
     #[error("{0} must not be 0")]
     ZeroPort(String),
+
+    #[error("ATOMIC_LOCAL_IP is required in distributed mode")]
+    MissingLocalIp,
+
+    #[error("ATOMIC_SLAVE_PORT is required for worker processes")]
+    MissingSlavePort,
 }
 
 /// Read `ATOMIC_ALLOCATOR`/`ATOMIC_K8S_*` from the environment. Shared by
@@ -323,7 +337,7 @@ impl Config {
     /// Use this when you cannot explicitly construct `Config` at the entry point
     /// (e.g. Python/JS bindings, legacy code). Prefers explicit constructors for
     /// new Rust programs.
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
 
         let mode = std::env::var(format!("{PREFIX}DEPLOYMENT_MODE"))
@@ -345,40 +359,22 @@ impl Config {
             })
             .unwrap_or(LogLevel::Info);
 
-        let log_cleanup = std::env::var(format!("{PREFIX}LOG_CLEANUP"))
-            .ok()
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(!cfg!(debug_assertions));
+        let log_cleanup = env_opt::<bool>("LOG_CLEANUP").unwrap_or(!cfg!(debug_assertions));
 
-        let local_ip: Ipv4Addr = std::env::var(format!("{PREFIX}LOCAL_IP"))
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| {
-                if mode == DeploymentMode::Distributed {
-                    panic!("ATOMIC_LOCAL_IP is required in distributed mode");
-                }
-                Ipv4Addr::LOCALHOST
-            });
+        let local_ip: Ipv4Addr = match env_opt::<Ipv4Addr>("LOCAL_IP") {
+            Some(ip) => ip,
+            None if mode == DeploymentMode::Distributed => return Err(ConfigError::MissingLocalIp),
+            None => Ipv4Addr::LOCALHOST,
+        };
 
-        let shuffle_port = std::env::var(format!("{PREFIX}SHUFFLE_SERVICE_PORT"))
-            .ok()
-            .and_then(|s| s.parse().ok());
+        let shuffle_port = env_opt::<u16>("SHUFFLE_SERVICE_PORT");
 
-        let slave_deployment = std::env::var(format!("{PREFIX}SLAVE_DEPLOYMENT"))
-            .ok()
-            .and_then(|s| s.parse::<bool>().ok())
-            .unwrap_or(false);
+        let slave_deployment = env_opt::<bool>("SLAVE_DEPLOYMENT").unwrap_or(false);
 
         let worker = if slave_deployment {
-            let port = std::env::var(format!("{PREFIX}SLAVE_PORT"))
-                .ok()
-                .and_then(|s| s.parse::<u16>().ok())
-                .expect("ATOMIC_SLAVE_PORT is required for worker processes");
-            let max_concurrent_tasks =
-                std::env::var(format!("{PREFIX}WORKER_MAX_CONCURRENT_TASKS"))
-                    .ok()
-                    .and_then(|s| s.parse::<u16>().ok())
-                    .unwrap_or_else(|| num_cpus::get().max(1) as u16);
+            let port = env_opt::<u16>("SLAVE_PORT").ok_or(ConfigError::MissingSlavePort)?;
+            let max_concurrent_tasks = env_opt::<u16>("WORKER_MAX_CONCURRENT_TASKS")
+                .unwrap_or_else(|| num_cpus::get().max(1) as u16);
             Some(WorkerConfig {
                 port,
                 max_concurrent_tasks,
@@ -387,67 +383,36 @@ impl Config {
             None
         };
 
-        let shuffle_spill_threshold = std::env::var(format!("{PREFIX}SHUFFLE_SPILL_THRESHOLD"))
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok());
-
-        let metrics_port = std::env::var(format!("{PREFIX}METRICS_PORT"))
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok());
-
-        let speculation_multiplier = std::env::var(format!("{PREFIX}SPECULATION_MULTIPLIER"))
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok());
-
-        let agent_step_timeout_secs = std::env::var(format!("{PREFIX}AGENT_STEP_TIMEOUT_SECS"))
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok());
-
+        let shuffle_spill_threshold = env_opt::<usize>("SHUFFLE_SPILL_THRESHOLD");
+        let metrics_port = env_opt::<u16>("METRICS_PORT");
+        let speculation_multiplier = env_opt::<f64>("SPECULATION_MULTIPLIER");
+        let agent_step_timeout_secs = env_opt::<u64>("AGENT_STEP_TIMEOUT_SECS");
         let coalesce_shuffle_threshold_bytes =
-            std::env::var(format!("{PREFIX}COALESCE_SHUFFLE_THRESHOLD_BYTES"))
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-
-        let heartbeat_interval_secs = std::env::var(format!("{PREFIX}HEARTBEAT_INTERVAL_SECS"))
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        let heartbeat_timeout_ms = std::env::var(format!("{PREFIX}HEARTBEAT_TIMEOUT_MS"))
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(2000);
+            env_opt::<u64>("COALESCE_SHUFFLE_THRESHOLD_BYTES").unwrap_or(0);
+        let heartbeat_interval_secs = env_opt::<u64>("HEARTBEAT_INTERVAL_SECS").unwrap_or(0);
+        let heartbeat_timeout_ms = env_opt::<u64>("HEARTBEAT_TIMEOUT_MS").unwrap_or(2000);
 
         let tls_ca_cert = std::env::var(format!("{PREFIX}TLS_CA_CERT"))
             .ok()
-            .map(std::path::PathBuf::from);
+            .map(PathBuf::from);
         let tls_cert = std::env::var(format!("{PREFIX}TLS_CERT"))
             .ok()
-            .map(std::path::PathBuf::from);
+            .map(PathBuf::from);
         let tls_key = std::env::var(format!("{PREFIX}TLS_KEY"))
             .ok()
-            .map(std::path::PathBuf::from);
+            .map(PathBuf::from);
 
         let auth_token = std::env::var(format!("{PREFIX}AUTH_TOKEN")).ok();
 
-        let register_port = std::env::var(format!("{PREFIX}REGISTER_PORT"))
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok());
-
-        let sort_shuffle_threshold = std::env::var(format!("{PREFIX}SORT_SHUFFLE_THRESHOLD"))
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok());
-
-        let drain_timeout_ms = std::env::var(format!("{PREFIX}DRAIN_TIMEOUT_MS"))
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_DRAIN_TIMEOUT_MS);
+        let register_port = env_opt::<u16>("REGISTER_PORT");
+        let sort_shuffle_threshold = env_opt::<usize>("SORT_SHUFFLE_THRESHOLD");
+        let drain_timeout_ms =
+            env_opt::<u64>("DRAIN_TIMEOUT_MS").unwrap_or(DEFAULT_DRAIN_TIMEOUT_MS);
 
         let (allocator, kube) = allocator_from_env();
 
         // In env-var mode, workers come from hosts.conf — resolved by the caller.
-        Config {
+        Ok(Config {
             local_ip,
             work_dir,
             mode,
@@ -475,7 +440,7 @@ impl Config {
             drain_timeout_ms,
             allocator,
             kube,
-        }
+        })
     }
 
     pub fn is_local(&self) -> bool {

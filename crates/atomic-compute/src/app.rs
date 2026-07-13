@@ -1,9 +1,35 @@
 use std::net::{Ipv4Addr, SocketAddrV4, ToSocketAddrs};
 use std::sync::Arc;
 
+use clap::Parser;
+
 use crate::context::{Context, start_worker};
 use crate::env::Config;
 use crate::error::{ComputeError, ComputeResult};
+
+/// Recognised CLI flags for a binary built on [`AtomicApp`]. `clap` owns the
+/// entire CLI surface: unknown flags are rejected, so a user program embeds its
+/// own options as `clap` args on the same parser rather than defining a parallel
+/// argv scanner.
+#[derive(Parser, Debug)]
+#[command(about = "Atomic driver/worker entry point")]
+struct AppArgs {
+    /// Run as a worker: bind `--port` and enter the task-dispatch loop.
+    #[arg(long)]
+    worker: bool,
+    /// Run as an explicit driver (the default when neither role flag is set).
+    #[arg(long)]
+    driver: bool,
+    /// Worker listen port (worker role only).
+    #[arg(long, default_value_t = 10000)]
+    port: u16,
+    /// Comma-separated `ip:port` or `dns:host:port` worker endpoints.
+    #[arg(long)]
+    workers: Option<String>,
+    /// Override the local IP advertised to workers.
+    #[arg(long, default_value_t = Ipv4Addr::LOCALHOST)]
+    local_ip: Ipv4Addr,
+}
 
 /// A `dns:<host>:<port>` worker spec, retained so the driver can re-resolve the
 /// headless Service periodically and pick up pods that scaled in/out.
@@ -83,51 +109,41 @@ impl AtomicApp {
     ///     AppRole::Driver       => { /* job logic */ }
     /// }
     /// ```
-    // Deliberately not `clap`: this scans the *embedding* user program's full argv for a
-    // handful of recognized flags and ignores everything else by design — a user program
-    // built with `AtomicApp::build()` is free to define its own CLI on top of `--worker` /
-    // `--workers` / `--local-ip`. `clap::Parser` owns the entire CLI surface of a binary and
-    // rejects unrecognized flags, which would break that coexistence. Leaf binaries that own
-    // their whole CLI (e.g. `atomic-worker`, `integration/cli.rs`) use `clap` instead.
     pub async fn build() -> ComputeResult<Self> {
-        let args: Vec<String> = std::env::args().collect();
+        let args = AppArgs::parse();
 
         let _ = env_logger::try_init();
 
-        if args.iter().any(|a| a == "--worker") {
-            let port = args
-                .windows(2)
-                .find(|w| w[0] == "--port")
-                .and_then(|w| w[1].parse::<u16>().ok())
-                .unwrap_or(10000);
+        if args.worker {
+            let config = Config::worker(args.local_ip, args.port);
 
-            let local_ip = Self::parse_local_ip(&args);
-            let config = Config::worker(local_ip, port);
-
-            log::info!("[worker-{}] process ready pid={}", port, std::process::id());
+            log::info!(
+                "[worker-{}] process ready pid={}",
+                args.port,
+                std::process::id()
+            );
 
             return Ok(AtomicApp {
-                role: AppRole::Worker { port },
+                role: AppRole::Worker { port: args.port },
                 ctx: None,
                 worker_config: Some(config),
             });
         }
 
-        if args.iter().any(|a| a == "--driver") {
+        if args.driver {
             log::info!("role=driver (explicit --driver flag)");
         }
 
-        let worker_addrs = Self::worker_addresses(&args);
-        let local_ip = Self::parse_local_ip(&args);
+        let worker_addrs = Self::worker_addresses(args.workers.as_deref());
 
         let mut config = if worker_addrs.is_empty() {
             Config::local()
         } else {
-            Config::distributed_driver(local_ip, worker_addrs)
+            Config::distributed_driver(args.local_ip, worker_addrs)
         };
         // If discovery was via `dns:host:port`, keep the spec so the driver can
         // re-resolve it and pick up workers that scale in/out (K8s autoscaling).
-        config.worker_dns = Self::worker_dns(&args).map(|d| (d.host, d.port));
+        config.worker_dns = Self::worker_dns(args.workers.as_deref()).map(|d| (d.host, d.port));
         // `Config::local`/`distributed_driver` default to AllocatorKind::Static; overlay
         // ATOMIC_ALLOCATOR/ATOMIC_K8S_* so a driver launched by `atomic submit-k8s
         // --dynamic-workers` can still reach AllocatorKind::Kube through this entry point.
@@ -174,14 +190,9 @@ impl AtomicApp {
     /// `dns:<host>:<port>` spec. A `dns:` token is resolved to every IPv4 A
     /// record behind `<host>` (e.g. the pods of a Kubernetes headless Service),
     /// each paired with `<port>`.
-    pub fn worker_addresses(args: &[String]) -> Vec<SocketAddrV4> {
-        args.windows(2)
-            .find(|w| w[0] == "--workers")
-            .map(|w| {
-                w[1].split(',')
-                    .flat_map(Self::resolve_worker_token)
-                    .collect()
-            })
+    pub fn worker_addresses(workers: Option<&str>) -> Vec<SocketAddrV4> {
+        workers
+            .map(|w| w.split(',').flat_map(Self::resolve_worker_token).collect())
             .unwrap_or_default()
     }
 
@@ -210,11 +221,8 @@ impl AtomicApp {
 
     /// Extract a `dns:<host>:<port>` worker spec from `--workers`, if present, so
     /// the driver can re-resolve it for live discovery. The first `dns:` token wins.
-    pub fn worker_dns(args: &[String]) -> Option<WorkerDns> {
-        let value = args
-            .windows(2)
-            .find(|w| w[0] == "--workers")
-            .map(|w| w[1].as_str())?;
+    pub fn worker_dns(workers: Option<&str>) -> Option<WorkerDns> {
+        let value = workers?;
         for token in value.split(',') {
             if let Some(rest) = token.strip_prefix("dns:") {
                 let mut parts = rest.rsplitn(2, ':');
@@ -231,14 +239,6 @@ impl AtomicApp {
         }
         None
     }
-
-    /// Parse `--local-ip ADDR`, falling back to `127.0.0.1`.
-    fn parse_local_ip(args: &[String]) -> Ipv4Addr {
-        args.windows(2)
-            .find(|w| w[0] == "--local-ip")
-            .and_then(|w| w[1].parse().ok())
-            .unwrap_or(Ipv4Addr::LOCALHOST)
-    }
 }
 
 /// Convenience macro that builds the [`AtomicApp`] entry point.
@@ -253,13 +253,9 @@ macro_rules! app {
 mod tests {
     use super::*;
 
-    fn args(workers: &str) -> Vec<String> {
-        vec!["bin".into(), "--workers".into(), workers.into()]
-    }
-
     #[test]
     fn literal_addresses_parse() {
-        let got = AtomicApp::worker_addresses(&args("127.0.0.1:10001,10.0.0.5:10002"));
+        let got = AtomicApp::worker_addresses(Some("127.0.0.1:10001,10.0.0.5:10002"));
         assert_eq!(
             got,
             vec![
@@ -271,14 +267,21 @@ mod tests {
 
     #[test]
     fn dns_spec_extracted() {
-        let got = AtomicApp::worker_dns(&args("dns:atomic-workers:10001")).unwrap();
+        let got = AtomicApp::worker_dns(Some("dns:atomic-workers:10001")).unwrap();
         assert_eq!(got.host, "atomic-workers");
         assert_eq!(got.port, 10001);
     }
 
     #[test]
     fn literals_have_no_dns() {
-        assert!(AtomicApp::worker_dns(&args("127.0.0.1:10001")).is_none());
+        assert!(AtomicApp::worker_dns(Some("127.0.0.1:10001")).is_none());
+    }
+
+    #[test]
+    fn cli_parses() {
+        let a = AppArgs::parse_from(["atomic", "--worker", "--port", "10005"]);
+        assert!(a.worker);
+        assert_eq!(a.port, 10005);
     }
 
     #[test]

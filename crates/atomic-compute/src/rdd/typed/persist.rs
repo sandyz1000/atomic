@@ -83,13 +83,26 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
                     StorageLevel::DiskOnly,
                 ));
                 // Eagerly write all partitions to disk (DiskOnly skips memory cache).
+                // A failure here leaves the partition unspilled — it will be recomputed
+                // on read rather than served from disk, so warn instead of failing the
+                // builder (persist returns `Self`, not `Result`).
                 for part_idx in 0..num_parts {
                     let splits = self.rdd.splits();
-                    if let Ok(items) = self.rdd.compute(splits[part_idx].clone()) {
-                        let data: Vec<T> = items.collect();
-                        if let Some(path) = cached.spill_path(part_idx) {
-                            let _ = disk_write_partition(&path, &data);
+                    match self.rdd.compute(splits[part_idx].clone()) {
+                        Ok(items) => {
+                            let data: Vec<T> = items.collect();
+                            if let Some(path) = cached.spill_path(part_idx)
+                                && let Err(e) = disk_write_partition(&path, &data)
+                            {
+                                log::warn!(
+                                    "persist(DiskOnly): failed to spill partition {part_idx} \
+                                     to {path:?}: {e}"
+                                );
+                            }
                         }
+                        Err(e) => log::warn!(
+                            "persist(DiskOnly): failed to compute partition {part_idx}: {e}"
+                        ),
                     }
                 }
                 TypedRdd::new(cached as RddRef<T>, ctx)

@@ -740,6 +740,7 @@ dependencies = [
  "aws-sdk-s3",
  "base64",
  "bincode 2.0.1",
+ "clap",
  "crossbeam",
  "dashmap",
  "deno_core",

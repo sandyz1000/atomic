@@ -46,7 +46,7 @@ fn test_config_validation_ok() {
 
 #[tokio::test]
 async fn test_nlq_context_builds() {
-    let ctx = NlqContext::build(test_config());
+    let ctx = NlqContext::build(test_config()).unwrap();
     let tools = ctx.registry.all_tools();
     assert!(tools.iter().any(|t| t.name == "sql_query"));
     assert!(tools.iter().any(|t| t.name == "llm_filter"));
@@ -55,7 +55,7 @@ async fn test_nlq_context_builds() {
 
 #[tokio::test]
 async fn test_register_python_tool() {
-    let ctx = NlqContext::build(test_config());
+    let ctx = NlqContext::build(test_config()).unwrap();
     ctx.register_tool(ToolDefinition {
         name: "my_tool".to_string(),
         description: "A test Python tool".to_string(),
@@ -72,7 +72,7 @@ async fn test_register_python_tool() {
 
 #[tokio::test]
 async fn test_register_js_tool() {
-    let ctx = NlqContext::build(test_config());
+    let ctx = NlqContext::build(test_config()).unwrap();
     ctx.register_tool(ToolDefinition {
         name: "js_tool".to_string(),
         description: "A test JS tool".to_string(),
@@ -84,6 +84,6 @@ async fn test_register_js_tool() {
 
 #[tokio::test]
 async fn test_sql_ctx_accessible() {
-    let ctx = NlqContext::build(test_config());
+    let ctx = NlqContext::build(test_config()).unwrap();
     let _sql = ctx.sql_ctx();
 }

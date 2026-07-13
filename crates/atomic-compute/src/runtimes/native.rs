@@ -13,6 +13,12 @@ use crate::task_registry::{
     TASK_REGISTRY,
 };
 
+/// Decode a bincode payload, tagging failures with `label` so the dispatch site
+/// that produced the bytes is named in the error.
+fn decode_or_invalid<T: bincode::Decode<()>>(bytes: &[u8], label: &str) -> ComputeResult<T> {
+    decode_payload(bytes).map_err(|e| ComputeError::InvalidPayload(format!("{label} decode: {e}")))
+}
+
 /// Handles `TaskRuntime::Native` ops — both compile-time `#[task]` registry
 /// lookups and shuffle-map writes.
 pub(crate) struct NativeDispatcher {}
@@ -36,10 +42,8 @@ impl OpDispatcher for NativeDispatcher {
                 num_output_partitions,
             } => {
                 // Payload carries the dispatch key + the shipped partitioner spec.
-                let payload: crate::shuffle_map::ShuffleMapPayload = decode_payload(&op.payload)
-                    .map_err(|e| {
-                        ComputeError::InvalidPayload(format!("shuffle-map payload decode: {e}"))
-                    })?;
+                let payload: crate::shuffle_map::ShuffleMapPayload =
+                    decode_or_invalid(&op.payload, "shuffle-map payload")?;
                 let type_id = payload.type_id.as_str();
                 let spec = &payload.partitioner_spec;
                 // Range (sort) shuffles use the sorted handler when one is registered for the type
@@ -79,29 +83,23 @@ impl OpDispatcher for NativeDispatcher {
             TaskAction::KafkaConsume => {
                 // The per-partition consume config is shipped in `source_partitions[i]`
                 // (i.e. `data`), not in `op.payload` (which is empty for KafkaConsume).
-                let payload: atomic_data::distributed::KafkaConsumePayload = decode_payload(data)
-                    .map_err(|e| {
-                    ComputeError::InvalidPayload(format!("KafkaConsume data decode: {e}"))
-                })?;
+                let payload: atomic_data::distributed::KafkaConsumePayload =
+                    decode_or_invalid(data, "KafkaConsume data")?;
                 kafka_consume_handler(&payload)
             }
             TaskAction::ReadFileSplit => {
                 // Per-partition config shipped in `data` (bincode-encoded FileSplitPayload);
                 // `op.payload` is empty.
-                let payload: atomic_data::distributed::FileSplitPayload = decode_payload(data)
-                    .map_err(|e| {
-                        ComputeError::InvalidPayload(format!("ReadFileSplit data decode: {e}"))
-                    })?;
+                let payload: atomic_data::distributed::FileSplitPayload =
+                    decode_or_invalid(data, "ReadFileSplit data")?;
                 file_split_handler(&payload)
             }
             TaskAction::MergeState { merge_fn } => {
                 // Per-shard input shipped in `data` (bincode-encoded StateMergePayload).
                 // The merge fn is content-agnostic; the shard's state persists across
                 // batches in the worker-global WORKER_STATE_STORE.
-                let payload: atomic_data::distributed::StateMergePayload = decode_payload(data)
-                    .map_err(|e| {
-                        ComputeError::InvalidPayload(format!("MergeState data decode: {e}"))
-                    })?;
+                let payload: atomic_data::distributed::StateMergePayload =
+                    decode_or_invalid(data, "MergeState data")?;
                 let merge = STATE_MERGE_REGISTRY.get(merge_fn.as_str()).ok_or_else(|| {
                     ComputeError::UnknownOperation(format!(
                         "no state-merge fn '{merge_fn}' registered; \

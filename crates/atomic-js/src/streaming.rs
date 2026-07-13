@@ -26,107 +26,39 @@ type ReduceFnRef = FunctionRef<FnArgs<(JV, JV)>, JV>;
 type StateUpdateFnRef = FunctionRef<FnArgs<(Vec<JV>, Option<JV>)>, Option<JV>>;
 type StateUpdateFn<'a> = Function<'a, FnArgs<(Vec<JV>, Option<JV>)>, Option<JV>>;
 
-/// A JS callback stored as a persistent napi reference so it can be called
-/// across scope boundaries.  `FunctionRef` implements `Send + Sync` and drops
-/// the underlying `napi_ref` on `Drop`.
-enum StoredFn {
-    Map(FunctionRef<JV, JV>),
-    Filter(FunctionRef<JV, bool>),
-    FlatMap(FunctionRef<JV, Vec<JV>>),
-    Reduce(ReduceFnRef),
-    StateUpdate(StateUpdateFnRef),
-    OutputCb(FunctionRef<Vec<JV>, ()>),
+// JS callbacks are stored as persistent napi references (`FunctionRef`) so they
+// survive scope boundaries; `FunctionRef::borrow_back(&env)` re-materialises a
+// callable handle. Each `JsStreamTransform` variant holds the concrete
+// `FunctionRef` for its operation, so calling never has to re-discriminate.
+
+/// Persist a `reduceByKey` callback as a `FnArgs` ref so `(a, b)` is passed as
+/// two separate JS arguments rather than one array.
+fn reduce_ref(f: Function<(JV, JV), JV>) -> Result<ReduceFnRef> {
+    // SAFETY: Function<(A,B), R> and Function<FnArgs<(A,B)>, R> have the same
+    // memory layout (phantom types only). The transmute selects the multi-arg
+    // JsValuesTupleIntoVec impl so (a, b) is passed as two separate JS args.
+    let f: Function<FnArgs<(JV, JV)>, JV> = unsafe { std::mem::transmute(f) };
+    f.create_ref()
 }
 
-impl StoredFn {
-    fn from_map(f: Function<JV, JV>) -> Result<Self> {
-        Ok(StoredFn::Map(f.create_ref()?))
-    }
-
-    fn from_filter(f: Function<JV, bool>) -> Result<Self> {
-        Ok(StoredFn::Filter(f.create_ref()?))
-    }
-
-    fn from_flat_map(f: Function<JV, Vec<JV>>) -> Result<Self> {
-        Ok(StoredFn::FlatMap(f.create_ref()?))
-    }
-
-    fn from_reduce(f: Function<(JV, JV), JV>) -> Result<Self> {
-        // SAFETY: Function<(A,B), R> and Function<FnArgs<(A,B)>, R> have the same
-        // memory layout (phantom types only). The transmute selects the multi-arg
-        // JsValuesTupleIntoVec impl so (a, b) is passed as two separate JS args.
-        let f_fnargs: Function<FnArgs<(JV, JV)>, JV> = unsafe { std::mem::transmute(f) };
-        Ok(StoredFn::Reduce(f_fnargs.create_ref()?))
-    }
-
-    fn from_state_update(f: Function<(Vec<JV>, Option<JV>), Option<JV>>) -> Result<Self> {
-        // Same transmute rationale as from_reduce.
-        let f_fnargs: StateUpdateFn<'_> = unsafe { std::mem::transmute(f) };
-        Ok(StoredFn::StateUpdate(f_fnargs.create_ref()?))
-    }
-
-    fn from_output_cb(f: Function<Vec<JV>, ()>) -> Result<Self> {
-        Ok(StoredFn::OutputCb(f.create_ref()?))
-    }
-
-    fn call_map(&self, env: &Env, x: JV) -> Result<JV> {
-        let StoredFn::Map(r) = self else {
-            unreachable!()
-        };
-        r.borrow_back(env)?.call(x)
-    }
-
-    fn call_filter(&self, env: &Env, x: JV) -> Result<bool> {
-        let StoredFn::Filter(r) = self else {
-            unreachable!()
-        };
-        r.borrow_back(env)?.call(x)
-    }
-
-    fn call_flat_map(&self, env: &Env, x: JV) -> Result<Vec<JV>> {
-        let StoredFn::FlatMap(r) = self else {
-            unreachable!()
-        };
-        r.borrow_back(env)?.call(x)
-    }
-
-    fn call_reduce(&self, env: &Env, a: JV, b: JV) -> Result<JV> {
-        let StoredFn::Reduce(r) = self else {
-            unreachable!()
-        };
-        r.borrow_back(env)?.call((a, b).into())
-    }
-
-    fn call_state_update(
-        &self,
-        env: &Env,
-        new_vals: Vec<JV>,
-        old: Option<JV>,
-    ) -> Result<Option<JV>> {
-        let StoredFn::StateUpdate(r) = self else {
-            unreachable!()
-        };
-        r.borrow_back(env)?.call((new_vals, old).into())
-    }
-
-    fn call_output_cb(&self, env: &Env, batch: Vec<JV>) -> Result<()> {
-        let StoredFn::OutputCb(r) = self else {
-            unreachable!()
-        };
-        r.borrow_back(env)?.call(batch)
-    }
+/// Persist an `updateStateByKey` callback; same `FnArgs` rationale as
+/// [`reduce_ref`].
+fn state_update_ref(f: Function<(Vec<JV>, Option<JV>), Option<JV>>) -> Result<StateUpdateFnRef> {
+    // SAFETY: same layout rationale as `reduce_ref`.
+    let f: StateUpdateFn<'_> = unsafe { std::mem::transmute(f) };
+    f.create_ref()
 }
 
 enum JsStreamTransform {
-    Map(StoredFn),
-    Filter(StoredFn),
-    FlatMap(StoredFn),
-    ReduceByKey(StoredFn),
+    Map(FunctionRef<JV, JV>),
+    Filter(FunctionRef<JV, bool>),
+    FlatMap(FunctionRef<JV, Vec<JV>>),
+    ReduceByKey(ReduceFnRef),
     GroupByKey,
     Join(Arc<JsDStreamInner>),
     LeftOuterJoin(Arc<JsDStreamInner>),
-    UpdateStateByKey(StoredFn),
-    MapValues(StoredFn),
+    UpdateStateByKey(StateUpdateFnRef),
+    MapValues(FunctionRef<JV, JV>),
 }
 
 enum JsDStreamInner {
@@ -158,7 +90,7 @@ impl JsDStream {
         Ok(JsDStream {
             inner: Arc::new(JsDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: JsStreamTransform::Map(StoredFn::from_map(f)?),
+                op: JsStreamTransform::Map(f.create_ref()?),
             }),
             is_pair: false,
         })
@@ -170,7 +102,7 @@ impl JsDStream {
         Ok(JsDStream {
             inner: Arc::new(JsDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: JsStreamTransform::Filter(StoredFn::from_filter(f)?),
+                op: JsStreamTransform::Filter(f.create_ref()?),
             }),
             is_pair,
         })
@@ -181,7 +113,7 @@ impl JsDStream {
         Ok(JsDStream {
             inner: Arc::new(JsDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: JsStreamTransform::FlatMap(StoredFn::from_flat_map(f)?),
+                op: JsStreamTransform::FlatMap(f.create_ref()?),
             }),
             is_pair: false,
         })
@@ -195,7 +127,7 @@ impl JsDStream {
         Ok(JsDStream {
             inner: Arc::new(JsDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: JsStreamTransform::ReduceByKey(StoredFn::from_reduce(f)?),
+                op: JsStreamTransform::ReduceByKey(reduce_ref(f)?),
             }),
             is_pair: true,
         })
@@ -256,7 +188,7 @@ impl JsDStream {
         Ok(JsDStream {
             inner: Arc::new(JsDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: JsStreamTransform::UpdateStateByKey(StoredFn::from_state_update(f)?),
+                op: JsStreamTransform::UpdateStateByKey(state_update_ref(f)?),
             }),
             is_pair: true,
         })
@@ -270,7 +202,7 @@ impl JsDStream {
         Ok(JsDStream {
             inner: Arc::new(JsDStreamInner::Transform {
                 parent: Arc::clone(&self.inner),
-                op: JsStreamTransform::MapValues(StoredFn::from_map(f)?),
+                op: JsStreamTransform::MapValues(f.create_ref()?),
             }),
             is_pair: true,
         })
@@ -312,7 +244,7 @@ impl JsBatchQueue {
 
 struct OutputOp {
     stream: Arc<JsDStreamInner>,
-    callback: StoredFn,
+    callback: FunctionRef<Vec<JV>, ()>,
 }
 
 fn compute_batch(
@@ -355,21 +287,26 @@ fn apply_transform(
     state_store: &mut HashMap<String, JV>,
 ) -> Result<Vec<JV>> {
     match op {
-        JsStreamTransform::Map(f) => elements.into_iter().map(|e| f.call_map(env, e)).collect(),
+        JsStreamTransform::Map(f) => elements
+            .into_iter()
+            .map(|e| f.borrow_back(env)?.call(e))
+            .collect(),
 
         JsStreamTransform::Filter(f) => elements
             .into_iter()
-            .filter_map(|e| match f.call_filter(env, e.clone()) {
-                Ok(true) => Some(Ok(e)),
-                Ok(false) => None,
-                Err(err) => Some(Err(err)),
-            })
+            .filter_map(
+                |e| match f.borrow_back(env).and_then(|h| h.call(e.clone())) {
+                    Ok(true) => Some(Ok(e)),
+                    Ok(false) => None,
+                    Err(err) => Some(Err(err)),
+                },
+            )
             .collect(),
 
         JsStreamTransform::FlatMap(f) => {
             let mut result = Vec::new();
             for e in elements {
-                result.extend(f.call_flat_map(env, e)?);
+                result.extend(f.borrow_back(env)?.call(e)?);
             }
             Ok(result)
         }
@@ -389,7 +326,7 @@ fn apply_transform(
                 let mut found = false;
                 for (ek, acc) in &mut groups {
                     if key_str(ek)? == k_str {
-                        *acc = f.call_reduce(env, acc.clone(), v.clone())?;
+                        *acc = f.borrow_back(env)?.call((acc.clone(), v.clone()).into())?;
                         found = true;
                         break;
                     }
@@ -529,7 +466,9 @@ fn apply_transform(
                     .map(|(_, _, v)| v.clone())
                     .unwrap_or_default();
                 let old_state = state_store.get(key_str_val).cloned();
-                let new_state = f.call_state_update(env, new_values_for_key, old_state)?;
+                let new_state = f
+                    .borrow_back(env)?
+                    .call((new_values_for_key, old_state).into())?;
                 match new_state {
                     None => {
                         state_store.remove(key_str_val);
@@ -552,7 +491,7 @@ fn apply_transform(
                 if pair.len() != 2 {
                     return Err(Error::from_reason("mapValues: need 2-element array"));
                 }
-                let new_v = f.call_map(env, pair[1].clone())?;
+                let new_v = f.borrow_back(env)?.call(pair[1].clone())?;
                 Ok(serde_json::json!([pair[0], new_v]))
             })
             .collect(),
@@ -645,7 +584,7 @@ mod tests {
         assert!(b3.is_empty());
     }
 
-    // --- GroupByKey transform (no StoredFn — pure Rust) ---
+    // --- GroupByKey transform (no JS callback — pure Rust) ---
 
     #[test]
     fn group_by_key() {
@@ -689,7 +628,7 @@ mod tests {
         assert!(compute_batch(&grouped, &mut empty_state()).is_err());
     }
 
-    // --- Join transform (no StoredFn — pure Rust) ---
+    // --- Join transform (no JS callback — pure Rust) ---
 
     #[test]
     fn join_matching_pairs() {
@@ -733,7 +672,7 @@ mod tests {
         assert_eq!(result.len(), 2);
     }
 
-    // --- LeftOuterJoin transform (no StoredFn — pure Rust) ---
+    // --- LeftOuterJoin transform (no JS callback — pure Rust) ---
 
     #[test]
     fn loj_match_present() {
@@ -802,11 +741,12 @@ mod tests {
         assert_eq!(b2, vec![json!(2)]);
     }
 
-    // --- Confirm StoredFn is Send + Sync (compile-time check for the unsafe impls) ---
+    // --- Confirm the stored callback refs are Send + Sync (they travel across
+    // threads inside JsDStreamInner via Arc). ---
     fn _assert_send_sync<T: Send + Sync>() {}
     #[test]
-    fn stored_fn_send_sync() {
-        _assert_send_sync::<StoredFn>();
+    fn transform_send_sync() {
+        _assert_send_sync::<JsStreamTransform>();
     }
 }
 
@@ -895,7 +835,7 @@ impl JsStreamingContext {
         let op_idx = self.output_ops.len();
         self.output_ops.push(OutputOp {
             stream: Arc::clone(&stream.inner),
-            callback: StoredFn::from_output_cb(callback)?,
+            callback: callback.create_ref()?,
         });
         // When restored from checkpoint, state_stores may already have an entry.
         if self.state_stores.len() <= op_idx {
@@ -910,7 +850,7 @@ impl JsStreamingContext {
         for (idx, op) in self.output_ops.iter().enumerate() {
             let state_store = &mut self.state_stores[idx];
             let elements = compute_batch(&env, &op.stream, state_store)?;
-            op.callback.call_output_cb(&env, elements)?;
+            op.callback.borrow_back(&env)?.call(elements)?;
         }
         self.write_checkpoint_if_enabled()?;
         Ok(())

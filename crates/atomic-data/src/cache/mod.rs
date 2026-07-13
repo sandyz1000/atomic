@@ -184,8 +184,9 @@ impl PartitionStore {
         if let Some((evicted_key, evicted_val)) = evicted
             && evicted_key != key
             && let Some(ev_entry) = self.spill.get(&evicted_key)
+            && let Err(e) = (ev_entry.write)(evicted_val.as_ref())
         {
-            let _ = (ev_entry.write)(evicted_val.as_ref());
+            log::warn!("cache spill failed for evicted {evicted_key:?}: {e}");
         }
 
         Some(arc)
@@ -208,8 +209,9 @@ impl PartitionStore {
         if let Some((evicted_key, evicted_val)) = evicted
             && evicted_key != key
             && let Some(entry) = self.spill.get(&evicted_key)
+            && let Err(e) = (entry.write)(evicted_val.as_ref())
         {
-            let _ = (entry.write)(evicted_val.as_ref());
+            log::warn!("cache spill failed for evicted {evicted_key:?}: {e}");
         }
     }
 
