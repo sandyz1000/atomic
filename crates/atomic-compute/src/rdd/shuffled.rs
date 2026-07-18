@@ -207,9 +207,9 @@ where
     fn number_of_splits(&self) -> usize {
         // If adaptive coalescing ran for this shuffle, return the coalesced count.
         if let Some(tracker) = atomic_data::env::get_map_output_tracker()
-            && let Some(n) = tracker.get_coalesced_partitions(self.shuffle_id)
+            && let Some(entry) = tracker.coalesced_parts.get(&self.shuffle_id)
         {
-            return n;
+            return *entry;
         }
         self.part.get_num_of_partitions()
     }
@@ -268,23 +268,21 @@ where
         let original_num_partitions = self.part.get_num_of_partitions();
 
         // Determine which original reduce-partition IDs this coalesced split covers.
-        let original_ids: Vec<usize> =
-            if let Some(tracker) = atomic_data::env::get_map_output_tracker() {
-                if let Some(coalesced_n) = tracker.get_coalesced_partitions(self.shuffle_id) {
-                    // Map coalesced_id → original reduce partition range.
-                    // Simple even-split mapping: coalesced partition i covers
-                    // [i * (original / coalesced), (i+1) * (original / coalesced)).
-                    let ratio = original_num_partitions.max(1);
-                    let per_coalesced = ratio.div_ceil(coalesced_n); // ceil
-                    let start_id = coalesced_id * per_coalesced;
-                    let end_id = ((coalesced_id + 1) * per_coalesced).min(original_num_partitions);
-                    (start_id..end_id).collect()
-                } else {
-                    vec![coalesced_id]
-                }
-            } else {
-                vec![coalesced_id]
-            };
+        let mut original_ids: Vec<usize> = vec![coalesced_id];
+
+        if let Some(tracker) = atomic_data::env::get_map_output_tracker()
+            && let Some(entry) = tracker.coalesced_parts.get(&self.shuffle_id)
+        {
+            let coalesced_n = *entry;
+            // Map coalesced_id → original reduce partition range.
+            // Simple even-split mapping: coalesced partition i covers
+            // [i * (original / coalesced), (i+1) * (original / coalesced)).
+            let ratio = original_num_partitions.max(1);
+            let per_coalesced = ratio.div_ceil(coalesced_n); // ceil
+            let start_id = coalesced_id * per_coalesced;
+            let end_id = ((coalesced_id + 1) * per_coalesced).min(original_num_partitions);
+            original_ids = (start_id..end_id).collect();
+        }
 
         // Sort-shuffle reduce: the map side wrote sorted runs (in `comparator` order),
         // and range partitions are themselves key-ordered, so a single **lazy** k-way
@@ -304,7 +302,11 @@ where
             // never resident — only the k-way-merge working set. The run count is
             // the number of map outputs registered for this shuffle.
             let run_count = atomic_data::env::get_map_output_tracker()
-                .and_then(|t| t.server_uris.get(&self.shuffle_id).map(|e| e.value().len()))
+                .and_then(|t| {
+                    t.map_output_uris
+                        .get(&self.shuffle_id)
+                        .map(|e| e.value().len())
+                })
                 .unwrap_or(0);
             if run_count > *REDUCE_SPILL_THRESHOLD_RUNS {
                 let mut runs: Vec<SpilledRunIter<K, C>> = Vec::new();

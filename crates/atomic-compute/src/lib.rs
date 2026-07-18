@@ -147,7 +147,7 @@ macro_rules! register_partitioner {
 /// Register a state-merge function for distributed stateful streaming under a
 /// stable `name`. Place this once in the binary (driver and workers run the same
 /// binary). The worker looks up `name` in `STATE_MERGE_REGISTRY` when it handles a
-/// [`TaskAction::MergeState`](atomic_data::distributed::TaskAction::MergeState).
+/// [`StepKind::MergeState`](atomic_data::distributed::StepKind::MergeState).
 ///
 /// ```rust,ignore
 /// atomic_compute::register_state_merge!("atomic_structured::windowed_v1", windowed_state_merge);

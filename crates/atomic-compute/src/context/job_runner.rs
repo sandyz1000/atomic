@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use atomic_data::data::Data;
 use atomic_data::distributed::{
-    PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
+    OpKind, PipelineOp, ResultStatus, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode,
+    WireEncode,
 };
 use atomic_data::partial::{ApproximateEvaluator, result::PartialResult};
 use atomic_data::rdd::{Rdd, RddBase};
@@ -35,7 +36,7 @@ impl Context {
     {
         let ops = vec![PipelineOp {
             op_id: op_id.to_string(),
-            action,
+            kind: OpKind::Task(action),
             runtime: TaskRuntime::Native,
             payload,
         }];
@@ -62,7 +63,7 @@ impl Context {
         let payload = zero.encode_wire()?;
         let ops = vec![PipelineOp {
             op_id: op_id.to_string(),
-            action: TaskAction::Fold,
+            kind: OpKind::Task(TaskAction::Fold),
             runtime: TaskRuntime::Native,
             payload,
         }];
@@ -85,7 +86,7 @@ impl Context {
         let combined_data = partition_values.encode_wire()?;
         let reduce_ops = vec![PipelineOp {
             op_id: op_id.to_string(),
-            action: TaskAction::Reduce,
+            kind: OpKind::Task(TaskAction::Reduce),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }];
@@ -241,10 +242,10 @@ impl Context {
     ) -> ComputeResult<Vec<PipelineOp>> {
         let shuffle_op = PipelineOp {
             op_id: format!("shuffle-map-{}", spec.shuffle_id),
-            action: TaskAction::ShuffleMap {
+            kind: OpKind::Engine(StepKind::ShuffleMap {
                 shuffle_id: spec.shuffle_id,
                 num_output_partitions: spec.num_output_partitions,
-            },
+            }),
             runtime: TaskRuntime::Native,
             payload: bincode::encode_to_vec(
                 crate::shuffle_map::ShuffleMapPayload {

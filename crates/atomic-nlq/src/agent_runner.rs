@@ -91,7 +91,7 @@ fn dispatch_tool(payload: &AgentStepPayload, tool_ref: &str, json_args: &str) ->
 /// Concrete [`AgentRunner`] implementation backed by atomic-nlq's LlmClient.
 ///
 /// Registered once at startup via [`register`]; the `NativeDispatcher` looks it
-/// up in `AGENT_RUNNER_REGISTRY` when it sees a [`TaskAction::AgentStep`] op.
+/// up in `AGENT_RUNNER_REGISTRY` when it sees a [`StepKind::AgentStep`] op.
 pub struct PartitionAgentRunner;
 
 impl PartitionAgentRunner {

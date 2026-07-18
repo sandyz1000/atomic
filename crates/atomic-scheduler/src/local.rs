@@ -6,7 +6,7 @@ use atomic_data::rdd::Rdd;
 use atomic_data::task::{TaskOption, TaskResult};
 use atomic_data::task_context::TaskContext;
 use std::clone::Clone;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::option::Option;
@@ -19,13 +19,14 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
-use crate::base::{Mutators, NativeScheduler};
+use crate::base::{NativeScheduler, SchedulerState};
 use crate::dag::{CompletionEvent, FetchFailedVals, TaskEndReason};
 use crate::error::{LibResult, SchedulerError};
 use crate::job::JobTracker;
 use crate::listener::{
     JobEndListener, JobListener, JobStartListener, LiveListenerBus, NoOpListener,
 };
+use crate::planner::StagePlanner;
 use crate::stage::Stage;
 
 /// Recovery hook for lost distributed map outputs: `(shuffle_id, map_id) → recovered`.
@@ -45,7 +46,7 @@ pub struct LocalScheduler {
     resubmit_timeout: u128,
     poll_timeout: u64,
     /// Shared mutable state: stage cache, event queues, map-output tracker, and ID counters.
-    mutators: Mutators,
+    state: SchedulerState,
     /// Scheduler role flag taken at construction; retained as config (driver vs. worker).
     #[allow(dead_code)]
     master: bool,
@@ -68,7 +69,7 @@ impl LocalScheduler {
         let mut live_listener_bus = LiveListenerBus::new();
         live_listener_bus.start().unwrap();
         LocalScheduler {
-            mutators: Mutators::new().with_coalesce_threshold(coalesce_threshold_bytes),
+            state: SchedulerState::new().with_coalesce_threshold(coalesce_threshold_bytes),
             max_failures,
             attempt_id: Arc::new(AtomicUsize::new(0)),
             resubmit_timeout: 2000,
@@ -181,9 +182,7 @@ impl LocalScheduler {
             return Ok(result);
         }
 
-        self.mutators
-            .event_queues
-            .insert(jt.run_id, VecDeque::new());
+        self.state.event_queues.insert(jt.run_id, VecDeque::new());
 
         let mut results: Vec<Option<U>> = (0..jt.num_output_parts).map(|_| None).collect();
         // Timestamp of the oldest unresubmitted failure; None when jt.failed is empty.
@@ -203,8 +202,8 @@ impl LocalScheduler {
 
         let mut num_finished = 0;
         while num_finished != jt.num_output_parts {
-            if let Some(reason) = self.mutators.take_job_abort(jt.run_id) {
-                self.mutators.event_queues.remove(&jt.run_id);
+            if let Some(reason) = self.state.take_job_abort(jt.run_id) {
+                self.state.event_queues.remove(&jt.run_id);
                 return Err(SchedulerError::JobAborted(reason));
             }
             let event_option = self.wait_for_event(jt.run_id, self.poll_timeout);
@@ -212,7 +211,7 @@ impl LocalScheduler {
             if let Some(evt) = event_option {
                 log::debug!("event starting");
                 let stage = self
-                    .mutators
+                    .state
                     .stage_cache
                     .get(&evt.task.get_stage_id())
                     .unwrap()
@@ -252,7 +251,7 @@ impl LocalScheduler {
                             count,
                             self.max_failures,
                         );
-                        let m = self.get_mutators();
+                        let m = self.state();
                         let failed_stage = m.fetch_from_stage_cache(evt.task.get_stage_id());
                         // submit_stage() no-ops for a stage still marked running.
                         jt.running.lock().remove(&failed_stage);
@@ -273,7 +272,7 @@ impl LocalScheduler {
                             count,
                             self.max_failures,
                         );
-                        let m = self.get_mutators();
+                        let m = self.state();
                         let failed_stage = m.fetch_from_stage_cache(evt.task.get_stage_id());
                         jt.running.lock().remove(&failed_stage);
                         jt.failed.lock().insert(failed_stage);
@@ -298,7 +297,7 @@ impl LocalScheduler {
             }
         }
 
-        self.mutators.event_queues.remove(&jt.run_id);
+        self.state.event_queues.remove(&jt.run_id);
         Ok(results
             .into_iter()
             .map(|s| match s {
@@ -311,7 +310,6 @@ impl LocalScheduler {
     fn run_task(
         event_queues: Arc<DashMap<usize, VecDeque<CompletionEvent>>>,
         task: TaskOption,
-        _id_in_job: usize,
         attempt_id: usize,
     ) {
         let result = task.run(attempt_id);
@@ -380,10 +378,6 @@ impl LocalScheduler {
 
 #[async_trait::async_trait]
 impl NativeScheduler for LocalScheduler {
-    fn get_mutators(&self) -> Mutators {
-        self.mutators.clone()
-    }
-
     /// Overrides the base handler to route lost *distributed* map outputs to the
     /// installed [`MapOutputRecovery`] hook. The base behavior — recompute the map
     /// partition on the driver from lineage — is only correct in local mode: a
@@ -405,7 +399,7 @@ impl NativeScheduler for LocalScheduler {
             ..
         } = failed_vals;
 
-        let m = self.get_mutators();
+        let m = self.state();
         // The stage that hit the fetch failure re-runs once recovery is done.
         let failed_stage = m.fetch_from_stage_cache(stage_id);
         jt.running.lock().remove(&failed_stage);
@@ -453,17 +447,13 @@ impl NativeScheduler for LocalScheduler {
     }
 
     /// Every single task is run in the local thread pool
-    fn submit_task<T: Data, U: Data, F>(
-        &self,
-        task: TaskOption,
-        id_in_job: usize,
-        _server_address: SocketAddrV4,
-    ) where
+    fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, _server_address: SocketAddrV4)
+    where
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
     {
         log::debug!("inside submit task");
         let my_attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
-        let event_queues = self.mutators.event_queues.clone();
+        let event_queues = self.state.event_queues.clone();
 
         // No need to serialize for local execution — runs on a Tokio blocking thread
         let task_id = match &task {
@@ -481,7 +471,7 @@ impl NativeScheduler for LocalScheduler {
                 task_id,
                 std::thread::current().id(),
             );
-            LocalScheduler::run_task(event_queues, task, id_in_job, my_attempt_id)
+            LocalScheduler::run_task(event_queues, task, my_attempt_id)
         });
     }
 
@@ -492,11 +482,18 @@ impl NativeScheduler for LocalScheduler {
     async fn update_cache_locs(&self) -> LibResult<()> {
         Ok(())
     }
+}
+
+#[async_trait::async_trait]
+impl StagePlanner for LocalScheduler {
+    fn state(&self) -> SchedulerState {
+        self.state.clone()
+    }
 
     async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage> {
         log::debug!("getting shuffle map stage");
         let stage_id = self
-            .mutators
+            .state
             .shuffle_to_map_stage
             .get(&shuf.get_shuffle_id())
             .map(|s| s.id);
@@ -504,7 +501,7 @@ impl NativeScheduler for LocalScheduler {
             Some(id) => {
                 // Return the up-to-date copy from stage_cache — shuffle_to_map_stage holds a
                 // stale clone that never sees add_output_loc_to_stage updates.
-                Ok(self.mutators.stage_cache.get(&id).unwrap().clone())
+                Ok(self.state.stage_cache.get(&id).unwrap().clone())
             }
             None => {
                 log::debug!("started creating shuffle map stage before");
@@ -515,8 +512,8 @@ impl NativeScheduler for LocalScheduler {
                 // If the distributed scheduler already completed this shuffle, mark the
                 // stage available so the local scheduler doesn't re-run it and overwrite
                 // the worker URIs in MapOutputTracker.
-                if self.mutators.is_shuffle_complete(shuffle_id) {
-                    let uris = self.mutators.get_shuffle_server_uris(shuffle_id);
+                if self.state.is_shuffle_complete(shuffle_id) {
+                    let uris = self.state.get_shuffle_server_uris(shuffle_id);
                     log::debug!(
                         "shuffle #{} already complete from distributed run; \
                          pre-populating stage #{} output_locs ({} partitions, {} uris)",
@@ -530,28 +527,18 @@ impl NativeScheduler for LocalScheduler {
                     // staged pipelines). Only populate as many slots as the stage has.
                     for (partition, uri) in uris.into_iter().enumerate().take(stage.num_partitions)
                     {
-                        self.mutators
-                            .add_output_loc_to_stage(stage.id, partition, uri);
+                        self.state.add_output_loc_to_stage(stage.id, partition, uri);
                     }
                 }
                 // Re-fetch from stage_cache so output_locs mutations are reflected.
-                let updated = self.mutators.stage_cache.get(&stage.id).unwrap().clone();
-                self.mutators
+                let updated = self.state.stage_cache.get(&stage.id).unwrap().clone();
+                self.state
                     .shuffle_to_map_stage
                     .insert(shuffle_id, updated.clone());
                 log::debug!("finished inserting newly created shuffle stage");
                 Ok(updated)
             }
         }
-    }
-
-    async fn get_missing_parent_stages(&'_ self, stage: Stage) -> LibResult<Vec<Stage>> {
-        log::debug!("getting missing parent stages");
-        let mut missing: BTreeSet<Stage> = BTreeSet::new();
-        let mut visited: HashSet<usize> = HashSet::new();
-        self.visit_missing_parent(&mut missing, &mut visited, stage.get_rdd())
-            .await?;
-        Ok(missing.into_iter().collect())
     }
 }
 

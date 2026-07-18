@@ -86,7 +86,7 @@ where
     where
         S: NativeScheduler,
     {
-        let run_id = scheduler.get_mutators().get_next_job_id();
+        let run_id = scheduler.state().get_next_job_id();
         let final_stage = scheduler
             .new_stage(final_rdd.clone().get_rdd_base(), None)
             .await?;

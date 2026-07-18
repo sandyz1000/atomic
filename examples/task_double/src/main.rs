@@ -157,6 +157,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect()?;
     println!("task_fn positive: {:?}", positives_inline);
 
+    // task_fn! with a capture list: the captured `factor` is shipped as an rkyv-encoded
+    // task parameter, so `|x| x * factor` works even though it closes over a local.
+    let factor = 10i32;
+    let scaled = ctx
+        .parallelize_typed(data.clone(), 2)
+        .map_task(task_fn!([factor: i32] |x: i32| -> i32 { x * factor }))
+        .collect()?;
+    println!("task_fn capture (x*{factor}): {scaled:?}");
+
     // Binary (fold) closures infer return type from the first arg.
     let sum_inline = ctx
         .parallelize_typed(data, 2)

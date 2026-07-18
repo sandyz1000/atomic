@@ -11,7 +11,7 @@ use crate::task_traits::{BinaryTask, UnaryTask};
 use atomic_data::cache::StorageLevel;
 use atomic_data::dependency::Dependency;
 use atomic_data::distributed::{
-    PipelineOp, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
+    OpKind, PipelineOp, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;

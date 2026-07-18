@@ -8,6 +8,7 @@ use crate::task_traits::BinaryTask;
 ///
 /// `const NAME` encodes the element type via `stringify!(T)` so different
 /// instantiations (`MaxTask<i32>`, `MaxTask<String>`, …) each get a unique op_id.
+#[derive(Clone, Copy)]
 pub struct MaxTask<T>(std::marker::PhantomData<T>);
 
 impl<T> MaxTask<T> {
@@ -26,7 +27,7 @@ macro_rules! impl_max_task {
     ($ty:ty) => {
         impl BinaryTask<$ty> for MaxTask<$ty> {
             const NAME: &'static str = concat!("atomic::builtin::max::", stringify!($ty));
-            fn call(a: $ty, b: $ty) -> $ty {
+            fn call(&self, a: $ty, b: $ty) -> $ty {
                 if a >= b { a } else { b }
             }
         }

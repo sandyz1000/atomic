@@ -12,7 +12,7 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 
 # SSH / SFTP — pure-Rust, no Docker, no shelling out
-russh = "0.61.2"
+russh = "0.62.2"
 russh-sftp = "2.1"
 
 # Binary integrity check

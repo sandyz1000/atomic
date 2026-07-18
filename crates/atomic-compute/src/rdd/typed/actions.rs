@@ -357,6 +357,47 @@ impl<T: Data + Clone> TypedRdd<T> {
         Ok(())
     }
 
+    /// Apply a `#[task]`-registered side-effecting function (`UnaryTask<T, ()>`) to each
+    /// element. Unlike [`for_each`](Self::for_each), which collects to the driver and runs
+    /// the closure there, this runs the task **on the workers** in distributed mode.
+    pub fn for_each_task<F>(&self, task: F) -> Result<(), BaseError>
+    where
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+        F: UnaryTask<T, ()>,
+    {
+        if !self.context.is_distributed() {
+            let task_c = task.clone();
+            let for_each_partition = move |iter: Box<dyn Iterator<Item = T>>| {
+                for x in iter {
+                    task_c.call(x);
+                }
+            };
+            self.context.run_job(self.rdd.clone(), for_each_partition)?;
+            return Ok(());
+        }
+
+        let op = PipelineOp {
+            op_id: F::NAME.to_string(),
+            kind: OpKind::Task(TaskAction::Foreach),
+            runtime: TaskRuntime::Native,
+            payload: task.encode_params(),
+        };
+        let (source_partitions, mut ops) = match &self.staged {
+            None => {
+                let src = Context::encode_rdd_partitions(self.rdd.clone())
+                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                (src, vec![])
+            }
+            Some(s) => (s.source_partitions.clone(), s.ops.clone()),
+        };
+        ops.push(op);
+        self.context
+            .dispatch_pipeline(source_partitions, ops)
+            .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+        Ok(())
+    }
+
     /// Count the number of occurrences of each unique value.
     ///
     /// In distributed mode, collects all elements from workers then counts on

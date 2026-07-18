@@ -195,26 +195,26 @@ where
     /// #[task] fn add(a: u32, b: u32) -> u32 { a + b }
     /// let sums = pair_rdd.reduce_by_key_task(Add);
     /// ```
-    pub fn reduce_by_key_task<B>(self, _task: B) -> TypedRdd<(K, V)>
+    pub fn reduce_by_key_task<B>(self, task: B) -> TypedRdd<(K, V)>
     where
         B: BinaryTask<V>,
         K: bincode::Encode + bincode::Decode<()>,
         V: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
     {
-        self.reduce_by_key(|a, b| B::call(a, b))
+        self.reduce_by_key(move |a, b| task.call(a, b))
     }
 
     /// Fold values per key from `zero` using a registered binary task — the
     /// content-addressed form of [`fold_by_key`](Self::fold_by_key).
-    pub fn fold_by_key_task<B>(self, zero: V, _task: B, num_partitions: usize) -> TypedRdd<(K, V)>
+    pub fn fold_by_key_task<B>(self, zero: V, task: B, num_partitions: usize) -> TypedRdd<(K, V)>
     where
         B: BinaryTask<V>,
         V: bincode::Encode + bincode::Decode<()>,
         K: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
     {
-        self.fold_by_key(zero, |a, b| B::call(a, b), num_partitions)
+        self.fold_by_key(zero, move |a, b| task.call(a, b), num_partitions)
     }
 
     /// Aggregate values per key into a different accumulator type `C`, using two
@@ -250,8 +250,8 @@ where
     /// ```
     pub fn aggregate_by_key_task<C, L, M>(
         self,
-        _lift: L,
-        _merge: M,
+        lift: L,
+        merge: M,
         num_partitions: usize,
     ) -> TypedRdd<(K, C)>
     where
@@ -262,10 +262,12 @@ where
         V: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
     {
+        let lift_mv = lift.clone();
+        let merge_mv = merge.clone();
         self.combine_by_key(
-            |v| L::call(v),
-            |c, v| M::call(c, L::call(v)),
-            |c1, c2| M::call(c1, c2),
+            move |v| lift.call(v),
+            move |c, v| merge_mv.call(c, lift_mv.call(v)),
+            move |c1, c2| merge.call(c1, c2),
             num_partitions,
         )
     }
@@ -493,7 +495,7 @@ where
     /// ```
     pub fn reduce_by_key_locally_task<B>(
         &self,
-        _merge: B,
+        merge: B,
     ) -> Result<std::collections::HashMap<K, V>, BaseError>
     where
         B: BinaryTask<V>,
@@ -502,11 +504,12 @@ where
         use std::collections::HashMap;
 
         // Map-side combine: each partition reduces its own keys independently.
+        let merge_c = merge.clone();
         let combine_partition = move |iter: Box<dyn Iterator<Item = (K, V)>>| {
             let mut acc: HashMap<K, V> = HashMap::new();
             for (k, v) in iter {
                 let merged = match acc.remove(&k) {
-                    Some(existing) => B::call(existing, v),
+                    Some(existing) => merge_c.call(existing, v),
                     None => v,
                 };
                 acc.insert(k, merged);
@@ -521,7 +524,7 @@ where
         for partial in partials {
             for (k, v) in partial {
                 let merged = match result.remove(&k) {
-                    Some(existing) => B::call(existing, v),
+                    Some(existing) => merge.call(existing, v),
                     None => v,
                 };
                 result.insert(k, merged);

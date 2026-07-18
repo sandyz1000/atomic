@@ -29,7 +29,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
             // partition's bytes on its worker under `cache_id` (see runtimes/native.rs).
             sp.ops.push(PipelineOp {
                 op_id: String::new(),
-                action: TaskAction::Cache { rdd_id: cache_id },
+                kind: OpKind::Engine(StepKind::Cache { rdd_id: cache_id }),
                 runtime: TaskRuntime::Native,
                 payload: vec![],
             });

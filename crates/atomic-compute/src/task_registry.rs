@@ -142,7 +142,7 @@ inventory::collect!(ShuffleMapEntry);
 /// `register_shuffle_map!(K, V)` calls linked into the binary.
 ///
 /// Keyed by the stringify-based key (e.g. `"String::u32"`).
-/// `NativeBackend` uses this when it sees `TaskAction::ShuffleMap`.
+/// `NativeBackend` uses this when it sees `StepKind::ShuffleMap`.
 pub static SHUFFLE_MAP_REGISTRY: Lazy<HashMap<&'static str, ShuffleMapHandlerFn>> =
     Lazy::new(|| {
         inventory::iter::<ShuffleMapEntry>
@@ -181,7 +181,7 @@ pub static SORT_SHUFFLE_MAP_REGISTRY: Lazy<HashMap<&'static str, ShuffleMapHandl
 ///
 /// Content-agnostic, so the data/compute layers carry no streaming types: it
 /// operates on opaque serialized state. The worker calls it for a
-/// [`TaskAction::MergeState`](atomic_data::distributed::TaskAction::MergeState):
+/// [`StepKind::MergeState`](atomic_data::distributed::StepKind::MergeState):
 /// `prev` is the shard's current serialized state (`None` if this is the first
 /// merge), `partials` is this batch's partial state for the shard, and `params` is
 /// the merge/emit configuration. It returns `(new_state_bytes, emitted_bytes)`.
@@ -203,7 +203,7 @@ inventory::collect!(StateMergeEntry);
 
 /// Global compile-time state-merge registry — built once from all
 /// `register_state_merge!` calls linked into the binary. `NativeBackend` uses this
-/// when it sees [`TaskAction::MergeState`](atomic_data::distributed::TaskAction::MergeState).
+/// when it sees [`StepKind::MergeState`](atomic_data::distributed::StepKind::MergeState).
 pub static STATE_MERGE_REGISTRY: Lazy<HashMap<&'static str, StateMergeFn>> = Lazy::new(|| {
     inventory::iter::<StateMergeEntry>
         .into_iter()
@@ -278,7 +278,7 @@ pub static SHUFFLE_KEY_REGISTRY: Lazy<HashMap<TypeId, &'static str>> = Lazy::new
         .collect()
 });
 
-/// Object-safe runner for [`TaskAction::AgentStep`] ops.
+/// Object-safe runner for [`StepKind::AgentStep`] ops.
 ///
 /// `atomic-nlq` provides the concrete implementation and installs it via
 /// [`register_agent_runner`] at startup — avoiding a direct `atomic-compute →

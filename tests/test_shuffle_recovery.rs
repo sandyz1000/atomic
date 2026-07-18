@@ -11,9 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use atomic_data::distributed::{
-    PipelineOp, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime,
-    TransportFrameKind, WireDecode, WireEncode, WorkerCapabilities, encode_transport_frame,
-    parse_transport_header,
+    OpKind, PipelineOp, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope, TaskResultEnvelope,
+    TaskRuntime, TransportFrameKind, WireDecode, WireEncode, WorkerCapabilities,
+    encode_transport_frame, parse_transport_header,
 };
 use atomic_data::shuffle::MapOutputTracker;
 use atomic_data::task_context::TaskContext;
@@ -29,7 +29,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn noop_ops() -> Vec<PipelineOp> {
     vec![PipelineOp {
         op_id: "no.op".to_string(),
-        action: TaskAction::Map,
+        kind: OpKind::Task(TaskAction::Map),
         runtime: TaskRuntime::Native,
         payload: vec![],
     }]
@@ -102,7 +102,7 @@ async fn test_rerun_reregisters_slot() {
         .await
         .expect("recovery dispatch");
 
-    let locs = tracker.server_uris.get(&5).expect("shuffle registered");
+    let locs = tracker.map_output_uris.get(&5).expect("shuffle registered");
     assert_eq!(
         locs[1].as_deref(),
         Some(fresh_uri),
@@ -178,7 +178,7 @@ async fn test_hook_retries_reduce_only() {
 
     assert_eq!(calls.load(Ordering::SeqCst), 1, "hook must run once");
     assert_eq!(
-        tracker.server_uris.get(&7).unwrap()[0].as_deref(),
+        tracker.map_output_uris.get(&7).unwrap()[0].as_deref(),
         Some("http://10.0.0.9:31000"),
         "tracker slot must hold the recovered URI"
     );
@@ -188,7 +188,7 @@ async fn test_hook_retries_reduce_only() {
         assert_eq!(failed.iter().next().unwrap().id, jt.final_stage.id);
     }
     assert!(
-        sched.get_mutators().take_job_abort(jt.run_id).is_none(),
+        sched.state().take_job_abort(jt.run_id).is_none(),
         "successful recovery must not abort the job"
     );
 
@@ -217,7 +217,7 @@ async fn test_hook_failure_aborts() {
         .await;
 
     let reason = sched
-        .get_mutators()
+        .state()
         .take_job_abort(jt.run_id)
         .expect("failed recovery must abort the job");
     assert!(

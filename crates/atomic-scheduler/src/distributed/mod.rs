@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     fmt::Debug,
     net::{Ipv4Addr, SocketAddrV4},
     sync::{
@@ -22,10 +22,11 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 
 use crate::{
-    base::{Mutators, NativeScheduler},
+    base::{NativeScheduler, SchedulerState},
     error::{LibResult, SchedulerError},
     job::Job,
     listener::LiveListenerBus,
+    planner::StagePlanner,
     stage::Stage,
 };
 
@@ -60,7 +61,7 @@ pub type AccumulatorSink = Arc<dyn Fn(&[(usize, Vec<u8>)]) + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub struct DistributedScheduler {
-    pub(crate) mutators: Mutators,
+    pub(crate) state: SchedulerState,
     pub(crate) max_failures: usize,
     pub(crate) attempt_id: Arc<AtomicUsize>,
 
@@ -125,7 +126,7 @@ impl DistributedScheduler {
             .start()
             .expect("LiveListenerBus failed to start its event-dispatch thread");
         Self {
-            mutators: Mutators::new(),
+            state: SchedulerState::new(),
             max_failures,
             attempt_id: Arc::new(AtomicUsize::new(0)),
             worker_capabilities: Arc::new(DashMap::new()),
@@ -248,35 +249,15 @@ impl DistributedScheduler {
             "distributed approximate jobs require the local scheduler",
         ))
     }
-
-    pub fn run_job<T: Data, U: Data + Clone, F>(
-        self: Arc<Self>,
-        func: Arc<F>,
-        final_rdd: Arc<dyn Rdd<Item = T>>,
-        partitions: Vec<usize>,
-        allow_local: bool,
-    ) -> LibResult<Vec<U>>
-    where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
-    {
-        let _ = (self, func, final_rdd, partitions, allow_local);
-        Err(SchedulerError::UnsupportedOperation(
-            "use run_native_job for distributed execution",
-        ))
-    }
 }
 
 #[async_trait::async_trait]
 impl NativeScheduler for DistributedScheduler {
-    fn submit_task<T: Data, U: Data, F>(
-        &self,
-        task: TaskOption,
-        _id_in_job: usize,
-        _target_executor: SocketAddrV4,
-    ) where
+    fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, _target_executor: SocketAddrV4)
+    where
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
     {
-        let _ = (task, _id_in_job, _target_executor);
+        let _ = (task, _target_executor);
         log::debug!("legacy submit_task ignored; use run_native_job");
     }
 
@@ -313,19 +294,19 @@ impl NativeScheduler for DistributedScheduler {
         // partitions (`register_cache_locs`); do not wipe them between jobs.
         Ok(())
     }
+}
 
+#[async_trait::async_trait]
+impl StagePlanner for DistributedScheduler {
     async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage> {
-        let stage = self
-            .mutators
-            .shuffle_to_map_stage
-            .get(&shuf.get_shuffle_id());
+        let stage = self.state.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
         match stage {
             Some(stage) => Ok(stage.clone()),
             None => {
                 let stage = self
                     .new_stage(shuf.get_rdd_base(), Some(shuf.clone()))
                     .await?;
-                self.mutators
+                self.state
                     .shuffle_to_map_stage
                     .insert(shuf.get_shuffle_id(), stage.clone());
                 Ok(stage)
@@ -333,16 +314,8 @@ impl NativeScheduler for DistributedScheduler {
         }
     }
 
-    async fn get_missing_parent_stages(&self, stage: Stage) -> LibResult<Vec<Stage>> {
-        let mut missing: BTreeSet<Stage> = BTreeSet::new();
-        let mut visited: HashSet<usize> = HashSet::new();
-        self.visit_missing_parent(&mut missing, &mut visited, stage.get_rdd())
-            .await?;
-        Ok(missing.into_iter().collect())
-    }
-
-    fn get_mutators(&self) -> Mutators {
-        self.mutators.clone()
+    fn state(&self) -> SchedulerState {
+        self.state.clone()
     }
 }
 
@@ -477,7 +450,7 @@ pub fn start_register_server(port: u16, scheduler: Arc<DistributedScheduler>) {
 mod tests {
     use super::*;
     use atomic_data::distributed::{
-        PipelineOp, ResultStatus, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope,
+        OpKind, PipelineOp, ResultStatus, StepKind, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope,
         TaskResultEnvelope, TaskRuntime, TransportFrameKind, WireDecode, WireEncode,
         encode_transport_frame, parse_transport_header,
     };
@@ -549,20 +522,20 @@ mod tests {
 
     #[test]
     fn plan_serve_cached() {
-        use atomic_data::distributed::{PipelineOp, TaskAction, TaskRuntime};
+        use atomic_data::distributed::{OpKind, PipelineOp, StepKind, TaskAction, TaskRuntime};
         let sched = DistributedScheduler::new(4, true);
         let ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
         sched.register_cache_locs(&[(700, 0), (700, 1)], ip);
 
         let cache_op = PipelineOp {
             op_id: String::new(),
-            action: TaskAction::Cache { rdd_id: 700 },
+            kind: OpKind::Engine(StepKind::Cache { rdd_id: 700 }),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
         let map_op = PipelineOp {
             op_id: "m".into(),
-            action: TaskAction::Map,
+            kind: OpKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
@@ -692,7 +665,7 @@ mod tests {
             "trace-1".to_string(),
             vec![PipelineOp {
                 op_id: "mycrate::double".to_string(),
-                action: TaskAction::Map,
+                kind: OpKind::Task(TaskAction::Map),
                 runtime: TaskRuntime::Native,
                 payload: vec![],
             }],
@@ -793,7 +766,7 @@ mod tests {
         let sched = DistributedScheduler::new(4, true);
         let task = envelope_with_ops(vec![PipelineOp {
             op_id: String::new(),
-            action: TaskAction::AgentStep,
+            kind: OpKind::Engine(StepKind::AgentStep),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }]);
@@ -809,7 +782,7 @@ mod tests {
             DistributedScheduler::new(4, true).with_agent_step_timeout(Duration::from_secs(60));
         let task = envelope_with_ops(vec![PipelineOp {
             op_id: String::new(),
-            action: TaskAction::AgentStep,
+            kind: OpKind::Engine(StepKind::AgentStep),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }]);
@@ -824,7 +797,7 @@ mod tests {
         let sched = DistributedScheduler::new(4, true);
         let task = envelope_with_ops(vec![PipelineOp {
             op_id: String::new(),
-            action: TaskAction::Map,
+            kind: OpKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }]);

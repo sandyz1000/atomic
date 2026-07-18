@@ -14,7 +14,7 @@ pub struct ShuffleMapPayload {
 
 /// Generic shuffle-write function for `(K, V)` pairs.
 ///
-/// Called by `NativeBackend` when it sees `TaskAction::ShuffleMap`.
+/// Called by `NativeBackend` when it sees `StepKind::ShuffleMap`.
 /// Decodes the rkyv-encoded `Vec<(K, V)>` input, partitions elements by
 /// `FxHash(key) % num_reduce_partitions`, and writes each bucket as
 /// bincode-encoded `Vec<(K, V)>` to `SHUFFLE_CACHE`.

@@ -2,8 +2,8 @@ use atomic_data::distributed::{PipelineOp, TaskEnvelope};
 use futures::future::try_join_all;
 
 use crate::{
-    base::NativeScheduler,
     error::{LibResult, SchedulerError},
+    planner::StagePlanner,
 };
 
 use super::DistributedScheduler;
@@ -100,7 +100,7 @@ impl DistributedScheduler {
     ) -> LibResult<()> {
         use std::sync::atomic::Ordering;
 
-        let m = self.get_mutators();
+        let m = self.state();
         let stage_id = m.get_next_stage_id();
         let task_id = m.get_next_task_id();
         let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
@@ -137,7 +137,7 @@ impl DistributedScheduler {
         use std::sync::atomic::Ordering;
 
         let num_partitions = partitions.len();
-        let m = self.get_mutators();
+        let m = self.state();
         let stage_id = {
             let _lock = self.scheduler_lock.lock();
             m.register_shuffle(shuffle_id, num_partitions);

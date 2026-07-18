@@ -24,7 +24,7 @@ use crate::workflow::{AgentLoop, AgentResult, WorkflowExecutor};
 /// Build with [`NlqContext::build`] or [`NlqContext::build_with_compute`],
 /// register tables and tools, then call [`query`].
 pub struct NlqContext {
-    sql_ctx: Arc<AtomicSqlContext>,
+    pub sql_ctx: Arc<AtomicSqlContext>,
     agent_loop: AgentLoop,
     pub registry: Arc<ToolRegistry>,
     /// Retained NLQ configuration (model, rounds, batching); referenced by future

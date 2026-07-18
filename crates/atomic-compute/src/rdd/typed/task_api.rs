@@ -15,7 +15,7 @@ where
     /// ```ignore
     /// let doubled = ctx.parallelize_typed(data, 2).map_task(Double).collect()?;
     /// ```
-    pub fn map_task<U, F>(self, _task: F) -> TypedRdd<U>
+    pub fn map_task<U, F>(self, task: F) -> TypedRdd<U>
     where
         U: Data + Clone + WireEncode + WireDecode,
         Vec<U>: WireEncode + WireDecode,
@@ -24,14 +24,17 @@ where
         let context = self.context.clone();
         if !context.is_distributed() {
             let id = context.new_rdd_id();
-            return TypedRdd::new(Arc::new(MapperRdd::new(id, self.rdd, F::call)), context);
+            return TypedRdd::new(
+                Arc::new(MapperRdd::new(id, self.rdd, move |x| task.call(x))),
+                context,
+            );
         }
 
         let op = PipelineOp {
             op_id: F::NAME.to_string(),
-            action: TaskAction::Map,
+            kind: OpKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
-            payload: vec![],
+            payload: task.encode_params(),
         };
         let staged = Self::stage_op(self.staged, &self.rdd, op)
             .expect("map_task: failed to encode source partitions");
@@ -52,7 +55,7 @@ where
     /// ```ignore
     /// let positives = ctx.parallelize_typed(data, 2).filter_task(IsPositive).collect()?;
     /// ```
-    pub fn filter_task<F>(self, _task: F) -> TypedRdd<T>
+    pub fn filter_task<F>(self, task: F) -> TypedRdd<T>
     where
         F: UnaryTask<T, bool>,
     {
@@ -60,7 +63,8 @@ where
         if !context.is_distributed() {
             let id = context.new_rdd_id();
             let filter_fn = move |_idx: usize, iter: Box<dyn Iterator<Item = T>>| {
-                Box::new(iter.filter(|x| F::call(x.clone()))) as Box<dyn Iterator<Item = T>>
+                let task = task.clone();
+                Box::new(iter.filter(move |x| task.call(x.clone()))) as Box<dyn Iterator<Item = T>>
             };
             return TypedRdd::new(
                 Arc::new(MapPartitionsRdd::new(id, self.rdd, filter_fn)),
@@ -70,7 +74,7 @@ where
 
         let op = PipelineOp {
             op_id: F::NAME.to_string(),
-            action: TaskAction::Filter,
+            kind: OpKind::Task(TaskAction::Filter),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
@@ -93,7 +97,7 @@ where
     /// ```ignore
     /// let mirrored = ctx.parallelize_typed(data, 2).flat_map_task(Mirror).collect()?;
     /// ```
-    pub fn flat_map_task<U, F>(self, _task: F) -> TypedRdd<U>
+    pub fn flat_map_task<U, F>(self, task: F) -> TypedRdd<U>
     where
         U: Data + Clone + WireEncode + WireDecode,
         Vec<U>: WireEncode + WireDecode,
@@ -103,8 +107,8 @@ where
         if !context.is_distributed() {
             let id = context.new_rdd_id();
             return TypedRdd::new(
-                Arc::new(FlatMapperRdd::new(id, self.rdd, |x| {
-                    Box::new(F::call(x).into_iter())
+                Arc::new(FlatMapperRdd::new(id, self.rdd, move |x| {
+                    Box::new(task.call(x).into_iter())
                 })),
                 context,
             );
@@ -112,12 +116,56 @@ where
 
         let op = PipelineOp {
             op_id: F::NAME.to_string(),
-            action: TaskAction::FlatMap,
+            kind: OpKind::Task(TaskAction::FlatMap),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
         let staged = Self::stage_op(self.staged, &self.rdd, op)
             .expect("flat_map_task: failed to encode source partitions");
+        let id = context.new_rdd_id();
+        TypedRdd {
+            rdd: Arc::new(ParallelCollection::new(id, Vec::<U>::new(), 1)),
+            context,
+            staged: Some(staged),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Apply a `#[task]`-registered `Vec<T> -> Vec<U>` function to each whole partition.
+    ///
+    /// The task is a `UnaryTask<Vec<T>, Vec<U>>` — the "element" is the entire partition.
+    /// Unlike [`map_partitions`](Self::map_partitions) (closure, driver-only), this dispatches
+    /// to the worker holding the partition in distributed mode.
+    ///
+    /// # Example
+    /// ```ignore
+    /// #[task] fn top2(mut items: Vec<i32>) -> Vec<i32> { items.sort(); items.into_iter().rev().take(2).collect() }
+    /// let out = ctx.parallelize_typed(data, 2).map_partitions_task(Top2).collect()?;
+    /// ```
+    pub fn map_partitions_task<U, F>(self, task: F) -> TypedRdd<U>
+    where
+        U: Data + Clone + WireEncode + WireDecode,
+        Vec<U>: WireEncode + WireDecode,
+        F: UnaryTask<Vec<T>, Vec<U>>,
+    {
+        let context = self.context.clone();
+        if !context.is_distributed() {
+            let id = context.new_rdd_id();
+            let f = move |_idx: usize, iter: Box<dyn Iterator<Item = T>>| {
+                let items: Vec<T> = iter.collect();
+                Box::new(task.call(items).into_iter()) as Box<dyn Iterator<Item = U>>
+            };
+            return TypedRdd::new(Arc::new(MapPartitionsRdd::new(id, self.rdd, f)), context);
+        }
+
+        let op = PipelineOp {
+            op_id: F::NAME.to_string(),
+            kind: OpKind::Task(TaskAction::MapPartitions),
+            runtime: TaskRuntime::Native,
+            payload: task.encode_params(),
+        };
+        let staged = Self::stage_op(self.staged, &self.rdd, op)
+            .expect("map_partitions_task: failed to encode source partitions");
         let id = context.new_rdd_id();
         TypedRdd {
             rdd: Arc::new(ParallelCollection::new(id, Vec::<U>::new(), 1)),
@@ -138,18 +186,19 @@ where
     /// ```ignore
     /// let total = ctx.parallelize_typed(data, 2).fold_task(0i32, Add)?;
     /// ```
-    pub fn fold_task<F>(&self, init: T, _task: F) -> Result<T, BaseError>
+    pub fn fold_task<F>(&self, init: T, task: F) -> Result<T, BaseError>
     where
         F: BinaryTask<T>,
         Vec<T>: WireEncode + WireDecode,
     {
         if !self.context.is_distributed() {
-            let f_clone = F::call;
+            let task_c = task.clone();
             let zero = init.clone();
-            let reduce_partition =
-                move |iter: Box<dyn Iterator<Item = T>>| iter.fold(zero.clone(), &f_clone);
+            let reduce_partition = move |iter: Box<dyn Iterator<Item = T>>| {
+                iter.fold(zero.clone(), |a, b| task_c.call(a, b))
+            };
             let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
-            return Ok(results.into_iter().fold(init, F::call));
+            return Ok(results.into_iter().fold(init, |a, b| task.call(a, b)));
         }
 
         // Build pipeline: existing staged ops (if any) + fold op.
@@ -158,7 +207,7 @@ where
             .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
         let fold_op = PipelineOp {
             op_id: F::NAME.to_string(),
-            action: TaskAction::Fold,
+            kind: OpKind::Task(TaskAction::Fold),
             runtime: TaskRuntime::Native,
             payload: fold_payload,
         };
@@ -192,7 +241,10 @@ where
             return Ok(part_values.remove(0));
         }
 
-        Ok(part_values.into_iter().reduce(F::call).unwrap_or(init))
+        Ok(part_values
+            .into_iter()
+            .reduce(|a, b| task.call(a, b))
+            .unwrap_or(init))
     }
 
     /// Reduce all elements using a `#[task]`-registered binary function.
@@ -208,22 +260,25 @@ where
     /// ```ignore
     /// let total = ctx.parallelize_typed(data, 2).reduce_task(task_fn!(|a: i32, b: i32| a + b))?;
     /// ```
-    pub fn reduce_task<F>(&self, _task: F) -> Result<Option<T>, BaseError>
+    pub fn reduce_task<F>(&self, task: F) -> Result<Option<T>, BaseError>
     where
         F: BinaryTask<T>,
         Vec<T>: WireEncode + WireDecode,
     {
         if !self.context.is_distributed() {
-            let reduce_partition = |iter: Box<dyn Iterator<Item = T>>| {
-                iter.reduce(F::call).into_iter().collect::<Vec<_>>()
+            let task_c = task.clone();
+            let reduce_partition = move |iter: Box<dyn Iterator<Item = T>>| {
+                iter.reduce(|a, b| task_c.call(a, b))
+                    .into_iter()
+                    .collect::<Vec<_>>()
             };
             let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
-            return Ok(results.into_iter().flatten().reduce(F::call));
+            return Ok(results.into_iter().flatten().reduce(|a, b| task.call(a, b)));
         }
 
         let reduce_op = PipelineOp {
             op_id: F::NAME.to_string(),
-            action: TaskAction::Reduce,
+            kind: OpKind::Task(TaskAction::Reduce),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
@@ -257,7 +312,7 @@ where
                     .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
                 let driver_ops = vec![PipelineOp {
                     op_id: F::NAME.to_string(),
-                    action: TaskAction::Reduce,
+                    kind: OpKind::Task(TaskAction::Reduce),
                     runtime: TaskRuntime::Native,
                     payload: vec![],
                 }];
@@ -360,7 +415,7 @@ impl TypedRdd<String> {
 
         let op = PipelineOp {
             op_id: String::new(),
-            action: TaskAction::AgentStep,
+            kind: OpKind::Engine(StepKind::AgentStep),
             runtime: TaskRuntime::Native,
             payload: payload_bytes,
         };

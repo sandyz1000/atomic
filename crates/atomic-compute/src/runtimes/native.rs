@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use atomic_data::accumulator;
 use atomic_data::broadcast;
 use atomic_data::distributed::{
-    PipelineOp, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime, decode_payload,
+    OpKind, PipelineOp, StepKind, TaskEnvelope, TaskResultEnvelope, TaskRuntime, decode_payload,
 };
 
 use crate::error::{ComputeError, ComputeResult};
@@ -36,11 +36,11 @@ impl OpDispatcher for NativeDispatcher {
         partition_id: usize,
         data: &[u8],
     ) -> ComputeResult<Vec<u8>> {
-        match &op.action {
-            TaskAction::ShuffleMap {
+        match &op.kind {
+            OpKind::Engine(StepKind::ShuffleMap {
                 shuffle_id,
                 num_output_partitions,
-            } => {
+            }) => {
                 // Payload carries the dispatch key + the shipped partitioner spec.
                 let payload: crate::shuffle_map::ShuffleMapPayload =
                     decode_or_invalid(&op.payload, "shuffle-map payload")?;
@@ -70,7 +70,7 @@ impl OpDispatcher for NativeDispatcher {
                     }
                 }
             }
-            TaskAction::Cache { rdd_id } => {
+            OpKind::Engine(StepKind::Cache { rdd_id }) => {
                 // Terminal identity op: store this partition's bytes for later reuse.
                 atomic_data::cache::worker_partition_cache().put(
                     *rdd_id,
@@ -80,21 +80,21 @@ impl OpDispatcher for NativeDispatcher {
                 Ok(data.to_vec())
             }
             #[cfg(feature = "kafka")]
-            TaskAction::KafkaConsume => {
+            OpKind::Engine(StepKind::KafkaConsume) => {
                 // The per-partition consume config is shipped in `source_partitions[i]`
                 // (i.e. `data`), not in `op.payload` (which is empty for KafkaConsume).
                 let payload: atomic_data::distributed::KafkaConsumePayload =
                     decode_or_invalid(data, "KafkaConsume data")?;
                 kafka_consume_handler(&payload)
             }
-            TaskAction::ReadFileSplit => {
+            OpKind::Engine(StepKind::ReadFileSplit) => {
                 // Per-partition config shipped in `data` (bincode-encoded FileSplitPayload);
                 // `op.payload` is empty.
                 let payload: atomic_data::distributed::FileSplitPayload =
                     decode_or_invalid(data, "ReadFileSplit data")?;
                 file_split_handler(&payload)
             }
-            TaskAction::MergeState { merge_fn } => {
+            OpKind::Engine(StepKind::MergeState { merge_fn }) => {
                 // Per-shard input shipped in `data` (bincode-encoded StateMergePayload).
                 // The merge fn is content-agnostic; the shard's state persists across
                 // batches in the worker-global WORKER_STATE_STORE.
@@ -152,7 +152,7 @@ impl OpDispatcher for NativeDispatcher {
                 store.put(payload.state_id, new_state);
                 Ok(emitted)
             }
-            TaskAction::AgentStep => {
+            OpKind::Engine(StepKind::AgentStep) => {
                 let payload: atomic_data::distributed::AgentStepPayload =
                     serde_json::from_slice(&op.payload).map_err(|e| {
                         ComputeError::InvalidPayload(format!("AgentStep payload decode: {e}"))
@@ -169,7 +169,7 @@ impl OpDispatcher for NativeDispatcher {
                     .run_partition(&payload, data)
                     .map_err(ComputeError::InvalidPayload)
             }
-            _ => match TASK_REGISTRY.get(op.op_id.as_str()) {
+            OpKind::Task(action) => match TASK_REGISTRY.get(op.op_id.as_str()) {
                 None => {
                     let registered: Vec<&str> = TASK_REGISTRY.keys().copied().collect();
                     Err(ComputeError::UnknownOperation(format!(
@@ -183,7 +183,7 @@ impl OpDispatcher for NativeDispatcher {
                         registered.join(", ")
                     )))
                 }
-                Some(handler) => Ok(handler(&op.action, &op.payload, data)?),
+                Some(handler) => Ok(handler(action, &op.payload, data)?),
             },
         }
     }
@@ -321,7 +321,7 @@ fn run_pipeline(
             "[{}] pipeline op '{}' {:?} data_bytes={}",
             worker_id,
             op.op_id,
-            op.action,
+            op.kind,
             data.len(),
         );
         let dispatcher = dispatchers.get(&op.runtime).ok_or_else(|| {
@@ -345,15 +345,15 @@ fn build_result_envelope(
     let shuffle_server_uri = task
         .ops
         .iter()
-        .any(|op| matches!(op.action, TaskAction::ShuffleMap { .. }))
+        .any(|op| matches!(op.kind, OpKind::Engine(StepKind::ShuffleMap { .. })))
         .then(atomic_data::env::get_shuffle_server_uri)
         .flatten();
 
     let cached_partitions: Vec<(usize, usize)> = task
         .ops
         .iter()
-        .filter_map(|op| match op.action {
-            TaskAction::Cache { rdd_id } => Some((rdd_id, task.partition_id)),
+        .filter_map(|op| match op.kind {
+            OpKind::Engine(StepKind::Cache { rdd_id }) => Some((rdd_id, task.partition_id)),
             _ => None,
         })
         .collect();
@@ -363,7 +363,7 @@ fn build_result_envelope(
     let held_state_ids: Vec<u64> = task
         .ops
         .iter()
-        .filter(|op| matches!(op.action, TaskAction::MergeState { .. }))
+        .filter(|op| matches!(op.kind, OpKind::Engine(StepKind::MergeState { .. })))
         .filter_map(|_| {
             decode_payload::<atomic_data::distributed::StateMergePayload>(&task.data)
                 .ok()
@@ -553,14 +553,11 @@ fn write_shard_checkpoint(dir: &str, state_id: u64, bytes: &[u8]) -> ComputeResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atomic_data::distributed::{PipelineOp, ResultStatus, TaskAction, TaskRuntime};
+    use atomic_data::distributed::{
+        OpKind, PipelineOp, ResultStatus, StepKind, TaskAction, TaskRuntime,
+    };
 
-    fn make_task(
-        op_id: &str,
-        action: TaskAction,
-        runtime: TaskRuntime,
-        data: Vec<u8>,
-    ) -> TaskEnvelope {
+    fn make_task(op_id: &str, kind: OpKind, runtime: TaskRuntime, data: Vec<u8>) -> TaskEnvelope {
         TaskEnvelope::new(
             1,
             2,
@@ -570,7 +567,7 @@ mod tests {
             "test-trace".to_string(),
             vec![PipelineOp {
                 op_id: op_id.to_string(),
-                action,
+                kind,
                 runtime,
                 payload: vec![],
             }],
@@ -581,7 +578,12 @@ mod tests {
     #[test]
     fn native_runtime_unknown_op_returns_fatal_failure() {
         let backend = ComputeEngine::default();
-        let task = make_task("no.such.op", TaskAction::Map, TaskRuntime::Native, vec![]);
+        let task = make_task(
+            "no.such.op",
+            OpKind::Task(TaskAction::Map),
+            TaskRuntime::Native,
+            vec![],
+        );
         let result = backend.execute("test-worker", &task).unwrap();
         assert_eq!(result.status, ResultStatus::FatalFailure);
         assert!(result.error.unwrap().contains("no.such.op"));
@@ -590,7 +592,12 @@ mod tests {
     #[test]
     fn default_backend_has_native_dispatcher() {
         let backend = ComputeEngine::default();
-        let task = make_task("nonexistent", TaskAction::Map, TaskRuntime::Native, vec![]);
+        let task = make_task(
+            "nonexistent",
+            OpKind::Task(TaskAction::Map),
+            TaskRuntime::Native,
+            vec![],
+        );
         let result = backend.execute("w", &task);
         assert!(result.is_ok(), "Native dispatcher must be registered");
         assert_eq!(result.unwrap().status, ResultStatus::FatalFailure);
@@ -609,7 +616,12 @@ mod tests {
     #[test]
     fn unregistered_runtime_returns_err() {
         let backend = ComputeEngine::default();
-        let task = make_task("no.such.op", TaskAction::Map, TaskRuntime::Native, vec![]);
+        let task = make_task(
+            "no.such.op",
+            OpKind::Task(TaskAction::Map),
+            TaskRuntime::Native,
+            vec![],
+        );
         assert!(backend.execute("w", &task).is_ok());
     }
 
@@ -621,7 +633,7 @@ mod tests {
         // reports (rdd_id, partition_id) for driver-side locality registration.
         let task = make_task(
             "",
-            TaskAction::Cache { rdd_id: 9001 },
+            OpKind::Engine(StepKind::Cache { rdd_id: 9001 }),
             TaskRuntime::Native,
             data.clone(),
         );
