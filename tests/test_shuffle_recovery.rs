@@ -20,7 +20,7 @@ use atomic_data::task_context::TaskContext;
 use atomic_scheduler::dag::FetchFailedVals;
 use atomic_scheduler::job::JobTracker;
 use atomic_scheduler::listener::NoOpListener;
-use atomic_scheduler::{DistributedScheduler, LocalScheduler, NativeScheduler};
+use atomic_scheduler::{DistributedScheduler, LocalScheduler, NativeScheduler, StagePlanner};
 
 /// Serializes tests: they share the process-global `MAP_OUTPUT_TRACKER`, and the
 /// schedulers snapshot it at construction.

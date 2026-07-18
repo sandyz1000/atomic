@@ -123,39 +123,60 @@ impl Context {
         let broadcasts = self.broadcast_snapshot();
         match &self.scheduler {
             Schedulers::Local(_) => {
-                // Some ops (e.g. AgentStep) need a reachable Tokio runtime to `block_on`
-                // their async work; local mode otherwise runs on a plain native thread.
+                // Mirror the distributed model — one task per executor — but the executor is
+                // a local blocking thread instead of a remote worker. Each partition's pipeline
+                // runs concurrently on Tokio's blocking pool, which keeps a reachable runtime for
+                // ops (e.g. AgentStep) that `block_on` async work.
                 env::Env::run_in_async_rt(|| {
-                    let backend = ComputeEngine::default();
-                    source_partitions
-                        .into_iter()
-                        .enumerate()
-                        .map(|(part_id, data)| {
-                            let task = TaskEnvelope::new(
-                                0,
-                                0,
-                                part_id,
-                                0,
-                                part_id,
-                                format!("local-pipeline-{}", part_id),
-                                ops.clone(),
-                                data,
-                            )
-                            .with_broadcasts(broadcasts.clone());
-                            let result = backend.execute("local-driver", &task)?;
+                    let engine = Arc::new(ComputeEngine::default());
+                    let ops = Arc::new(ops);
+                    let broadcasts = Arc::new(broadcasts);
+                    futures::executor::block_on(async {
+                        let mut handles = Vec::with_capacity(source_partitions.len());
+                        for (part_id, data) in source_partitions.into_iter().enumerate() {
+                            let engine = engine.clone();
+                            let ops = ops.clone();
+                            let broadcasts = broadcasts.clone();
+                            handles.push(tokio::task::spawn_blocking(move || {
+                                let task = TaskEnvelope::new(
+                                    0,
+                                    0,
+                                    part_id,
+                                    0,
+                                    part_id,
+                                    format!("local-pipeline-{part_id}"),
+                                    (*ops).clone(),
+                                    data,
+                                )
+                                .with_broadcasts((*broadcasts).clone());
+                                engine.execute("local-driver", &task)
+                            }));
+                        }
+                        // Results are joined in partition order; accumulator deltas merge on the
+                        // driver after each task completes.
+                        let mut out = Vec::with_capacity(handles.len());
+                        for h in handles {
+                            let result = h.await.map_err(|e| {
+                                ComputeError::InvalidPayload(format!(
+                                    "local task thread panicked: {e}"
+                                ))
+                            })??;
                             match result.status {
                                 ResultStatus::Success => {
                                     if !result.accumulator_deltas.is_empty() {
                                         self.merge_accumulator_deltas(&result.accumulator_deltas);
                                     }
-                                    Ok(result.data)
+                                    out.push(result.data);
                                 }
-                                _ => Err(ComputeError::InvalidPayload(
-                                    result.error.unwrap_or_else(|| "task failed".to_string()),
-                                )),
+                                _ => {
+                                    return Err(ComputeError::InvalidPayload(
+                                        result.error.unwrap_or_else(|| "task failed".to_string()),
+                                    ));
+                                }
                             }
-                        })
-                        .collect()
+                        }
+                        Ok(out)
+                    })
                 })
             }
             Schedulers::Distributed(sched) => Ok(env::Env::run_in_async_rt(|| {

@@ -1,7 +1,7 @@
 use std::{
     collections::{HashSet, VecDeque},
     fmt::Debug,
-    net::{Ipv4Addr, SocketAddrV4},
+    net::SocketAddrV4,
     sync::{
         Arc,
         atomic::{AtomicI16, AtomicUsize, Ordering},
@@ -15,14 +15,13 @@ use atomic_data::{
     distributed::WorkerCapabilities,
     partial::{ApproximateEvaluator, result::PartialResult},
     rdd::Rdd,
-    task::TaskOption,
     task_context::TaskContext,
 };
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
 use crate::{
-    base::{NativeScheduler, SchedulerState},
+    base::SchedulerState,
     error::{LibResult, SchedulerError},
     job::Job,
     listener::LiveListenerBus,
@@ -252,51 +251,6 @@ impl DistributedScheduler {
 }
 
 #[async_trait::async_trait]
-impl NativeScheduler for DistributedScheduler {
-    fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, _target_executor: SocketAddrV4)
-    where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
-    {
-        let _ = (task, _target_executor);
-        log::debug!("legacy submit_task ignored; use run_native_job");
-    }
-
-    fn next_executor_server(&self, task: &TaskOption) -> SocketAddrV4 {
-        if !task.is_pinned() {
-            let socket_addr = self
-                .server_uris
-                .lock()
-                .pop_back()
-                .expect("next_executor_server called with an empty worker pool");
-            self.server_uris.lock().push_front(socket_addr);
-            socket_addr
-        } else {
-            let servers = &mut *self.server_uris.lock();
-            let location: Ipv4Addr = task.preferred_locations()[0];
-            if let Some((pos, _)) = servers
-                .iter()
-                .enumerate()
-                .find(|(_, endpoint)| *endpoint.ip() == location)
-            {
-                let target_host = servers
-                    .remove(pos)
-                    .expect("invariant: pos was just produced by find() above");
-                servers.push_front(target_host);
-                target_host
-            } else {
-                unreachable!()
-            }
-        }
-    }
-
-    async fn update_cache_locs(&self) -> LibResult<()> {
-        // Cache locations are populated incrementally as workers report cached
-        // partitions (`register_cache_locs`); do not wipe them between jobs.
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
 impl StagePlanner for DistributedScheduler {
     async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage> {
         let stage = self.state.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
@@ -454,6 +408,7 @@ mod tests {
         TaskResultEnvelope, TaskRuntime, TransportFrameKind, WireDecode, WireEncode,
         encode_transport_frame, parse_transport_header,
     };
+    use std::net::Ipv4Addr;
 
     #[test]
     fn accumulator_sink_merges() {
