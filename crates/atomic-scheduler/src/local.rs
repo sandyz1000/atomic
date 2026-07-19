@@ -360,10 +360,7 @@ impl LocalScheduler {
         result: Box<dyn Data>,
     ) {
         let result = Some(result);
-        let run_id = match &task {
-            TaskOption::ResultTask(rt) => rt.run_id,
-            TaskOption::ShuffleMapTask(smt) => smt.run_id,
-        };
+        let run_id = task.get_run_id();
         if let Some(mut queue) = event_queues.get_mut(&run_id) {
             queue.push_back(CompletionEvent {
                 task,
@@ -456,10 +453,7 @@ impl NativeScheduler for LocalScheduler {
         let event_queues = self.state.event_queues.clone();
 
         // No need to serialize for local execution — runs on a Tokio blocking thread
-        let task_id = match &task {
-            TaskOption::ResultTask(t) => t.task_id,
-            TaskOption::ShuffleMapTask(t) => t.task_id,
-        };
+        let task_id = task.get_task_id();
         log::info!(
             "[local-worker] spawning task_id={} attempt={} on blocking thread",
             task_id,

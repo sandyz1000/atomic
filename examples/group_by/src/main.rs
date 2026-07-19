@@ -11,6 +11,10 @@
 use atomic_compute::app::{AppRole, AtomicApp};
 use atomic_compute::{task, task_fn};
 
+// reduce_by_key_task / group_by_key shuffle `(String, i32)` by key hash, so the
+// shuffle-map writer for that pair must be linked into the binary.
+atomic_compute::register_shuffle_map!(String, i32);
+
 /// Sum two counts — the keyed-reduction merge.
 #[task]
 fn add_i32(a: i32, b: i32) -> i32 {

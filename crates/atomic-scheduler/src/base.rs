@@ -131,9 +131,13 @@ pub trait NativeScheduler: StagePlanner {
                     shuffle_server_uri
                 );
                 let m = self.state();
-                m.add_output_loc_to_stage(smt.stage_id, smt.partition, shuffle_server_uri);
+                m.add_output_loc_to_stage(
+                    smt.meta.stage_id,
+                    smt.meta.partition,
+                    shuffle_server_uri,
+                );
 
-                let stage = m.fetch_from_stage_cache(smt.stage_id);
+                let stage = m.fetch_from_stage_cache(smt.meta.stage_id);
                 log::debug!(
                     "pending stages: {:?}",
                     jt.pending_tasks

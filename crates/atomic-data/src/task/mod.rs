@@ -6,18 +6,67 @@ pub use result::{ResultTask, ResultTaskBox};
 pub use shuffle_map::ShuffleMapTask;
 use std::{error, net::Ipv4Addr};
 
-/// Base trait for all tasks - provides common task metadata
+/// Scheduler metadata common to every task, regardless of its kind.
+///
+/// Both `ResultTaskBox` and `ShuffleMapTask` (and the generic `ResultTask`)
+/// embed this so the shared identity/placement fields are defined once.
+#[derive(Clone)]
+pub struct TaskMeta {
+    pub task_id: usize,
+    pub run_id: usize,
+    pub stage_id: usize,
+    pub partition: usize,
+    pub locs: Vec<Ipv4Addr>,
+    pub pinned: bool,
+}
+
+impl TaskMeta {
+    pub fn new(
+        task_id: usize,
+        run_id: usize,
+        stage_id: usize,
+        partition: usize,
+        locs: Vec<Ipv4Addr>,
+        pinned: bool,
+    ) -> Self {
+        TaskMeta {
+            task_id,
+            run_id,
+            stage_id,
+            partition,
+            locs,
+            pinned,
+        }
+    }
+}
+
+/// Base trait for all tasks - exposes the shared [`TaskMeta`] and derives every
+/// common accessor from it, so implementors only supply `meta()`.
 pub trait TaskBase: Send + Sync {
-    fn get_run_id(&self) -> usize;
-    fn get_stage_id(&self) -> usize;
-    fn get_task_id(&self) -> usize;
+    fn meta(&self) -> &TaskMeta;
+
+    fn get_run_id(&self) -> usize {
+        self.meta().run_id
+    }
+
+    fn get_stage_id(&self) -> usize {
+        self.meta().stage_id
+    }
+
+    fn get_task_id(&self) -> usize {
+        self.meta().task_id
+    }
+
+    fn partition(&self) -> usize {
+        self.meta().partition
+    }
 
     fn is_pinned(&self) -> bool {
-        false
+        self.meta().pinned
     }
 
     fn preferred_locations(&self) -> Vec<Ipv4Addr> {
-        Vec::new()
+        self.meta().locs.clone()
     }
 
     fn generation(&self) -> Option<i64> {
@@ -41,6 +90,15 @@ pub enum TaskOption {
 }
 
 impl TaskOption {
+    /// Borrow the active variant as its shared [`TaskBase`] so metadata accessors
+    /// forward through one place instead of a match per getter.
+    fn as_task_base(&self) -> &dyn TaskBase {
+        match self {
+            TaskOption::ResultTask(tsk) => tsk,
+            TaskOption::ShuffleMapTask(tsk) => tsk,
+        }
+    }
+
     /// Run the task and return the result
     pub fn run(&self, id: usize) -> Result<TaskResult, Box<dyn error::Error>> {
         match self {
@@ -50,38 +108,23 @@ impl TaskOption {
     }
 
     pub fn get_task_id(&self) -> usize {
-        match self {
-            TaskOption::ResultTask(tsk) => tsk.get_task_id(),
-            TaskOption::ShuffleMapTask(tsk) => tsk.get_task_id(),
-        }
+        self.as_task_base().get_task_id()
     }
 
     pub fn get_run_id(&self) -> usize {
-        match self {
-            TaskOption::ResultTask(tsk) => tsk.get_run_id(),
-            TaskOption::ShuffleMapTask(tsk) => tsk.get_run_id(),
-        }
+        self.as_task_base().get_run_id()
     }
 
     pub fn get_stage_id(&self) -> usize {
-        match self {
-            TaskOption::ResultTask(tsk) => tsk.get_stage_id(),
-            TaskOption::ShuffleMapTask(tsk) => tsk.get_stage_id(),
-        }
+        self.as_task_base().get_stage_id()
     }
 
     pub fn is_pinned(&self) -> bool {
-        match self {
-            TaskOption::ResultTask(tsk) => tsk.is_pinned(),
-            TaskOption::ShuffleMapTask(tsk) => tsk.is_pinned(),
-        }
+        self.as_task_base().is_pinned()
     }
 
     pub fn preferred_locations(&self) -> Vec<Ipv4Addr> {
-        match self {
-            TaskOption::ResultTask(tsk) => tsk.preferred_locations(),
-            TaskOption::ShuffleMapTask(tsk) => tsk.preferred_locations(),
-        }
+        self.as_task_base().preferred_locations()
     }
 }
 

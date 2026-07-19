@@ -259,13 +259,16 @@ impl DistributedScheduler {
         let partitions = shuffle_dep.encode_partitions().map_err(|e| {
             SchedulerError::TaskFailed(format!("shuffle map partition encode: {e}"))
         })?;
-        let data = partitions.get(task.partition).cloned().ok_or_else(|| {
-            SchedulerError::TaskFailed(format!(
-                "shuffle map partition {} out of bounds ({} partitions)",
-                task.partition,
-                partitions.len()
-            ))
-        })?;
+        let data = partitions
+            .get(task.meta.partition)
+            .cloned()
+            .ok_or_else(|| {
+                SchedulerError::TaskFailed(format!(
+                    "shuffle map partition {} out of bounds ({} partitions)",
+                    task.meta.partition,
+                    partitions.len()
+                ))
+            })?;
 
         let payload = bincode::encode_to_vec(
             atomic_data::distributed::ShuffleMapPayload {
@@ -290,14 +293,14 @@ impl DistributedScheduler {
         let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
         let trace = format!(
             "native-submit-shuffle-{}-{}",
-            spec.shuffle_id, task.partition
+            spec.shuffle_id, task.meta.partition
         );
         Ok(TaskEnvelope::new(
-            task.run_id,
-            task.stage_id,
-            task.task_id,
+            task.meta.run_id,
+            task.meta.stage_id,
+            task.meta.task_id,
             attempt_id,
-            task.partition,
+            task.meta.partition,
             trace,
             ops,
             data,
