@@ -56,9 +56,10 @@ pub struct PipelineOp {
     /// Registered op_id, e.g. `"task_double::double"`. Looked up in the worker's
     /// compile-time dispatch table. Empty string for Python/JS task ops.
     pub op_id: String,
-    /// Which operation this step performs. Authoritative for Native runtime;
-    /// informational (for observability) for Python and JavaScript runtimes.
-    pub action: TaskAction,
+    /// What this step does: a registered task function applied with a combinator shape
+    /// ([`OpKind::Task`]), or a built-in engine step ([`OpKind::Engine`]). Authoritative
+    /// for Native runtime; informational (for observability) for Python and JavaScript.
+    pub kind: OpKind,
     /// Which runtime executes this op. Defaults to [`TaskRuntime::Native`].
     pub runtime: TaskRuntime,
     /// rkyv-encoded config: fold zero value for Fold/Aggregate; serde_json-encoded
@@ -66,17 +67,11 @@ pub struct PipelineOp {
     pub payload: Vec<u8>,
 }
 
-/// The action the worker should apply over the partition data using the named task function.
+/// The combinator shape the worker applies over the partition using the named task function.
 ///
-/// The driver sets this based on which RDD operation triggered the task submission.
-/// The worker dispatch handler reads this to decide how to iterate over the partition.
-///
-/// `KafkaConsume` is `#[cfg(feature = "kafka")]`-gated and declared **last**, intentionally.
-/// Variants with struct fields can't carry explicit discriminants in Rust (unlike
-/// [`TaskRuntime`]'s pinned values), so the only way to keep every other variant's implicit
-/// discriminant stable across builds with/without the `kafka` feature is to put the
-/// cfg-gated variant after all of them — inserting or removing it then never shifts anyone
-/// else's position.
+/// The driver sets this from which `_task` RDD operation triggered the submission; the
+/// worker dispatch handler reads it to decide how to iterate. The `#[task]` / `task_fn!`
+/// macros derive the supported shapes from the function signature.
 #[derive(
     Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
@@ -96,6 +91,28 @@ pub enum TaskAction {
     Aggregate,
     /// Collect all elements from partition (identity pass-through).
     Collect,
+    /// Apply the task function to the whole partition at once: `Vec<T> -> Vec<U>`.
+    /// The task is a `UnaryTask<Vec<T>, Vec<U>>`; `data` is the rkyv-encoded partition.
+    MapPartitions,
+    /// Apply a side-effecting task (`UnaryTask<T, ()>`) to each element on the worker.
+    /// Terminal: produces no output (returns an empty result).
+    Foreach,
+}
+
+/// A built-in engine step that runs fixed worker logic rather than a registered task
+/// function. Unlike [`TaskAction`], these carry no `op_id` — the variant selects the behavior.
+///
+/// `KafkaConsume` is `#[cfg(feature = "kafka")]`-gated and declared **last**, intentionally.
+/// Variants with struct fields can't carry explicit discriminants in Rust (unlike
+/// [`TaskRuntime`]'s pinned values), so the only way to keep every other variant's implicit
+/// discriminant stable across builds with/without the `kafka` feature is to put the
+/// cfg-gated variant after all of them — inserting or removing it then never shifts anyone
+/// else's position.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum StepKind {
     /// Shuffle map phase: repartition elements by key into `num_output_partitions` buckets.
     ShuffleMap {
         shuffle_id: usize,
@@ -134,7 +151,38 @@ pub enum TaskAction {
     KafkaConsume,
 }
 
-/// Config for a [`TaskAction::AgentStep`] op.
+/// What a [`PipelineOp`] does: apply a registered task function with a combinator shape
+/// ([`TaskAction`]), or run a built-in engine step ([`StepKind`]).
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OpKind {
+    /// Registered task function applied with a combinator shape. `op_id` names the function.
+    Task(TaskAction),
+    /// Built-in engine step. `op_id` is empty.
+    Engine(StepKind),
+}
+
+impl OpKind {
+    /// The combinator shape if this is a task op, else `None`.
+    pub fn task_action(&self) -> Option<&TaskAction> {
+        match self {
+            OpKind::Task(a) => Some(a),
+            OpKind::Engine(_) => None,
+        }
+    }
+
+    /// The engine step if this is an engine op, else `None`.
+    pub fn engine_step(&self) -> Option<&StepKind> {
+        match self {
+            OpKind::Engine(s) => Some(s),
+            OpKind::Task(_) => None,
+        }
+    }
+}
+
+/// Config for a [`StepKind::AgentStep`] op.
 ///
 /// Serialized as JSON into `PipelineOp.payload` so it can be decoded by the
 /// worker's `NativeDispatcher` without a shared rkyv schema.
@@ -206,7 +254,7 @@ pub struct ResolvedTool {
 ///
 /// One `AgentFindings` is produced per input element in the partition.
 /// `Vec<AgentFindings>` is rkyv-encoded as the partition output of an
-/// [`TaskAction::AgentStep`] op.
+/// [`StepKind::AgentStep`] op.
 #[derive(
     Debug, Clone, PartialEq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
@@ -300,6 +348,17 @@ pub struct FileSplitPayload {
     pub start_byte: u64,
     /// Exclusive end byte; `None` means read to EOF.
     pub end_byte: Option<u64>,
+}
+
+/// Payload for one `StepKind::ShuffleMap` pipeline op.
+///
+/// Sent in `PipelineOp.payload` and decoded on the worker by the native runtime.
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+pub struct ShuffleMapPayload {
+    /// `SHUFFLE_MAP_REGISTRY` key for the concrete `(K, V)` pair.
+    pub type_id: String,
+    /// Serializable partitioner description used by the worker when writing buckets.
+    pub partitioner_spec: crate::partitioner::PartitionerSchema,
 }
 
 /// Per-shard input for a [`TaskAction::MergeState`] task (bincode-encoded into the

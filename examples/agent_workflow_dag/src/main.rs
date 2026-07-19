@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..NlqConfig::default()
     };
 
-    let ctx = NlqContext::build(config);
+    let ctx = NlqContext::build(config)?;
     ctx.sql_ctx().register_batches("orders", vec![batch])?;
 
     // ── Construct the workflow DAG manually ─────────────────────────────────────

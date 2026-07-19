@@ -41,3 +41,5 @@ __pycache__
 
 *.node
 *.abi3.so
+
+extensions

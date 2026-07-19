@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::{PipelineOp, PythonTaskPayload, TaskAction, TaskRuntime};
+use atomic_data::distributed::{OpKind, PipelineOp, PythonTaskPayload, TaskAction, TaskRuntime};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
@@ -168,7 +168,7 @@ impl PyRdd {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let op = PipelineOp {
             op_id: "atomic::task::python".to_string(),
-            action,
+            kind: OpKind::Task(action),
             runtime: TaskRuntime::Python,
             payload,
         };

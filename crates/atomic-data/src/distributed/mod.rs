@@ -33,7 +33,7 @@ mod tests {
     fn task_envelope_round_trips_with_rkyv() {
         let ops = vec![PipelineOp {
             op_id: "mycrate::double".to_string(),
-            action: TaskAction::Map,
+            kind: OpKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }];
@@ -42,7 +42,7 @@ mod tests {
         let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize envelope");
         assert_eq!(decoded.ops.len(), 1);
         assert_eq!(decoded.ops[0].op_id, "mycrate::double");
-        assert_eq!(decoded.ops[0].action, TaskAction::Map);
+        assert_eq!(decoded.ops[0].kind, OpKind::Task(TaskAction::Map));
         assert_eq!(decoded.data, vec![1, 2, 3]);
     }
 
@@ -61,14 +61,14 @@ mod tests {
     fn fold_action_round_trips() {
         let ops = vec![PipelineOp {
             op_id: "mycrate::sum".to_string(),
-            action: TaskAction::Fold,
+            kind: OpKind::Task(TaskAction::Fold),
             runtime: TaskRuntime::Native,
             payload: 0_i32.to_le_bytes().to_vec(),
         }];
         let envelope = TaskEnvelope::new(1, 2, 3, 0, 4, "trace-2".to_string(), ops, vec![1, 2, 3]);
         let bytes = envelope.encode_wire().expect("serialize");
         let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
-        assert_eq!(decoded.ops[0].action, TaskAction::Fold);
+        assert_eq!(decoded.ops[0].kind, OpKind::Task(TaskAction::Fold));
         assert_eq!(decoded.ops[0].payload, 0_i32.to_le_bytes().to_vec());
     }
 
@@ -76,10 +76,10 @@ mod tests {
     fn shuffle_map_carries_ids() {
         let ops = vec![PipelineOp {
             op_id: "sys.shuffle_map".to_string(),
-            action: TaskAction::ShuffleMap {
+            kind: OpKind::Engine(StepKind::ShuffleMap {
                 shuffle_id: 7,
                 num_output_partitions: 4,
-            },
+            }),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }];
@@ -87,11 +87,11 @@ mod tests {
         let bytes = envelope.encode_wire().expect("serialize");
         let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
         assert!(matches!(
-            decoded.ops[0].action,
-            TaskAction::ShuffleMap {
+            decoded.ops[0].kind,
+            OpKind::Engine(StepKind::ShuffleMap {
                 shuffle_id: 7,
                 num_output_partitions: 4
-            }
+            })
         ));
     }
 
@@ -100,19 +100,19 @@ mod tests {
         let ops = vec![
             PipelineOp {
                 op_id: "myapp::double".to_string(),
-                action: TaskAction::Map,
+                kind: OpKind::Task(TaskAction::Map),
                 runtime: TaskRuntime::Native,
                 payload: vec![],
             },
             PipelineOp {
                 op_id: "myapp::is_positive".to_string(),
-                action: TaskAction::Filter,
+                kind: OpKind::Task(TaskAction::Filter),
                 runtime: TaskRuntime::Native,
                 payload: vec![],
             },
             PipelineOp {
                 op_id: "myapp::add".to_string(),
-                action: TaskAction::Fold,
+                kind: OpKind::Task(TaskAction::Fold),
                 runtime: TaskRuntime::Native,
                 payload: 0_i32.to_le_bytes().to_vec(),
             },
@@ -122,7 +122,7 @@ mod tests {
         let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
         assert_eq!(decoded.ops.len(), 3);
         assert_eq!(decoded.ops[0].op_id, "myapp::double");
-        assert_eq!(decoded.ops[1].action, TaskAction::Filter);
+        assert_eq!(decoded.ops[1].kind, OpKind::Task(TaskAction::Filter));
         assert_eq!(decoded.ops[2].op_id, "myapp::add");
     }
 
@@ -130,7 +130,7 @@ mod tests {
     fn default_runtime_is_native() {
         let op = PipelineOp {
             op_id: "x".to_string(),
-            action: TaskAction::Map,
+            kind: OpKind::Task(TaskAction::Map),
             runtime: TaskRuntime::default(),
             payload: vec![],
         };
@@ -141,7 +141,7 @@ mod tests {
     fn native_runtime_roundtrips_rkyv() {
         let ops = vec![PipelineOp {
             op_id: "x".to_string(),
-            action: TaskAction::Map,
+            kind: OpKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }];
@@ -162,13 +162,22 @@ mod tests {
             | TaskAction::Reduce
             | TaskAction::Aggregate
             | TaskAction::Collect
-            | TaskAction::ShuffleMap { .. }
-            | TaskAction::Cache { .. }
-            | TaskAction::ReadFileSplit
-            | TaskAction::MergeState { .. }
-            | TaskAction::AgentStep => true,
+            | TaskAction::MapPartitions
+            | TaskAction::Foreach => true,
+        };
+    }
+
+    #[test]
+    fn step_kind_variants_exhaustive() {
+        let step = StepKind::ReadFileSplit;
+        let _ = match step {
+            StepKind::ShuffleMap { .. }
+            | StepKind::Cache { .. }
+            | StepKind::ReadFileSplit
+            | StepKind::MergeState { .. }
+            | StepKind::AgentStep => true,
             #[cfg(feature = "kafka")]
-            TaskAction::KafkaConsume => true,
+            StepKind::KafkaConsume => true,
         };
     }
 

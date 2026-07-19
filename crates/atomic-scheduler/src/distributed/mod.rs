@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashSet, VecDeque},
+    collections::{HashSet, VecDeque},
     fmt::Debug,
     net::{Ipv4Addr, SocketAddrV4},
     sync::{
@@ -12,20 +12,22 @@ use std::{
 use atomic_data::{
     data::Data,
     dependency::ErasedShuffleDependency,
-    distributed::WorkerCapabilities,
+    distributed::{OpKind, PipelineOp, StepKind, TaskEnvelope, TaskRuntime, WorkerCapabilities},
     partial::{ApproximateEvaluator, result::PartialResult},
     rdd::Rdd,
-    task::TaskOption,
+    task::{ShuffleMapTask, TaskOption},
     task_context::TaskContext,
 };
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
 use crate::{
-    base::{Mutators, NativeScheduler},
+    base::{NativeScheduler, SchedulerState},
+    dag::{CompletionEvent, TaskEndReason},
     error::{LibResult, SchedulerError},
     job::Job,
     listener::LiveListenerBus,
+    planner::StagePlanner,
     stage::Stage,
 };
 
@@ -42,6 +44,7 @@ pub use allocator::{
     AllocatorError, AllocatorResult, ResourceProfile, StaticAllocator, WorkerAllocator,
 };
 pub use cache_dispatch::CacheDispatch;
+pub use shuffle_stage::ActiveShuffleStage;
 pub use worker_pool::InflightGuard;
 
 /// Consecutive TCP-level failure count per worker before removal.
@@ -60,7 +63,7 @@ pub type AccumulatorSink = Arc<dyn Fn(&[(usize, Vec<u8>)]) + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub struct DistributedScheduler {
-    pub(crate) mutators: Mutators,
+    pub(crate) state: SchedulerState,
     pub(crate) max_failures: usize,
     pub(crate) attempt_id: Arc<AtomicUsize>,
 
@@ -125,7 +128,7 @@ impl DistributedScheduler {
             .start()
             .expect("LiveListenerBus failed to start its event-dispatch thread");
         Self {
-            mutators: Mutators::new(),
+            state: SchedulerState::new(),
             max_failures,
             attempt_id: Arc::new(AtomicUsize::new(0)),
             worker_capabilities: Arc::new(DashMap::new()),
@@ -231,6 +234,159 @@ impl DistributedScheduler {
         self
     }
 
+    /// Push a completion event into the DAG event queue for `run_id`.
+    fn enqueue_completion_event(&self, run_id: usize, event: CompletionEvent) {
+        if let Some(mut queue) = self.state.event_queues.get_mut(&run_id) {
+            queue.push_back(event);
+        } else {
+            log::debug!(
+                "dropping completion event for run_id={run_id} (event queue already removed)"
+            );
+        }
+    }
+
+    /// Convert one submitted [`TaskOption`] into a [`TaskEnvelope`] the distributed workers can run.
+    ///
+    /// Today only `ShuffleMapTask` has a complete op payload here. `ResultTask` still carries a
+    /// driver closure and is rejected in distributed mode.
+    fn build_shuffle_task_envelope(&self, task: &ShuffleMapTask) -> LibResult<TaskEnvelope> {
+        let shuffle_dep = task.dep.get_shuffle_dep().ok_or_else(|| {
+            SchedulerError::TaskFailed(
+                "shuffle-map task missing shuffle dependency in task.dep".to_string(),
+            )
+        })?;
+        let spec = &shuffle_dep.spec;
+        let partitions = shuffle_dep.encode_partitions().map_err(|e| {
+            SchedulerError::TaskFailed(format!("shuffle map partition encode: {e}"))
+        })?;
+        let data = partitions
+            .get(task.meta.partition)
+            .cloned()
+            .ok_or_else(|| {
+                SchedulerError::TaskFailed(format!(
+                    "shuffle map partition {} out of bounds ({} partitions)",
+                    task.meta.partition,
+                    partitions.len()
+                ))
+            })?;
+
+        let payload = bincode::encode_to_vec(
+            atomic_data::distributed::ShuffleMapPayload {
+                type_id: spec.type_id.to_string(),
+                partitioner_spec: spec.partitioner_spec.clone(),
+            },
+            bincode::config::standard(),
+        )
+        .map_err(|e| SchedulerError::TaskFailed(format!("shuffle-map payload encode: {e}")))?;
+
+        let mut ops: Vec<PipelineOp> = spec.preceding_ops.clone();
+        ops.push(PipelineOp {
+            op_id: format!("shuffle-map-{}", spec.shuffle_id),
+            kind: OpKind::Engine(StepKind::ShuffleMap {
+                shuffle_id: spec.shuffle_id,
+                num_output_partitions: spec.num_output_partitions,
+            }),
+            runtime: TaskRuntime::Native,
+            payload,
+        });
+
+        let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
+        let trace = format!(
+            "native-submit-shuffle-{}-{}",
+            spec.shuffle_id, task.meta.partition
+        );
+        Ok(TaskEnvelope::new(
+            task.meta.run_id,
+            task.meta.stage_id,
+            task.meta.task_id,
+            attempt_id,
+            task.meta.partition,
+            trace,
+            ops,
+            data,
+        ))
+    }
+
+    async fn execute_distributed_shuffle_task(
+        &self,
+        task_option: TaskOption,
+        task: ShuffleMapTask,
+        target_executor: SocketAddrV4,
+    ) -> CompletionEvent {
+        let envelope = match self.build_shuffle_task_envelope(&task) {
+            Ok(env) => env,
+            Err(e) => {
+                return CompletionEvent {
+                    task: task_option,
+                    reason: TaskEndReason::OtherFailure(e.to_string()),
+                    result: Some(Box::new(()) as Box<dyn Data>),
+                };
+            }
+        };
+
+        match self
+            .submit_native_task(&envelope, Some(target_executor))
+            .await
+        {
+            Ok((result, _worker_addr)) => match result.status {
+                atomic_data::distributed::ResultStatus::Success => {
+                    self.merge_accumulator_deltas(&result.accumulator_deltas);
+                    match result.shuffle_server_uri {
+                        Some(uri) => CompletionEvent {
+                            task: task_option,
+                            reason: TaskEndReason::Success,
+                            result: Some(Box::new(uri) as Box<dyn Data>),
+                        },
+                        None => CompletionEvent {
+                            task: task_option,
+                            reason: TaskEndReason::OtherFailure(
+                                "shuffle task succeeded but worker returned no shuffle_server_uri"
+                                    .to_string(),
+                            ),
+                            result: Some(Box::new(()) as Box<dyn Data>),
+                        },
+                    }
+                }
+                atomic_data::distributed::ResultStatus::RetryableFailure
+                | atomic_data::distributed::ResultStatus::FatalFailure
+                | atomic_data::distributed::ResultStatus::CacheMiss => CompletionEvent {
+                    task: task_option,
+                    reason: TaskEndReason::OtherFailure(
+                        result
+                            .error
+                            .unwrap_or_else(|| "distributed shuffle task failed".to_string()),
+                    ),
+                    result: Some(Box::new(()) as Box<dyn Data>),
+                },
+            },
+            Err(e) => CompletionEvent {
+                task: task_option,
+                reason: TaskEndReason::OtherFailure(e.to_string()),
+                result: Some(Box::new(()) as Box<dyn Data>),
+            },
+        }
+    }
+
+    async fn execute_submitted_task(
+        &self,
+        task: TaskOption,
+        target_executor: SocketAddrV4,
+    ) -> CompletionEvent {
+        match task.clone() {
+            TaskOption::ShuffleMapTask(shuffle_task) => {
+                self.execute_distributed_shuffle_task(task, shuffle_task, target_executor)
+                    .await
+            }
+            TaskOption::ResultTask(_) => CompletionEvent {
+                task,
+                reason: TaskEndReason::OtherFailure(
+                    "distributed ResultTask is unsupported: closure-backed task IR cannot be shipped; use task_fn!/map_task-style op pipelines".to_string(),
+                ),
+                result: Some(Box::new(()) as Box<dyn Data>),
+            },
+        }
+    }
+
     pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
         self: Arc<Self>,
         func: Arc<F>,
@@ -248,63 +404,77 @@ impl DistributedScheduler {
             "distributed approximate jobs require the local scheduler",
         ))
     }
-
-    pub fn run_job<T: Data, U: Data + Clone, F>(
-        self: Arc<Self>,
-        func: Arc<F>,
-        final_rdd: Arc<dyn Rdd<Item = T>>,
-        partitions: Vec<usize>,
-        allow_local: bool,
-    ) -> LibResult<Vec<U>>
-    where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
-    {
-        let _ = (self, func, final_rdd, partitions, allow_local);
-        Err(SchedulerError::UnsupportedOperation(
-            "use run_native_job for distributed execution",
-        ))
-    }
 }
 
 #[async_trait::async_trait]
 impl NativeScheduler for DistributedScheduler {
-    fn submit_task<T: Data, U: Data, F>(
-        &self,
-        task: TaskOption,
-        _id_in_job: usize,
-        _target_executor: SocketAddrV4,
-    ) where
+    fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, target_executor: SocketAddrV4)
+    where
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
     {
-        let _ = (task, _id_in_job, _target_executor);
-        log::debug!("legacy submit_task ignored; use run_native_job");
+        let run_id = task.get_run_id();
+        let scheduler = self.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let event = match runtime {
+                Ok(rt) => rt.block_on(scheduler.execute_submitted_task(task, target_executor)),
+                Err(e) => CompletionEvent {
+                    task,
+                    reason: TaskEndReason::OtherFailure(format!(
+                        "failed to initialize tokio runtime for submit_task: {e}"
+                    )),
+                    result: Some(Box::new(()) as Box<dyn Data>),
+                },
+            };
+            scheduler.enqueue_completion_event(run_id, event);
+        });
     }
 
     fn next_executor_server(&self, task: &TaskOption) -> SocketAddrV4 {
+        let mut servers = self.server_uris.lock();
+        if servers.is_empty() {
+            log::warn!("next_executor_server called with an empty worker pool");
+            return SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0);
+        }
+
         if !task.is_pinned() {
-            let socket_addr = self
-                .server_uris
-                .lock()
+            let socket_addr = servers
                 .pop_back()
-                .expect("next_executor_server called with an empty worker pool");
-            self.server_uris.lock().push_front(socket_addr);
-            socket_addr
-        } else {
-            let servers = &mut *self.server_uris.lock();
-            let location: Ipv4Addr = task.preferred_locations()[0];
-            if let Some((pos, _)) = servers
-                .iter()
-                .enumerate()
-                .find(|(_, endpoint)| *endpoint.ip() == location)
-            {
-                let target_host = servers
-                    .remove(pos)
-                    .expect("invariant: pos was just produced by find() above");
-                servers.push_front(target_host);
-                target_host
-            } else {
-                unreachable!()
+                .expect("server list checked non-empty above");
+            servers.push_front(socket_addr);
+            return socket_addr;
+        }
+
+        let preferred = match task.preferred_locations().first().copied() {
+            Some(ip) => ip,
+            None => {
+                let socket_addr = servers
+                    .pop_back()
+                    .expect("server list checked non-empty above");
+                servers.push_front(socket_addr);
+                return socket_addr;
             }
+        };
+
+        if let Some((pos, _)) = servers
+            .iter()
+            .enumerate()
+            .find(|(_, endpoint)| *endpoint.ip() == preferred)
+        {
+            let target_host = servers
+                .remove(pos)
+                .expect("invariant: pos was just produced by find() above");
+            servers.push_front(target_host);
+            target_host
+        } else {
+            log::warn!("pinned preferred worker {preferred} not live; falling back to round-robin");
+            let socket_addr = servers
+                .pop_back()
+                .expect("server list checked non-empty above");
+            servers.push_front(socket_addr);
+            socket_addr
         }
     }
 
@@ -314,18 +484,22 @@ impl NativeScheduler for DistributedScheduler {
         Ok(())
     }
 
+    fn supports_closure_tasks(&self) -> bool {
+        false
+    }
+}
+
+#[async_trait::async_trait]
+impl StagePlanner for DistributedScheduler {
     async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage> {
-        let stage = self
-            .mutators
-            .shuffle_to_map_stage
-            .get(&shuf.get_shuffle_id());
+        let stage = self.state.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
         match stage {
             Some(stage) => Ok(stage.clone()),
             None => {
                 let stage = self
                     .new_stage(shuf.get_rdd_base(), Some(shuf.clone()))
                     .await?;
-                self.mutators
+                self.state
                     .shuffle_to_map_stage
                     .insert(shuf.get_shuffle_id(), stage.clone());
                 Ok(stage)
@@ -333,16 +507,8 @@ impl NativeScheduler for DistributedScheduler {
         }
     }
 
-    async fn get_missing_parent_stages(&self, stage: Stage) -> LibResult<Vec<Stage>> {
-        let mut missing: BTreeSet<Stage> = BTreeSet::new();
-        let mut visited: HashSet<usize> = HashSet::new();
-        self.visit_missing_parent(&mut missing, &mut visited, stage.get_rdd())
-            .await?;
-        Ok(missing.into_iter().collect())
-    }
-
-    fn get_mutators(&self) -> Mutators {
-        self.mutators.clone()
+    fn state(&self) -> SchedulerState {
+        self.state.clone()
     }
 }
 
@@ -477,7 +643,7 @@ pub fn start_register_server(port: u16, scheduler: Arc<DistributedScheduler>) {
 mod tests {
     use super::*;
     use atomic_data::distributed::{
-        PipelineOp, ResultStatus, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope,
+        OpKind, PipelineOp, ResultStatus, StepKind, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope,
         TaskResultEnvelope, TaskRuntime, TransportFrameKind, WireDecode, WireEncode,
         encode_transport_frame, parse_transport_header,
     };
@@ -549,20 +715,20 @@ mod tests {
 
     #[test]
     fn plan_serve_cached() {
-        use atomic_data::distributed::{PipelineOp, TaskAction, TaskRuntime};
+        use atomic_data::distributed::{OpKind, PipelineOp, StepKind, TaskAction, TaskRuntime};
         let sched = DistributedScheduler::new(4, true);
         let ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
         sched.register_cache_locs(&[(700, 0), (700, 1)], ip);
 
         let cache_op = PipelineOp {
             op_id: String::new(),
-            action: TaskAction::Cache { rdd_id: 700 },
+            kind: OpKind::Engine(StepKind::Cache { rdd_id: 700 }),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
         let map_op = PipelineOp {
             op_id: "m".into(),
-            action: TaskAction::Map,
+            kind: OpKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
@@ -692,7 +858,7 @@ mod tests {
             "trace-1".to_string(),
             vec![PipelineOp {
                 op_id: "mycrate::double".to_string(),
-                action: TaskAction::Map,
+                kind: OpKind::Task(TaskAction::Map),
                 runtime: TaskRuntime::Native,
                 payload: vec![],
             }],
@@ -784,6 +950,15 @@ mod tests {
         assert_eq!(sched.agent_step_timeout, Some(Duration::from_secs(900)));
     }
 
+    #[test]
+    fn distributed_scheduler_does_not_support_closure_tasks() {
+        let sched = DistributedScheduler::new(4, true);
+        assert!(
+            !<DistributedScheduler as NativeScheduler>::supports_closure_tasks(&sched),
+            "distributed scheduler must reject closure-backed ResultTask execution"
+        );
+    }
+
     fn envelope_with_ops(ops: Vec<PipelineOp>) -> TaskEnvelope {
         TaskEnvelope::new(0, 0, 0, 0, 0, "test".to_string(), ops, Vec::new())
     }
@@ -793,7 +968,7 @@ mod tests {
         let sched = DistributedScheduler::new(4, true);
         let task = envelope_with_ops(vec![PipelineOp {
             op_id: String::new(),
-            action: TaskAction::AgentStep,
+            kind: OpKind::Engine(StepKind::AgentStep),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }]);
@@ -809,7 +984,7 @@ mod tests {
             DistributedScheduler::new(4, true).with_agent_step_timeout(Duration::from_secs(60));
         let task = envelope_with_ops(vec![PipelineOp {
             op_id: String::new(),
-            action: TaskAction::AgentStep,
+            kind: OpKind::Engine(StepKind::AgentStep),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }]);
@@ -824,7 +999,7 @@ mod tests {
         let sched = DistributedScheduler::new(4, true);
         let task = envelope_with_ops(vec![PipelineOp {
             op_id: String::new(),
-            action: TaskAction::Map,
+            kind: OpKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }]);

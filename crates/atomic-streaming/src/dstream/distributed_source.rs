@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use atomic_compute::rdd::ParallelCollection;
 use atomic_data::data::Data;
-use atomic_data::distributed::{FileSplitPayload, PipelineOp, TaskAction, TaskRuntime};
+use atomic_data::distributed::{FileSplitPayload, OpKind, PipelineOp, StepKind, TaskRuntime};
 use atomic_data::rdd::Rdd;
 use parking_lot::Mutex;
 
@@ -244,7 +244,7 @@ impl DistributedSource for DistributedFileSource {
                 let task = SourcePartitionTask {
                     op: PipelineOp {
                         op_id: String::new(),
-                        action: TaskAction::ReadFileSplit,
+                        kind: OpKind::Engine(StepKind::ReadFileSplit),
                         runtime: TaskRuntime::Native,
                         payload: vec![],
                     },

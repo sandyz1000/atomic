@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use atomic_data::distributed::{PipelineOp, TaskAction, WorkerCapabilities, decode_payload};
+use atomic_data::distributed::{OpKind, PipelineOp, StepKind, WorkerCapabilities, decode_payload};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::{LibResult, SchedulerError};
@@ -226,7 +226,7 @@ impl DistributedScheduler {
     /// Unified capability check. For regular ops, `cap` is the `op_id`.
     /// For shuffle ops, `cap` is `"shuffle:<shuffle_key>"`.
     ///
-    /// An empty `cap` means the op (e.g. `TaskAction::Cache`) is handled by the
+    /// An empty `cap` means the op (e.g. `StepKind::Cache`) is handled by the
     /// scheduler/worker runtime directly and never looked up in `TASK_REGISTRY`,
     /// so it requires no capability. An empty `registered_ops` list means "accept
     /// all" for backwards compatibility with workers that predate capability
@@ -247,8 +247,8 @@ impl DistributedScheduler {
     /// `<key>` is the stringify-based type key — the first field of the
     /// bincode-encoded `ShuffleMapPayload`.
     pub(crate) fn required_capability(op: &PipelineOp) -> String {
-        match &op.action {
-            TaskAction::ShuffleMap { .. } => {
+        match &op.kind {
+            OpKind::Engine(StepKind::ShuffleMap { .. }) => {
                 let key: String =
                     decode_payload(&op.payload).unwrap_or_else(|_| "<invalid-payload>".to_string());
                 format!("shuffle:{key}")

@@ -3,16 +3,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::shuffle::error::NetworkError;
+use crate::shuffle::map_output_server::{MapOutputServerHandle, spawn_shuffling_server};
 use dashmap::{DashMap, DashSet};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use thiserror::Error;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 type Result<T> = std::result::Result<T, MapOutputError>;
 
@@ -38,14 +36,15 @@ pub type ServerUris = Arc<DashMap<usize, Vec<Option<String>>>>;
 #[derive(Clone, Debug)]
 pub struct MapOutputTracker {
     is_master: bool,
-    pub server_uris: ServerUris,
+    pub map_output_uris: ServerUris,
     fetching: Arc<DashSet<usize>>,
     generation: Arc<Mutex<i64>>,
     master_addr: SocketAddr,
     /// Adaptive coalescing result: shuffle_id → coalesced reduce partition count.
     /// Set by the scheduler after the map stage completes (if coalescing is configured).
     /// Queried by `ShuffledRdd::number_of_splits()` and `ShuffleFetcher::fetch`.
-    pub coalesced_partitions: Arc<DashMap<usize, usize>>,
+    pub coalesced_parts: Arc<DashMap<usize, usize>>,
+    server_handle: Arc<Mutex<Option<MapOutputServerHandle>>>,
 }
 
 // Only master_addr doesn't have a default.
@@ -53,11 +52,12 @@ impl Default for MapOutputTracker {
     fn default() -> Self {
         MapOutputTracker {
             is_master: Default::default(),
-            server_uris: Default::default(),
+            map_output_uris: Default::default(),
             fetching: Default::default(),
             generation: Default::default(),
             master_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
-            coalesced_partitions: Arc::new(DashMap::new()),
+            coalesced_parts: Arc::new(DashMap::new()),
+            server_handle: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -66,11 +66,12 @@ impl MapOutputTracker {
     pub fn new(is_master: bool, master_addr: SocketAddr) -> Self {
         let output_tracker = MapOutputTracker {
             is_master,
-            server_uris: Arc::new(DashMap::new()),
+            map_output_uris: Arc::new(DashMap::new()),
             fetching: Arc::new(DashSet::new()),
             generation: Arc::new(Mutex::new(0)),
             master_addr,
-            coalesced_partitions: Arc::new(DashMap::new()),
+            coalesced_parts: Arc::new(DashMap::new()),
+            server_handle: Arc::new(Mutex::new(None)),
         };
         output_tracker.server();
         output_tracker
@@ -79,12 +80,12 @@ impl MapOutputTracker {
     /// Record the coalesced reduce partition count for a shuffle stage.
     /// Called by the scheduler after all shuffle-map tasks complete.
     pub fn set_coalesced_partitions(&self, shuffle_id: usize, n: usize) {
-        self.coalesced_partitions.insert(shuffle_id, n);
+        self.coalesced_parts.insert(shuffle_id, n);
     }
 
     /// Return the coalesced reduce partition count, if adaptive coalescing ran for this shuffle.
     pub fn get_coalesced_partitions(&self, shuffle_id: usize) -> Option<usize> {
-        self.coalesced_partitions.get(&shuffle_id).map(|v| *v)
+        self.coalesced_parts.get(&shuffle_id).map(|v| *v)
     }
 
     async fn client(&self, shuffle_id: usize) -> Result<Vec<String>> {
@@ -170,137 +171,30 @@ impl MapOutputTracker {
             return;
         }
         log::debug!("map output tracker server starting");
-        let master_addr = self.master_addr;
-        let server_uris = self.server_uris.clone();
+        let handle = spawn_shuffling_server(self.master_addr, self.map_output_uris.clone());
+        *self.server_handle.lock() = Some(handle);
+    }
 
-        tokio::spawn(async move {
-            let listener = match TcpListener::bind(master_addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    log::error!("Failed to bind listener: {}", e);
-                    return;
-                }
-            };
-            log::debug!("map output tracker server started on {}", master_addr);
-
-            loop {
-                let (stream, _) = match listener.accept().await {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        log::error!("Failed to accept connection: {}", e);
-                        continue;
-                    }
-                };
-
-                let server_uris_clone = server_uris.clone();
-                tokio::spawn(async move {
-                    let io = TokioIo::new(stream);
-
-                    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-                        let server_uris = server_uris_clone.clone();
-                        async move {
-                            // Read request body (shuffle_id)
-                            let body_bytes = match req.collect().await {
-                                Ok(collected) => collected.to_bytes(),
-                                Err(e) => {
-                                    log::error!("Failed to read request body: {}", e);
-                                    return Ok::<_, hyper::Error>(
-                                        Response::builder()
-                                            .status(StatusCode::BAD_REQUEST)
-                                            .body(Full::new(Bytes::from("Failed to read request")))
-                                            .unwrap(),
-                                    );
-                                }
-                            };
-
-                            // Deserialize shuffle_id
-                            let shuffle_id: usize = match bincode::decode_from_slice(
-                                &body_bytes,
-                                bincode::config::standard(),
-                            ) {
-                                Ok((id, _)) => id,
-                                Err(e) => {
-                                    log::error!("Failed to deserialize shuffle_id: {}", e);
-                                    return Ok(Response::builder()
-                                        .status(StatusCode::BAD_REQUEST)
-                                        .body(Full::new(Bytes::from("Invalid shuffle_id")))
-                                        .unwrap());
-                                }
-                            };
-
-                            log::debug!("received request for shuffle id #{}", shuffle_id);
-
-                            // Wait until shuffle data is available
-                            loop {
-                                match server_uris.get(&shuffle_id) {
-                                    Some(uris) => {
-                                        let ready_count =
-                                            uris.iter().filter(|x| x.is_some()).count();
-                                        if ready_count > 0 {
-                                            break;
-                                        }
-                                    }
-                                    None => {
-                                        log::error!("shuffle id #{} not found", shuffle_id);
-                                        return Ok(Response::builder()
-                                            .status(StatusCode::NOT_FOUND)
-                                            .body(Full::new(Bytes::from("Shuffle ID not found")))
-                                            .unwrap());
-                                    }
-                                }
-                                tokio::time::sleep(Duration::from_millis(1)).await;
-                            }
-
-                            // Get locations
-                            let locs = server_uris
-                                .get(&shuffle_id)
-                                .map(|kv| kv.value().iter().flatten().cloned().collect::<Vec<_>>())
-                                .unwrap_or_default();
-
-                            log::debug!(
-                                "locs inside map output tracker server for shuffle id #{}: {:?}",
-                                shuffle_id,
-                                locs
-                            );
-
-                            // Serialize response
-                            let response_bytes =
-                                match bincode::encode_to_vec(&locs, bincode::config::standard()) {
-                                    Ok(bytes) => bytes,
-                                    Err(e) => {
-                                        log::error!("Failed to serialize response: {}", e);
-                                        return Ok(Response::builder()
-                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                            .body(Full::new(Bytes::from("Serialization failed")))
-                                            .unwrap());
-                                    }
-                                };
-
-                            Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .header("content-type", "application/octet-stream")
-                                .body(Full::new(Bytes::from(response_bytes)))
-                                .unwrap())
-                        }
-                    });
-
-                    if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                        log::error!("Error serving connection: {:?}", err);
-                    }
-                });
-            }
-        });
+    pub async fn shutdown_server(&self) {
+        let handle = self.server_handle.lock().take();
+        if let Some(handle) = handle {
+            handle.shutdown().await;
+        }
     }
 
     pub fn register_shuffle(&self, shuffle_id: usize, num_maps: usize) {
         log::debug!("inside register shuffle");
-        if self.server_uris.get(&shuffle_id).is_some() {
+        if self.map_output_uris.get(&shuffle_id).is_some() {
             // TODO: error handling
             log::debug!("map tracker register shuffle none");
             return;
         }
-        self.server_uris.insert(shuffle_id, vec![None; num_maps]);
-        log::debug!("server_uris after register_shuffle {:?}", self.server_uris);
+        self.map_output_uris
+            .insert(shuffle_id, vec![None; num_maps]);
+        log::debug!(
+            "map_output_uris after register_shuffle {:?}",
+            self.map_output_uris
+        );
     }
 
     pub fn register_map_output(
@@ -316,7 +210,7 @@ impl MapOutputTracker {
             server_uri
         );
         let mut entry = self
-            .server_uris
+            .map_output_uris
             .get_mut(&shuffle_id)
             .ok_or(MapOutputError::ShuffleIdNotFound(shuffle_id))?;
         let num_maps = entry.len();
@@ -337,7 +231,7 @@ impl MapOutputTracker {
             shuffle_id,
             locs
         );
-        self.server_uris.insert(shuffle_id, locs);
+        self.map_output_uris.insert(shuffle_id, locs);
     }
 
     /// Remove all map output URIs for `shuffle_id`.
@@ -345,20 +239,20 @@ impl MapOutputTracker {
     /// Called when a shuffle-map stage fails fatally so the scheduler can re-run
     /// the full map stage and re-register fresh URIs.
     pub fn unregister_shuffle(&self, shuffle_id: usize) {
-        self.server_uris.remove(&shuffle_id);
+        self.map_output_uris.remove(&shuffle_id);
         self.increment_generation();
         log::debug!("MapOutputTracker: unregistered shuffle_id={}", shuffle_id);
     }
 
     pub fn unregister_map_output(&self, shuffle_id: usize, map_id: usize, server_uri: String) {
-        if let Some(arr) = self.server_uris.get(&shuffle_id) {
+        if let Some(arr) = self.map_output_uris.get(&shuffle_id) {
             // Bounds-safe: out-of-range map_id is treated as a no-op.
             let should_clear = arr
                 .get(map_id)
                 .is_some_and(|slot| *slot == Some(server_uri));
             drop(arr); // release read guard before acquiring write guard
             if should_clear
-                && let Some(mut entry) = self.server_uris.get_mut(&shuffle_id)
+                && let Some(mut entry) = self.map_output_uris.get_mut(&shuffle_id)
                 && let Some(slot) = entry.get_mut(map_id)
             {
                 *slot = None;
@@ -374,7 +268,7 @@ impl MapOutputTracker {
     /// outputs cleared.
     pub fn unregister_outputs_on_host(&self, host: &str) -> usize {
         let mut cleared = 0;
-        for mut entry in self.server_uris.iter_mut() {
+        for mut entry in self.map_output_uris.iter_mut() {
             for slot in entry.value_mut().iter_mut() {
                 if slot.as_deref().is_some_and(|uri| uri.contains(host)) {
                     *slot = None;
@@ -392,11 +286,11 @@ impl MapOutputTracker {
         log::debug!(
             "trying to get uri for shuffle task #{}, current server uris: {:?}",
             shuffle_id,
-            self.server_uris
+            self.map_output_uris
         );
 
         if self
-            .server_uris
+            .map_output_uris
             .get(&shuffle_id)
             .and_then(|some| some.iter().find_map(|x| x.clone()))
             .is_none()
@@ -407,7 +301,7 @@ impl MapOutputTracker {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 let servers = self
-                    .server_uris
+                    .map_output_uris
                     .get(&shuffle_id)
                     .ok_or_else(|| MapOutputError::ShuffleIdNotFound(shuffle_id))?
                     .iter()
@@ -421,7 +315,7 @@ impl MapOutputTracker {
             }
             let fetched = self.client(shuffle_id).await?;
             log::debug!("fetched locs from client: {:?}", fetched);
-            self.server_uris.insert(
+            self.map_output_uris.insert(
                 shuffle_id,
                 fetched.iter().map(|x| Some(x.clone())).collect(),
             );
@@ -430,7 +324,7 @@ impl MapOutputTracker {
             Ok(fetched)
         } else {
             Ok(self
-                .server_uris
+                .map_output_uris
                 .get(&shuffle_id)
                 .ok_or_else(|| MapOutputError::ShuffleIdNotFound(shuffle_id))?
                 .iter()
@@ -449,7 +343,7 @@ impl MapOutputTracker {
 
     pub fn update_generation(&mut self, new_gen: i64) {
         if new_gen > *self.generation.lock() {
-            self.server_uris = Arc::new(DashMap::new());
+            self.map_output_uris = Arc::new(DashMap::new());
             *self.generation.lock() = new_gen;
         }
     }
@@ -505,10 +399,10 @@ mod tests {
 
         // Host A slots are now empty; host B is untouched.
         assert_eq!(
-            t.server_uris.get(&0).unwrap().clone(),
+            t.map_output_uris.get(&0).unwrap().clone(),
             vec![None, Some("http://10.0.0.2:9000".to_string())]
         );
-        assert_eq!(t.server_uris.get(&1).unwrap().clone(), vec![None, None]);
+        assert_eq!(t.map_output_uris.get(&1).unwrap().clone(), vec![None, None]);
     }
 
     #[test]
@@ -517,7 +411,7 @@ mod tests {
         t.register_map_outputs(0, vec![Some("http://10.0.0.2:9000".to_string())]);
         assert_eq!(t.unregister_outputs_on_host("10.9.9.9"), 0);
         assert_eq!(
-            t.server_uris.get(&0).unwrap().clone(),
+            t.map_output_uris.get(&0).unwrap().clone(),
             vec![Some("http://10.0.0.2:9000".to_string())]
         );
     }

@@ -5,18 +5,13 @@ use std::sync::Arc;
 use crate::data::Data;
 use crate::dependency::Dependency;
 use crate::rdd::RddBase;
-use crate::task::{Task, TaskBase};
+use crate::task::{Task, TaskBase, TaskMeta};
 
 #[derive(Clone)]
 pub struct ShuffleMapTask {
-    pub task_id: usize,
-    pub run_id: usize,
-    pub stage_id: usize,
+    pub meta: TaskMeta,
     pub rdd: Arc<dyn RddBase>,
-    pinned: bool,
     pub dep: Arc<Dependency>,
-    pub partition: usize,
-    pub locs: Vec<Ipv4Addr>,
 }
 
 impl ShuffleMapTask {
@@ -29,15 +24,11 @@ impl ShuffleMapTask {
         partition: usize,
         locs: Vec<Ipv4Addr>,
     ) -> Self {
+        let pinned = rdd.is_pinned();
         ShuffleMapTask {
-            task_id,
-            run_id,
-            stage_id,
-            pinned: rdd.is_pinned(),
+            meta: TaskMeta::new(task_id, run_id, stage_id, partition, locs, pinned),
             rdd,
             dep,
-            partition,
-            locs,
         }
     }
 }
@@ -47,35 +38,14 @@ impl Display for ShuffleMapTask {
         write!(
             f,
             "ShuffleMapTask({:?}, {:?})",
-            self.stage_id, self.partition
+            self.meta.stage_id, self.meta.partition
         )
     }
 }
 
 impl TaskBase for ShuffleMapTask {
-    fn get_run_id(&self) -> usize {
-        self.run_id
-    }
-
-    fn get_stage_id(&self) -> usize {
-        self.stage_id
-    }
-
-    fn get_task_id(&self) -> usize {
-        self.task_id
-    }
-
-    fn is_pinned(&self) -> bool {
-        self.pinned
-    }
-
-    fn preferred_locations(&self) -> Vec<Ipv4Addr> {
-        self.locs.clone()
-    }
-
-    fn generation(&self) -> Option<i64> {
-        // Some(env::Env::get().map_output_tracker.get_generation())
-        None
+    fn meta(&self) -> &TaskMeta {
+        &self.meta
     }
 }
 
@@ -84,7 +54,7 @@ impl Task for ShuffleMapTask {
         if let Some(shuffle_dep) = self.dep.get_shuffle_dep() {
             // New signature: do_shuffle_task now only takes partition
             // The ShuffleDependency internally has the typed RDD
-            let result = shuffle_dep.do_shuffle_task(self.partition);
+            let result = shuffle_dep.do_shuffle_task(self.meta.partition);
             return Ok(Box::new(result));
         }
 

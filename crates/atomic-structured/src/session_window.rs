@@ -27,7 +27,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::{PipelineOp, StateMergePayload, TaskAction, TaskRuntime};
+use atomic_data::distributed::{OpKind, PipelineOp, StateMergePayload, StepKind, TaskRuntime};
 
 use crate::OutputMode;
 use crate::distributed_state::{MODE_APPEND, mode_code, shard_of};
@@ -585,9 +585,9 @@ impl BatchEngine for DistributedSessionEngine {
 
         let ops = vec![PipelineOp {
             op_id: String::new(),
-            action: TaskAction::MergeState {
+            kind: OpKind::Engine(StepKind::MergeState {
                 merge_fn: SESSION_MERGE_FN.to_string(),
-            },
+            }),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }];

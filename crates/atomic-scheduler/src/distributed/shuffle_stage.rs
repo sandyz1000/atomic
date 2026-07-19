@@ -1,14 +1,90 @@
-use atomic_data::distributed::{PipelineOp, TaskEnvelope};
+use atomic_data::{
+    dependency::Dependency,
+    distributed::{OpKind, PipelineOp, ShuffleMapPayload, StepKind, TaskEnvelope, TaskRuntime},
+    rdd::RddBase,
+};
 use futures::future::try_join_all;
+use std::sync::Arc;
 
 use crate::{
-    base::NativeScheduler,
     error::{LibResult, SchedulerError},
+    planner::StagePlanner,
 };
+
+/// One shuffle stage dispatched by `run_pending_shuffle_stages`.
+///
+/// The compute context stores this for fetch-failure recovery (re-run one lost map partition).
+#[derive(Clone)]
+pub struct ActiveShuffleStage {
+    pub shuffle_id: usize,
+    pub dep: Arc<atomic_data::dependency::ErasedShuffleDependency>,
+    pub ops: Vec<PipelineOp>,
+}
 
 use super::DistributedScheduler;
 
 impl DistributedScheduler {
+    /// Build the exact op pipeline for one distributed shuffle-map stage:
+    /// any preceding staged ops followed by the `ShuffleMap` engine step.
+    fn shuffle_map_ops(
+        spec: &atomic_data::dependency::ShuffleSpec,
+        fallback_preceding: &[PipelineOp],
+    ) -> LibResult<Vec<PipelineOp>> {
+        let payload = bincode::encode_to_vec(
+            ShuffleMapPayload {
+                type_id: spec.type_id.to_string(),
+                partitioner_spec: spec.partitioner_spec.clone(),
+            },
+            bincode::config::standard(),
+        )
+        .map_err(|e| SchedulerError::TaskFailed(format!("shuffle-map payload encode: {e}")))?;
+
+        let mut ops = if spec.preceding_ops.is_empty() {
+            fallback_preceding.to_vec()
+        } else {
+            spec.preceding_ops.clone()
+        };
+        ops.push(PipelineOp {
+            op_id: format!("shuffle-map-{}", spec.shuffle_id),
+            kind: OpKind::Engine(StepKind::ShuffleMap {
+                shuffle_id: spec.shuffle_id,
+                num_output_partitions: spec.num_output_partitions,
+            }),
+            runtime: TaskRuntime::Native,
+            payload,
+        });
+        Ok(ops)
+    }
+
+    /// Traverse the RDD dependencies and run every pending shuffle-map stage on workers.
+    ///
+    /// Returns one descriptor per dispatched shuffle stage so callers can persist recovery
+    /// metadata (`dep + ops`) alongside scheduler state.
+    pub async fn run_pending_shuffle_stages(
+        &self,
+        rdd: &Arc<dyn RddBase>,
+        preceding_ops: Vec<PipelineOp>,
+    ) -> LibResult<Vec<ActiveShuffleStage>> {
+        let mut dispatched = Vec::new();
+        for dep in rdd.get_dependencies() {
+            if let Dependency::Shuffle(shuffle_dep) = dep {
+                let spec = &shuffle_dep.spec;
+                let ops = Self::shuffle_map_ops(spec, &preceding_ops)?;
+                let parent_partitions = shuffle_dep.encode_partitions().map_err(|e| {
+                    SchedulerError::TaskFailed(format!("shuffle input encode: {e}"))
+                })?;
+                self.run_shuffle_map_stage(spec.shuffle_id, ops.clone(), parent_partitions)
+                    .await?;
+                dispatched.push(ActiveShuffleStage {
+                    shuffle_id: spec.shuffle_id,
+                    dep: shuffle_dep,
+                    ops,
+                });
+            }
+        }
+        Ok(dispatched)
+    }
+
     /// Run the shuffle-map phase of a shuffle stage in distributed mode.
     ///
     /// Dispatches one `TaskEnvelope` per input partition; each worker stores its output
@@ -100,7 +176,7 @@ impl DistributedScheduler {
     ) -> LibResult<()> {
         use std::sync::atomic::Ordering;
 
-        let m = self.get_mutators();
+        let m = self.state();
         let stage_id = m.get_next_stage_id();
         let task_id = m.get_next_task_id();
         let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
@@ -137,7 +213,7 @@ impl DistributedScheduler {
         use std::sync::atomic::Ordering;
 
         let num_partitions = partitions.len();
-        let m = self.get_mutators();
+        let m = self.state();
         let stage_id = {
             let _lock = self.scheduler_lock.lock();
             m.register_shuffle(shuffle_id, num_partitions);

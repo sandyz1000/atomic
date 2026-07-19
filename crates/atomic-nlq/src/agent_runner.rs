@@ -91,7 +91,7 @@ fn dispatch_tool(payload: &AgentStepPayload, tool_ref: &str, json_args: &str) ->
 /// Concrete [`AgentRunner`] implementation backed by atomic-nlq's LlmClient.
 ///
 /// Registered once at startup via [`register`]; the `NativeDispatcher` looks it
-/// up in `AGENT_RUNNER_REGISTRY` when it sees a [`TaskAction::AgentStep`] op.
+/// up in `AGENT_RUNNER_REGISTRY` when it sees a [`StepKind::AgentStep`] op.
 pub struct PartitionAgentRunner;
 
 impl PartitionAgentRunner {
@@ -131,6 +131,7 @@ impl PartitionAgentRunner {
         let mut conversation = String::from(input);
         let mut answer = String::new();
         let mut rounds_done = 0u32;
+        let mut confidence = 1.0;
         let mut budget_exceeded = false;
 
         let tool_hint = if payload.tool_refs.is_empty() {
@@ -165,7 +166,11 @@ impl PartitionAgentRunner {
             {
                 Ok(r) => r,
                 Err(e) => {
+                    // Count the attempted round and flag the finding as unreliable,
+                    // instead of silently returning rounds: 0 with confidence: 1.0.
                     answer = format!("error: {e}");
+                    rounds_done = round + 1;
+                    confidence = 0.0;
                     break;
                 }
             };
@@ -216,7 +221,7 @@ impl PartitionAgentRunner {
             input_id,
             answer: validated_answer,
             rounds: rounds_done as usize,
-            confidence: 1.0,
+            confidence,
             budget_exceeded,
         }
     }

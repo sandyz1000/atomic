@@ -32,7 +32,7 @@ use atomic_compute::context::Context;
 use atomic_compute::rdd::ParallelCollection;
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::distributed::{KafkaConsumePayload, PipelineOp, TaskAction, TaskRuntime};
+use atomic_data::distributed::{KafkaConsumePayload, OpKind, PipelineOp, StepKind, TaskRuntime};
 use atomic_data::error::BaseError;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::split::{Split, SplitStruct};
@@ -448,7 +448,7 @@ pub fn build_staged_pipeline(
 ) -> (Vec<Vec<u8>>, Vec<PipelineOp>) {
     let ops = vec![PipelineOp {
         op_id: String::new(), // KafkaConsume dispatched by action variant, not op_id
-        action: TaskAction::KafkaConsume,
+        kind: OpKind::Engine(StepKind::KafkaConsume),
         runtime: TaskRuntime::Native,
         payload: vec![], // config is per-partition in source_partitions (data)
     }];
@@ -481,7 +481,7 @@ impl crate::dstream::distributed_source::DistributedSource for DirectKafkaInputD
         _batch_time_ms: u64,
     ) -> Vec<crate::dstream::distributed_source::SourcePartitionTask> {
         use crate::dstream::distributed_source::SourcePartitionTask;
-        use atomic_data::distributed::{PipelineOp, TaskAction, TaskRuntime};
+        use atomic_data::distributed::{OpKind, PipelineOp, StepKind, TaskRuntime};
 
         self.fetch_offset_ranges()
             .into_iter()
@@ -499,7 +499,7 @@ impl crate::dstream::distributed_source::DistributedSource for DirectKafkaInputD
                 SourcePartitionTask {
                     op: PipelineOp {
                         op_id: String::new(),
-                        action: TaskAction::KafkaConsume,
+                        kind: OpKind::Engine(StepKind::KafkaConsume),
                         runtime: TaskRuntime::Native,
                         payload: vec![],
                     },

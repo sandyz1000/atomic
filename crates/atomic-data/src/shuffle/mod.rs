@@ -4,6 +4,7 @@ pub mod error;
 pub mod fetcher;
 pub mod manager;
 pub mod map_output;
+pub(crate) mod map_output_server;
 
 use http_body_util::Full;
 use hyper::body::Bytes;

@@ -4,7 +4,7 @@
 //! `Mutex<StateStore>`, which grows unbounded as windows accumulate.
 //! [`DistributedStateEngine`] instead shards the state by `StateKey` across the
 //! cluster: each micro-batch's partials are routed by a stable hash to one of
-//! `num_shards` shards, and a [`TaskAction::MergeState`] task merges them into that
+//! `num_shards` shards, and a [`StepKind::MergeState`] task merges them into that
 //! shard's persistent state on the owning worker (`WORKER_STATE_STORE`), returning
 //! only the cells to emit. The driver computes the partials and assembles the
 //! output, but never holds the full cross-batch state.
@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use atomic_compute::context::Context;
 use atomic_data::distributed::{
-    PipelineOp, StateMergePayload, TaskAction, TaskRuntime, decode_payload,
+    OpKind, PipelineOp, StateMergePayload, StepKind, TaskRuntime, decode_payload,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 
@@ -197,9 +197,9 @@ impl BatchEngine for DistributedStateEngine {
 
         let ops = vec![PipelineOp {
             op_id: String::new(),
-            action: TaskAction::MergeState {
+            kind: OpKind::Engine(StepKind::MergeState {
                 merge_fn: WINDOWED_MERGE_FN.to_string(),
-            },
+            }),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }];

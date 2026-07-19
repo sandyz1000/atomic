@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::{JsTaskPayload, PipelineOp, TaskAction, TaskRuntime};
+use atomic_data::distributed::{JsTaskPayload, OpKind, PipelineOp, TaskAction, TaskRuntime};
 use napi::JsValue as _;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -99,7 +99,7 @@ impl JsRdd {
             .map_err(|e| Error::from_reason(format!("JsTaskPayload encode: {e}")))?;
         let op = PipelineOp {
             op_id: "atomic::task::js".to_string(),
-            action,
+            kind: OpKind::Task(action),
             runtime: TaskRuntime::JavaScript,
             payload,
         };

@@ -1,6 +1,6 @@
 use std::net::SocketAddrV4;
 
-use atomic_data::distributed::{PipelineOp, TaskAction};
+use atomic_data::distributed::{OpKind, PipelineOp, StepKind};
 
 use super::DistributedScheduler;
 
@@ -27,11 +27,11 @@ impl DistributedScheduler {
     pub fn plan_cache_dispatch(&self, ops: &[PipelineOp], num_partitions: usize) -> CacheDispatch {
         let Some(idx) = ops
             .iter()
-            .rposition(|o| matches!(o.action, TaskAction::Cache { .. }))
+            .rposition(|o| matches!(o.kind, OpKind::Engine(StepKind::Cache { .. })))
         else {
             return CacheDispatch::Recompute;
         };
-        let TaskAction::Cache { rdd_id } = ops[idx].action else {
+        let OpKind::Engine(StepKind::Cache { rdd_id }) = ops[idx].kind else {
             return CacheDispatch::Recompute;
         };
         let Some(entry) = self.cache_endpoints.get(&rdd_id) else {

@@ -195,26 +195,26 @@ where
     /// #[task] fn add(a: u32, b: u32) -> u32 { a + b }
     /// let sums = pair_rdd.reduce_by_key_task(Add);
     /// ```
-    pub fn reduce_by_key_task<B>(self, _task: B) -> TypedRdd<(K, V)>
+    pub fn reduce_by_key_task<B>(self, task: B) -> TypedRdd<(K, V)>
     where
         B: BinaryTask<V>,
         K: bincode::Encode + bincode::Decode<()>,
         V: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
     {
-        self.reduce_by_key(|a, b| B::call(a, b))
+        self.reduce_by_key(move |a, b| task.call(a, b))
     }
 
     /// Fold values per key from `zero` using a registered binary task — the
     /// content-addressed form of [`fold_by_key`](Self::fold_by_key).
-    pub fn fold_by_key_task<B>(self, zero: V, _task: B, num_partitions: usize) -> TypedRdd<(K, V)>
+    pub fn fold_by_key_task<B>(self, zero: V, task: B, num_partitions: usize) -> TypedRdd<(K, V)>
     where
         B: BinaryTask<V>,
         V: bincode::Encode + bincode::Decode<()>,
         K: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
     {
-        self.fold_by_key(zero, |a, b| B::call(a, b), num_partitions)
+        self.fold_by_key(zero, move |a, b| task.call(a, b), num_partitions)
     }
 
     /// Aggregate values per key into a different accumulator type `C`, using two
@@ -250,8 +250,8 @@ where
     /// ```
     pub fn aggregate_by_key_task<C, L, M>(
         self,
-        _lift: L,
-        _merge: M,
+        lift: L,
+        merge: M,
         num_partitions: usize,
     ) -> TypedRdd<(K, C)>
     where
@@ -262,10 +262,12 @@ where
         V: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
     {
+        let lift_mv = lift.clone();
+        let merge_mv = merge.clone();
         self.combine_by_key(
-            |v| L::call(v),
-            |c, v| M::call(c, L::call(v)),
-            |c1, c2| M::call(c1, c2),
+            move |v| lift.call(v),
+            move |c, v| merge_mv.call(c, lift_mv.call(v)),
+            move |c1, c2| merge.call(c1, c2),
             num_partitions,
         )
     }
@@ -277,17 +279,31 @@ where
     where
         U: Data + Clone,
         K: std::hash::Hash + Eq,
-        Vec<(K, U)>: Data + Clone,
+        Vec<(K, U)>: Data + Clone + WireEncode + WireDecode,
+        (K, U): WireEncode,
     {
         use std::collections::HashSet;
         let ctx = self.context.clone();
         let id = ctx.new_rdd_id();
 
-        let other_parts = other
-            .context
-            .run_job(other.rdd, |iter| iter.map(|(k, _)| k).collect::<Vec<K>>())
-            .unwrap_or_default();
-        let excluded: Arc<HashSet<K>> = Arc::new(other_parts.into_iter().flatten().collect());
+        // Materialise the other side's keys. Distributed uses the op path; the closure
+        // `run_job` would run over the empty driver placeholder RDD.
+        let excluded: Arc<HashSet<K>> = Arc::new(if other.context.is_distributed() {
+            other
+                .collect_distributed()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect()
+        } else {
+            other
+                .context
+                .run_job(other.rdd, |iter| iter.map(|(k, _)| k).collect::<Vec<K>>())
+                .unwrap_or_default()
+                .into_iter()
+                .flatten()
+                .collect()
+        });
 
         let rdd = Arc::new(MapPartitionsRdd::new(id, self.rdd, move |_idx, iter| {
             let excl = excluded.clone();
@@ -416,8 +432,22 @@ where
         TypedRdd::new(Arc::new(shuffled), self.context)
     }
 
-    pub fn count_by_key(&self) -> Result<std::collections::HashMap<K, u64>, BaseError> {
+    pub fn count_by_key(&self) -> Result<std::collections::HashMap<K, u64>, BaseError>
+    where
+        (K, V): WireEncode,
+        Vec<(K, V)>: WireEncode + WireDecode,
+    {
         use std::collections::HashMap;
+
+        let mut final_counts = HashMap::new();
+        // Distributed: count on the driver from op-path collected pairs — the closure
+        // `run_job` path below would run over the empty driver placeholder RDD.
+        if self.context.is_distributed() {
+            for (k, _v) in self.collect_distributed()? {
+                *final_counts.entry(k).or_insert(0) += 1;
+            }
+            return Ok(final_counts);
+        }
 
         let count_partition = move |iter: Box<dyn Iterator<Item = (K, V)>>| {
             let mut counts: HashMap<K, u64> = HashMap::new();
@@ -426,30 +456,35 @@ where
             }
             counts
         };
-
         let partition_counts = self.context.run_job(self.rdd.clone(), count_partition)?;
-
-        let mut final_counts = HashMap::new();
         for counts in partition_counts {
             for (k, v) in counts {
                 *final_counts.entry(k).or_insert(0) += v;
             }
         }
-
         Ok(final_counts)
     }
 
     pub fn lookup(&self, key: &K) -> Result<Vec<V>, BaseError>
     where
         K: Clone,
+        (K, V): WireEncode,
+        Vec<(K, V)>: WireEncode + WireDecode,
     {
+        if self.context.is_distributed() {
+            return Ok(self
+                .collect_distributed()?
+                .into_iter()
+                .filter(|(k, _)| k == key)
+                .map(|(_, v)| v)
+                .collect());
+        }
         let key_clone = key.clone();
         let lookup_partition = move |iter: Box<dyn Iterator<Item = (K, V)>>| {
             iter.filter(|(k, _)| k == &key_clone)
                 .map(|(_, v)| v)
                 .collect::<Vec<V>>()
         };
-
         let partition_values = self.context.run_job(self.rdd.clone(), lookup_partition)?;
         Ok(partition_values.into_iter().flatten().collect())
     }
@@ -461,11 +496,19 @@ where
     pub fn collect_as_map(&self) -> Result<std::collections::HashMap<K, V>, BaseError>
     where
         K: std::hash::Hash + Eq,
+        (K, V): WireEncode,
+        Vec<(K, V)>: WireEncode + WireDecode,
     {
+        let mut map = std::collections::HashMap::new();
+        if self.context.is_distributed() {
+            for (k, v) in self.collect_distributed()? {
+                map.insert(k, v);
+            }
+            return Ok(map);
+        }
         let partitions = self
             .context
             .run_job(self.rdd.clone(), |iter| iter.collect::<Vec<(K, V)>>())?;
-        let mut map = std::collections::HashMap::new();
         for pairs in partitions {
             for (k, v) in pairs {
                 map.insert(k, v);
@@ -493,20 +536,37 @@ where
     /// ```
     pub fn reduce_by_key_locally_task<B>(
         &self,
-        _merge: B,
+        merge: B,
     ) -> Result<std::collections::HashMap<K, V>, BaseError>
     where
         B: BinaryTask<V>,
         K: std::hash::Hash + Eq,
+        (K, V): WireEncode,
+        Vec<(K, V)>: WireEncode + WireDecode,
     {
         use std::collections::HashMap;
 
+        // Distributed: merge on the driver from op-path collected pairs — the closure
+        // `run_job` path below would run over the empty driver placeholder RDD.
+        if self.context.is_distributed() {
+            let mut result: HashMap<K, V> = HashMap::new();
+            for (k, v) in self.collect_distributed()? {
+                let merged = match result.remove(&k) {
+                    Some(existing) => merge.call(existing, v),
+                    None => v,
+                };
+                result.insert(k, merged);
+            }
+            return Ok(result);
+        }
+
         // Map-side combine: each partition reduces its own keys independently.
+        let merge_c = merge.clone();
         let combine_partition = move |iter: Box<dyn Iterator<Item = (K, V)>>| {
             let mut acc: HashMap<K, V> = HashMap::new();
             for (k, v) in iter {
                 let merged = match acc.remove(&k) {
-                    Some(existing) => B::call(existing, v),
+                    Some(existing) => merge_c.call(existing, v),
                     None => v,
                 };
                 acc.insert(k, merged);
@@ -521,7 +581,7 @@ where
         for partial in partials {
             for (k, v) in partial {
                 let merged = match result.remove(&k) {
-                    Some(existing) => B::call(existing, v),
+                    Some(existing) => merge.call(existing, v),
                     None => v,
                 };
                 result.insert(k, merged);

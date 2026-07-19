@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::{
     data::Data,
     rdd::Rdd,
-    task::{Task, TaskBase},
+    task::{Task, TaskBase, TaskMeta},
     task_context::TaskContext,
 };
 
@@ -14,14 +14,9 @@ pub struct ResultTask<T: Data, U: Data, F>
 where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
 {
-    pub task_id: usize,
-    pub run_id: usize,
-    pub stage_id: usize,
-    pinned: bool,
+    pub meta: TaskMeta,
     pub rdd: Arc<dyn Rdd<Item = T>>,
     pub func: Arc<F>,
-    pub partition: usize,
-    pub locs: Vec<Ipv4Addr>,
     pub output_id: usize,
     _marker: PhantomData<T>,
 }
@@ -31,7 +26,11 @@ where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ResultTask({}, {})", self.stage_id, self.partition)
+        write!(
+            f,
+            "ResultTask({}, {})",
+            self.meta.stage_id, self.meta.partition
+        )
     }
 }
 
@@ -40,15 +39,13 @@ where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
 {
     fn clone(&self) -> Self {
+        // Re-derive `pinned` from the RDD (matches construction in `new`).
+        let mut meta = self.meta.clone();
+        meta.pinned = self.rdd.is_pinned();
         ResultTask {
-            task_id: self.task_id,
-            run_id: self.run_id,
-            stage_id: self.stage_id,
-            pinned: self.rdd.is_pinned(),
+            meta,
             rdd: self.rdd.clone(),
             func: self.func.clone(),
-            partition: self.partition,
-            locs: self.locs.clone(),
             output_id: self.output_id,
             _marker: PhantomData,
         }
@@ -70,15 +67,11 @@ where
         locs: Vec<Ipv4Addr>,
         output_id: usize,
     ) -> Self {
+        let pinned = rdd.is_pinned();
         ResultTask {
-            task_id,
-            run_id,
-            stage_id,
-            pinned: rdd.is_pinned(),
+            meta: TaskMeta::new(task_id, run_id, stage_id, partition, locs, pinned),
             rdd,
             func,
-            partition,
-            locs,
             output_id,
             _marker: PhantomData,
         }
@@ -89,29 +82,8 @@ impl<T: Data, U: Data, F> TaskBase for ResultTask<T, U, F>
 where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
 {
-    fn get_run_id(&self) -> usize {
-        self.run_id
-    }
-
-    fn get_stage_id(&self) -> usize {
-        self.stage_id
-    }
-
-    fn get_task_id(&self) -> usize {
-        self.task_id
-    }
-
-    fn is_pinned(&self) -> bool {
-        self.pinned
-    }
-
-    fn preferred_locations(&self) -> Vec<Ipv4Addr> {
-        self.locs.clone()
-    }
-
-    fn generation(&self) -> Option<i64> {
-        // Some(env::Env::get().map_output_tracker.get_generation())
-        None
+    fn meta(&self) -> &TaskMeta {
+        &self.meta
     }
 }
 
@@ -120,8 +92,8 @@ where
     F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
 {
     fn run(&self, id: usize) -> Result<Box<dyn Data>, Box<dyn std::error::Error>> {
-        let split = self.rdd.splits()[self.partition].clone();
-        let context = TaskContext::new(self.stage_id, self.partition, id);
+        let split = self.rdd.splits()[self.meta.partition].clone();
+        let context = TaskContext::new(self.meta.stage_id, self.meta.partition, id);
         // Propagate compute errors (e.g. a lost-map-output `BaseError::FetchFailed`)
         // instead of panicking, so the scheduler can recover from lineage.
         let s = Box::new((self.func)((context, self.rdd.iterator(split)?)));
@@ -133,13 +105,8 @@ where
 /// This eliminates the need for trait objects and downcasting
 #[derive(Clone)]
 pub struct ResultTaskBox {
-    pub task_id: usize,
-    pub run_id: usize,
-    pub stage_id: usize,
-    pub partition: usize,
+    pub meta: TaskMeta,
     pub output_id: usize,
-    pub locs: Vec<Ipv4Addr>,
-    pub is_pinned: bool,
     // Type-erased runner: stores a closure that runs the actual ResultTask
     runner: TaskRunner,
 }
@@ -157,36 +124,15 @@ where
         let runner = Arc::clone(&task);
 
         ResultTaskBox {
-            task_id: task.task_id,
-            run_id: task.run_id,
-            stage_id: task.stage_id,
-            partition: task.partition,
+            meta: task.meta.clone(),
             output_id: task.output_id,
-            locs: task.locs.clone(),
-            is_pinned: task.pinned,
             runner: Arc::new(move |id| runner.run(id)),
         }
     }
 }
 impl TaskBase for ResultTaskBox {
-    fn get_run_id(&self) -> usize {
-        self.run_id
-    }
-
-    fn get_stage_id(&self) -> usize {
-        self.stage_id
-    }
-
-    fn get_task_id(&self) -> usize {
-        self.task_id
-    }
-
-    fn is_pinned(&self) -> bool {
-        self.is_pinned
-    }
-
-    fn preferred_locations(&self) -> Vec<Ipv4Addr> {
-        self.locs.clone()
+    fn meta(&self) -> &TaskMeta {
+        &self.meta
     }
 }
 

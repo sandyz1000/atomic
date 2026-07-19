@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let config = NlqConfig::default();
-    let ctx = NlqContext::build(config);
+    let ctx = NlqContext::build(config).unwrap();
     ctx.sql_ctx()
         .register_partitioned_batches("orders", vec![vec![batch]])?;
 

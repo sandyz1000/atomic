@@ -3,18 +3,12 @@ use atomic_data::partitioner::PartitionerSchema;
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 
-/// Wire payload for a `ShuffleMap` op: the registry dispatch key (`"K::V"`) plus the serializable
-/// partitioner spec, so the worker can partition shuffle output using the RDD's real partitioner
-/// (e.g. range for `sort_by_key`) instead of plain hash.
-#[derive(bincode::Encode, bincode::Decode)]
-pub struct ShuffleMapPayload {
-    pub type_id: String,
-    pub partitioner_spec: PartitionerSchema,
-}
+// `ShuffleMapPayload` moved to `atomic_data::distributed::ShuffleMapPayload` so
+// scheduler and compute runtimes share one wire payload type.
 
 /// Generic shuffle-write function for `(K, V)` pairs.
 ///
-/// Called by `NativeBackend` when it sees `TaskAction::ShuffleMap`.
+/// Called by `NativeBackend` when it sees `StepKind::ShuffleMap`.
 /// Decodes the rkyv-encoded `Vec<(K, V)>` input, partitions elements by
 /// `FxHash(key) % num_reduce_partitions`, and writes each bucket as
 /// bincode-encoded `Vec<(K, V)>` to `SHUFFLE_CACHE`.

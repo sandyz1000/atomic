@@ -4,6 +4,7 @@ use crate::task_traits::BinaryTask;
 /// Built-in: add two values.
 ///
 /// Used by `TypedRdd::count()` to sum per-partition counts.
+#[derive(Clone, Copy)]
 pub struct SumTask<T>(std::marker::PhantomData<T>);
 
 impl<T> SumTask<T> {
@@ -22,7 +23,7 @@ macro_rules! impl_sum_task {
     ($ty:ty) => {
         impl BinaryTask<$ty> for SumTask<$ty> {
             const NAME: &'static str = concat!("atomic::builtin::sum::", stringify!($ty));
-            fn call(a: $ty, b: $ty) -> $ty {
+            fn call(&self, a: $ty, b: $ty) -> $ty {
                 a + b
             }
         }

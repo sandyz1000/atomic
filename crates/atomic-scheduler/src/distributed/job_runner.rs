@@ -9,14 +9,15 @@ use std::{
 };
 
 use atomic_data::distributed::{
-    PipelineOp, StateMergePayload, TaskAction, TaskEnvelope, TaskResultEnvelope, decode_payload,
+    OpKind, PipelineOp, StateMergePayload, StepKind, TaskEnvelope, TaskResultEnvelope,
+    decode_payload,
 };
 use parking_lot::Mutex;
 
 use crate::{
-    base::NativeScheduler,
     error::{LibResult, SchedulerError},
     job::Job,
+    planner::StagePlanner,
 };
 
 use super::{
@@ -148,7 +149,7 @@ impl DistributedScheduler {
         let is_agent_step = task
             .ops
             .iter()
-            .any(|o| matches!(o.action, TaskAction::AgentStep));
+            .any(|o| matches!(o.kind, OpKind::Engine(StepKind::AgentStep)));
         if is_agent_step {
             Some(
                 self.agent_step_timeout
@@ -290,7 +291,7 @@ impl DistributedScheduler {
                         && task
                             .ops
                             .iter()
-                            .any(|o| matches!(o.action, TaskAction::AgentStep))
+                            .any(|o| matches!(o.kind, OpKind::Engine(StepKind::AgentStep)))
                     {
                         // No per-input checkpointing within a partition (by design — see
                         // notes/agentic-task-future-design.md): retrying re-runs every input
@@ -352,7 +353,7 @@ impl DistributedScheduler {
             .into_iter()
             .enumerate()
             .map(|(partition_id, partition_data)| {
-                let task_id = self.get_mutators().get_next_task_id();
+                let task_id = self.state().get_next_task_id();
                 let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
                 let task_key = format!("{}:{task_id}", ctx.run_id);
                 self.taskid_to_jobid.insert(task_key.clone(), ctx.run_id);
@@ -392,7 +393,7 @@ impl DistributedScheduler {
                         )
                         .with_cache_source(*rdd_id)
                         .with_broadcasts(ctx.broadcasts.to_vec());
-                        let fb_task_id = self.get_mutators().get_next_task_id();
+                        let fb_task_id = self.state().get_next_task_id();
                         let fb_attempt = self.attempt_id.fetch_add(1, Ordering::SeqCst);
                         let fallback = TaskEnvelope::new(
                             ctx.run_id,
@@ -669,8 +670,8 @@ impl DistributedScheduler {
             .join("→");
         let (run_id, stage_id) = {
             let _lock = self.scheduler_lock.lock();
-            let run_id = self.get_mutators().get_next_job_id();
-            let stage_id = self.get_mutators().get_next_stage_id();
+            let run_id = self.state().get_next_job_id();
+            let stage_id = self.state().get_next_stage_id();
             let job = Job::new(run_id, run_id);
             self.active_jobs.insert(run_id, job.clone());
             self.active_job_queue.lock().push_back(job);
@@ -686,7 +687,7 @@ impl DistributedScheduler {
         // partitions vec is consumed, so `pin_state_shard` can look up registered locs.
         let is_merge_state = ops
             .iter()
-            .any(|o| matches!(o.action, TaskAction::MergeState { .. }));
+            .any(|o| matches!(o.kind, OpKind::Engine(StepKind::MergeState { .. })));
         let state_ids: Vec<Option<u64>> = if is_merge_state {
             partitions
                 .iter()
@@ -739,7 +740,7 @@ impl DistributedScheduler {
         // avoid duplicate LLM cost and non-deterministic "first winner" results.
         let has_agent_step = ops
             .iter()
-            .any(|o| matches!(o.action, TaskAction::AgentStep));
+            .any(|o| matches!(o.kind, OpKind::Engine(StepKind::AgentStep)));
         if let Some(multiplier) = self.speculation_multiplier {
             if !has_agent_step {
                 self.run_speculation_monitor(

@@ -3,9 +3,10 @@ use crate::dag::FetchFailedVals;
 use crate::error::{LibResult, SchedulerError};
 use crate::job::JobTracker;
 use crate::listener::JobListener;
+use crate::planner::StagePlanner;
 use crate::stage::Stage;
 use atomic_data::data::Data;
-use atomic_data::dependency::{Dependency, ErasedShuffleDependency};
+use atomic_data::dependency::Dependency;
 use atomic_data::rdd::RddBase;
 use atomic_data::shuffle::MapOutputTracker;
 use atomic_data::task::TaskOption;
@@ -13,7 +14,7 @@ use atomic_data::task::result::ResultTask;
 use atomic_data::task::shuffle_map::ShuffleMapTask;
 use atomic_data::task_context::TaskContext;
 use dashmap::DashMap;
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,9 +28,7 @@ pub type EventQueue = Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
 
 /// Functionality of the library built-in schedulers
 #[async_trait::async_trait]
-pub trait NativeScheduler: Send + Sync {
-    fn get_mutators(&self) -> Mutators;
-
+pub trait NativeScheduler: StagePlanner {
     /// Fast path for execution. Runs the DD in the driver main thread if possible.
     fn local_execution<T: Data, U: Data, F, L>(
         jt: Arc<JobTracker<F, U, T, L>>,
@@ -51,132 +50,6 @@ pub trait NativeScheduler: Send + Sync {
         }
     }
 
-    async fn new_stage(
-        &self,
-        rdd_base: Arc<dyn RddBase>,
-        shuffle_dependency: Option<Arc<ErasedShuffleDependency>>,
-    ) -> LibResult<Stage> {
-        log::debug!("creating new stage");
-        // TODO: Cache tracker - for LocalScheduler, cache is managed locally
-        // For now, we skip cache registration in base scheduler
-        let m = self.get_mutators();
-        if let Some(dep) = shuffle_dependency.clone() {
-            log::debug!("shuffle dependency exists, registering to map output tracker");
-            m.register_shuffle(dep.get_shuffle_id(), rdd_base.number_of_splits());
-            log::debug!("new stage tracker after");
-        }
-        let id = m.get_next_stage_id();
-        log::debug!("new stage id #{}", id);
-        let stage = Stage::new(
-            id,
-            rdd_base.clone(),
-            shuffle_dependency,
-            self.get_parent_stages(rdd_base).await?,
-        );
-        m.insert_into_stage_cache(id, stage.clone());
-        log::debug!("returning new stage #{}", id);
-        Ok(stage)
-    }
-
-    async fn visit_missing_parent<'s>(
-        &'s self,
-        missing: &'s mut BTreeSet<Stage>,
-        visited: &'s mut HashSet<usize>,
-        rdd: Arc<dyn RddBase>,
-    ) -> LibResult<()> {
-        log::debug!(
-            "missing stages: {:?}",
-            missing.iter().map(|x| x.id).collect::<Vec<_>>()
-        );
-        log::debug!("visited rdd ids: {:?}", visited);
-        let rdd_id = rdd.get_rdd_id();
-        if !visited.contains(&rdd_id) {
-            visited.insert(rdd_id);
-            // TODO: distributed cache-locality registration (deferred)
-            for _ in 0..rdd.number_of_splits() {
-                let locs = self.get_mutators().get_cache_locs(rdd.clone());
-                log::debug!("cache locs: {:?}", locs);
-                if locs.is_none() {
-                    for dep in rdd.get_dependencies() {
-                        log::debug!("for dep in missing stages ");
-                        match dep {
-                            Dependency::Shuffle(shuf_dep) => {
-                                let stage = self.get_shuffle_map_stage(shuf_dep.clone()).await?;
-                                log::debug!("shuffle stage #{} in missing stages", stage.id);
-                                if !stage.is_available() {
-                                    log::debug!(
-                                        "inserting shuffle stage #{} in missing stages",
-                                        stage.id
-                                    );
-                                    missing.insert(stage);
-                                }
-                            }
-                            Dependency::OneToOne { rdd_base }
-                            | Dependency::Range { rdd_base, .. }
-                            | Dependency::CoalescedSplitDep {
-                                rdd: rdd_base,
-                                prev: _,
-                            } => {
-                                log::debug!("narrow stage in missing stages");
-                                self.visit_missing_parent(missing, visited, rdd_base)
-                                    .await?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn visit_for_parent_stages<'s>(
-        &'s self,
-        parents: &'s mut BTreeSet<Stage>,
-        visited: &'s mut HashSet<usize>,
-        rdd: Arc<dyn RddBase>,
-    ) -> LibResult<()> {
-        log::debug!(
-            "parent stages: {:?}",
-            parents.iter().map(|x| x.id).collect::<Vec<_>>()
-        );
-        log::debug!("visited rdd ids: {:?}", visited);
-        let rdd_id = rdd.get_rdd_id();
-        if !visited.contains(&rdd_id) {
-            visited.insert(rdd_id);
-            // TODO: Cache tracker - for LocalScheduler, cache is managed locally
-            for dep in rdd.get_dependencies() {
-                match dep {
-                    Dependency::Shuffle(shuf_dep) => {
-                        parents.insert(self.get_shuffle_map_stage(shuf_dep.clone()).await?);
-                    }
-                    Dependency::OneToOne { rdd_base }
-                    | Dependency::Range { rdd_base, .. }
-                    | Dependency::CoalescedSplitDep {
-                        rdd: rdd_base,
-                        prev: _,
-                    } => {
-                        self.visit_for_parent_stages(parents, visited, rdd_base)
-                            .await?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn get_parent_stages(&self, rdd: Arc<dyn RddBase>) -> LibResult<Vec<Stage>> {
-        log::debug!("inside get parent stages");
-        let mut parents: BTreeSet<Stage> = BTreeSet::new();
-        let mut visited: HashSet<usize> = HashSet::new();
-        self.visit_for_parent_stages(&mut parents, &mut visited, rdd.clone())
-            .await?;
-        log::debug!(
-            "parent stages: {:?}",
-            parents.iter().map(|x| x.id).collect::<Vec<_>>()
-        );
-        Ok(parents.into_iter().collect())
-    }
-
     async fn on_event_failure<T: Data, U: Data, F, L>(
         &self,
         jt: Arc<JobTracker<F, U, T, L>>,
@@ -195,7 +68,7 @@ pub trait NativeScheduler: Send + Sync {
 
         // The reduce stage that hit the fetch failure: mark it failed so it is
         // re-run after the lost map output is recomputed.
-        let m = self.get_mutators();
+        let m = self.state();
         let failed_stage = m.fetch_from_stage_cache(stage_id);
         jt.running.lock().remove(&failed_stage);
         jt.failed.lock().insert(failed_stage);
@@ -257,10 +130,14 @@ pub trait NativeScheduler: Send + Sync {
                     "completed shuffle task server uri: {:?}",
                     shuffle_server_uri
                 );
-                let m = self.get_mutators();
-                m.add_output_loc_to_stage(smt.stage_id, smt.partition, shuffle_server_uri);
+                let m = self.state();
+                m.add_output_loc_to_stage(
+                    smt.meta.stage_id,
+                    smt.meta.partition,
+                    shuffle_server_uri,
+                );
 
-                let stage = m.fetch_from_stage_cache(smt.stage_id);
+                let stage = m.fetch_from_stage_cache(smt.meta.stage_id);
                 log::debug!(
                     "pending stages: {:?}",
                     jt.pending_tasks
@@ -389,18 +266,17 @@ pub trait NativeScheduler: Send + Sync {
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
         L: JobListener,
     {
-        let m = self.get_mutators();
+        let m = self.state();
         let mut pending_tasks = jt.pending_tasks.lock();
         let my_pending = pending_tasks.entry(stage.clone()).or_default();
         if stage == jt.final_stage {
             log::debug!("final stage #{}", stage.id);
-            for (id_in_job, (id, part)) in jt
-                .output_parts
-                .iter()
-                .enumerate()
-                .take(jt.num_output_parts)
-                .enumerate()
-            {
+            if !self.supports_closure_tasks() {
+                return Err(SchedulerError::UnsupportedOperation(
+                    "final-stage closure ResultTask is unsupported on this scheduler; use task-op APIs (task_fn!/map_task/filter_task/flat_map_task/fold_task/reduce_task) for distributed execution",
+                ));
+            }
+            for (id, part) in jt.output_parts.iter().enumerate().take(jt.num_output_parts) {
                 let locs = self.get_preferred_locs(jt.final_rdd.get_rdd_base(), *part);
                 let result_task = ResultTask::new(
                     m.get_next_task_id(),
@@ -415,7 +291,7 @@ pub trait NativeScheduler: Send + Sync {
                 let task_option = TaskOption::ResultTask(result_task.into());
                 let executor = self.next_executor_server(&task_option);
                 my_pending.insert(task_option.clone());
-                self.submit_task::<T, U, F>(task_option, id_in_job, executor)
+                self.submit_task::<T, U, F>(task_option, executor)
             }
         } else {
             for p in 0..stage.num_partitions {
@@ -447,7 +323,7 @@ pub trait NativeScheduler: Send + Sync {
                     let task_option = TaskOption::ShuffleMapTask(shuffle_map_task);
                     let executor = self.next_executor_server(&task_option);
                     my_pending.insert(task_option.clone());
-                    self.submit_task::<T, U, F>(task_option, p, executor);
+                    self.submit_task::<T, U, F>(task_option, executor);
                 }
             }
         }
@@ -457,8 +333,8 @@ pub trait NativeScheduler: Send + Sync {
     fn wait_for_event(&self, run_id: usize, timeout: u64) -> Option<CompletionEvent> {
         // TODO: make use of async to wait for events
         let end = Instant::now() + Duration::from_millis(timeout);
-        let mutators = self.get_mutators();
-        let event_queue = mutators.get_event_queue();
+        let state = self.state();
+        let event_queue = state.get_event_queue();
         while event_queue.get(&run_id)?.is_empty() {
             if Instant::now() > end {
                 return None;
@@ -468,15 +344,19 @@ pub trait NativeScheduler: Send + Sync {
         event_queue.get_mut(&run_id)?.pop_front()
     }
 
-    fn submit_task<T: Data, U: Data, F>(
-        &self,
-        task: TaskOption,
-        id_in_job: usize,
-        target_executor: SocketAddrV4,
-    ) where
+    fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, target_executor: SocketAddrV4)
+    where
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U;
 
-    // mutators:
+    /// Whether this scheduler can execute closure-backed `ResultTask`s.
+    ///
+    /// Local scheduler returns `true` (default). Distributed scheduler returns `false` and
+    /// requires op-envelope task APIs.
+    fn supports_closure_tasks(&self) -> bool {
+        true
+    }
+
+    // state:
     // fn add_output_loc_to_stage(&self, stage_id: usize, partition: usize, host: String);
     // fn insert_into_stage_cache(&self, id: usize, stage: Stage);
     // /// refreshes cache locations
@@ -491,55 +371,14 @@ pub trait NativeScheduler: Send + Sync {
     // fn fetch_from_shuffle_to_cache(&self, id: usize) -> Stage;
     // fn get_cache_locs(&self, rdd: Arc<dyn RddBase>) -> Option<Vec<Vec<Ipv4Addr>>>;
     // fn get_event_queue(&self) -> &Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
-    async fn get_missing_parent_stages<'a>(&'a self, stage: Stage) -> LibResult<Vec<Stage>>;
     // fn get_next_job_id(&self) -> usize;
     // fn get_next_stage_id(&self) -> usize;
     // fn get_next_task_id(&self) -> usize;
     fn next_executor_server(&self, task: &TaskOption) -> SocketAddrV4;
-
-    fn get_preferred_locs(&self, rdd: Arc<dyn RddBase>, partition: usize) -> Vec<Ipv4Addr> {
-        // TODO: have to implement this completely
-        if let Some(cached) = self.get_mutators().get_cache_locs(rdd.clone())
-            && let Some(cached) = cached.get(partition)
-        {
-            return cached.clone();
-        }
-        let rdd_prefs = rdd.preferred_locations(rdd.splits()[partition].clone());
-        if !rdd.is_pinned() {
-            if !rdd_prefs.is_empty() {
-                return rdd_prefs;
-            }
-            for dep in rdd.get_dependencies().iter() {
-                match dep {
-                    Dependency::OneToOne { .. }
-                    | Dependency::Range { .. }
-                    | Dependency::CoalescedSplitDep { .. } => {
-                        for in_part in dep.get_parents(partition) {
-                            let locs = self.get_preferred_locs(dep.get_rdd_base(), in_part);
-                            if !locs.is_empty() {
-                                return locs;
-                            }
-                        }
-                    }
-                    Dependency::Shuffle(_) => {
-                        // Shuffle dependencies don't have preferred locations
-                    }
-                }
-            }
-            Vec::new()
-        } else {
-            // when pinned, is required that there is exactly one preferred location
-            // for a given partition
-            assert!(rdd_prefs.len() == 1);
-            rdd_prefs
-        }
-    }
-
-    async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage>;
 }
 
 #[derive(Clone, Default)]
-pub struct Mutators {
+pub struct SchedulerState {
     pub stage_cache: Arc<DashMap<usize, Stage>>,
     pub map_output_tracker: Option<Arc<MapOutputTracker>>,
     pub shuffle_to_map_stage: Arc<DashMap<usize, Stage>>,
@@ -563,7 +402,7 @@ pub struct Mutators {
     pub job_aborts: Arc<DashMap<usize, String>>,
 }
 
-impl Mutators {
+impl SchedulerState {
     pub fn new() -> Self {
         Self {
             stage_cache: Arc::new(DashMap::new()),
@@ -636,7 +475,7 @@ impl Mutators {
     pub fn get_map_output_uri(&self, shuffle_id: usize, map_id: usize) -> Option<String> {
         self.map_output_tracker
             .as_ref()?
-            .server_uris
+            .map_output_uris
             .get(&shuffle_id)?
             .get(map_id)?
             .clone()
@@ -685,9 +524,9 @@ impl Mutators {
             None => return,
         };
 
-        // server_uris[shuffle_id].len() gives the original number of reduce partitions.
+        // map_output_uris[shuffle_id].len() gives the original number of reduce partitions.
         let num_reduce_partitions = tracker
-            .server_uris
+            .map_output_uris
             .get(&shuffle_id)
             .map(|v| v.len())
             .unwrap_or(0);
@@ -732,7 +571,7 @@ impl Mutators {
                 "adaptive coalescing: shuffle #{shuffle_id} coalesced {num_reduce_partitions} → \
                  {coalesced_count} partitions ({total_bytes} bytes total)"
             );
-            tracker.set_coalesced_partitions(shuffle_id, coalesced_count);
+            tracker.coalesced_parts.insert(shuffle_id, coalesced_count);
         }
     }
 
@@ -775,7 +614,7 @@ impl Mutators {
     pub fn is_shuffle_complete(&self, shuffle_id: usize) -> bool {
         if let Some(tracker) = &self.map_output_tracker {
             tracker
-                .server_uris
+                .map_output_uris
                 .get(&shuffle_id)
                 .is_some_and(|arr| !arr.is_empty() && arr.iter().all(|s| s.is_some()))
         } else {
@@ -787,7 +626,7 @@ impl Mutators {
     pub fn get_shuffle_server_uris(&self, shuffle_id: usize) -> Vec<String> {
         if let Some(tracker) = &self.map_output_tracker {
             tracker
-                .server_uris
+                .map_output_uris
                 .get(&shuffle_id)
                 .map(|arr| arr.iter().filter_map(|s| s.clone()).collect())
                 .unwrap_or_default()

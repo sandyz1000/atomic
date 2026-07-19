@@ -2,7 +2,7 @@
 //!
 //! In `DistributedScheduler::submit_native_task()`, after `MAX_WORKER_FAILURES`
 //! (hard-coded 3) consecutive TCP-level errors the worker endpoint is removed from
-//! `server_uris`, `worker_capabilities`, `inflight`, and `worker_failures`.
+//! `map_output_uris`, `worker_capabilities`, `inflight`, and `worker_failures`.
 //! There is NO path to re-add it — even if the worker process recovers and
 //! reconnects. The driver must be restarted to use the recovered worker.
 //!
@@ -104,7 +104,7 @@ fn test_worker_with_empty_ops_accepts_all() {
 /// after the 3rd failure `next_executor` errors.
 #[tokio::test]
 async fn test_worker_tcp_removal() {
-    use atomic_data::distributed::{PipelineOp, TaskAction, TaskEnvelope, TaskRuntime};
+    use atomic_data::distributed::{OpKind, PipelineOp, TaskAction, TaskEnvelope, TaskRuntime};
 
     // Bind an ephemeral port — the listener immediately drops each connection
     // to simulate a dead worker.
@@ -140,7 +140,7 @@ async fn test_worker_tcp_removal() {
         "test".to_string(),
         vec![PipelineOp {
             op_id: "no.op".to_string(),
-            action: TaskAction::Map,
+            kind: OpKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }],
@@ -187,7 +187,7 @@ async fn test_worker_tcp_removal() {
 /// setup overhead.
 #[tokio::test]
 async fn test_exponential_backoff() {
-    use atomic_data::distributed::{PipelineOp, TaskAction, TaskEnvelope, TaskRuntime};
+    use atomic_data::distributed::{OpKind, PipelineOp, TaskAction, TaskEnvelope, TaskRuntime};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -217,7 +217,7 @@ async fn test_exponential_backoff() {
         "test".to_string(),
         vec![PipelineOp {
             op_id: "no.op".to_string(),
-            action: TaskAction::Map,
+            kind: OpKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }],
@@ -284,7 +284,7 @@ fn removed_worker_clears_outputs() {
     sched.register_worker(dead, capabilities(&[]));
     sched.remove_worker(dead);
 
-    let locs = tracker.server_uris.get(&0).unwrap().clone();
+    let locs = tracker.map_output_uris.get(&0).unwrap().clone();
     assert_eq!(
         locs,
         vec![None, Some("http://10.0.0.9:31000".to_string())],

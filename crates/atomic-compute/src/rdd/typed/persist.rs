@@ -29,7 +29,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
             // partition's bytes on its worker under `cache_id` (see runtimes/native.rs).
             sp.ops.push(PipelineOp {
                 op_id: String::new(),
-                action: TaskAction::Cache { rdd_id: cache_id },
+                kind: OpKind::Engine(StepKind::Cache { rdd_id: cache_id }),
                 runtime: TaskRuntime::Native,
                 payload: vec![],
             });
@@ -150,7 +150,8 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
     /// Requires `T: bincode::Encode + bincode::Decode<()>`.
     pub fn checkpoint(self, dir: impl AsRef<str>) -> Result<TypedRdd<T>, BaseError>
     where
-        T: bincode::Encode + bincode::Decode<()>,
+        T: bincode::Encode + bincode::Decode<()> + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
     {
         use crate::rdd::checkpoint::{CheckpointRdd, CheckpointStore};
         use atomic_data::cache::disk_write_partition;

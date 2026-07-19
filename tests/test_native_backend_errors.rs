@@ -23,7 +23,7 @@ use atomic_compute::runtimes::{Backend, ComputeEngine};
 use atomic_compute::task;
 use atomic_compute::task_traits::UnaryTask;
 use atomic_data::distributed::{
-    PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
+    OpKind, PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
 use std::sync::Arc;
 
@@ -61,7 +61,7 @@ fn make_envelope_with_ops(ops: Vec<PipelineOp>, data: Vec<u8>) -> TaskEnvelope {
 fn single_op(op_id: &str, action: TaskAction) -> PipelineOp {
     PipelineOp {
         op_id: op_id.to_string(),
-        action,
+        kind: OpKind::Task(action),
         runtime: TaskRuntime::Native,
         payload: vec![],
     }
@@ -186,7 +186,7 @@ fn test_fold_op_sums_partition() {
     let items: Vec<i32> = vec![1, 2, 3, 4, 5];
     let op = PipelineOp {
         op_id: "atomic::builtin::sum::i32".to_string(),
-        action: TaskAction::Fold,
+        kind: OpKind::Task(TaskAction::Fold),
         runtime: TaskRuntime::Native,
         payload: encode(zero),
     };

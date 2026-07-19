@@ -1,7 +1,7 @@
 use atomic_data::accumulator::MergeFn;
-use atomic_data::dependency::ErasedShuffleDependency;
-use atomic_data::distributed::PipelineOp;
-use atomic_scheduler::{LocalScheduler, Schedulers};
+use atomic_scheduler::{
+    ActiveShuffleStage as SchedulerActiveShuffleStage, LocalScheduler, Schedulers,
+};
 use std::net::SocketAddrV4;
 use std::path::PathBuf;
 use std::sync::{
@@ -15,6 +15,7 @@ use crate::error::{ComputeError, ComputeResult};
 mod broadcast;
 mod io;
 mod job_runner;
+mod pipeline_executor;
 mod scope;
 mod worker;
 
@@ -58,12 +59,9 @@ pub struct Context {
     pub(crate) active_shuffle_stages: ActiveShuffleStages,
 }
 
-/// One distributed shuffle-map stage as dispatched: the dependency supplies the
-/// input partition bytes, `ops` is the exact pipeline each map task ran.
-pub(crate) struct ActiveShuffleStage {
-    pub(crate) dep: Arc<ErasedShuffleDependency>,
-    pub(crate) ops: Vec<PipelineOp>,
-}
+/// Distributed shuffle-map stage metadata retained for reduce-side fetch-failure
+/// recovery (`shuffle_id → dep + ops`).
+pub(crate) type ActiveShuffleStage = SchedulerActiveShuffleStage;
 
 pub(crate) type ActiveShuffleStages = Arc<dashmap::DashMap<usize, ActiveShuffleStage>>;
 

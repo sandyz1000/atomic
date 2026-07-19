@@ -2,7 +2,10 @@ use heck::ToUpperCamelCase;
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use syn::{ExprClosure, ItemFn, LitStr, ReturnType, Type, parse_macro_input};
+use syn::parse::{Parse, ParseStream};
+use syn::{
+    ExprClosure, Ident, ItemFn, LitStr, ReturnType, Token, Type, bracketed, parse_macro_input,
+};
 
 /// Compute a stable FNV-1a 64-bit hash of the closure's normalized token text.
 ///
@@ -18,6 +21,44 @@ fn fnv1a_hash(s: &str) -> u64 {
         h = h.wrapping_mul(PRIME);
     }
     h
+}
+
+/// A single `name: Type` entry in a `task_fn!` capture list.
+struct CaptureItem {
+    name: Ident,
+    ty: Type,
+}
+
+impl Parse for CaptureItem {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let name: Ident = input.parse()?;
+        input.parse::<Token![:]>()?;
+        let ty: Type = input.parse()?;
+        Ok(CaptureItem { name, ty })
+    }
+}
+
+/// `task_fn!` input: an optional `[a: T, b: U]` capture list followed by a closure.
+struct TaskFnInput {
+    captures: Vec<CaptureItem>,
+    closure: ExprClosure,
+}
+
+impl Parse for TaskFnInput {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let captures = if input.peek(syn::token::Bracket) {
+            let content;
+            bracketed!(content in input);
+            content
+                .parse_terminated(CaptureItem::parse, Token![,])?
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let closure: ExprClosure = input.parse()?;
+        Ok(TaskFnInput { captures, closure })
+    }
 }
 
 /// Attribute macro for defining a distributed Atomic task function.
@@ -265,6 +306,11 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
                         items.into_iter().flat_map(#fn_name).collect();
                     result.encode_wire().map_err(|e| e.to_string())
                 }
+                TaskAction::MapPartitions => {
+                    let items = <#input_type>::decode_wire(data).map_err(|e| e.to_string())?;
+                    let result = #fn_name(items);
+                    result.encode_wire().map_err(|e| e.to_string())
+                }
                 other => Err(::std::format!(
                     "task '{}' does not support action {:?}",
                     #fn_name_str, other
@@ -281,6 +327,14 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
                     let result: ::std::vec::Vec<#output_type> =
                         items.into_iter().map(#fn_name).collect();
                     result.encode_wire().map_err(|e| e.to_string())
+                }
+                TaskAction::Foreach => {
+                    let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
+                        .map_err(|e| e.to_string())?;
+                    for x in items {
+                        #fn_name(x);
+                    }
+                    ::std::result::Result::Ok(::std::vec::Vec::new())
                 }
                 other => Err(::std::format!(
                     "task '{}' does not support action {:?}",
@@ -303,7 +357,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             impl ::atomic_compute::__macro_support::BinaryTask<#input_type> for #struct_name {
                 const NAME: &'static str = #op_id_expr;
-                fn call(a: #input_type, b: #input_type) -> #input_type {
+                fn call(&self, a: #input_type, b: #input_type) -> #input_type {
                     #fn_name(a, b)
                 }
             }
@@ -320,7 +374,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
                 for #struct_name
             {
                 const NAME: &'static str = #op_id_expr;
-                fn call(input: #input_type) -> #output_type {
+                fn call(&self, input: #input_type) -> #output_type {
                     #fn_name(input)
                 }
             }
@@ -397,10 +451,22 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Both are dispatched identically on workers.
 #[proc_macro]
 pub fn task_fn(input: TokenStream) -> TokenStream {
-    let closure = parse_macro_input!(input as ExprClosure);
+    let TaskFnInput { captures, closure } = parse_macro_input!(input as TaskFnInput);
+    let cap_names: Vec<&Ident> = captures.iter().map(|c| &c.name).collect();
+    let cap_types: Vec<&Type> = captures.iter().map(|c| &c.ty).collect();
+    let has_captures = !captures.is_empty();
 
     let inputs = &closure.inputs;
     let num_inputs = inputs.len();
+
+    // Capture lists are only meaningful on unary (map/filter/flat_map) closures. A binary
+    // (fold/reduce) op already uses `payload` for its zero value, so it cannot also carry
+    // captured parameters there.
+    if has_captures && num_inputs == 2 {
+        return TokenStream::from(quote! {
+            compile_error!("task_fn! capture lists are only supported on unary closures")
+        });
+    }
 
     // Extract (pat, ty) pairs from typed closure args.
     // Each arg must be `pat: Type` (Pat::Type).
@@ -420,6 +486,58 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
 
     let struct_ident = syn::Ident::new("__TaskFnStruct", Span::call_site());
     let dispatch_fn_ident = syn::Ident::new("__task_fn_dispatch", Span::call_site());
+
+    // ── capture-derived codegen (unary path) ──
+    // A zero-capture closure keeps the original zero-sized-struct shape; a capturing one
+    // becomes a struct whose fields are the captured values, rkyv-encoded into the op
+    // payload at the call site and decoded on the worker before the body runs.
+    let cap_struct_decl = if has_captures {
+        quote! {
+            #[allow(non_camel_case_types)]
+            #[derive(Clone)]
+            struct #struct_ident { #(#cap_names: #cap_types),* }
+        }
+    } else {
+        quote! {
+            #[allow(non_camel_case_types)]
+            #[derive(Clone)]
+            struct #struct_ident;
+        }
+    };
+    let cap_construct = if has_captures {
+        quote! { #struct_ident { #(#cap_names),* } }
+    } else {
+        quote! { #struct_ident }
+    };
+    let cap_encode_params = if has_captures {
+        quote! {
+            fn encode_params(&self) -> ::std::vec::Vec<u8> {
+                ::atomic_compute::__macro_support::WireEncode::encode_wire(
+                    &( #(self.#cap_names.clone(),)* )
+                )
+                .unwrap_or_default()
+            }
+        }
+    } else {
+        quote! {}
+    };
+    let cap_decode_instance = if has_captures {
+        quote! {
+            let ( #(#cap_names,)* ): ( #(#cap_types,)* ) =
+                ::atomic_compute::__macro_support::WireDecode::decode_wire(payload)
+                    .map_err(|e| e.to_string())?;
+            let __task = #struct_ident { #(#cap_names),* };
+        }
+    } else {
+        quote! {
+            let _ = payload;
+            let __task = #struct_ident;
+        }
+    };
+    let cap_body = quote! {
+        #(let #cap_names = self.#cap_names.clone();)*
+        #body
+    };
 
     //
     // Format: "task_fn::{module_path}::{Action}<{types}>::{short_hash}"
@@ -514,11 +632,12 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
         TokenStream::from(quote! {
             {
                 #[allow(non_camel_case_types)]
+                #[derive(Clone)]
                 struct #struct_ident;
 
                 impl ::atomic_compute::__macro_support::BinaryTask<#t> for #struct_ident {
                     const NAME: &'static str = #op_id_expr;
-                    fn call(#pat0: #t, #pat1: #t) -> #t {
+                    fn call(&self, #pat0: #t, #pat1: #t) -> #t {
                         #body
                     }
                 }
@@ -529,7 +648,10 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
                     payload: &[u8],
                     data: &[u8],
                 ) -> ::std::result::Result<::std::vec::Vec<u8>, ::std::string::String> {
-                    use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
+                    use ::atomic_compute::__macro_support::{
+                        BinaryTask, TaskAction, WireDecode, WireEncode,
+                    };
+                    let __task = #struct_ident;
                     match action {
                         TaskAction::Fold | TaskAction::Aggregate => {
                             let zero = <#t>::decode_wire(payload).map_err(|e| e.to_string())?;
@@ -537,7 +659,7 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
                                 .map_err(|e| e.to_string())?;
                             let result = items
                                 .into_iter()
-                                .fold(zero, |acc, x| <#struct_ident as ::atomic_compute::__macro_support::BinaryTask<#t>>::call(acc, x));
+                                .fold(zero, |acc, x| __task.call(acc, x));
                             result.encode_wire().map_err(|e| e.to_string())
                         }
                         TaskAction::Reduce => {
@@ -548,7 +670,7 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
                                 .next()
                                 .ok_or_else(|| "reduce on empty partition".to_string())?;
                             let result = iter.fold(first, |acc, x| {
-                                <#struct_ident as ::atomic_compute::__macro_support::BinaryTask<#t>>::call(acc, x)
+                                __task.call(acc, x)
                             });
                             result.encode_wire().map_err(|e| e.to_string())
                         }
@@ -616,14 +738,14 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
                 TaskAction::Map | TaskAction::Collect => {
                     let items = ::std::vec::Vec::<#t>::decode_wire(data).map_err(|e| e.to_string())?;
                     let result: ::std::vec::Vec<bool> = items.into_iter()
-                        .map(|x| <#struct_ident as ::atomic_compute::__macro_support::UnaryTask<#t, #ret_type>>::call(x))
+                        .map(|x| __task.call(x))
                         .collect();
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 TaskAction::Filter => {
                     let items = ::std::vec::Vec::<#t>::decode_wire(data).map_err(|e| e.to_string())?;
                     let result: ::std::vec::Vec<#t> = items.into_iter()
-                        .filter(|x| <#struct_ident as ::atomic_compute::__macro_support::UnaryTask<#t, #ret_type>>::call(x.clone()))
+                        .filter(|x| __task.call(x.clone()))
                         .collect();
                     result.encode_wire().map_err(|e| e.to_string())
                 }
@@ -634,15 +756,20 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
                 TaskAction::Map | TaskAction::Collect => {
                     let items = ::std::vec::Vec::<#t>::decode_wire(data).map_err(|e| e.to_string())?;
                     let result: ::std::vec::Vec<#ret_type> = items.into_iter()
-                        .map(|x| <#struct_ident as ::atomic_compute::__macro_support::UnaryTask<#t, #ret_type>>::call(x))
+                        .map(|x| __task.call(x))
                         .collect();
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 TaskAction::FlatMap => {
                     let items = ::std::vec::Vec::<#t>::decode_wire(data).map_err(|e| e.to_string())?;
                     let result: ::std::vec::Vec<_> = items.into_iter()
-                        .flat_map(|x| <#struct_ident as ::atomic_compute::__macro_support::UnaryTask<#t, #ret_type>>::call(x))
+                        .flat_map(|x| __task.call(x))
                         .collect();
+                    result.encode_wire().map_err(|e| e.to_string())
+                }
+                TaskAction::MapPartitions => {
+                    let items = <#t>::decode_wire(data).map_err(|e| e.to_string())?;
+                    let result = __task.call(items);
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 other => Err(::std::format!("task_fn (vec) does not support action {:?}", other)),
@@ -652,9 +779,16 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
                 TaskAction::Map | TaskAction::Collect => {
                     let items = ::std::vec::Vec::<#t>::decode_wire(data).map_err(|e| e.to_string())?;
                     let result: ::std::vec::Vec<#ret_type> = items.into_iter()
-                        .map(|x| <#struct_ident as ::atomic_compute::__macro_support::UnaryTask<#t, #ret_type>>::call(x))
+                        .map(|x| __task.call(x))
                         .collect();
                     result.encode_wire().map_err(|e| e.to_string())
+                }
+                TaskAction::Foreach => {
+                    let items = ::std::vec::Vec::<#t>::decode_wire(data).map_err(|e| e.to_string())?;
+                    for x in items {
+                        __task.call(x);
+                    }
+                    ::std::result::Result::Ok(::std::vec::Vec::new())
                 }
                 other => Err(::std::format!("task_fn (unary) does not support action {:?}", other)),
             }
@@ -662,14 +796,14 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
 
         TokenStream::from(quote! {
             {
-                #[allow(non_camel_case_types)]
-                struct #struct_ident;
+                #cap_struct_decl
 
                 impl ::atomic_compute::__macro_support::UnaryTask<#t, #ret_type> for #struct_ident {
                     const NAME: &'static str = #op_id_expr;
-                    fn call(#pat0: #t) -> #ret_type {
-                        #body
+                    fn call(&self, #pat0: #t) -> #ret_type {
+                        #cap_body
                     }
+                    #cap_encode_params
                 }
 
                 #[doc(hidden)]
@@ -678,8 +812,10 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
                     payload: &[u8],
                     data: &[u8],
                 ) -> ::std::result::Result<::std::vec::Vec<u8>, ::std::string::String> {
-                    use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
-                    let _ = payload;
+                    use ::atomic_compute::__macro_support::{
+                        TaskAction, UnaryTask, WireDecode, WireEncode,
+                    };
+                    #cap_decode_instance
                     match action {
                         #dispatch_arms
                     }
@@ -693,7 +829,7 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
                     }
                 }
 
-                #struct_ident
+                #cap_construct
             }
         })
     }
