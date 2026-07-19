@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use atomic_data::data::Data;
 use atomic_data::distributed::{
-    OpKind, PipelineOp, ResultStatus, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode,
-    WireEncode,
+    OpKind, PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
 use atomic_data::partial::{ApproximateEvaluator, result::PartialResult};
 use atomic_data::rdd::{Rdd, RddBase};
@@ -17,6 +16,7 @@ use crate::error::{ComputeError, ComputeResult};
 use crate::runtimes::{Backend, ComputeEngine};
 
 use super::Context;
+use super::pipeline_executor::{DistributedExecutor, LocalExecutor, PipelineExecutor};
 
 impl Context {
     /// Dispatch a `#[task]`-registered Map/Filter/FlatMap over every partition,
@@ -121,71 +121,21 @@ impl Context {
         ops: Vec<PipelineOp>,
     ) -> ComputeResult<Vec<Vec<u8>>> {
         let broadcasts = self.broadcast_snapshot();
+        self.pipeline_executor()
+            .run_pipeline(source_partitions, ops, broadcasts)
+    }
+
+    /// Build the [`PipelineExecutor`] for the active runtime — a local thread pool
+    /// ([`LocalExecutor`]) or remote workers ([`DistributedExecutor`]). Upstream calls
+    /// [`dispatch_pipeline`](Self::dispatch_pipeline) either way.
+    pub(crate) fn pipeline_executor(&self) -> Box<dyn PipelineExecutor> {
         match &self.scheduler {
-            Schedulers::Local(_) => {
-                // Mirror the distributed model — one task per executor — but the executor is
-                // a local blocking thread instead of a remote worker. Each partition's pipeline
-                // runs concurrently on Tokio's blocking pool, which keeps a reachable runtime for
-                // ops (e.g. AgentStep) that `block_on` async work.
-                env::Env::run_in_async_rt(|| {
-                    let engine = Arc::new(ComputeEngine::default());
-                    let ops = Arc::new(ops);
-                    let broadcasts = Arc::new(broadcasts);
-                    futures::executor::block_on(async {
-                        let mut handles = Vec::with_capacity(source_partitions.len());
-                        for (part_id, data) in source_partitions.into_iter().enumerate() {
-                            let engine = engine.clone();
-                            let ops = ops.clone();
-                            let broadcasts = broadcasts.clone();
-                            handles.push(tokio::task::spawn_blocking(move || {
-                                let task = TaskEnvelope::new(
-                                    0,
-                                    0,
-                                    part_id,
-                                    0,
-                                    part_id,
-                                    format!("local-pipeline-{part_id}"),
-                                    (*ops).clone(),
-                                    data,
-                                )
-                                .with_broadcasts((*broadcasts).clone());
-                                engine.execute("local-driver", &task)
-                            }));
-                        }
-                        // Results are joined in partition order; accumulator deltas merge on the
-                        // driver after each task completes.
-                        let mut out = Vec::with_capacity(handles.len());
-                        for h in handles {
-                            let result = h.await.map_err(|e| {
-                                ComputeError::InvalidPayload(format!(
-                                    "local task thread panicked: {e}"
-                                ))
-                            })??;
-                            match result.status {
-                                ResultStatus::Success => {
-                                    if !result.accumulator_deltas.is_empty() {
-                                        self.merge_accumulator_deltas(&result.accumulator_deltas);
-                                    }
-                                    out.push(result.data);
-                                }
-                                _ => {
-                                    return Err(ComputeError::InvalidPayload(
-                                        result.error.unwrap_or_else(|| "task failed".to_string()),
-                                    ));
-                                }
-                            }
-                        }
-                        Ok(out)
-                    })
-                })
-            }
-            Schedulers::Distributed(sched) => Ok(env::Env::run_in_async_rt(|| {
-                futures::executor::block_on(sched.run_native_job_with_broadcasts(
-                    ops,
-                    source_partitions,
-                    broadcasts,
-                ))
-            })?),
+            Schedulers::Local(_) => Box::new(LocalExecutor {
+                accumulator_store: self.accumulator_store.clone(),
+            }),
+            Schedulers::Distributed(s) => Box::new(DistributedExecutor {
+                scheduler: s.clone(),
+            }),
         }
     }
 
@@ -213,79 +163,35 @@ impl Context {
         rdd: &Arc<dyn RddBase>,
         preceding_ops: Vec<PipelineOp>,
     ) -> ComputeResult<()> {
-        use atomic_data::dependency::Dependency;
-
         let sched = match &self.scheduler {
             Schedulers::Distributed(s) => s.clone(),
             Schedulers::Local(_) => return Ok(()),
         };
 
-        for dep in rdd.get_dependencies() {
-            if let Dependency::Shuffle(shuffle_dep) = dep {
-                let parent_partitions = shuffle_dep.encode_partitions()?;
-                let spec = &shuffle_dep.spec;
-                let ops = Self::shuffle_map_ops(spec, &preceding_ops)?;
+        let dispatched = env::Env::run_in_async_rt(|| {
+            futures::executor::block_on(sched.run_pending_shuffle_stages(rdd, preceding_ops))
+        })?;
 
-                let shuffle_id = spec.shuffle_id;
-                let num_output_partitions = spec.num_output_partitions;
-                // Recorded before dispatch so the fetch-failure recovery hook can
-                // replay a single map partition if a worker dies before the reduce.
-                self.active_shuffle_stages.insert(
-                    shuffle_id,
-                    super::ActiveShuffleStage {
-                        dep: shuffle_dep.clone(),
-                        ops: ops.clone(),
-                    },
-                );
-                env::Env::run_in_async_rt(|| {
-                    futures::executor::block_on(sched.run_shuffle_map_stage(
-                        shuffle_id,
-                        ops,
-                        parent_partitions,
-                    ))
-                })?;
-
-                log::info!(
-                    "shuffle map stage complete: shuffle_id={shuffle_id} \
-                     num_reduce_partitions={num_output_partitions}",
-                );
-            }
+        for stage in dispatched {
+            self.active_shuffle_stages.insert(
+                stage.shuffle_id,
+                super::ActiveShuffleStage {
+                    shuffle_id: stage.shuffle_id,
+                    dep: stage.dep,
+                    ops: stage.ops,
+                },
+            );
+            log::info!(
+                "shuffle map stage complete: shuffle_id={} num_reduce_partitions={}",
+                stage.shuffle_id,
+                self.active_shuffle_stages
+                    .get(&stage.shuffle_id)
+                    .map(|entry| entry.dep.spec.num_output_partitions)
+                    .unwrap_or(0)
+            );
         }
 
         Ok(())
-    }
-
-    /// The exact op pipeline a shuffle-map task runs for `spec`: the staged (or
-    /// caller-supplied) preceding ops followed by the `ShuffleMap` op itself.
-    fn shuffle_map_ops(
-        spec: &atomic_data::dependency::ShuffleSpec,
-        fallback_preceding: &[PipelineOp],
-    ) -> ComputeResult<Vec<PipelineOp>> {
-        let shuffle_op = PipelineOp {
-            op_id: format!("shuffle-map-{}", spec.shuffle_id),
-            kind: OpKind::Engine(StepKind::ShuffleMap {
-                shuffle_id: spec.shuffle_id,
-                num_output_partitions: spec.num_output_partitions,
-            }),
-            runtime: TaskRuntime::Native,
-            payload: bincode::encode_to_vec(
-                crate::shuffle_map::ShuffleMapPayload {
-                    type_id: spec.type_id.to_string(),
-                    partitioner_spec: spec.partitioner_spec.clone(),
-                },
-                bincode::config::standard(),
-            )
-            .map_err(|e| {
-                ComputeError::InvalidPayload(format!("shuffle-map payload encode: {e}"))
-            })?,
-        };
-        let mut ops = if spec.preceding_ops.is_empty() {
-            fallback_preceding.to_vec()
-        } else {
-            spec.preceding_ops.clone()
-        };
-        ops.push(shuffle_op);
-        Ok(ops)
     }
 
     /// Wire the driver's fetch-failure recovery: when a reduce task reports a lost

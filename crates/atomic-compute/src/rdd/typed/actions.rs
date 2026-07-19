@@ -54,7 +54,39 @@ impl<T: Data + Clone> TypedRdd<T> {
     ///
     /// Returns `Vec<Vec<T>>` where index `i` holds the elements of partition `i`.
     /// Useful for `save_as_text_file` and `checkpoint` which write one file per partition.
-    pub fn collect_partitions(&self) -> Result<Vec<Vec<T>>, BaseError> {
+    pub fn collect_partitions(&self) -> Result<Vec<Vec<T>>, BaseError>
+    where
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        if self.context.is_distributed() {
+            if let Some(ref staged) = self.staged {
+                let result_bytes = self
+                    .context
+                    .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                return result_bytes
+                    .into_iter()
+                    .map(|bytes| {
+                        Vec::<T>::decode_wire(&bytes)
+                            .map_err(|e| BaseError::DowncastFailure(e.to_string()))
+                    })
+                    .collect();
+            }
+
+            // No staged op pipeline: encode each partition directly and decode back,
+            // preserving partition boundaries without closure-backed scheduler tasks.
+            let source = Context::encode_rdd_partitions(self.rdd.clone())
+                .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+            return source
+                .into_iter()
+                .map(|bytes| {
+                    Vec::<T>::decode_wire(&bytes)
+                        .map_err(|e| BaseError::DowncastFailure(e.to_string()))
+                })
+                .collect();
+        }
+
         let cl = |iter: Box<dyn Iterator<Item = T>>| iter.collect::<Vec<T>>();
         Ok(self.context.run_job(self.rdd.clone(), cl)?)
     }
@@ -66,7 +98,14 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// fetches one partition at a time and yields its elements before fetching the next.
     /// This reduces peak driver-side memory for large datasets where the caller processes
     /// elements incrementally.
-    pub fn to_local_iterator(&self) -> Result<impl Iterator<Item = T>, BaseError> {
+    pub fn to_local_iterator(&self) -> Result<impl Iterator<Item = T>, BaseError>
+    where
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        if self.context.is_distributed() {
+            return Ok(self.collect_distributed()?.into_iter());
+        }
         let n = self.num_partitions();
         let mut result: Vec<T> = Vec::new();
         for i in 0..n {
@@ -195,7 +234,17 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Samples `max(1, ceil(confidence × num_partitions))` partitions and extrapolates.
     /// `confidence` must be in `(0.0, 1.0]`; use `1.0` for a full (non-approximate) scan.
     /// The result is an estimate — the actual count may differ from the return value.
-    pub fn count_approx(&self, confidence: f64) -> Result<u64, BaseError> {
+    pub fn count_approx(&self, confidence: f64) -> Result<u64, BaseError>
+    where
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        if self.context.is_distributed() {
+            // For op-only distributed execution we avoid closure-backed sampling jobs.
+            // This path computes an exact count from worker-produced output.
+            return Ok(self.collect_distributed()?.len() as u64);
+        }
+
         let n = self.num_partitions();
         let sample_n = ((confidence.clamp(0.001, 1.0) * n as f64).ceil() as usize)
             .max(1)
@@ -243,17 +292,21 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Returns `None` if the RDD is empty.
     pub fn tree_reduce<F>(&self, f: F, depth: usize) -> Result<Option<T>, BaseError>
     where
-        T: Clone,
+        T: Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
         F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
     {
-        let f_job = f.clone();
-        let reduce_partition = move |iter: Box<dyn Iterator<Item = T>>| iter.reduce(&f_job);
-        let mut partials: Vec<T> = self
-            .context
-            .run_job(self.rdd.clone(), reduce_partition)?
-            .into_iter()
-            .flatten()
-            .collect();
+        let mut partials: Vec<T> = if self.context.is_distributed() {
+            self.collect_distributed()?
+        } else {
+            let f_job = f.clone();
+            let reduce_partition = move |iter: Box<dyn Iterator<Item = T>>| iter.reduce(&f_job);
+            self.context
+                .run_job(self.rdd.clone(), reduce_partition)?
+                .into_iter()
+                .flatten()
+                .collect()
+        };
 
         let levels = depth.max(1);
         for _ in 0..levels {
@@ -288,13 +341,20 @@ impl<T: Data + Clone> TypedRdd<T> {
     ) -> Result<U, BaseError>
     where
         U: Data + Clone,
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
         SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
         CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
     {
-        let z = zero.clone();
-        let reduce_partition =
-            move |iter: Box<dyn Iterator<Item = T>>| iter.fold(z.clone(), &seq_fn);
-        let mut partials: Vec<U> = self.context.run_job(self.rdd.clone(), reduce_partition)?;
+        let mut partials: Vec<U> = if self.context.is_distributed() {
+            let elements = self.collect_distributed()?;
+            vec![elements.into_iter().fold(zero.clone(), &seq_fn)]
+        } else {
+            let z = zero.clone();
+            let reduce_partition =
+                move |iter: Box<dyn Iterator<Item = T>>| iter.fold(z.clone(), &seq_fn);
+            self.context.run_job(self.rdd.clone(), reduce_partition)?
+        };
 
         let levels = depth.max(1);
         for _ in 0..levels {
@@ -490,7 +550,7 @@ impl<T: Data + Clone> TypedRdd<T> {
 
     /// Internal helper: dispatch the staged pipeline (or raw partitions) to workers
     /// and return all elements as a flat `Vec<T>`. Used by `max`, `min`, `count`.
-    fn collect_distributed(&self) -> Result<Vec<T>, BaseError>
+    pub(crate) fn collect_distributed(&self) -> Result<Vec<T>, BaseError>
     where
         T: WireEncode,
         Vec<T>: WireEncode + WireDecode,

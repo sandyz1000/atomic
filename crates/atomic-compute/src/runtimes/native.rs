@@ -42,7 +42,7 @@ impl OpDispatcher for NativeDispatcher {
                 num_output_partitions,
             }) => {
                 // Payload carries the dispatch key + the shipped partitioner spec.
-                let payload: crate::shuffle_map::ShuffleMapPayload =
+                let payload: atomic_data::distributed::ShuffleMapPayload =
                     decode_or_invalid(&op.payload, "shuffle-map payload")?;
                 let type_id = payload.type_id.as_str();
                 let spec = &payload.partitioner_spec;

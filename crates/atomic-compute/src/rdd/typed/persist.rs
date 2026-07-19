@@ -150,7 +150,8 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
     /// Requires `T: bincode::Encode + bincode::Decode<()>`.
     pub fn checkpoint(self, dir: impl AsRef<str>) -> Result<TypedRdd<T>, BaseError>
     where
-        T: bincode::Encode + bincode::Decode<()>,
+        T: bincode::Encode + bincode::Decode<()> + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
     {
         use crate::rdd::checkpoint::{CheckpointRdd, CheckpointStore};
         use atomic_data::cache::disk_write_partition;

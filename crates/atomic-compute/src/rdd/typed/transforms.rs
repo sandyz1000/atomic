@@ -80,14 +80,26 @@ impl<T: Data> TypedRdd<T> {
     /// Return a new RDD containing elements only in this RDD but not in `other`.
     pub fn subtract(self, other: TypedRdd<T>) -> TypedRdd<T>
     where
-        T: Eq + std::hash::Hash + Clone,
+        T: Eq + std::hash::Hash + Clone + WireEncode,
+        Vec<T>: WireEncode + WireDecode,
     {
         use std::collections::HashSet;
-        let other_elems = self
-            .context
-            .run_job(other.rdd, |iter| iter.collect::<Vec<T>>())
-            .unwrap_or_default();
-        let other_set: Arc<HashSet<T>> = Arc::new(other_elems.into_iter().flatten().collect());
+        // Distributed materialises the other side via the op path; the closure `run_job`
+        // would run over the empty driver placeholder RDD.
+        let other_set: Arc<HashSet<T>> = Arc::new(if self.context.is_distributed() {
+            other
+                .collect_distributed()
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        } else {
+            self.context
+                .run_job(other.rdd, |iter| iter.collect::<Vec<T>>())
+                .unwrap_or_default()
+                .into_iter()
+                .flatten()
+                .collect()
+        });
         let other_set_clone = Arc::clone(&other_set);
         let filter_fn =
             move |_idx: usize, iter: Box<dyn Iterator<Item = T>>| -> Box<dyn Iterator<Item = T>> {
@@ -105,14 +117,26 @@ impl<T: Data> TypedRdd<T> {
 
     pub fn intersection(self, other: TypedRdd<T>) -> TypedRdd<T>
     where
-        T: Eq + std::hash::Hash + Clone,
+        T: Eq + std::hash::Hash + Clone + WireEncode,
+        Vec<T>: WireEncode + WireDecode,
     {
         use std::collections::HashSet;
-        let other_elems = self
-            .context
-            .run_job(other.rdd, |iter| iter.collect::<Vec<T>>())
-            .unwrap_or_default();
-        let other_set: Arc<HashSet<T>> = Arc::new(other_elems.into_iter().flatten().collect());
+        // Distributed materialises the other side via the op path; the closure `run_job`
+        // would run over the empty driver placeholder RDD.
+        let other_set: Arc<HashSet<T>> = Arc::new(if self.context.is_distributed() {
+            other
+                .collect_distributed()
+                .unwrap_or_default()
+                .into_iter()
+                .collect()
+        } else {
+            self.context
+                .run_job(other.rdd, |iter| iter.collect::<Vec<T>>())
+                .unwrap_or_default()
+                .into_iter()
+                .flatten()
+                .collect()
+        });
         let other_set_clone = Arc::clone(&other_set);
         let filter_fn =
             move |_idx: usize, iter: Box<dyn Iterator<Item = T>>| -> Box<dyn Iterator<Item = T>> {
@@ -288,7 +312,8 @@ impl<T: Data> TypedRdd<T> {
     /// Each element is converted to a string via `Display` and written as one line.
     pub fn save_as_text_file(&self, uri: &str) -> Result<(), BaseError>
     where
-        T: std::fmt::Display + Clone,
+        T: std::fmt::Display + Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
     {
         if uri.starts_with("s3://") {
             return self.write_s3(uri);
@@ -317,7 +342,8 @@ impl<T: Data> TypedRdd<T> {
     crate::cfg_s3! {
     fn write_s3(&self, uri: &str) -> Result<(), BaseError>
     where
-        T: std::fmt::Display + Clone,
+        T: std::fmt::Display + Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
     {
         use crate::io::s3::s3_impl::{S3Uri, write_text};
         let s3uri = S3Uri::parse(uri).ok_or_else(|| {
@@ -338,7 +364,8 @@ impl<T: Data> TypedRdd<T> {
     crate::cfg_not_s3! {
     fn write_s3(&self, _uri: &str) -> Result<(), BaseError>
     where
-        T: std::fmt::Display + Clone,
+        T: std::fmt::Display + Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
     {
         Err(BaseError::Other(
             "save_as_text_file: s3:// URI requires the 's3' feature flag".to_owned(),

@@ -350,6 +350,17 @@ pub struct FileSplitPayload {
     pub end_byte: Option<u64>,
 }
 
+/// Payload for one `StepKind::ShuffleMap` pipeline op.
+///
+/// Sent in `PipelineOp.payload` and decoded on the worker by the native runtime.
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+pub struct ShuffleMapPayload {
+    /// `SHUFFLE_MAP_REGISTRY` key for the concrete `(K, V)` pair.
+    pub type_id: String,
+    /// Serializable partitioner description used by the worker when writing buckets.
+    pub partitioner_spec: crate::partitioner::PartitionerSchema,
+}
+
 /// Per-shard input for a [`TaskAction::MergeState`] task (bincode-encoded into the
 /// task `data`). Content-agnostic: `params` and `partials` are opaque to the data
 /// layer and interpreted only by the registered state-merge function.

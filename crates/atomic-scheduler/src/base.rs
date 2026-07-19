@@ -267,6 +267,11 @@ pub trait NativeScheduler: StagePlanner {
         let my_pending = pending_tasks.entry(stage.clone()).or_default();
         if stage == jt.final_stage {
             log::debug!("final stage #{}", stage.id);
+            if !self.supports_closure_tasks() {
+                return Err(SchedulerError::UnsupportedOperation(
+                    "final-stage closure ResultTask is unsupported on this scheduler; use task-op APIs (task_fn!/map_task/filter_task/flat_map_task/fold_task/reduce_task) for distributed execution",
+                ));
+            }
             for (id, part) in jt.output_parts.iter().enumerate().take(jt.num_output_parts) {
                 let locs = self.get_preferred_locs(jt.final_rdd.get_rdd_base(), *part);
                 let result_task = ResultTask::new(
@@ -338,6 +343,14 @@ pub trait NativeScheduler: StagePlanner {
     fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, target_executor: SocketAddrV4)
     where
         F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U;
+
+    /// Whether this scheduler can execute closure-backed `ResultTask`s.
+    ///
+    /// Local scheduler returns `true` (default). Distributed scheduler returns `false` and
+    /// requires op-envelope task APIs.
+    fn supports_closure_tasks(&self) -> bool {
+        true
+    }
 
     // state:
     // fn add_output_loc_to_stage(&self, stage_id: usize, partition: usize, host: String);
