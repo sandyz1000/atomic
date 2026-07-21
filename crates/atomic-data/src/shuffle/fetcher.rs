@@ -368,7 +368,6 @@ impl ShuffleFetcher {
         Self::handshake(TokioIo::new(stream)).await
     }
 
-    crate::cfg_tls! {
     /// Attempt the handshake over TLS when `is_https` and a TLS connector is configured.
     /// Returns `Err(stream)` (still holding the connection) so the caller falls
     /// through to plain HTTP; `Ok(result)` if the TLS path was taken.
@@ -376,8 +375,11 @@ impl ShuffleFetcher {
         is_https: bool,
         host: &str,
         stream: tokio::net::TcpStream,
-    ) -> Result<LibResult<hyper::client::conn::http1::SendRequest<Body>>, tokio::net::TcpStream> {
-        let Some(connector) = is_https.then(crate::env::get_shuffle_tls_connector).flatten()
+    ) -> Result<LibResult<hyper::client::conn::http1::SendRequest<Body>>, tokio::net::TcpStream>
+    {
+        let Some(connector) = is_https
+            .then(crate::env::get_shuffle_tls_connector)
+            .flatten()
         else {
             return Err(stream);
         };
@@ -390,16 +392,6 @@ impl ShuffleFetcher {
             Err(_) => return Ok(Err(ShuffleError::FailedFetchOp)),
         };
         Ok(Self::handshake(TokioIo::new(tls_stream)).await)
-    }
-    }
-    crate::cfg_not_tls! {
-    async fn try_tls_open(
-        _is_https: bool,
-        _host: &str,
-        stream: tokio::net::TcpStream,
-    ) -> Result<LibResult<hyper::client::conn::http1::SendRequest<Body>>, tokio::net::TcpStream> {
-        Err(stream)
-    }
     }
 
     async fn handshake<IO>(

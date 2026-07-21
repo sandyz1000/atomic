@@ -22,14 +22,11 @@ pub struct ShuffleConfig {
 
     /// PEM file containing this node's TLS certificate chain.
     /// When set (together with `tls_key` and `tls_ca`), the shuffle HTTP server
-    /// is wrapped with mutual TLS.  Requires the `tls` feature flag.
-    #[cfg(feature = "tls")]
+    /// is wrapped with mutual TLS.
     pub tls_cert: Option<PathBuf>,
     /// PEM file containing this node's PKCS#8 private key.
-    #[cfg(feature = "tls")]
     pub tls_key: Option<PathBuf>,
     /// PEM file containing the cluster CA certificate used to verify peer certificates.
-    #[cfg(feature = "tls")]
     pub tls_ca: Option<PathBuf>,
 }
 
@@ -47,11 +44,8 @@ impl ShuffleConfig {
             log_cleanup,
             spill_threshold: None,
             spill_dir: None,
-            #[cfg(feature = "tls")]
             tls_cert: None,
-            #[cfg(feature = "tls")]
             tls_key: None,
-            #[cfg(feature = "tls")]
             tls_ca: None,
         }
     }
@@ -63,16 +57,8 @@ impl ShuffleConfig {
             .unwrap_or_else(|| self.local_dir.join("shuffle-spill"))
     }
 
-    crate::cfg_tls! {
-        /// Returns `true` when all three TLS fields are set and the `tls` feature is active.
-        pub fn tls_enabled(&self) -> bool {
-            self.tls_cert.is_some() && self.tls_key.is_some() && self.tls_ca.is_some()
-        }
-    }
-    crate::cfg_not_tls! {
-        /// Returns `true` when all three TLS fields are set and the `tls` feature is active.
-        pub fn tls_enabled(&self) -> bool {
-            false
-        }
+    /// Returns `true` when all three TLS fields are set.
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_cert.is_some() && self.tls_key.is_some() && self.tls_ca.is_some()
     }
 }

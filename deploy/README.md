@@ -104,5 +104,5 @@ helm upgrade demo deploy/helm/atomic --set autoscaling.enabled=true
 
 The driver defaults to `driver.kind: Job` (a batch program that exits). Set it to
 `Deployment` for a long-running driver service. Enable mTLS with
-`--set tls.enabled=true --set tls.secretName=atomic-tls` (build the image with the
-`tls` feature).
+`--set tls.enabled=true --set tls.secretName=atomic-tls` (mTLS is built into the image —
+no feature flag needed).

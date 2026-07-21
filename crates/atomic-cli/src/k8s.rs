@@ -4,7 +4,7 @@
 //! [`atomic_k8s::driver_job`] for the Job spec itself — no image build required).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use atomic_k8s::{DriverJobSpec, InitFetch, build_driver_job};
 use aws_config::BehaviorVersion;
@@ -12,7 +12,46 @@ use k8s_openapi::api::batch::v1::Job;
 use kube::api::PostParams;
 use kube::{Api, Client};
 
-use crate::{CliError, Result, SubmitK8sArgs};
+use crate::{Result, SubmitK8sArgs};
+
+/// Errors specific to `atomic submit-k8s`. Kept in one enum so the whole k8s-only group
+/// carries a single feature gate; wrapped into [`CliError`] via `#[from]` so `?` in these
+/// (`Result<_, CliError>`) functions converts transparently.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum K8sError {
+    #[error("--binary requires --s3-bucket to stage the driver binary")]
+    MissingS3Bucket,
+
+    #[error(
+        "--dynamic-workers needs a worker image: pass --worker-image, or --image \
+         (workers default to the driver's own image)"
+    )]
+    MissingWorkerImage,
+
+    #[error("failed to read binary {0}: {1}")]
+    BinaryReadFailed(PathBuf, std::io::Error),
+
+    #[error("S3 upload to s3://{bucket}/{key} failed: {source}")]
+    S3Upload {
+        bucket: String,
+        key: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    // `kube::Error` is a large enum; box it so `CliError` (and every `Result<_, CliError>`
+    // in this crate, including non-k8s ones) doesn't inherit its size.
+    #[error("failed to connect to the Kubernetes API: {0}")]
+    KubeClient(#[source] Box<kube::Error>),
+
+    #[error("failed to create Job {name} in namespace {namespace}: {source}")]
+    KubeJobCreate {
+        name: String,
+        namespace: String,
+        #[source]
+        source: Box<kube::Error>,
+    },
+}
 
 /// Fetch-and-exec image published by the project's own release process (not built
 /// per-job, not per-user — see `crates/atomic-bootstrap`).
@@ -26,13 +65,13 @@ pub(crate) async fn cmd_submit_k8s(args: SubmitK8sArgs) -> Result<()> {
         .clone()
         .or_else(|| args.source.image.clone());
     if args.dynamic_workers && worker_image.as_deref().unwrap_or("").is_empty() {
-        return Err(CliError::MissingWorkerImage);
+        return Err(K8sError::MissingWorkerImage.into());
     }
 
     let fetch = match &args.source.binary {
         None => None,
         Some(binary) => {
-            let bucket = args.s3_bucket.clone().ok_or(CliError::MissingS3Bucket)?;
+            let bucket = args.s3_bucket.clone().ok_or(K8sError::MissingS3Bucket)?;
             let key = stage_key(&args.s3_prefix, &name);
             upload_to_s3(binary, &bucket, &key).await?;
             let url = format!("s3://{bucket}/{key}");
@@ -79,11 +118,11 @@ pub(crate) async fn cmd_submit_k8s(args: SubmitK8sArgs) -> Result<()> {
 
     let client = Client::try_default()
         .await
-        .map_err(|e| CliError::KubeClient(Box::new(e)))?;
+        .map_err(|e| K8sError::KubeClient(Box::new(e)))?;
     let jobs: Api<Job> = Api::namespaced(client, &args.namespace);
     jobs.create(&PostParams::default(), &job)
         .await
-        .map_err(|source| CliError::KubeJobCreate {
+        .map_err(|source| K8sError::KubeJobCreate {
             name: name.clone(),
             namespace: args.namespace.clone(),
             source: Box::new(source),
@@ -110,7 +149,7 @@ fn short_id() -> String {
 
 async fn upload_to_s3(path: &Path, bucket: &str, key: &str) -> Result<()> {
     let data =
-        std::fs::read(path).map_err(|e| CliError::BinaryReadFailed(path.to_path_buf(), e))?;
+        std::fs::read(path).map_err(|e| K8sError::BinaryReadFailed(path.to_path_buf(), e))?;
 
     let cfg = aws_config::load_defaults(BehaviorVersion::latest()).await;
     let client = aws_sdk_s3::Client::new(&cfg);
@@ -121,7 +160,7 @@ async fn upload_to_s3(path: &Path, bucket: &str, key: &str) -> Result<()> {
         .body(data.into())
         .send()
         .await
-        .map_err(|e| CliError::S3Upload {
+        .map_err(|e| K8sError::S3Upload {
             bucket: bucket.to_string(),
             key: key.to_string(),
             source: Box::new(e),

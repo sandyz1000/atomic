@@ -149,7 +149,6 @@ impl ShuffleManager {
         Ok((server_uri, bind_port))
     }
 
-    crate::cfg_tls! {
     fn tls_acceptor(config: &ShuffleConfig) -> LibResult<Option<tokio_rustls::TlsAcceptor>> {
         if config.tls_enabled() {
             Ok(Some(Self::make_tls_acceptor(config)?))
@@ -157,16 +156,7 @@ impl ShuffleManager {
             Ok(None)
         }
     }
-    }
-    crate::cfg_not_tls! {
-    fn tls_acceptor(
-        _config: &ShuffleConfig,
-    ) -> LibResult<Option<std::convert::Infallible>> {
-        Ok(None)
-    }
-    }
 
-    crate::cfg_tls! {
     fn make_tls_acceptor(config: &ShuffleConfig) -> LibResult<tokio_rustls::TlsAcceptor> {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
         use rustls::{RootCertStore, ServerConfig};
@@ -275,56 +265,6 @@ impl ShuffleManager {
         };
         Ok(())
     }
-    } // cfg_tls!
-
-    crate::cfg_not_tls! {
-    fn launch_async_server(
-        conn: TcpListener,
-        cache: Arc<dyn ShuffleCache>,
-        _tls: Option<std::convert::Infallible>,
-    ) -> LibResult<()> {
-        use hyper::server::conn::http1;
-        let (s, r) = cb_channel::bounded::<LibResult<()>>(1);
-
-        tokio::spawn(async move {
-            // Hold the start-up sender for the lifetime of the accept loop so the
-            // channel stays open while the caller waits on `r` below; dropping it
-            // early would disconnect `r` and spuriously report a start failure.
-            let _startup_sender = s;
-            conn.set_nonblocking(true)
-                .map_err(|_| ShuffleError::FailedToStart)?;
-
-            let listener =
-                tokio::net::TcpListener::from_std(conn).map_err(|_| ShuffleError::FailedToStart)?;
-
-            loop {
-                let (stream, _) = listener
-                    .accept()
-                    .await
-                    .map_err(|_| ShuffleError::FailedToStart)?;
-
-                let io = TokioIo::new(stream);
-                let cache_clone = cache.clone();
-
-                tokio::spawn(async move {
-                    let service = ShuffleService::new(cache_clone);
-                    if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                        log::error!("Error serving connection: {:?}", err);
-                    }
-                });
-            }
-
-            #[allow(unreachable_code)]
-            Err::<(), _>(ShuffleError::FailedToStart)
-        });
-
-        cb_channel::select! {
-            recv(r) -> msg => { msg.map_err(|_| ShuffleError::FailedToStart)??; }
-            default(Duration::from_millis(25)) => log::debug!("started shuffle server"),
-        };
-        Ok(())
-    }
-    } // cfg_not_tls!
 
     fn init_status_checker(
         server_uri: &str,

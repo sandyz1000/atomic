@@ -136,37 +136,27 @@ pub fn init_shuffle(
     Ok(())
 }
 
-crate::cfg_tls! {
-    fn apply_tls_config(shuffle_config: &mut ShuffleConfig, config: &super::Config) {
-        shuffle_config.tls_cert = config.tls_cert.clone();
-        shuffle_config.tls_key = config.tls_key.clone();
-        shuffle_config.tls_ca = config.tls_ca_cert.clone();
-    }
-}
-crate::cfg_not_tls! {
-    fn apply_tls_config(_shuffle_config: &mut ShuffleConfig, _config: &super::Config) {}
+fn apply_tls_config(shuffle_config: &mut ShuffleConfig, config: &super::Config) {
+    shuffle_config.tls_cert = config.tls_cert.clone();
+    shuffle_config.tls_key = config.tls_key.clone();
+    shuffle_config.tls_ca = config.tls_ca_cert.clone();
 }
 
-crate::cfg_tls! {
-    fn set_tls_connector(shuffle_config: &ShuffleConfig, config: &super::Config) {
-        if !shuffle_config.tls_enabled() {
-            return;
-        }
-        let (Some(cert), Some(key), Some(ca)) =
-            (&config.tls_cert, &config.tls_key, &config.tls_ca_cert)
-        else {
-            return;
-        };
-        use crate::tls::tls_impl::{TlsConnector, make_client_config};
-        match make_client_config(cert, key, ca) {
-            Ok(client_cfg) => {
-                let connector = Arc::new(TlsConnector::from(client_cfg));
-                atomic_data::env::set_shuffle_tls_connector(connector);
-            }
-            Err(e) => log::warn!("Failed to build shuffle TLS connector: {e}"),
-        }
+fn set_tls_connector(shuffle_config: &ShuffleConfig, config: &super::Config) {
+    if !shuffle_config.tls_enabled() {
+        return;
     }
-}
-crate::cfg_not_tls! {
-    fn set_tls_connector(_shuffle_config: &ShuffleConfig, _config: &super::Config) {}
+    let (Some(cert), Some(key), Some(ca)) =
+        (&config.tls_cert, &config.tls_key, &config.tls_ca_cert)
+    else {
+        return;
+    };
+    use crate::tls::{TlsConnector, make_client_config};
+    match make_client_config(cert, key, ca) {
+        Ok(client_cfg) => {
+            let connector = Arc::new(TlsConnector::from(client_cfg));
+            atomic_data::env::set_shuffle_tls_connector(connector);
+        }
+        Err(e) => log::warn!("Failed to build shuffle TLS connector: {e}"),
+    }
 }

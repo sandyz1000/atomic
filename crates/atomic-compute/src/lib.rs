@@ -60,8 +60,7 @@ pub mod tls;
 // statement-position variant) are defined once in `atomic_data` and shared
 // workspace-wide. Used here via `crate::cfg_x!`, re-exported below.
 pub use atomic_data::{
-    cfg_js, cfg_k8s, cfg_kafka, cfg_not_js, cfg_not_k8s, cfg_not_python, cfg_not_tls, cfg_python,
-    cfg_tls,
+    cfg_js, cfg_k8s, cfg_kafka, cfg_not_js, cfg_not_k8s, cfg_not_python, cfg_python,
 };
 
 pub mod __macro_support {

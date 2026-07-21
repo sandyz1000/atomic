@@ -73,7 +73,7 @@ traffic — combine it with TLS (below) on untrusted networks.
 
 ## TLS (mTLS for worker communication)
 
-Requires the `tls` feature flag (`cargo build --features tls`).
+Built in — enable it by setting the fields below; no feature flag needed. TLS activates only when cert/key/CA are configured (otherwise plain TCP).
 
 | Env var | Config field | Default | Description |
 |---|---|---|---|

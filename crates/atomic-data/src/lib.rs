@@ -59,15 +59,6 @@ pub use task_context::TaskContext;
 // fields" / "... to enum variants"; match-arm position is a hard parse error) — those
 // four positions keep the raw `#[cfg(...)]` attribute. See the `atomic-rust-standards`
 // skill for the full convention and the compiling counter-examples behind this comment.
-#[macro_export]
-macro_rules! cfg_tls {
-    ($($item:item)*) => { $(#[cfg(feature = "tls")] $item)* };
-}
-
-#[macro_export]
-macro_rules! cfg_not_tls {
-    ($($item:item)*) => { $(#[cfg(not(feature = "tls"))] $item)* };
-}
 
 #[macro_export]
 macro_rules! cfg_kafka {

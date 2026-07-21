@@ -20,9 +20,6 @@ atomic build
 
 # Build for a specific target
 atomic build --target aarch64-unknown-linux-musl
-
-# Build with optional features
-atomic build --features tls,s3
 ```
 
 `atomic build` uses [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) (auto-installed if absent) to produce a statically-linked musl binary. The result is in `target/<target>/release/`.
@@ -138,7 +135,7 @@ ctx.text_file("s3://my-bucket/data/input/")?.save_as_text_file("s3://my-bucket/d
 
 ## 6. mTLS for worker communication
 
-Requires the `tls` feature.
+mTLS support is built in — enable it by configuring certs (below); no feature flag needed.
 
 Generate certificates with your preferred CA (example using `cfssl`):
 

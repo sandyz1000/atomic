@@ -205,40 +205,40 @@ impl Context {
     }
 
     crate::cfg_k8s! {
-    fn build_kube_allocator(
-        config: &Config,
-        _address_map: &[SocketAddrV4],
-    ) -> Arc<dyn atomic_scheduler::WorkerAllocator> {
-        // Driver pod identity (downward API) becomes the OwnerReference on worker
-        // pods so Kubernetes garbage-collects them if the driver dies.
-        let owner = match (std::env::var("POD_NAME"), std::env::var("POD_UID")) {
-            (Ok(name), Ok(uid)) => Some(atomic_k8s::DriverOwner { name, uid }),
-            _ => None,
-        };
-        let kube_config = atomic_k8s::KubeConfig {
-            namespace: config.kube.namespace.clone(),
-            worker_image: config.kube.worker_image.clone(),
-            service_account: config.kube.service_account.clone(),
-            task_port: config.kube.task_port,
-            ready_timeout: Duration::from_secs(config.kube.ready_timeout_secs),
-            command: config.kube.command.clone(),
-            owner,
-        };
-        Arc::new(atomic_k8s::KubeWorkerAllocator::new(kube_config))
-    }
+        fn build_kube_allocator(
+            config: &Config,
+            _address_map: &[SocketAddrV4],
+        ) -> Arc<dyn atomic_scheduler::WorkerAllocator> {
+            // Driver pod identity (downward API) becomes the OwnerReference on worker
+            // pods so Kubernetes garbage-collects them if the driver dies.
+            let owner = match (std::env::var("POD_NAME"), std::env::var("POD_UID")) {
+                (Ok(name), Ok(uid)) => Some(atomic_k8s::DriverOwner { name, uid }),
+                _ => None,
+            };
+            let kube_config = atomic_k8s::KubeConfig {
+                namespace: config.kube.namespace.clone(),
+                worker_image: config.kube.worker_image.clone(),
+                service_account: config.kube.service_account.clone(),
+                task_port: config.kube.task_port,
+                ready_timeout: Duration::from_secs(config.kube.ready_timeout_secs),
+                command: config.kube.command.clone(),
+                owner,
+            };
+            Arc::new(atomic_k8s::KubeWorkerAllocator::new(kube_config))
+        }
     } // cfg_k8s!
 
     crate::cfg_not_k8s! {
-    fn build_kube_allocator(
-        _config: &Config,
-        address_map: &[SocketAddrV4],
-    ) -> Arc<dyn atomic_scheduler::WorkerAllocator> {
-        log::error!(
-            "Config requested the Kubernetes allocator but this binary was built without the \
-             `k8s` feature; falling back to the static worker pool"
-        );
-        Arc::new(atomic_scheduler::StaticAllocator::new(address_map.to_vec()))
-    }
+        fn build_kube_allocator(
+            _config: &Config,
+            address_map: &[SocketAddrV4],
+        ) -> Arc<dyn atomic_scheduler::WorkerAllocator> {
+            log::error!(
+                "Config requested the Kubernetes allocator but this binary was built without the \
+                `k8s` feature; falling back to the static worker pool"
+            );
+            Arc::new(atomic_scheduler::StaticAllocator::new(address_map.to_vec()))
+        }
     } // cfg_not_k8s!
 
     pub(super) fn worker_clean_up_directives(
@@ -413,6 +413,7 @@ pub fn start_worker(config: Config) -> ! {
         log::warn!("shuffle service could not start on worker: {e}");
     }
 
+    #[cfg(feature = "js")]
     warmup_js();
 
     let result = config
@@ -450,30 +451,20 @@ crate::cfg_js! {
         }
     }
 }
-crate::cfg_not_js! {
-    fn warmup_js() {}
-}
 
-crate::cfg_tls! {
-    fn configure_tls(executor: Executor, config: &Config) -> ComputeResult<Executor> {
-        let ca_cert = config.tls_ca_cert.as_deref();
-        let cert = config.tls_cert.as_deref();
-        let key = config.tls_key.as_deref();
-        if crate::tls::tls_is_configured(ca_cert, cert, key) {
-            executor
-                .with_tls(ca_cert.unwrap(), key.unwrap(), ca_cert.unwrap())
-                .map_err(|e| {
-                    ComputeError::GetOrCreateConfig(Box::leak(
-                        format!("TLS init: {e}").into_boxed_str(),
-                    ))
-                })
-        } else {
-            Ok(executor)
-        }
-    }
-}
-crate::cfg_not_tls! {
-    fn configure_tls(executor: Executor, _config: &Config) -> ComputeResult<Executor> {
+fn configure_tls(executor: Executor, config: &Config) -> ComputeResult<Executor> {
+    let ca_cert = config.tls_ca_cert.as_deref();
+    let cert = config.tls_cert.as_deref();
+    let key = config.tls_key.as_deref();
+    if crate::tls::tls_is_configured(ca_cert, cert, key) {
+        executor
+            .with_tls(ca_cert.unwrap(), key.unwrap(), ca_cert.unwrap())
+            .map_err(|e| {
+                ComputeError::GetOrCreateConfig(Box::leak(
+                    format!("TLS init: {e}").into_boxed_str(),
+                ))
+            })
+    } else {
         Ok(executor)
     }
 }

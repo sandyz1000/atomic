@@ -27,11 +27,9 @@ on structure, naming, and readability.
 ## Development Commands
 
 ```bash
-# Build
+# Build (mTLS and S3 are built in — no feature flags needed)
 cargo build
 cargo build --release
-cargo build --release --features tls      # TLS for worker comms
-cargo build --release --features s3       # S3 object store
 
 # Test (excludes atomic-py and atomic-worker by design)
 cargo test --workspace --exclude atomic-py --exclude atomic-worker

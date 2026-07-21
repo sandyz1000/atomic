@@ -52,9 +52,9 @@ base64 = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
-tokio-rustls = { workspace = true, optional = true }
-rustls = { workspace = true, optional = true }
-rustls-pemfile = { workspace = true, optional = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 rdkafka = { workspace = true, optional = true, features = ["cmake-build"] }
 atomic-k8s = { workspace = true, optional = true }
 
@@ -64,9 +64,6 @@ python = ["pyo3", "pythonize", "atomic-data/python"]
 # Embedded V8 (deno_core) — thread-local JsRuntime per tokio blocking thread.
 js = ["deno_core", "atomic-data/js"]
 embedded-runtime = ["python", "js"]
-# Enable TLS (mutual TLS) for driver↔worker TCP communication.
-# Requires cert/key/CA paths set in Config::tls_cert/tls_key/tls_ca_cert.
-tls = ["tokio-rustls", "rustls", "rustls-pemfile", "atomic-data/tls"]
 # Enables TaskAction::KafkaConsume dispatch on workers (pulls in librdkafka via cmake).
 kafka = ["dep:rdkafka", "atomic-data/kafka"]
 # Driver-side Kubernetes worker allocator (per-job dedicated pods via kube-rs).

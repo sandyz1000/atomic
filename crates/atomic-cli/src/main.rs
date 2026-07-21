@@ -10,9 +10,6 @@ atomic_data::cfg_k8s! {
 mod ssh;
 
 use commands::{cmd_build, cmd_ship, cmd_stop, cmd_submit};
-atomic_data::cfg_k8s! {
-    use k8s::cmd_submit_k8s;
-}
 
 type Result<T, E = CliError> = std::result::Result<T, E>;
 
@@ -111,45 +108,12 @@ pub(crate) enum CliError {
     #[error("no local driver binary — run `cargo build` first")]
     NoLocalBinary,
 
-    // submit-k8s
+    // submit-k8s errors live in their own enum so the whole k8s-only group carries a single
+    // feature gate (one `#[cfg]` here) instead of one per variant — variants can't be macro-
+    // gated (`cfg_k8s!` is item-position only; see atomic-rust-standards).
     #[cfg(feature = "k8s")]
-    #[error("--binary requires --s3-bucket to stage the driver binary")]
-    MissingS3Bucket,
-
-    #[cfg(feature = "k8s")]
-    #[error(
-        "--dynamic-workers needs a worker image: pass --worker-image, or --image \
-         (workers default to the driver's own image)"
-    )]
-    MissingWorkerImage,
-
-    #[cfg(feature = "k8s")]
-    #[error("failed to read binary {0}: {1}")]
-    BinaryReadFailed(PathBuf, std::io::Error),
-
-    #[cfg(feature = "k8s")]
-    #[error("S3 upload to s3://{bucket}/{key} failed: {source}")]
-    S3Upload {
-        bucket: String,
-        key: String,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-
-    // `kube::Error` is a large enum; box it so `CliError` (and every `Result<_,
-    // CliError>` in this crate, including non-k8s ones) doesn't inherit its size.
-    #[cfg(feature = "k8s")]
-    #[error("failed to connect to the Kubernetes API: {0}")]
-    KubeClient(#[source] Box<kube::Error>),
-
-    #[cfg(feature = "k8s")]
-    #[error("failed to create Job {name} in namespace {namespace}: {source}")]
-    KubeJobCreate {
-        name: String,
-        namespace: String,
-        #[source]
-        source: Box<kube::Error>,
-    },
+    #[error(transparent)]
+    K8s(#[from] k8s::K8sError),
 
     // Transparent wrappers
     #[error(transparent)]
@@ -312,6 +276,6 @@ async fn main() -> Result<()> {
         Commands::Submit(args) => cmd_submit(args).await,
         Commands::Stop(args) => cmd_stop(args),
         #[cfg(feature = "k8s")]
-        Commands::SubmitK8s(args) => cmd_submit_k8s(args).await,
+        Commands::SubmitK8s(args) => k8s::cmd_submit_k8s(args).await,
     }
 }

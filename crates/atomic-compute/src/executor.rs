@@ -24,7 +24,6 @@ pub struct Executor {
     worker_id: Arc<str>,
     backend: ComputeEngine,
     /// Pre-built TLS acceptor. `None` means plain TCP (default).
-    #[cfg(feature = "tls")]
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
 }
 
@@ -35,28 +34,23 @@ impl Executor {
             max_concurrent_tasks,
             worker_id: Arc::from(format!("worker-{}", port)),
             backend: ComputeEngine::default(),
-            #[cfg(feature = "tls")]
             tls_acceptor: None,
         }
     }
 
-    crate::cfg_tls! {
-    /// Configure mutual TLS using cert/key/CA PEM files.
-    ///
-    /// Only available with the `tls` feature. When called, all incoming
-    /// connections will be upgraded to mTLS before processing.
+    /// Configure mutual TLS using cert/key/CA PEM files. When called, all incoming
+    /// connections are upgraded to mTLS before processing.
     pub fn with_tls(
         mut self,
         cert: &std::path::Path,
         key: &std::path::Path,
         ca: &std::path::Path,
     ) -> ComputeResult<Self, std::io::Error> {
-        use crate::tls::tls_impl::make_server_config;
+        use crate::tls::make_server_config;
         let cfg = make_server_config(cert, key, ca)?;
         self.tls_acceptor = Some(Arc::new(tokio_rustls::TlsAcceptor::from(cfg)));
         Ok(self)
     }
-    } // cfg_tls!
 
     pub fn execute_task(
         &self,
@@ -204,40 +198,29 @@ impl Executor {
         Ok(Signal::Continue)
     }
 
-    crate::cfg_tls! {
-        /// Try to accept `stream` as a TLS connection. Returns `None` when handled (a
-        /// task was spawned), or gives `stream` back so the caller falls through to
-        /// the plain-TCP path.
-        fn try_spawn_tls(
-            exec: &Arc<Self>,
-            stream: tokio::net::TcpStream,
-            tasks: &mut JoinSet<ComputeResult<Signal>>,
-        ) -> Option<tokio::net::TcpStream> {
-            let Some(acceptor) = &exec.tls_acceptor else {
-                return Some(stream);
-            };
-            let acceptor = acceptor.clone();
-            let exec = Arc::clone(exec);
-            tasks.spawn(async move {
-                match acceptor.accept(stream).await {
-                    Ok(tls_stream) => exec.handle_connection(tls_stream).await,
-                    Err(e) => {
-                        log::warn!("TLS handshake failed: {e}");
-                        Ok(Signal::Continue)
-                    }
+    /// Try to accept `stream` as a TLS connection. Returns `None` when handled (a
+    /// task was spawned), or gives `stream` back so the caller falls through to
+    /// the plain-TCP path.
+    fn try_spawn_tls(
+        exec: &Arc<Self>,
+        stream: tokio::net::TcpStream,
+        tasks: &mut JoinSet<ComputeResult<Signal>>,
+    ) -> Option<tokio::net::TcpStream> {
+        let Some(acceptor) = &exec.tls_acceptor else {
+            return Some(stream);
+        };
+        let acceptor = acceptor.clone();
+        let exec = Arc::clone(exec);
+        tasks.spawn(async move {
+            match acceptor.accept(stream).await {
+                Ok(tls_stream) => exec.handle_connection(tls_stream).await,
+                Err(e) => {
+                    log::warn!("TLS handshake failed: {e}");
+                    Ok(Signal::Continue)
                 }
-            });
-            None
-        }
-    }
-    crate::cfg_not_tls! {
-        fn try_spawn_tls(
-            _exec: &Arc<Self>,
-            stream: tokio::net::TcpStream,
-            _tasks: &mut JoinSet<ComputeResult<Signal>>,
-        ) -> Option<tokio::net::TcpStream> {
-            Some(stream)
-        }
+            }
+        });
+        None
     }
 
     fn handle_transport_frame(
