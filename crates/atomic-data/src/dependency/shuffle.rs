@@ -1,165 +1,40 @@
+//! The shuffle-dependency subsystem.
+//!
+//! A shuffle has a **typed source** ([`TypedShuffle<K,V,C>`]) the RDD layer builds. It
+//! projects into an erased **[`ShuffleDependency`]** — the value the DAG holds — which reads all
+//! its metadata and behaviour through the erased [`ShuffleExecutor`] (impl'd by the typed
+//! source); it also carries the few bits the source can't provide (the worker dispatch key and
+//! any staged pipeline). See `notes/shuffle-dependency-lineage.md`.
+
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::sync::Arc;
+
 use bincode::Encode;
 
 use crate::aggregator::Aggregator;
 use crate::data::Data;
 use crate::distributed::{Step, WireEncode};
 use crate::error::BaseResult;
-// use crate::env;
-use crate::partitioner::Partitioner;
+use crate::partitioner::{Partitioner, PartitionerSchema};
 use crate::rdd::RddBase;
-use crate::split::CoalescedRddSplit;
-use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::sync::Arc;
 
-/// Type of dependency between RDDs
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DependencyType {
-    /// Narrow dependency where each partition depends on a known subset of parent partitions
-    Narrow,
-    /// Shuffle dependency where data needs to be redistributed across partitions
-    Shuffle,
-}
-
-/// Dependency between RDDs
-#[derive(Clone)]
-pub enum Dependency {
-    /// One-to-one narrow dependency where each partition depends on exactly one parent partition
-    OneToOne {
-        rdd_base: Arc<dyn RddBase>,
-    },
-    /// Range narrow dependency between ranges of partitions in parent and child RDDs
-    Range {
-        rdd_base: Arc<dyn RddBase>,
-        /// the start of the range in the parent RDD
-        in_start: usize,
-        /// the start of the range in the child RDD
-        out_start: usize,
-        /// the length of the range
-        length: usize,
-    },
-
-    CoalescedSplitDep {
-        /// The RDD that this coalesced split depends on.
-        /// This is a reference to the base RDD in the dependency graph.
-        rdd: Arc<dyn RddBase>,
-        /// The previous RDD in the transformation chain.
-        /// Used to track the lineage of transformations leading to this coalesced split.
-        prev: Arc<dyn RddBase>,
-    },
-    Shuffle(Arc<ErasedShuffleDependency>),
-}
-
-impl Dependency {
-    pub fn new_one_to_one(rdd_base: Arc<dyn RddBase>) -> Self {
-        Dependency::OneToOne { rdd_base }
-    }
-
-    pub fn new_range(
-        rdd_base: Arc<dyn RddBase>,
-        in_start: usize,
-        out_start: usize,
-        length: usize,
-    ) -> Self {
-        Dependency::Range {
-            rdd_base,
-            in_start,
-            out_start,
-            length,
-        }
-    }
-
-    pub fn get_parents(&self, partition_id: usize) -> Vec<usize> {
-        match self {
-            Dependency::OneToOne { .. } => vec![partition_id],
-            Dependency::Range {
-                in_start,
-                out_start,
-                length,
-                ..
-            } => {
-                if partition_id >= *out_start && partition_id < out_start + length {
-                    vec![(partition_id - out_start) + in_start]
-                } else {
-                    Vec::new()
-                }
-            }
-            Dependency::Shuffle(_) => Vec::new(),
-            Dependency::CoalescedSplitDep { rdd, .. } => rdd
-                .splits()
-                .into_iter()
-                .enumerate()
-                .find(|(i, _)| i == &partition_id)
-                .and_then(|(_, p)| CoalescedRddSplit::downcasting(p).ok())
-                .map(|split| split.parent_indices)
-                .unwrap_or_default(),
-        }
-    }
-
-    pub fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        match self {
-            Dependency::OneToOne { rdd_base } => rdd_base.clone(),
-            Dependency::Range { rdd_base, .. } => rdd_base.clone(),
-            Dependency::Shuffle(dep) => dep.get_rdd_base(),
-            Dependency::CoalescedSplitDep { rdd: _, prev } => prev.clone(),
-        }
-    }
-
-    pub fn is_shuffle(&self) -> bool {
-        matches!(self, Dependency::Shuffle(_))
-    }
-
-    pub fn dependency_type(&self) -> DependencyType {
-        match self {
-            Dependency::OneToOne { .. }
-            | Dependency::Range { .. }
-            | Dependency::CoalescedSplitDep { .. } => DependencyType::Narrow,
-            Dependency::Shuffle(_) => DependencyType::Shuffle,
-        }
-    }
-
-    pub fn get_shuffle_id(&self) -> Option<usize> {
-        match self {
-            Dependency::Shuffle(dep) => Some(dep.get_shuffle_id()),
-            _ => None,
-        }
-    }
-
-    pub fn get_shuffle_dep(&self) -> Option<&ErasedShuffleDependency> {
-        match self {
-            Dependency::Shuffle(dep) => Some(dep),
-            _ => None,
-        }
-    }
-}
-
-/// Plain, cloneable description of a shuffle boundary — everything the scheduler and the
-/// wire layer need to know about a shuffle without its `K`/`V`/`C` generics. The behaviour
-/// (encoding parent partitions, running the map task) lives behind [`ShuffleExecutor`].
-#[derive(Clone)]
-pub struct ShuffleSpec {
-    pub shuffle_id: usize,
-    pub rdd_base: Arc<dyn RddBase>,
-    pub is_cogroup: bool,
-    pub num_output_partitions: usize,
-    /// Serializable partitioner spec, shipped to workers so they partition shuffle output using
-    /// the RDD's real partitioner (e.g. range for `sort_by_key`) instead of plain hash.
-    pub partitioner_spec: crate::partitioner::PartitionerSchema,
-    /// Identifies the registered `SHUFFLE_MAP_REGISTRY` handler for the `(K, V)` type pair —
-    /// the `register_shuffle_map!` key the worker looks up. Required for distributed shuffle.
-    pub type_id: &'static str,
-    /// Ops that run on workers *before* the ShuffleMap op, non-empty when a `_task` pipeline
-    /// precedes the shuffle. Paired with [`staged_partitions`](Self::staged_partitions).
-    pub preceding_steps: Vec<Step>,
-    /// Pre-encoded worker input for a staged-pipeline shuffle. When `Some`, these bytes are the
-    /// shuffle input instead of encoding the parent RDD through the executor.
-    pub staged_partitions: Option<Vec<Vec<u8>>>,
-}
-
-/// Type-erased behaviour of a shuffle: the two operations that need the concrete `K`/`V`/`C`,
-/// implemented by [`ShuffleDependency`] and stored as a trait object so the generics drop away.
+/// Type-erased behaviour **and** metadata of a shuffle: everything the DAG/scheduler need
+/// without the concrete `K`/`V`/`C`. Implemented by [`TypedShuffle`] and stored as a trait
+/// object so the generics drop away. Reading through this keeps a single source of truth (the
+/// typed source) instead of snapshotting its fields.
 pub trait ShuffleExecutor: Send + Sync {
+    /// Stable id of this shuffle, assigned by the context.
+    fn shuffle_id(&self) -> usize;
+    /// Whether this shuffle backs a cogroup.
+    fn is_cogroup(&self) -> bool;
+    /// The parent RDD, type-erased.
+    fn rdd_base(&self) -> Arc<dyn RddBase>;
+    /// Number of reduce-side output partitions.
+    fn num_output_partitions(&self) -> usize;
+    /// Serializable partitioner descriptor shipped to workers (see [`PartitionerSchema`]).
+    fn partitioner_spec(&self) -> PartitionerSchema;
     /// Encode every parent RDD partition as rkyv bytes (one `Vec<u8>` per partition) — the
     /// non-staged distributed input.
     fn encode_parent_partitions(&self) -> BaseResult<Vec<Vec<u8>>>;
@@ -168,29 +43,43 @@ pub trait ShuffleExecutor: Send + Sync {
     fn run_local(&self, partition_id: usize) -> String;
 }
 
-/// The type-erased form of a [`ShuffleDependency`] stored in the RDD DAG: its [`ShuffleSpec`]
-/// (data) plus a [`ShuffleExecutor`] (behaviour).
+/// The shuffle dependency the RDD DAG holds: an erased [`ShuffleExecutor`] (behaviour +
+/// metadata of the typed source) plus the few bits the DAG attaches at erasure that the source
+/// can't provide. Built from a [`TypedShuffle`] whose `K`/`V`/`C` are erased behind the `dyn`.
 #[derive(Clone)]
-pub struct ErasedShuffleDependency {
-    pub spec: ShuffleSpec,
-    exec: Arc<dyn ShuffleExecutor>,
+pub struct ShuffleDependency {
+    /// Identifies the registered `SHUFFLE_MAP_REGISTRY` handler for the `(K, V)` type pair —
+    /// the `register_shuffle_map!` key the worker looks up. Required for distributed shuffle.
+    pub type_id: &'static str,
+    /// Steps that run on workers *before* the ShuffleMap op, non-empty when a `_task` pipeline
+    /// precedes the shuffle. Paired with [`staged_partitions`](Self::staged_partitions).
+    pub preceding_steps: Vec<Step>,
+    /// Pre-encoded worker input for a staged-pipeline shuffle. When `Some`, these bytes are the
+    /// shuffle input instead of encoding the parent RDD through the executor.
+    pub staged_partitions: Option<Vec<Vec<u8>>>,
+    pub exec: Arc<dyn ShuffleExecutor>,
 }
 
-impl ErasedShuffleDependency {
+impl ShuffleDependency {
     pub fn get_shuffle_id(&self) -> usize {
-        self.spec.shuffle_id
+        self.exec.shuffle_id()
     }
 
     pub fn get_rdd_base(&self) -> Arc<dyn RddBase> {
-        self.spec.rdd_base.clone()
+        self.exec.rdd_base()
     }
 
     pub fn is_cogroup(&self) -> bool {
-        self.spec.is_cogroup
+        self.exec.is_cogroup()
     }
 
     pub fn get_num_output_partitions(&self) -> usize {
-        self.spec.num_output_partitions
+        self.exec.num_output_partitions()
+    }
+
+    /// Serializable partitioner descriptor for the workers.
+    pub fn partitioner_spec(&self) -> PartitionerSchema {
+        self.exec.partitioner_spec()
     }
 
     /// Run the shuffle-map task for `partition` in-process (local mode).
@@ -201,40 +90,40 @@ impl ErasedShuffleDependency {
     /// Worker input for the distributed shuffle-map stage: the staged pipeline's pre-encoded
     /// partitions when present, otherwise the parent RDD encoded on demand.
     pub fn encode_partitions(&self) -> BaseResult<Vec<Vec<u8>>> {
-        match &self.spec.staged_partitions {
+        match &self.staged_partitions {
             Some(parts) => Ok(parts.clone()),
             None => self.exec.encode_parent_partitions(),
         }
     }
 }
 
-impl PartialOrd for ErasedShuffleDependency {
-    fn partial_cmp(&self, other: &ErasedShuffleDependency) -> Option<Ordering> {
+impl PartialOrd for ShuffleDependency {
+    fn partial_cmp(&self, other: &ShuffleDependency) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for ErasedShuffleDependency {
-    fn eq(&self, other: &ErasedShuffleDependency) -> bool {
-        self.spec.shuffle_id == other.spec.shuffle_id
+impl PartialEq for ShuffleDependency {
+    fn eq(&self, other: &ShuffleDependency) -> bool {
+        self.exec.shuffle_id() == other.exec.shuffle_id()
     }
 }
 
-impl Eq for ErasedShuffleDependency {}
+impl Eq for ShuffleDependency {}
 
-impl Ord for ErasedShuffleDependency {
-    fn cmp(&self, other: &ErasedShuffleDependency) -> Ordering {
-        self.spec.shuffle_id.cmp(&other.spec.shuffle_id)
+impl Ord for ShuffleDependency {
+    fn cmp(&self, other: &ShuffleDependency) -> Ordering {
+        self.exec.shuffle_id().cmp(&other.exec.shuffle_id())
     }
 }
 
 /// Type-erased key comparator for the sort-shuffle path. Built by the constructing op
 /// where `K: Ord` is statically available (e.g. `sort_by_key`); `None` means the legacy
-/// unsorted layout. Stored erased so `ShuffleDependency`'s `K` bound stays `Hash`-only.
+/// unsorted layout. Stored erased so `TypedShuffle`'s `K` bound stays `Hash`-only.
 pub type KeyComparator<K> = Arc<dyn Fn(&K, &K) -> Ordering + Send + Sync>;
 
 /// Generic shuffle dependency with full type information
-pub struct ShuffleDependency<K: Data, V: Data, C: Data> {
+pub struct TypedShuffle<K: Data, V: Data, C: Data> {
     shuffle_id: usize,
     is_cogroup_flag: bool,
     /// Typed RDD - we know it produces (K, V) tuples
@@ -249,7 +138,7 @@ pub struct ShuffleDependency<K: Data, V: Data, C: Data> {
     _phantom: std::marker::PhantomData<(K, V, C)>,
 }
 
-impl<K, V, C> ShuffleDependency<K, V, C>
+impl<K, V, C> TypedShuffle<K, V, C>
 where
     K: Eq + Hash + Encode + Clone,
     C: Encode + Clone,
@@ -265,7 +154,7 @@ where
         aggregator: Arc<Aggregator<K, V, C>>,
         partitioner: Partitioner,
     ) -> Arc<Self> {
-        Arc::new(ShuffleDependency {
+        Arc::new(TypedShuffle {
             shuffle_id,
             is_cogroup_flag: is_cogroup,
             rdd,
@@ -287,7 +176,7 @@ where
         partitioner: Partitioner,
         comparator: KeyComparator<K>,
     ) -> Arc<Self> {
-        Arc::new(ShuffleDependency {
+        Arc::new(TypedShuffle {
             shuffle_id,
             is_cogroup_flag: is_cogroup,
             rdd,
@@ -402,25 +291,25 @@ where
     }
 }
 
-/// Convert typed ShuffleDependency to type-erased ErasedShuffleDependency.
+/// Erase a [`TypedShuffle`] into the DAG-facing [`ShuffleDependency`].
 ///
 /// Sets `type_id` to `std::any::type_name::<(K, V)>()`. This is a fallback path;
-/// prefer [`ErasedShuffleDependency::from_typed_with_key`] when a stable key is
+/// prefer [`ShuffleDependency::from_typed_with_key`] when a stable key is
 /// available from the compile-time `SHUFFLE_KEY_REGISTRY`.
-impl<K, V, C> From<Arc<ShuffleDependency<K, V, C>>> for ErasedShuffleDependency
+impl<K, V, C> From<Arc<TypedShuffle<K, V, C>>> for ShuffleDependency
 where
     K: Data + Eq + Hash + Encode + Clone,
     V: Data + Clone,
     C: Data + Encode + Clone,
     Vec<(K, V)>: WireEncode,
 {
-    fn from(dep: Arc<ShuffleDependency<K, V, C>>) -> Self {
-        ErasedShuffleDependency::from_typed_with_key(dep, std::any::type_name::<(K, V)>())
+    fn from(dep: Arc<TypedShuffle<K, V, C>>) -> Self {
+        ShuffleDependency::from_typed_with_key(dep, std::any::type_name::<(K, V)>())
     }
 }
 
-impl ErasedShuffleDependency {
-    /// Build a type-erased [`ErasedShuffleDependency`] from a typed [`ShuffleDependency`],
+impl ShuffleDependency {
+    /// Build a type-erased [`ShuffleDependency`] from a typed [`TypedShuffle`],
     /// using an explicit, stable `shuffle_key` string as the dispatch key.
     ///
     /// The `shuffle_key` is embedded in the `ShuffleMap` pipeline-op payload sent to
@@ -431,7 +320,7 @@ impl ErasedShuffleDependency {
     /// Call sites in `atomic-compute` obtain the key from `SHUFFLE_KEY_REGISTRY`
     /// (keyed by `TypeId::of::<(K, V)>()`) before calling this constructor.
     pub fn from_typed_with_key<K, V, C>(
-        dep: Arc<ShuffleDependency<K, V, C>>,
+        dep: Arc<TypedShuffle<K, V, C>>,
         shuffle_key: &'static str,
     ) -> Self
     where
@@ -440,17 +329,12 @@ impl ErasedShuffleDependency {
         C: Data + Encode + Clone,
         Vec<(K, V)>: WireEncode,
     {
-        let spec = ShuffleSpec {
-            shuffle_id: dep.shuffle_id,
-            rdd_base: dep.rdd.get_rdd_base(),
-            is_cogroup: dep.is_cogroup_flag,
-            num_output_partitions: dep.partitioner.get_num_of_partitions(),
-            partitioner_spec: dep.partitioner.to_spec(),
+        ShuffleDependency {
             type_id: shuffle_key,
             preceding_steps: vec![],
             staged_partitions: None,
-        };
-        ErasedShuffleDependency { spec, exec: dep }
+            exec: dep,
+        }
     }
 
     /// Attach a staged `_task` pipeline that precedes the shuffle: `source_partitions`
@@ -461,19 +345,39 @@ impl ErasedShuffleDependency {
         source_partitions: Vec<Vec<u8>>,
         preceding_steps: Vec<Step>,
     ) -> Self {
-        self.spec.staged_partitions = Some(source_partitions);
-        self.spec.preceding_steps = preceding_steps;
+        self.staged_partitions = Some(source_partitions);
+        self.preceding_steps = preceding_steps;
         self
     }
 }
 
-impl<K, V, C> ShuffleExecutor for ShuffleDependency<K, V, C>
+impl<K, V, C> ShuffleExecutor for TypedShuffle<K, V, C>
 where
     K: Data + Eq + Hash + Encode + Clone,
     V: Data + Clone,
     C: Data + Encode + Clone,
     Vec<(K, V)>: WireEncode,
 {
+    fn shuffle_id(&self) -> usize {
+        self.shuffle_id
+    }
+
+    fn is_cogroup(&self) -> bool {
+        self.is_cogroup_flag
+    }
+
+    fn rdd_base(&self) -> Arc<dyn RddBase> {
+        self.rdd.get_rdd_base()
+    }
+
+    fn num_output_partitions(&self) -> usize {
+        self.partitioner.get_num_of_partitions()
+    }
+
+    fn partitioner_spec(&self) -> PartitionerSchema {
+        self.partitioner.to_spec()
+    }
+
     fn encode_parent_partitions(&self) -> BaseResult<Vec<Vec<u8>>> {
         self.rdd
             .splits()

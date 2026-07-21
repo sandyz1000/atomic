@@ -17,7 +17,7 @@ use crate::{
 #[derive(Clone)]
 pub struct ActiveShuffleStage {
     pub shuffle_id: usize,
-    pub dep: Arc<atomic_data::dependency::ErasedShuffleDependency>,
+    pub dep: Arc<atomic_data::dependency::ShuffleDependency>,
     pub steps: Vec<Step>,
 }
 
@@ -27,28 +27,28 @@ impl DistributedScheduler {
     /// Build the exact op pipeline for one distributed shuffle-map stage:
     /// any preceding staged steps followed by the `ShuffleMap` engine step.
     fn shuffle_map_ops(
-        spec: &atomic_data::dependency::ShuffleSpec,
+        dep: &atomic_data::dependency::ShuffleDependency,
         fallback_preceding: &[Step],
     ) -> LibResult<Vec<Step>> {
         let payload = bincode::encode_to_vec(
             ShuffleMapPayload {
-                type_id: spec.type_id.to_string(),
-                partitioner_spec: spec.partitioner_spec.clone(),
+                type_id: dep.type_id.to_string(),
+                partitioner_spec: dep.partitioner_spec(),
             },
             bincode::config::standard(),
         )
         .map_err(|e| SchedulerError::TaskFailed(format!("shuffle-map payload encode: {e}")))?;
 
-        let mut steps = if spec.preceding_steps.is_empty() {
+        let mut steps = if dep.preceding_steps.is_empty() {
             fallback_preceding.to_vec()
         } else {
-            spec.preceding_steps.clone()
+            dep.preceding_steps.clone()
         };
         steps.push(Step {
-            op_id: format!("shuffle-map-{}", spec.shuffle_id),
+            op_id: format!("shuffle-map-{}", dep.get_shuffle_id()),
             kind: StepKind::Engine(EngineStep::ShuffleMap {
-                shuffle_id: spec.shuffle_id,
-                num_output_partitions: spec.num_output_partitions,
+                shuffle_id: dep.get_shuffle_id(),
+                num_output_partitions: dep.get_num_output_partitions(),
             }),
             runtime: TaskRuntime::Native,
             payload,
@@ -68,15 +68,15 @@ impl DistributedScheduler {
         let mut dispatched = Vec::new();
         for dep in rdd.get_dependencies() {
             if let Dependency::Shuffle(shuffle_dep) = dep {
-                let spec = &shuffle_dep.spec;
-                let steps = Self::shuffle_map_ops(spec, &preceding_steps)?;
+                let steps = Self::shuffle_map_ops(&shuffle_dep, &preceding_steps)?;
                 let parent_partitions = shuffle_dep.encode_partitions().map_err(|e| {
                     SchedulerError::TaskFailed(format!("shuffle input encode: {e}"))
                 })?;
-                self.run_shuffle_map_stage(spec.shuffle_id, steps.clone(), parent_partitions)
+                let shuffle_id = shuffle_dep.get_shuffle_id();
+                self.run_shuffle_map_stage(shuffle_id, steps.clone(), parent_partitions)
                     .await?;
                 dispatched.push(ActiveShuffleStage {
-                    shuffle_id: spec.shuffle_id,
+                    shuffle_id,
                     dep: shuffle_dep,
                     steps,
                 });

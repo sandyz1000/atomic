@@ -120,9 +120,8 @@ impl<T: Data + Clone> RddBase for CachedRdd<T> {
         &self,
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
-        Ok(Box::new(
-            self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
-        ))
+        let rdd_iter = self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>);
+        Ok(Box::new(rdd_iter))
     }
 }
 
@@ -153,11 +152,11 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
                     return Ok(cached_iter);
                 }
                 let items: Vec<T> = self.inner.iterator(split)?.collect();
-                let arc = Arc::new(items);
+                let data = Arc::new(items);
                 if let Some(store) = PARTITION_CACHE.get() {
-                    store.put::<T>(rdd_id, idx, arc.clone());
+                    store.put::<T>(rdd_id, idx, data.clone());
                 }
-                Ok(Box::new(ArcVecIter { data: arc, pos: 0 }))
+                Ok(Box::new(ArcVecIter { data, pos: 0 }))
             }
 
             StorageLevel::MemoryAndDisk => {
@@ -176,11 +175,11 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
                     return Ok(cached_iter);
                 }
                 let items: Vec<T> = self.inner.iterator(split)?.collect();
-                let arc = Arc::new(items);
+                let data = Arc::new(items);
                 if let Some(store) = PARTITION_CACHE.get() {
-                    store.put::<T>(rdd_id, idx, arc.clone());
+                    store.put::<T>(rdd_id, idx, data.clone());
                 }
-                Ok(Box::new(ArcVecIter { data: arc, pos: 0 }))
+                Ok(Box::new(ArcVecIter { data, pos: 0 }))
             }
 
             StorageLevel::DiskOnly => {
@@ -221,8 +220,6 @@ impl<T: Clone> Iterator for ArcVecIter<T> {
         (remaining, Some(remaining))
     }
 }
-
-// Tests
 
 #[cfg(test)]
 mod tests {

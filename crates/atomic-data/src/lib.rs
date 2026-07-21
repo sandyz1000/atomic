@@ -5,7 +5,8 @@
 //! - [`rdd`] — [`RddBase`](rdd::RddBase) and [`Rdd`](rdd::Rdd) traits; the fundamental compute primitive.
 //! - [`distributed`] — wire types: [`TaskEnvelope`](distributed::TaskEnvelope),
 //!   [`TaskResultEnvelope`](distributed::TaskResultEnvelope), [`WorkerCapabilities`](distributed::WorkerCapabilities).
-//! - [`dependency`] — [`Dependency`](dependency::Dependency) (narrow vs. shuffle) and [`ShuffleDependency`](dependency::ShuffleDependency).
+//! - [`dependency`] — [`Dependency`](dependency::Dependency) (narrow vs. shuffle) and its erased
+//!   [`ShuffleDependency`](dependency::ShuffleDependency) (typed source: [`TypedShuffle`](dependency::TypedShuffle)).
 //! - [`partitioner`] — [`Partitioner`](partitioner::Partitioner), [`HashPartitioner`](partitioner::HashPartitioner), [`RangePartitioner`](partitioner::RangePartitioner).
 //! - [`broadcast`] — [`BroadcastVar`](broadcast::BroadcastVar) for driver-to-worker read-only data.
 //! - [`accumulator`] — distributed accumulators (sum, max, etc.).

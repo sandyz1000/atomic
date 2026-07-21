@@ -173,7 +173,7 @@ impl Context {
         })?;
 
         for stage in dispatched {
-            let num_output_partitions = stage.dep.spec.num_output_partitions;
+            let num_output_partitions = stage.dep.get_num_output_partitions();
             self.active_shuffle_stages.insert(
                 stage.shuffle_id,
                 super::ActiveShuffleStage {

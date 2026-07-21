@@ -1,5 +1,5 @@
 use atomic_data::data::Data;
-use atomic_data::dependency::ErasedShuffleDependency;
+use atomic_data::dependency::ShuffleDependency;
 use atomic_data::partial::result::PartialResult;
 use atomic_data::partial::{ApproxListener, ApproximateEvaluator};
 use atomic_data::rdd::Rdd;
@@ -104,8 +104,8 @@ impl LocalScheduler {
         // acquiring lock so that only one job can run at same time this lock is just
         // a temporary patch for preventing multiple jobs to update cache locks which affects
         // construction of dag task graph. dag task graph construction needs to be altered
-        let selfc = self.clone();
-        let _lock = selfc.scheduler_lock.lock();
+        let sched = self.clone();
+        let _lock = sched.scheduler_lock.lock();
 
         // Run async code directly - tokio runtime should already be available
         futures::executor::block_on(async move {
@@ -149,8 +149,8 @@ impl LocalScheduler {
         // acquiring lock so that only one job can run at same time this lock is just
         // a temporary patch for preventing multiple jobs to update cache locks which affects
         // construction of dag task graph. dag task graph construction needs to be altered
-        let selfc = self.clone();
-        let _lock = selfc.scheduler_lock.lock();
+        let sched = self.clone();
+        let _lock = sched.scheduler_lock.lock();
 
         // Run async code directly - tokio runtime should already be available
         futures::executor::block_on(async move {
@@ -484,7 +484,7 @@ impl StagePlanner for LocalScheduler {
         self.state.clone()
     }
 
-    async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage> {
+    async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependency>) -> LibResult<Stage> {
         log::debug!("getting shuffle map stage");
         let stage_id = self
             .state

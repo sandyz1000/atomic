@@ -1,4 +1,4 @@
-use atomic_data::distributed::WireDecode;
+use atomic_data::{data::Data, distributed::WireDecode};
 use atomic_data::partitioner::PartitionerSchema;
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
@@ -28,8 +28,8 @@ pub fn shuffle_map_handler<K, V>(
     spec: &PartitionerSchema,
 ) -> Result<(), String>
 where
-    K: atomic_data::data::Data + Clone + Hash + bincode::Encode + bincode::Decode<()> + WireDecode,
-    V: atomic_data::data::Data + Clone + bincode::Encode + bincode::Decode<()> + WireDecode,
+    K: Data + Clone + Hash + bincode::Encode + bincode::Decode<()> + WireDecode,
+    V: Data + Clone + bincode::Encode + bincode::Decode<()> + WireDecode,
     Vec<(K, V)>: WireDecode,
 {
     let pairs: Vec<(K, V)> = Vec::<(K, V)>::decode_wire(data)

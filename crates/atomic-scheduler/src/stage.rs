@@ -1,16 +1,15 @@
-use atomic_data::dependency::ErasedShuffleDependency;
+use atomic_data::dependency::ShuffleDependency;
 use atomic_data::rdd::RddBase;
 use std::cmp::Ordering;
 use std::fmt::Display;
 use std::sync::Arc;
 
 /// Stage in the DAG scheduler
-/// Simplified: now uses concrete ErasedShuffleDependency instead of trait object
 #[derive(Clone)]
 pub struct Stage {
     pub id: usize,
     pub num_partitions: usize,
-    pub shuffle_dependency: Option<Arc<ErasedShuffleDependency>>,
+    pub shuffle_dependency: Option<Arc<ShuffleDependency>>,
     pub is_shuffle_map: bool,
     pub rdd: Arc<dyn RddBase>,
     pub parents: Vec<Stage>,
@@ -50,7 +49,7 @@ impl Stage {
     pub fn new(
         id: usize,
         rdd: Arc<dyn RddBase>,
-        shuffle_dependency: Option<Arc<ErasedShuffleDependency>>,
+        shuffle_dependency: Option<Arc<ShuffleDependency>>,
         parents: Vec<Stage>,
     ) -> Self {
         Stage {

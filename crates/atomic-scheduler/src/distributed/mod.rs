@@ -11,7 +11,7 @@ use std::{
 
 use atomic_data::{
     data::Data,
-    dependency::ErasedShuffleDependency,
+    dependency::ShuffleDependency,
     distributed::{EngineStep, Step, StepKind, TaskEnvelope, TaskRuntime, WorkerCapabilities},
     partial::{ApproximateEvaluator, result::PartialResult},
     rdd::Rdd,
@@ -255,7 +255,6 @@ impl DistributedScheduler {
                 "shuffle-map task missing shuffle dependency in task.dep".to_string(),
             )
         })?;
-        let spec = &shuffle_dep.spec;
         let partitions = shuffle_dep.encode_partitions().map_err(|e| {
             SchedulerError::TaskFailed(format!("shuffle map partition encode: {e}"))
         })?;
@@ -272,19 +271,19 @@ impl DistributedScheduler {
 
         let payload = bincode::encode_to_vec(
             atomic_data::distributed::ShuffleMapPayload {
-                type_id: spec.type_id.to_string(),
-                partitioner_spec: spec.partitioner_spec.clone(),
+                type_id: shuffle_dep.type_id.to_string(),
+                partitioner_spec: shuffle_dep.partitioner_spec(),
             },
             bincode::config::standard(),
         )
         .map_err(|e| SchedulerError::TaskFailed(format!("shuffle-map payload encode: {e}")))?;
 
-        let mut steps: Vec<Step> = spec.preceding_steps.clone();
+        let mut steps: Vec<Step> = shuffle_dep.preceding_steps.clone();
         steps.push(Step {
-            op_id: format!("shuffle-map-{}", spec.shuffle_id),
+            op_id: format!("shuffle-map-{}", shuffle_dep.get_shuffle_id()),
             kind: StepKind::Engine(EngineStep::ShuffleMap {
-                shuffle_id: spec.shuffle_id,
-                num_output_partitions: spec.num_output_partitions,
+                shuffle_id: shuffle_dep.get_shuffle_id(),
+                num_output_partitions: shuffle_dep.get_num_output_partitions(),
             }),
             runtime: TaskRuntime::Native,
             payload,
@@ -293,7 +292,8 @@ impl DistributedScheduler {
         let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
         let trace = format!(
             "native-submit-shuffle-{}-{}",
-            spec.shuffle_id, task.meta.partition
+            shuffle_dep.get_shuffle_id(),
+            task.meta.partition
         );
         Ok(TaskEnvelope::new(
             task.meta.run_id,
@@ -483,7 +483,7 @@ impl NativeScheduler for DistributedScheduler {
 
 #[async_trait::async_trait]
 impl StagePlanner for DistributedScheduler {
-    async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage> {
+    async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependency>) -> LibResult<Stage> {
         let stage = self.state.shuffle_to_map_stage.get(&shuf.get_shuffle_id());
         match stage {
             Some(stage) => Ok(stage.clone()),

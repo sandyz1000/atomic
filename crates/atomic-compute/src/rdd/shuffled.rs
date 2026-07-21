@@ -3,9 +3,7 @@ use crate::rdd::{Rdd, RddBase};
 use crate::task_registry::SHUFFLE_KEY_REGISTRY;
 use atomic_data::aggregator::{Aggregator, MergeCombinersFn};
 use atomic_data::data::Data;
-use atomic_data::dependency::{
-    Dependency, ErasedShuffleDependency, KeyComparator, ShuffleDependency,
-};
+use atomic_data::dependency::{Dependency, KeyComparator, ShuffleDependency, TypedShuffle};
 use atomic_data::distributed::WireEncode;
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
@@ -135,7 +133,7 @@ where
         // Sort-shuffle when a comparator is supplied: the dependency sorts each bucket so the
         // reduce side can k-way merge sorted runs. Otherwise the legacy unsorted layout.
         let shuffle_dep = match &comparator {
-            Some(cmp) => ShuffleDependency::new_sorted(
+            Some(cmp) => TypedShuffle::new_sorted(
                 shuffle_id,
                 false,
                 parent.clone(),
@@ -143,7 +141,7 @@ where
                 part.clone(),
                 cmp.clone(),
             ),
-            None => ShuffleDependency::new(
+            None => TypedShuffle::new(
                 shuffle_id,
                 false,
                 parent.clone(),
@@ -163,7 +161,7 @@ where
                     std::any::type_name::<V>(),
                 )
             });
-        let dep_box = ErasedShuffleDependency::from_typed_with_key(shuffle_dep, shuffle_key);
+        let dep_box = ShuffleDependency::from_typed_with_key(shuffle_dep, shuffle_key);
         let dep_box = if let Some((src_parts, steps)) = staged {
             dep_box.with_staged_pipeline(src_parts, steps)
         } else {
@@ -223,10 +221,10 @@ where
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside iterator_any shuffledrdd",);
-        Ok(Box::new(
-            self.iterator(split)?
-                .map(|(k, v)| Box::new((k, v)) as Box<dyn Data>),
-        ))
+        let rdd_iter = self
+            .iterator(split)?
+            .map(|(k, v)| Box::new((k, v)) as Box<dyn Data>);
+        Ok(Box::new(rdd_iter))
     }
 
     fn cogroup_iterator_any(
@@ -234,10 +232,10 @@ where
         split: Box<dyn Split>,
     ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
         log::debug!("inside cogroup iterator_any shuffledrdd",);
-        Ok(Box::new(
-            self.iterator(split)?
-                .map(|(k, v)| Box::new((k, Box::new(v))) as Box<dyn Data>),
-        ))
+        let rdd_iter = self
+            .iterator(split)?
+            .map(|(k, v)| Box::new((k, Box::new(v))) as Box<dyn Data>);
+        Ok(Box::new(rdd_iter))
     }
 }
 

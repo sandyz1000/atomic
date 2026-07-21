@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
-use atomic_data::dependency::{Dependency, ErasedShuffleDependency};
+use atomic_data::dependency::{Dependency, ShuffleDependency};
 use atomic_data::rdd::RddBase;
 
 use crate::base::SchedulerState;
@@ -29,14 +29,14 @@ pub trait StagePlanner: Send + Sync {
     /// Return (creating if needed) the shuffle-map stage for a shuffle dependency.
     /// Backend-specific: the distributed scheduler caches completed shuffles, the local
     /// scheduler pre-populates output locations from an earlier distributed run.
-    async fn get_shuffle_map_stage(&self, shuf: Arc<ErasedShuffleDependency>) -> LibResult<Stage>;
+    async fn get_shuffle_map_stage(&self, shuf: Arc<ShuffleDependency>) -> LibResult<Stage>;
 
     /// Create a new stage for `rdd_base`, registering its shuffle dependency (if any) with
     /// the map-output tracker and discovering its parent stages.
     async fn new_stage(
         &self,
         rdd_base: Arc<dyn RddBase>,
-        shuffle_dependency: Option<Arc<ErasedShuffleDependency>>,
+        shuffle_dependency: Option<Arc<ShuffleDependency>>,
     ) -> LibResult<Stage> {
         log::debug!("creating new stage");
         let m = self.state();

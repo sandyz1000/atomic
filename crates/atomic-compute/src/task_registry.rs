@@ -1,4 +1,5 @@
 use atomic_data::distributed::{AgentStepPayload, TaskAction, WireDecode, WireEncode};
+use atomic_data::partitioner::Partitioner;
 use once_cell::sync::Lazy;
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -228,7 +229,7 @@ pub struct PartitionerEntry {
 inventory::collect!(PartitionerEntry);
 
 /// Reconstructs a registered named partitioner from its partition count.
-pub type PartitionerFactoryFn = fn(usize) -> atomic_data::partitioner::Partitioner;
+pub type PartitionerFactoryFn = fn(usize) -> Partitioner;
 
 /// Global compile-time named-partitioner registry — built once from all
 /// `register_partitioner!(P)` calls linked into the binary. Keyed by `P::NAME`.
@@ -242,10 +243,7 @@ pub static PARTITIONER_REGISTRY: Lazy<HashMap<&'static str, PartitionerFactoryFn
 
 /// Reconstruct a registered named partitioner, or `None` if its name was never
 /// registered in this binary (the caller then falls back to hash partitioning).
-pub fn lookup_partitioner(
-    name: &str,
-    num_partitions: usize,
-) -> Option<atomic_data::partitioner::Partitioner> {
+pub fn lookup_partitioner(name: &str, num_partitions: usize) -> Option<Partitioner> {
     PARTITIONER_REGISTRY
         .get(name)
         .map(|factory| factory(num_partitions))

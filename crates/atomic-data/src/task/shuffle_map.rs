@@ -53,7 +53,7 @@ impl Task for ShuffleMapTask {
     fn run(&self, _id: usize) -> Result<Box<dyn Data>, Box<dyn std::error::Error>> {
         if let Some(shuffle_dep) = self.dep.get_shuffle_dep() {
             // New signature: do_shuffle_task now only takes partition
-            // The ShuffleDependency internally has the typed RDD
+            // The TypedShuffle internally has the typed RDD
             let result = shuffle_dep.do_shuffle_task(self.meta.partition);
             return Ok(Box::new(result));
         }

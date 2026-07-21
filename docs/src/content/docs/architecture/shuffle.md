@@ -36,7 +36,7 @@ there is no direct worker-to-worker push.
 
 | Type | Crate | Role |
 |---|---|---|
-| `ShuffleDependency` | `atomic-data` | Typed shuffle edge in the RDD DAG |
+| `ShuffleDependency` | `atomic-data` | Shuffle edge in the RDD DAG (erased; typed source is `TypedShuffle`) |
 | `ShuffledRdd` | `atomic-compute` | Reduce-side RDD; fetches and merges on compute |
 | `ShuffleManager` | `atomic-data` | Per-worker HTTP server for shuffle reads |
 | `ShuffleFetcher` | `atomic-data` | HTTP client with exponential-backoff retry |

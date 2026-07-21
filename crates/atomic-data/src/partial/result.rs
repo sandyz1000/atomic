@@ -149,8 +149,8 @@ where
 
     /// Blocking method to wait for and return the final value.
     pub fn get_final_value(self) -> Result<R> {
-        let selfc = Arc::new(self);
-        (selfc._get_final_value)(selfc.clone())
+        let partial = Arc::new(self);
+        (partial._get_final_value)(partial.clone())
     }
 
     pub fn set_final_value(&mut self, value: R) -> Result<()> {
