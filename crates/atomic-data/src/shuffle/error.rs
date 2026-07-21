@@ -109,19 +109,19 @@ impl From<ShuffleError> for Response<Body> {
     }
 }
 
-impl From<ShuffleError> for crate::error::BaseError {
+impl From<ShuffleError> for crate::error::DataError {
     fn from(err: ShuffleError) -> Self {
         match err {
             ShuffleError::FetchFailed {
                 shuffle_id,
                 map_id,
                 server_uri,
-            } => crate::error::BaseError::FetchFailed {
+            } => crate::error::DataError::FetchFailed {
                 shuffle_id,
                 map_id,
                 server_uri,
             },
-            other => crate::error::BaseError::Other(other.to_string()),
+            other => crate::error::DataError::Other(other.to_string()),
         }
     }
 }
@@ -148,18 +148,18 @@ impl From<ShuffleError> for tonic::Status {
 #[cfg(test)]
 mod tests {
     use super::ShuffleError;
-    use crate::error::BaseError;
+    use crate::error::DataError;
 
     #[test]
     fn fetch_failed_preserved() {
-        let base: BaseError = ShuffleError::FetchFailed {
+        let base: DataError = ShuffleError::FetchFailed {
             shuffle_id: 7,
             map_id: 3,
             server_uri: "http://10.0.0.2:9000".to_string(),
         }
         .into();
         match base {
-            BaseError::FetchFailed {
+            DataError::FetchFailed {
                 shuffle_id,
                 map_id,
                 server_uri,
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn other_errors_stringify() {
-        let base: BaseError = ShuffleError::FailedFetchOp.into();
-        assert!(matches!(base, BaseError::Other(_)));
+        let base: DataError = ShuffleError::FailedFetchOp.into();
+        assert!(matches!(base, DataError::Other(_)));
     }
 }

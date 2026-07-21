@@ -30,7 +30,7 @@ use std::{
 };
 
 use crate::rdd::{Data, Rdd, rdd_val::RddVals};
-use atomic_data::{dependency::Dependency, error::BaseError, split::Split};
+use atomic_data::{dependency::Dependency, error::DataError, split::Split};
 
 /// Common fields for narrow-dependency RDDs: parent pointer, RDD metadata,
 /// op name, and pinned flag.
@@ -99,7 +99,7 @@ impl<T: Data> RddCore<T> {
         &self,
         split: Box<dyn Split>,
         rdd: &dyn Rdd<Item = U>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         Ok(Box::new(
             rdd.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))

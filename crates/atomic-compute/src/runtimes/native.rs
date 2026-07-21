@@ -307,8 +307,7 @@ fn run_pipeline(
         broadcast::cache_broadcast_values(&task.broadcast_values);
     }
     if !task.broadcast_ids.is_empty() {
-        broadcast::ensure_broadcasts_cached(&task.broadcast_ids)
-            .map_err(|e| ComputeError::InvalidPayload(e.to_string()))?;
+        broadcast::ensure_broadcasts_cached(&task.broadcast_ids)?;
     }
 
     for op in &task.steps {

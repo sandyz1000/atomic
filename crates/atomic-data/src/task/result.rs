@@ -94,7 +94,7 @@ where
     fn run(&self, id: usize) -> Result<Box<dyn Data>, Box<dyn std::error::Error>> {
         let split = self.rdd.splits()[self.meta.partition].clone();
         let context = TaskContext::new(self.meta.stage_id, self.meta.partition, id);
-        // Propagate compute errors (e.g. a lost-map-output `BaseError::FetchFailed`)
+        // Propagate compute errors (e.g. a lost-map-output `DataError::FetchFailed`)
         // instead of panicking, so the scheduler can recover from lineage.
         let s = Box::new((self.func)((context, self.rdd.iterator(split)?)));
         Ok(s)

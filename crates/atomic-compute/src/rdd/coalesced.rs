@@ -2,7 +2,7 @@ use crate::rdd::rdd_val::RddVals;
 use crate::rdd::*;
 use crate::rdd::{Rdd, RddBase};
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::split::{CoalescedRddSplit, PrefLoc, Split};
 use parking_lot::Mutex;
 use rand::RngExt;
@@ -68,7 +68,7 @@ impl<T: Data> RddBase for CoalescedRdd<T> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
@@ -133,7 +133,7 @@ impl<T: Data> Rdd for CoalescedRdd<T> {
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         let split = CoalescedRddSplit::downcasting(split)?;
         let mut iter = Vec::new();
         for (_, p) in self

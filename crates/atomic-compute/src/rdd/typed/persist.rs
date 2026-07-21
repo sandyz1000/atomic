@@ -148,7 +148,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
     /// Partitions are written to `{dir}/{rdd_id}/{partition}.bin` (bincode-encoded).
     ///
     /// Requires `T: bincode::Encode + bincode::Decode<()>`.
-    pub fn checkpoint(self, dir: impl AsRef<str>) -> Result<TypedRdd<T>, BaseError>
+    pub fn checkpoint(self, dir: impl AsRef<str>) -> Result<TypedRdd<T>, DataError>
     where
         T: bincode::Encode + bincode::Decode<()> + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -173,17 +173,17 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
                         .join(format!("{checkpoint_id}"))
                         .join(format!("{idx}.bin"));
                     disk_write_partition(&path, data)
-                        .map_err(|e| BaseError::Other(format!("checkpoint write failed: {e}")))?;
+                        .map_err(|e| DataError::Other(format!("checkpoint write failed: {e}")))?;
                 }
 
                 CheckpointStore::S3 { bucket, prefix } => {
                     use crate::io::s3::write_text;
                     let bytes = bincode::encode_to_vec(data, bincode::config::standard())
-                        .map_err(|e| BaseError::Other(format!("checkpoint encode: {e}")))?;
+                        .map_err(|e| DataError::Other(format!("checkpoint encode: {e}")))?;
                     let b64 =
                         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
                     let key = format!("{prefix}/{checkpoint_id}/{idx}.bin");
-                    write_text(bucket, &key, b64).map_err(|e| BaseError::Other(e.to_string()))?;
+                    write_text(bucket, &key, b64).map_err(|e| DataError::Other(e.to_string()))?;
                 }
             }
         }

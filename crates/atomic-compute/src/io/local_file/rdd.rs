@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::split::{BytesReader, FileReader, Split};
 
 use super::reader::LocalFsReader;
 
-type Result<T> = std::result::Result<T, BaseError>;
+type Result<T> = std::result::Result<T, DataError>;
 
 impl RddBase for LocalFsReader<BytesReader> {
     fn get_rdd_id(&self) -> usize {
@@ -116,7 +116,7 @@ impl Rdd for LocalFsReader<BytesReader> {
             .as_any()
             .downcast_ref::<BytesReader>()
             .ok_or_else(|| {
-                BaseError::DowncastFailure("expected BytesReader split for LocalFsReader".into())
+                DataError::DowncastFailure("expected BytesReader split for LocalFsReader".into())
             })?;
         let files_by_part = self.load_local_files()?;
         let idx = split.idx;
@@ -143,7 +143,7 @@ impl Rdd for LocalFsReader<FileReader> {
 
     fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = Self::Item>>> {
         let split = split.as_any().downcast_ref::<FileReader>().ok_or_else(|| {
-            BaseError::DowncastFailure("expected FileReader split for LocalFsReader".into())
+            DataError::DowncastFailure("expected FileReader split for LocalFsReader".into())
         })?;
         let files_by_part = self.load_local_files()?;
         let idx = split.idx;

@@ -16,7 +16,7 @@ use bincode::Encode;
 use crate::aggregator::Aggregator;
 use crate::data::Data;
 use crate::distributed::{Step, WireEncode};
-use crate::error::BaseResult;
+use crate::error::DataResult;
 use crate::partitioner::{Partitioner, PartitionerSchema};
 use crate::rdd::RddBase;
 
@@ -37,7 +37,7 @@ pub trait ShuffleExecutor: Send + Sync {
     fn partitioner_spec(&self) -> PartitionerSchema;
     /// Encode every parent RDD partition as rkyv bytes (one `Vec<u8>` per partition) — the
     /// non-staged distributed input.
-    fn encode_parent_partitions(&self) -> BaseResult<Vec<Vec<u8>>>;
+    fn encode_parent_partitions(&self) -> DataResult<Vec<Vec<u8>>>;
     /// Run the shuffle-map task for one partition in-process (local mode), returning the
     /// shuffle server URI that now holds its buckets.
     fn run_local(&self, partition_id: usize) -> String;
@@ -89,7 +89,7 @@ impl ShuffleDependency {
 
     /// Worker input for the distributed shuffle-map stage: the staged pipeline's pre-encoded
     /// partitions when present, otherwise the parent RDD encoded on demand.
-    pub fn encode_partitions(&self) -> BaseResult<Vec<Vec<u8>>> {
+    pub fn encode_partitions(&self) -> DataResult<Vec<Vec<u8>>> {
         match &self.staged_partitions {
             Some(parts) => Ok(parts.clone()),
             None => self.exec.encode_parent_partitions(),
@@ -378,7 +378,7 @@ where
         self.partitioner.to_spec()
     }
 
-    fn encode_parent_partitions(&self) -> BaseResult<Vec<Vec<u8>>> {
+    fn encode_parent_partitions(&self) -> DataResult<Vec<Vec<u8>>> {
         self.rdd
             .splits()
             .iter()

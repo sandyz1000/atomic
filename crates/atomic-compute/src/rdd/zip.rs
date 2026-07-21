@@ -3,7 +3,7 @@ use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseResult;
+use atomic_data::error::DataResult;
 use atomic_data::split::{Split, ZippedPartitionsSplit};
 use std::cmp::min;
 use std::marker::PhantomData;
@@ -97,7 +97,7 @@ where
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> DataResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
@@ -106,7 +106,7 @@ where
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> DataResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         self.iterator_any(split)
     }
 }
@@ -126,7 +126,7 @@ where
         Arc::new(self.clone()) as Arc<dyn RddBase>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>> {
+    fn compute(&self, split: Box<dyn Split>) -> DataResult<Box<dyn Iterator<Item = Self::Item>>> {
         let current_split = split
             .as_any()
             .downcast_ref::<ZippedPartitionsSplit>()
@@ -137,7 +137,7 @@ where
         Ok(Box::new(fst_iter.zip(sec_iter)))
     }
 
-    fn iterator(&self, split: Box<dyn Split>) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>> {
+    fn iterator(&self, split: Box<dyn Split>) -> DataResult<Box<dyn Iterator<Item = Self::Item>>> {
         self.compute(split.clone())
     }
 }

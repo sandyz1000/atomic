@@ -3,7 +3,7 @@ use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::split::{ParallelCollectionSplit, Split};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -139,14 +139,14 @@ impl<T: Data + Clone> RddBase for ParallelCollection<T> {
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         self.iterator_any(split)
     }
 
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         log::debug!("inside iterator_any parallel collection");
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
@@ -170,7 +170,7 @@ impl<T: Data + Clone> Rdd for ParallelCollection<T> {
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         if let Some(s) = split.as_any().downcast_ref::<ParallelCollectionSplit<T>>() {
             Ok(s.iterator())
         } else {

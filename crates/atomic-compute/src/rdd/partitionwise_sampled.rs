@@ -2,7 +2,7 @@ use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::split::Split;
 use atomic_utils::random::RandomSampler;
@@ -80,14 +80,14 @@ impl<T: Data> RddBase for PartitionwiseSampledRdd<T> {
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         self.iterator_any(split)
     }
 
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         log::debug!("inside PartitionwiseSampledRdd iterator_any");
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
@@ -108,7 +108,7 @@ impl<T: Data> Rdd for PartitionwiseSampledRdd<T> {
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         let sampler_func = self.sampler.get_sampler(None);
         let iter = self.prev.iterator(split)?;
         Ok(Box::new(sampler_func(iter)) as Box<dyn Iterator<Item = T>>)

@@ -5,7 +5,7 @@ use crate::rdd::core::RddCore;
 use crate::rdd::{Rdd, RddBase};
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::fn_traits::RddFn;
 use atomic_data::split::Split;
 use std::net::Ipv4Addr;
@@ -83,13 +83,13 @@ where
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         self.iterator_any(split)
     }
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         log::debug!("inside iterator_any maprdd");
         self.core.iterator_any(split, self)
     }
@@ -111,7 +111,7 @@ where
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         let f = self.f.clone();
         Ok(Box::new(self.core.prev.iterator(split)?.map(move |x| f(x))))
     }

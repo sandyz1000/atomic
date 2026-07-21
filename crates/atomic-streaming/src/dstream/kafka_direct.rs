@@ -33,7 +33,7 @@ use atomic_compute::rdd::ParallelCollection;
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
 use atomic_data::distributed::{KafkaConsumePayload, StepKind, Step, EngineStep, TaskRuntime};
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::split::{Split, SplitStruct};
 use parking_lot::Mutex;
@@ -332,7 +332,7 @@ impl RddBase for DirectKafkaBatchRdd {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> atomic_data::error::BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> atomic_data::error::DataResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         Ok(Box::new(
             self.compute(split)?.map(|s| Box::new(s) as Box<dyn Data>),
         ))
@@ -367,7 +367,7 @@ impl Rdd for DirectKafkaBatchRdd {
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = String>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = String>>, DataError> {
         let idx = split.get_index();
         if idx >= self.ranges.len() {
             return Ok(Box::new(std::iter::empty()));

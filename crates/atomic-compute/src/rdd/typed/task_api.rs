@@ -186,7 +186,7 @@ where
     /// ```ignore
     /// let total = ctx.parallelize_typed(data, 2).fold_task(0i32, Add)?;
     /// ```
-    pub fn fold_task<F>(&self, init: T, task: F) -> Result<T, BaseError>
+    pub fn fold_task<F>(&self, init: T, task: F) -> Result<T, DataError>
     where
         F: BinaryTask<T>,
         Vec<T>: WireEncode + WireDecode,
@@ -204,7 +204,7 @@ where
         // Build pipeline: existing staged steps (if any) + fold op.
         let fold_payload = init
             .encode_wire()
-            .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
         let fold_op = Step {
             op_id: F::NAME.to_string(),
             kind: StepKind::Task(TaskAction::Fold),
@@ -215,7 +215,7 @@ where
         let (source_partitions, mut steps) = match &self.staged {
             None => {
                 let encoded = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 (encoded, vec![])
             }
             Some(s) => (s.source_partitions.clone(), s.steps.clone()),
@@ -225,12 +225,12 @@ where
         let raw_partition_outputs = self
             .context
             .dispatch_pipeline(source_partitions, steps.clone())
-            .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
 
         let mut part_values: Vec<T> = raw_partition_outputs
             .into_iter()
             .map(|bytes| {
-                T::decode_wire(&bytes).map_err(|e| BaseError::DowncastFailure(e.to_string()))
+                T::decode_wire(&bytes).map_err(|e| DataError::DowncastFailure(e.to_string()))
             })
             .collect::<Result<_, _>>()?;
 
@@ -260,7 +260,7 @@ where
     /// ```ignore
     /// let total = ctx.parallelize_typed(data, 2).reduce_task(task_fn!(|a: i32, b: i32| a + b))?;
     /// ```
-    pub fn reduce_task<F>(&self, task: F) -> Result<Option<T>, BaseError>
+    pub fn reduce_task<F>(&self, task: F) -> Result<Option<T>, DataError>
     where
         F: BinaryTask<T>,
         Vec<T>: WireEncode + WireDecode,
@@ -286,7 +286,7 @@ where
         let (source_partitions, mut steps) = match &self.staged {
             None => {
                 let src = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 (src, vec![])
             }
             Some(s) => (s.source_partitions.clone(), s.steps.clone()),
@@ -296,11 +296,11 @@ where
         let partition_results_raw = self
             .context
             .dispatch_pipeline(source_partitions, steps)
-            .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
 
         let mut values: Vec<T> = partition_results_raw
             .into_iter()
-            .map(|b| T::decode_wire(&b).map_err(|e| BaseError::DowncastFailure(e.to_string())))
+            .map(|b| T::decode_wire(&b).map_err(|e| DataError::DowncastFailure(e.to_string())))
             .collect::<Result<_, _>>()?;
 
         match values.len() {
@@ -309,7 +309,7 @@ where
             _ => {
                 let combined = values
                     .encode_wire()
-                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 let driver_ops = vec![Step {
                     op_id: F::NAME.to_string(),
                     kind: StepKind::Task(TaskAction::Reduce),
@@ -328,12 +328,12 @@ where
                 );
                 let result = crate::runtimes::ComputeEngine::default()
                     .execute("local-driver", &task)
-                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 match result.status {
                     atomic_data::distributed::ResultStatus::Success => T::decode_wire(&result.data)
                         .map(Some)
-                        .map_err(|e| BaseError::DowncastFailure(e.to_string())),
-                    _ => Err(BaseError::DowncastFailure(
+                        .map_err(|e| DataError::DowncastFailure(e.to_string())),
+                    _ => Err(DataError::DowncastFailure(
                         result
                             .error
                             .unwrap_or_else(|| "reduce_task failed".to_string()),

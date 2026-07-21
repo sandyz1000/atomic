@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::*;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::split::Split;
 
 /// Two-parent cogroup: pairs items from `rdd1: Rdd<(K, V1)>` and `rdd2: Rdd<(K, V2)>` by key.
@@ -86,7 +86,7 @@ where
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         Ok(Box::new(
             self.compute(split)?
                 .map(|item| Box::new(item) as Box<dyn Data>),
@@ -113,7 +113,7 @@ where
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         let idx = split.get_index();
         let n1 = self.rdd1.get_rdd_base().number_of_splits();
         let n2 = self.rdd2.get_rdd_base().number_of_splits();
@@ -139,7 +139,7 @@ where
     fn iterator(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         self.compute(split)
     }
 }

@@ -113,8 +113,7 @@ impl LocalScheduler {
             let listener = ApproxListener::new(evaluator, timeout, partitions.len());
             let jt =
                 JobTracker::from_scheduler(&*self, func, final_rdd.clone(), partitions, listener)
-                    .await
-                    .map_err(|_| SchedulerError::Other)?;
+                    .await?;
             if final_rdd.number_of_splits() == 0 {
                 let time = Instant::now();
                 self.live_listener_bus.post(Box::new(JobStartListener {
@@ -330,8 +329,8 @@ impl LocalScheduler {
                 // A lost-map-output fetch failure must route to the FetchFailed path so the
                 // scheduler recomputes that map partition from lineage; everything else is a
                 // plain task failure that retries the same task.
-                let reason = match err.downcast_ref::<atomic_data::error::BaseError>() {
-                    Some(atomic_data::error::BaseError::FetchFailed {
+                let reason = match err.downcast_ref::<atomic_data::error::DataError>() {
+                    Some(atomic_data::error::DataError::FetchFailed {
                         shuffle_id,
                         map_id,
                         server_uri,

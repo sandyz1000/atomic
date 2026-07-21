@@ -2,7 +2,7 @@ use crate::rdd::rdd_val::RddVals;
 use atomic_data::{
     data::Data,
     dependency::Dependency,
-    error::BaseError,
+    error::DataError,
     rdd::{Rdd, RddBase},
     split::CartesianSplit,
 };
@@ -83,7 +83,7 @@ impl<T: Data + Clone, U: Data + Clone> RddBase for CartesianRdd<T, U> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
@@ -104,11 +104,11 @@ impl<T: Data + Clone, U: Data + Clone> Rdd for CartesianRdd<T, U> {
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         let current_split = split
             .as_any()
             .downcast_ref::<CartesianSplit>()
-            .ok_or_else(|| BaseError::DowncastFailure("CartesianSplit".to_string()))?;
+            .ok_or_else(|| DataError::DowncastFailure("CartesianSplit".to_string()))?;
 
         let iter1 = self.rdd1.iterator(current_split.s1.clone())?;
         // required because iter2 must be clonable:

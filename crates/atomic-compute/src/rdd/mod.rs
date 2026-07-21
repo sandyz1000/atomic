@@ -21,7 +21,7 @@ pub use atomic_utils::bpq::BoundedPriorityQueue;
 
 pub use atomic_data::{
     data::Data,
-    error::BaseError,
+    error::DataError,
     rdd::{Rdd, RddBase},
 };
 

@@ -6,7 +6,7 @@ use crate::rdd::rdd_val::RddVals;
 use crate::rdd::union_rdd::UnionVariants::{NonUniquePartitioner, PartitionerAware};
 use crate::rdd::*;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseResult;
+use atomic_data::error::DataResult;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::split::{PartitionerAwareUnionSplit, Split, UnionSplit};
 
@@ -202,7 +202,7 @@ impl<T: Data + Clone> RddBase for UnionRdd<T> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> DataResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         log::debug!("inside iterator_any union_rdd",);
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
@@ -228,7 +228,7 @@ impl<T: Data + Clone> Rdd for UnionRdd<T> {
         Arc::new(UnionRdd(self.0.clone())) as Arc<dyn Rdd<Item = T>>
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> BaseResult<Box<dyn Iterator<Item = T>>> {
+    fn compute(&self, split: Box<dyn Split>) -> DataResult<Box<dyn Iterator<Item = T>>> {
         match &self.0 {
             NonUniquePartitioner { rdds, .. } => {
                 let part = split
@@ -243,7 +243,7 @@ impl<T: Data + Clone> Rdd for UnionRdd<T> {
                     .as_any()
                     .downcast_ref::<PartitionerAwareUnionSplit>()
                     .ok_or(ComputeError::DowncastFailure("PartitionerAwareUnionSplit"))?;
-                let iter: BaseResult<Vec<_>> = rdds
+                let iter: DataResult<Vec<_>> = rdds
                     .iter()
                     .zip(split.parents(rdds))
                     .map(|(rdd, p)| rdd.iterator(p.clone()))

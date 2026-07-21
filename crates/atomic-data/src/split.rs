@@ -4,7 +4,7 @@ use dyn_clone::DynClone;
 
 use crate::{
     data::Data,
-    error::BaseError,
+    error::DataError,
     rdd::{Rdd, RddBase},
 };
 
@@ -91,13 +91,13 @@ impl CoalescedRddSplit {
         }
     }
 
-    pub fn downcasting(split: Box<dyn Split>) -> Result<CoalescedRddSplit, BaseError> {
+    pub fn downcasting(split: Box<dyn Split>) -> Result<CoalescedRddSplit, DataError> {
         // Use the as_any method to downcast
         split
             .as_any()
             .downcast_ref::<CoalescedRddSplit>()
             .cloned()
-            .ok_or_else(|| BaseError::DowncastFailure("CoalescedRddSplit".to_string()))
+            .ok_or_else(|| DataError::DowncastFailure("CoalescedRddSplit".to_string()))
     }
 }
 

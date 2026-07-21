@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::split::Split;
 
@@ -20,7 +20,7 @@ use crate::rdd::rdd_val::RddVals;
 /// (`Arc<dyn TextFileSource>`) without knowing any concrete scheme.
 pub trait TextFileSource: Send + Sync + Debug {
     /// Read the whole source and return its content as lines.
-    fn read_lines(&self) -> Result<Vec<String>, BaseError>;
+    fn read_lines(&self) -> Result<Vec<String>, DataError>;
 }
 
 /// A local filesystem file.
@@ -28,10 +28,10 @@ pub trait TextFileSource: Send + Sync + Debug {
 pub struct LocalTextFile(pub PathBuf);
 
 impl TextFileSource for LocalTextFile {
-    fn read_lines(&self) -> Result<Vec<String>, BaseError> {
+    fn read_lines(&self) -> Result<Vec<String>, DataError> {
         use std::io::BufRead;
         let file = std::fs::File::open(&self.0).map_err(|e| {
-            BaseError::Other(format!("text_file: cannot open {}: {e}", self.0.display()))
+            DataError::Other(format!("text_file: cannot open {}: {e}", self.0.display()))
         })?;
         Ok(std::io::BufReader::new(file)
             .lines()
@@ -48,7 +48,7 @@ pub struct S3TextFile {
 }
 
 impl TextFileSource for S3TextFile {
-    fn read_lines(&self) -> Result<Vec<String>, BaseError> {
+    fn read_lines(&self) -> Result<Vec<String>, DataError> {
         Ok(crate::io::s3::read_lines(&self.bucket, &self.key))
     }
 }
@@ -159,7 +159,7 @@ impl RddBase for TextFileRdd {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         Ok(Box::new(
             self.compute(split)?.map(|s| Box::new(s) as Box<dyn Data>),
         ))
@@ -180,10 +180,10 @@ impl Rdd for TextFileRdd {
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = String>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = String>>, DataError> {
         let idx = split.get_index();
         let source = self.sources.get(idx).ok_or_else(|| {
-            BaseError::Other(format!("TextFileRdd: partition {idx} out of range"))
+            DataError::Other(format!("TextFileRdd: partition {idx} out of range"))
         })?;
         let lines = source.read_lines()?;
         Ok(Box::new(lines.into_iter()))

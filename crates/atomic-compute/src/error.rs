@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::partial::PartialJobError;
 use atomic_data::shuffle::{
     error::{NetworkError, ShuffleError},
@@ -121,6 +121,12 @@ pub enum ComputeError {
     #[error(transparent)]
     SchedulerError(#[from] atomic_scheduler::error::SchedulerError),
 
+    #[error(transparent)]
+    Data(#[from] DataError),
+
+    #[error(transparent)]
+    Broadcast(#[from] atomic_data::broadcast::BroadcastError),
+
     #[error("internal error: {0}")]
     Other(String),
 }
@@ -131,15 +137,9 @@ impl ComputeError {
     }
 }
 
-impl From<ComputeError> for BaseError {
+impl From<ComputeError> for DataError {
     fn from(err: ComputeError) -> Self {
-        BaseError::Other(format!("{}", err))
-    }
-}
-
-impl From<BaseError> for ComputeError {
-    fn from(e: BaseError) -> Self {
-        ComputeError::InvalidPayload(e.to_string())
+        DataError::Other(format!("{}", err))
     }
 }
 

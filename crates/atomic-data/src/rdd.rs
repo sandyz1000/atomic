@@ -1,5 +1,5 @@
 use crate::{
-    data::Data, dependency::Dependency, error::BaseResult, partitioner::Partitioner, split::Split,
+    data::Data, dependency::Dependency, error::DataResult, partitioner::Partitioner, split::Split,
 };
 
 use std::sync::Arc;
@@ -36,12 +36,12 @@ pub trait RddBase: Send + Sync {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>>;
+    ) -> DataResult<Box<dyn Iterator<Item = Box<dyn Data>>>>;
 
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> BaseResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
+    ) -> DataResult<Box<dyn Iterator<Item = Box<dyn Data>>>> {
         self.iterator_any(split)
     }
 
@@ -75,9 +75,9 @@ pub trait Rdd: RddBase + 'static {
 
     fn get_rdd_base(&self) -> Arc<dyn RddBase>;
 
-    fn compute(&self, split: Box<dyn Split>) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>>;
+    fn compute(&self, split: Box<dyn Split>) -> DataResult<Box<dyn Iterator<Item = Self::Item>>>;
 
-    fn iterator(&self, split: Box<dyn Split>) -> BaseResult<Box<dyn Iterator<Item = Self::Item>>> {
+    fn iterator(&self, split: Box<dyn Split>) -> DataResult<Box<dyn Iterator<Item = Self::Item>>> {
         self.compute(split)
     }
 }

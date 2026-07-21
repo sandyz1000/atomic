@@ -432,7 +432,7 @@ where
         TypedRdd::new(Arc::new(shuffled), self.context)
     }
 
-    pub fn count_by_key(&self) -> Result<std::collections::HashMap<K, u64>, BaseError>
+    pub fn count_by_key(&self) -> Result<std::collections::HashMap<K, u64>, DataError>
     where
         (K, V): WireEncode,
         Vec<(K, V)>: WireEncode + WireDecode,
@@ -465,7 +465,7 @@ where
         Ok(final_counts)
     }
 
-    pub fn lookup(&self, key: &K) -> Result<Vec<V>, BaseError>
+    pub fn lookup(&self, key: &K) -> Result<Vec<V>, DataError>
     where
         K: Clone,
         (K, V): WireEncode,
@@ -493,7 +493,7 @@ where
     ///
     /// When a key appears multiple times, the last value encountered wins.
     /// Collects every pair into a single map on the driver.
-    pub fn collect_as_map(&self) -> Result<std::collections::HashMap<K, V>, BaseError>
+    pub fn collect_as_map(&self) -> Result<std::collections::HashMap<K, V>, DataError>
     where
         K: std::hash::Hash + Eq,
         (K, V): WireEncode,
@@ -537,7 +537,7 @@ where
     pub fn reduce_by_key_locally_task<B>(
         &self,
         merge: B,
-    ) -> Result<std::collections::HashMap<K, V>, BaseError>
+    ) -> Result<std::collections::HashMap<K, V>, DataError>
     where
         B: BinaryTask<V>,
         K: std::hash::Hash + Eq,

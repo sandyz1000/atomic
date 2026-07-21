@@ -15,7 +15,7 @@ fn next_cached_id() -> usize {
 }
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::split::Split;
 
 use crate::rdd::rdd_val::RddVals;
@@ -119,7 +119,7 @@ impl<T: Data + Clone> RddBase for CachedRdd<T> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         let rdd_iter = self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>);
         Ok(Box::new(rdd_iter))
     }
@@ -136,7 +136,7 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = T>>, BaseError> {
+    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = T>>, DataError> {
         let idx = split.get_index();
         let rdd_id = self.rdd_id();
 

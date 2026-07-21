@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::split::Split;
 
@@ -138,7 +138,7 @@ impl<T: Data + Clone + bincode::Decode<()> + 'static> RddBase for CheckpointRdd<
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         Ok(Box::new(
             self.compute(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
@@ -159,7 +159,7 @@ where
         Arc::new(self.clone())
     }
 
-    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = T>>, BaseError> {
+    fn compute(&self, split: Box<dyn Split>) -> Result<Box<dyn Iterator<Item = T>>, DataError> {
         let idx = split.get_index();
 
         match &self.store {
@@ -169,7 +169,7 @@ where
                     .join(format!("{idx}.bin"));
                 use crate::rdd::cached::disk_read_partition;
                 let items = disk_read_partition::<T>(&path).map_err(|e| {
-                    BaseError::Other(format!("checkpoint read failed at {}: {e}", path.display()))
+                    DataError::Other(format!("checkpoint read failed at {}: {e}", path.display()))
                 })?;
                 Ok(Box::new(items.into_iter()))
             }
@@ -184,12 +184,12 @@ where
                 let bytes =
                     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64.trim())
                         .map_err(|e| {
-                            BaseError::Other(format!("checkpoint s3 base64 decode: {e}"))
+                            DataError::Other(format!("checkpoint s3 base64 decode: {e}"))
                         })?;
                 let (items, _) =
                     bincode::decode_from_slice::<Vec<T>, _>(&bytes, bincode::config::standard())
                         .map_err(|e| {
-                            BaseError::Other(format!("checkpoint s3 bincode decode: {e}"))
+                            DataError::Other(format!("checkpoint s3 bincode decode: {e}"))
                         })?;
                 Ok(Box::new(items.into_iter()))
             }

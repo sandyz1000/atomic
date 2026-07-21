@@ -8,7 +8,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// round-trip per partition. Otherwise falls back to the driver scheduler path.
     ///
     /// **Warning**: This brings all data to the driver. Only use on small datasets.
-    pub fn collect(&self) -> Result<Vec<T>, BaseError>
+    pub fn collect(&self) -> Result<Vec<T>, DataError>
     where
         Vec<T>: WireDecode,
     {
@@ -17,12 +17,12 @@ impl<T: Data + Clone> TypedRdd<T> {
                 let result_bytes = self
                     .context
                     .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
-                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 return result_bytes
                     .into_iter()
                     .map(|bytes| {
                         Vec::<T>::decode_wire(&bytes)
-                            .map_err(|e| BaseError::DowncastFailure(e.to_string()))
+                            .map_err(|e| DataError::DowncastFailure(e.to_string()))
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .map(|vecs| vecs.into_iter().flatten().collect());
@@ -35,7 +35,7 @@ impl<T: Data + Clone> TypedRdd<T> {
             if has_shuffle {
                 self.context
                     .run_pending_shuffle_stages(&rdd_base, vec![])
-                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 // Fall through to run_job — ShuffledRdd::compute calls ShuffleFetcher::fetch.
             }
         }
@@ -54,7 +54,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     ///
     /// Returns `Vec<Vec<T>>` where index `i` holds the elements of partition `i`.
     /// Useful for `save_as_text_file` and `checkpoint` which write one file per partition.
-    pub fn collect_partitions(&self) -> Result<Vec<Vec<T>>, BaseError>
+    pub fn collect_partitions(&self) -> Result<Vec<Vec<T>>, DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -64,12 +64,12 @@ impl<T: Data + Clone> TypedRdd<T> {
                 let result_bytes = self
                     .context
                     .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
-                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 return result_bytes
                     .into_iter()
                     .map(|bytes| {
                         Vec::<T>::decode_wire(&bytes)
-                            .map_err(|e| BaseError::DowncastFailure(e.to_string()))
+                            .map_err(|e| DataError::DowncastFailure(e.to_string()))
                     })
                     .collect();
             }
@@ -77,12 +77,12 @@ impl<T: Data + Clone> TypedRdd<T> {
             // No staged op pipeline: encode each partition directly and decode back,
             // preserving partition boundaries without closure-backed scheduler tasks.
             let source = Context::encode_rdd_partitions(self.rdd.clone())
-                .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
             return source
                 .into_iter()
                 .map(|bytes| {
                     Vec::<T>::decode_wire(&bytes)
-                        .map_err(|e| BaseError::DowncastFailure(e.to_string()))
+                        .map_err(|e| DataError::DowncastFailure(e.to_string()))
                 })
                 .collect();
         }
@@ -98,7 +98,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// fetches one partition at a time and yields its elements before fetching the next.
     /// This reduces peak driver-side memory for large datasets where the caller processes
     /// elements incrementally.
-    pub fn to_local_iterator(&self) -> Result<impl Iterator<Item = T>, BaseError>
+    pub fn to_local_iterator(&self) -> Result<impl Iterator<Item = T>, DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -123,7 +123,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     ///
     /// In distributed mode, if a lazy pipeline is staged, it dispatches to workers
     /// and counts the returned elements on the driver. In local mode runs on driver.
-    pub fn count(&self) -> Result<u64, BaseError>
+    pub fn count(&self) -> Result<u64, DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -145,7 +145,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// In distributed mode, dispatches any staged pipeline to workers and takes
     /// the first `n` elements from the collected results. In local mode uses a
     /// partition-scanning strategy to minimise data read.
-    pub fn take(&self, num: usize) -> Result<Vec<T>, BaseError>
+    pub fn take(&self, num: usize) -> Result<Vec<T>, DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -204,7 +204,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Get the first element of the RDD.
     ///
     /// Returns an error if the RDD is empty.
-    pub fn first(&self) -> Result<T, BaseError>
+    pub fn first(&self) -> Result<T, DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -212,12 +212,12 @@ impl<T: Data + Clone> TypedRdd<T> {
         if let Some(result) = self.take(1)?.into_iter().next() {
             Ok(result)
         } else {
-            Err(BaseError::DowncastFailure("empty collection".to_string()))
+            Err(DataError::DowncastFailure("empty collection".to_string()))
         }
     }
 
     /// Returns `true` if the RDD contains no elements.
-    pub fn is_empty(&self) -> Result<bool, BaseError>
+    pub fn is_empty(&self) -> Result<bool, DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -234,7 +234,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Samples `max(1, ceil(confidence × num_partitions))` partitions and extrapolates.
     /// `confidence` must be in `(0.0, 1.0]`; use `1.0` for a full (non-approximate) scan.
     /// The result is an estimate — the actual count may differ from the return value.
-    pub fn count_approx(&self, confidence: f64) -> Result<u64, BaseError>
+    pub fn count_approx(&self, confidence: f64) -> Result<u64, DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -253,7 +253,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         let counts = self
             .context
             .run_job_with_partitions(self.rdd.clone(), |iter| iter.count() as u64, sample_indices)
-            .map_err(BaseError::from)?;
+            .map_err(DataError::from)?;
         let sampled_total: u64 = counts.iter().sum();
         let estimate = (sampled_total as f64 * n as f64 / sample_n as f64).round() as u64;
         Ok(estimate)
@@ -264,7 +264,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// In distributed mode, collects all elements from workers then applies
     /// `seq_fn` on the driver. `comb_fn` is unused in distributed mode since
     /// all elements are aggregated in a single pass on the driver.
-    pub fn aggregate<U, SF, CF>(&self, init: U, seq_fn: SF, comb_fn: CF) -> Result<U, BaseError>
+    pub fn aggregate<U, SF, CF>(&self, init: U, seq_fn: SF, comb_fn: CF) -> Result<U, DataError>
     where
         U: Data + Clone,
         T: WireEncode + WireDecode,
@@ -290,7 +290,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// `depth` controls the number of tree levels (default 2 is usually sufficient).
     ///
     /// Returns `None` if the RDD is empty.
-    pub fn tree_reduce<F>(&self, f: F, depth: usize) -> Result<Option<T>, BaseError>
+    pub fn tree_reduce<F>(&self, f: F, depth: usize) -> Result<Option<T>, DataError>
     where
         T: Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -338,7 +338,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         seq_fn: SF,
         comb_fn: CF,
         depth: usize,
-    ) -> Result<U, BaseError>
+    ) -> Result<U, DataError>
     where
         U: Data + Clone,
         T: WireEncode + WireDecode,
@@ -379,7 +379,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     ///
     /// In distributed mode, collects all elements from workers and applies `f`
     /// on the driver. The function runs on the driver, not on workers.
-    pub fn for_each<F>(&self, f: F) -> Result<(), BaseError>
+    pub fn for_each<F>(&self, f: F) -> Result<(), DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -402,7 +402,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// In distributed mode, collects all elements from workers and passes them
     /// as a single iterator to `f` on the driver (partition boundaries are not
     /// preserved across the wire).
-    pub fn for_each_partition<F>(&self, f: F) -> Result<(), BaseError>
+    pub fn for_each_partition<F>(&self, f: F) -> Result<(), DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -420,7 +420,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Apply a `#[task]`-registered side-effecting function (`UnaryTask<T, ()>`) to each
     /// element. Unlike [`for_each`](Self::for_each), which collects to the driver and runs
     /// the closure there, this runs the task **on the workers** in distributed mode.
-    pub fn for_each_task<F>(&self, task: F) -> Result<(), BaseError>
+    pub fn for_each_task<F>(&self, task: F) -> Result<(), DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -446,7 +446,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         let (source_partitions, mut steps) = match &self.staged {
             None => {
                 let src = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 (src, vec![])
             }
             Some(s) => (s.source_partitions.clone(), s.steps.clone()),
@@ -454,7 +454,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         steps.push(op);
         self.context
             .dispatch_pipeline(source_partitions, steps)
-            .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
         Ok(())
     }
 
@@ -462,7 +462,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     ///
     /// In distributed mode, collects all elements from workers then counts on
     /// the driver.
-    pub fn count_by_value(&self) -> Result<std::collections::HashMap<T, u64>, BaseError>
+    pub fn count_by_value(&self) -> Result<std::collections::HashMap<T, u64>, DataError>
     where
         T: Eq + std::hash::Hash + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -508,7 +508,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// ```ignore
     /// let max_val = rdd.max()?;
     /// ```
-    pub fn max(&self) -> Result<Option<T>, BaseError>
+    pub fn max(&self) -> Result<Option<T>, DataError>
     where
         T: Ord + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -534,7 +534,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// ```ignore
     /// let min_val = rdd.min()?;
     /// ```
-    pub fn min(&self) -> Result<Option<T>, BaseError>
+    pub fn min(&self) -> Result<Option<T>, DataError>
     where
         T: Ord + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -550,7 +550,7 @@ impl<T: Data + Clone> TypedRdd<T> {
 
     /// Internal helper: dispatch the staged pipeline (or raw partitions) to workers
     /// and return all elements as a flat `Vec<T>`. Used by `max`, `min`, `count`.
-    pub(crate) fn collect_distributed(&self) -> Result<Vec<T>, BaseError>
+    pub(crate) fn collect_distributed(&self) -> Result<Vec<T>, DataError>
     where
         T: WireEncode,
         Vec<T>: WireEncode + WireDecode,
@@ -558,7 +558,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         let (source, steps) = match &self.staged {
             None => {
                 let src = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 (src, vec![])
             }
             Some(s) => (s.source_partitions.clone(), s.steps.clone()),
@@ -566,12 +566,12 @@ impl<T: Data + Clone> TypedRdd<T> {
         let result_bytes = self
             .context
             .dispatch_pipeline(source, steps)
-            .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
 
         result_bytes
             .into_iter()
             .map(|b| {
-                Vec::<T>::decode_wire(&b).map_err(|e| BaseError::DowncastFailure(e.to_string()))
+                Vec::<T>::decode_wire(&b).map_err(|e| DataError::DowncastFailure(e.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()
             .map(|vecs| vecs.into_iter().flatten().collect())
@@ -580,7 +580,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Return the top k elements in descending order.
     ///
     /// In distributed mode, collects all elements from workers then sorts on the driver.
-    pub fn top(&self, k: usize) -> Result<Vec<T>, BaseError>
+    pub fn top(&self, k: usize) -> Result<Vec<T>, DataError>
     where
         T: Ord + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -607,7 +607,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Return the first k elements in ascending order.
     ///
     /// In distributed mode, collects all elements from workers then sorts on the driver.
-    pub fn take_ordered(&self, k: usize) -> Result<Vec<T>, BaseError>
+    pub fn take_ordered(&self, k: usize) -> Result<Vec<T>, DataError>
     where
         T: Ord + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,

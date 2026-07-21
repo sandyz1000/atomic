@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::distributed::{WireDecode, WireEncode};
-use crate::error::BaseResult;
+use crate::error::DataResult;
 
 static NEXT_ACCUMULATOR_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -78,7 +78,7 @@ where
 /// A delta arrives over the network from a worker, so a malformed payload (stale
 /// binary, transport corruption) must be a recoverable error on the driver, not a
 /// panic that takes down the whole process.
-pub type MergeFn = Box<dyn Fn(Vec<u8>, Vec<u8>) -> BaseResult<Vec<u8>> + Send + Sync>;
+pub type MergeFn = Box<dyn Fn(Vec<u8>, Vec<u8>) -> DataResult<Vec<u8>> + Send + Sync>;
 
 /// Type-safe helper to build a `MergeFn` from a user-supplied `Fn(T, T) -> T`.
 pub fn make_merge_fn<T, F>(merge: F) -> MergeFn

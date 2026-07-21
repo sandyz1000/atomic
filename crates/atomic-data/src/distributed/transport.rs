@@ -1,4 +1,4 @@
-use crate::error::{BaseError, BaseResult};
+use crate::error::{DataError, DataResult};
 
 pub const TRANSPORT_FRAME_MAGIC: [u8; 4] = *b"ATOM";
 pub const TRANSPORT_FRAME_VERSION_V1: u8 = 1;
@@ -15,7 +15,7 @@ pub enum TransportFrameKind {
 }
 
 impl TryFrom<u8> for TransportFrameKind {
-    type Error = BaseError;
+    type Error = DataError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
@@ -23,7 +23,7 @@ impl TryFrom<u8> for TransportFrameKind {
             4 => Ok(Self::TaskResultEnvelope),
             5 => Ok(Self::WorkerCapabilities),
             6 => Ok(Self::Auth),
-            _ => Err(BaseError::Other(format!(
+            _ => Err(DataError::Other(format!(
                 "unknown transport frame kind: {}",
                 value
             ))),
@@ -43,15 +43,15 @@ pub fn encode_transport_frame(kind: TransportFrameKind, payload: &[u8]) -> Vec<u
 
 pub fn parse_transport_header(
     header: &[u8; TRANSPORT_HEADER_LEN],
-) -> BaseResult<(TransportFrameKind, usize)> {
+) -> DataResult<(TransportFrameKind, usize)> {
     if header[..4] != TRANSPORT_FRAME_MAGIC {
-        return Err(BaseError::Other(
+        return Err(DataError::Other(
             "invalid transport frame magic".to_string(),
         ));
     }
 
     if header[4] != TRANSPORT_FRAME_VERSION_V1 {
-        return Err(BaseError::Other(format!(
+        return Err(DataError::Other(format!(
             "unsupported transport frame version: {}",
             header[4]
         )));

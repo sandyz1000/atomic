@@ -1,4 +1,4 @@
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::partial::PartialJobError;
 
 #[derive(Debug, thiserror::Error)]
@@ -40,7 +40,7 @@ pub enum SchedulerError {
     Io(#[from] std::io::Error),
 
     #[error(transparent)]
-    Base(#[from] BaseError),
+    Base(#[from] DataError),
 }
 
 pub type LibResult<T> = Result<T, SchedulerError>;

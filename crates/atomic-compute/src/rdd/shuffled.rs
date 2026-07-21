@@ -5,7 +5,7 @@ use atomic_data::aggregator::{Aggregator, MergeCombinersFn};
 use atomic_data::data::Data;
 use atomic_data::dependency::{Dependency, KeyComparator, ShuffleDependency, TypedShuffle};
 use atomic_data::distributed::WireEncode;
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::shuffle::fetcher::{ShuffleFetcher, SpilledRunIter};
 use atomic_data::split::{ShuffledRddSplit, Split};
@@ -219,7 +219,7 @@ where
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         log::debug!("inside iterator_any shuffledrdd",);
         let rdd_iter = self
             .iterator(split)?
@@ -230,7 +230,7 @@ where
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         log::debug!("inside cogroup iterator_any shuffledrdd",);
         let rdd_iter = self
             .iterator(split)?
@@ -258,7 +258,7 @@ where
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         log::debug!("compute inside shuffled rdd");
         let start = Instant::now();
 
@@ -314,7 +314,7 @@ where
                             self.fetcher
                                 .fetch_runs_spilled::<K, C>(self.shuffle_id, orig_id),
                         )
-                        .map_err(BaseError::from)?;
+                        .map_err(DataError::from)?;
                     runs.extend(fetched);
                 }
                 log::debug!(
@@ -329,7 +329,7 @@ where
             for orig_id in original_ids {
                 let fetched = Handle::current()
                     .block_on(self.fetcher.fetch_runs::<K, C>(self.shuffle_id, orig_id))
-                    .map_err(BaseError::from)?;
+                    .map_err(DataError::from)?;
                 runs.extend(fetched.into_iter().map(IntoIterator::into_iter));
             }
             log::debug!(
@@ -342,7 +342,7 @@ where
         let mut combiners: HashMap<K, C> = HashMap::new();
         for orig_id in original_ids {
             let fut = self.fetcher.fetch::<K, C>(self.shuffle_id, orig_id);
-            let result = Handle::current().block_on(fut).map_err(BaseError::from)?;
+            let result = Handle::current().block_on(fut).map_err(DataError::from)?;
             for (k, c) in result {
                 combiners
                     .entry(k)

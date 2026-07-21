@@ -1,5 +1,5 @@
 #[derive(thiserror::Error, Debug)]
-pub enum BaseError {
+pub enum DataError {
     #[error("{0}")]
     DowncastFailure(String),
 
@@ -26,7 +26,7 @@ pub enum BaseError {
     Io(#[from] std::io::Error),
 }
 
-pub type BaseResult<T> = Result<T, BaseError>;
+pub type DataResult<T> = Result<T, DataError>;
 
 #[cfg(test)]
 mod tests {
@@ -34,25 +34,25 @@ mod tests {
 
     #[test]
     fn other_error_displays_message() {
-        let err = BaseError::Other("something went wrong".into());
+        let err = DataError::Other("something went wrong".into());
         assert_eq!(err.to_string(), "something went wrong");
     }
 
     #[test]
     fn downcast_failure_displays_message() {
-        let err = BaseError::DowncastFailure("type mismatch".into());
+        let err = DataError::DowncastFailure("type mismatch".into());
         assert_eq!(err.to_string(), "type mismatch");
     }
 
     #[test]
     fn base_result_ok_round_trip() {
-        let result: BaseResult<u32> = Ok(42);
+        let result: DataResult<u32> = Ok(42);
         assert_eq!(result.ok(), Some(42));
     }
 
     #[test]
     fn base_result_err_propagates() {
-        let result: BaseResult<u32> = Err(BaseError::Other("fail".into()));
+        let result: DataResult<u32> = Err(DataError::Other("fail".into()));
         match result {
             Err(e) => assert_eq!(e.to_string(), "fail"),
             Ok(_) => panic!("expected Err"),

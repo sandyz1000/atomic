@@ -2,7 +2,7 @@ use std::{marker::PhantomData, net::Ipv4Addr, sync::Arc};
 
 use crate::rdd::{Data, Rdd, core::RddCore};
 use atomic_data::{
-    dependency::Dependency, error::BaseError, fn_traits::RddPartitionFn, rdd::RddBase, split::Split,
+    dependency::Dependency, error::DataError, fn_traits::RddPartitionFn, rdd::RddBase, split::Split,
 };
 
 /// An RDD that applies the provided function to every partition of the parent RDD.
@@ -80,14 +80,14 @@ where
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         self.iterator_any(split)
     }
 
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         Ok(Box::new(
             self.iterator(split)?.map(|x| Box::new(x) as Box<dyn Data>),
         ))
@@ -110,7 +110,7 @@ where
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         let f = self.f.clone();
         let index = split.get_index();
         Ok(Box::new(f(index, self.core.prev.iterator(split)?)))
@@ -192,7 +192,7 @@ where
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         Ok(Box::new(
             self.iterator(split)?
                 .map(|(k, v)| Box::new((k, v)) as Box<dyn Data>),
@@ -203,7 +203,7 @@ where
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         Ok(Box::new(
             self.iterator(split)?
                 .map(|(k, v)| Box::new((k, Box::new(v))) as Box<dyn Data>),
@@ -227,7 +227,7 @@ where
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         let f = self.f.clone();
         let index = split.get_index();
         Ok(Box::new(f(index, self.core.prev.iterator(split)?)))

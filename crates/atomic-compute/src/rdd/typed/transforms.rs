@@ -83,7 +83,7 @@ impl<T: Data> TypedRdd<T> {
     fn materialize_other_set(
         &self,
         other: &TypedRdd<T>,
-    ) -> Result<Arc<std::collections::HashSet<T>>, BaseError>
+    ) -> Result<Arc<std::collections::HashSet<T>>, DataError>
     where
         T: Eq + std::hash::Hash + Clone + WireEncode,
         Vec<T>: WireEncode + WireDecode,
@@ -100,7 +100,7 @@ impl<T: Data> TypedRdd<T> {
         Ok(Arc::new(items.into_iter().collect()))
     }
 
-    pub fn subtract(self, other: TypedRdd<T>) -> Result<TypedRdd<T>, BaseError>
+    pub fn subtract(self, other: TypedRdd<T>) -> Result<TypedRdd<T>, DataError>
     where
         T: Eq + std::hash::Hash + Clone + WireEncode,
         Vec<T>: WireEncode + WireDecode,
@@ -122,7 +122,7 @@ impl<T: Data> TypedRdd<T> {
         ))
     }
 
-    pub fn intersection(self, other: TypedRdd<T>) -> Result<TypedRdd<T>, BaseError>
+    pub fn intersection(self, other: TypedRdd<T>) -> Result<TypedRdd<T>, DataError>
     where
         T: Eq + std::hash::Hash + Clone + WireEncode,
         Vec<T>: WireEncode + WireDecode,
@@ -302,7 +302,7 @@ impl<T: Data> TypedRdd<T> {
     /// - Local path — creates the directory and writes `part-N` files inside it.
     ///
     /// Each element is converted to a string via `Display` and written as one line.
-    pub fn save_as_text_file(&self, uri: &str) -> Result<(), BaseError>
+    pub fn save_as_text_file(&self, uri: &str) -> Result<(), DataError>
     where
         T: std::fmt::Display + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
@@ -313,7 +313,7 @@ impl<T: Data> TypedRdd<T> {
 
         let path = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri));
         std::fs::create_dir_all(path).map_err(|e| {
-            BaseError::Other(format!(
+            DataError::Other(format!(
                 "save_as_text_file: cannot create dir {}: {e}",
                 path.display()
             ))
@@ -322,7 +322,7 @@ impl<T: Data> TypedRdd<T> {
             use std::io::Write;
             let file_path = path.join(format!("part-{idx}"));
             let mut f = std::fs::File::create(&file_path).map_err(|e| {
-                BaseError::Other(format!("save_as_text_file: {}: {e}", file_path.display()))
+                DataError::Other(format!("save_as_text_file: {}: {e}", file_path.display()))
             })?;
             for item in partition {
                 writeln!(f, "{item}")?;
@@ -331,14 +331,14 @@ impl<T: Data> TypedRdd<T> {
         Ok(())
     }
 
-    fn write_s3(&self, uri: &str) -> Result<(), BaseError>
+    fn write_s3(&self, uri: &str) -> Result<(), DataError>
     where
         T: std::fmt::Display + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
         use crate::io::s3::{S3Uri, write_text};
         let s3uri = S3Uri::parse(uri)
-            .ok_or_else(|| BaseError::Other(format!("save_as_text_file: invalid S3 URI: {uri}")))?;
+            .ok_or_else(|| DataError::Other(format!("save_as_text_file: invalid S3 URI: {uri}")))?;
         for (idx, partition) in self.collect_partitions()?.into_iter().enumerate() {
             let key = format!("{}/part-{idx}", s3uri.key.trim_end_matches('/'));
             let content: String = partition
@@ -346,7 +346,7 @@ impl<T: Data> TypedRdd<T> {
                 .map(|item| format!("{item}\n"))
                 .collect();
             write_text(&s3uri.bucket, &key, content)
-                .map_err(|e| BaseError::Other(e.to_string()))?;
+                .map_err(|e| DataError::Other(e.to_string()))?;
         }
         Ok(())
     }

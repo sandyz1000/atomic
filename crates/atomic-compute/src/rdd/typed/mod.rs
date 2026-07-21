@@ -13,7 +13,7 @@ use atomic_data::dependency::Dependency;
 use atomic_data::distributed::{
     EngineStep, Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
-use atomic_data::error::BaseError;
+use atomic_data::error::DataError;
 use atomic_data::partitioner::Partitioner;
 
 use crate::rdd::{Data, Rdd, RddBase};
@@ -160,14 +160,14 @@ impl<D: Data> RddBase for TypedRdd<D> {
     fn iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         self.rdd.iterator_any(split)
     }
 
     fn cogroup_iterator_any(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Box<dyn Data>>>, DataError> {
         self.rdd.cogroup_iterator_any(split)
     }
 
@@ -193,7 +193,7 @@ where
     fn compute(
         &self,
         split: Box<dyn Split>,
-    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, BaseError> {
+    ) -> Result<Box<dyn Iterator<Item = Self::Item>>, DataError> {
         self.rdd.compute(split)
     }
 }
