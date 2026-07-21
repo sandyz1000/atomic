@@ -121,11 +121,12 @@ impl Rdd for LocalFsReader<BytesReader> {
         let files_by_part = self.load_local_files()?;
         let idx = split.idx;
         let host = split.host;
-        Ok(Box::new(
+        let byte_iter =
             files_by_part
                 .into_iter()
-                .map(move |files| BytesReader { files, host, idx }),
-        ) as Box<dyn Iterator<Item = Self::Item>>)
+                .map(move |files| BytesReader { files, host, idx });
+
+        Ok(Box::new(byte_iter) as Box<dyn Iterator<Item = Self::Item>>)
     }
 }
 

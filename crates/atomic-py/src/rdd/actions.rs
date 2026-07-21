@@ -292,8 +292,7 @@ impl PyRdd {
 
     /// Write each element as a line to `path`.
     ///
-    /// Accepts a local file path or, when built with the `s3` feature, an
-    /// S3 URI (`s3://bucket/prefix`).
+    /// Accepts a local file path or an S3 URI (`s3://bucket/prefix`).
     pub fn save_as_text_file(&self, py: Python, path: String) -> PyResult<()> {
         if path.starts_with("s3://") {
             return self.write_s3(py, &path);
@@ -435,37 +434,28 @@ impl PyRdd {
 // A plain (non-`#[pymethods]`) impl block for private helpers — pyo3's proc-macro
 // only processes items inside a `#[pymethods]`-annotated block.
 impl PyRdd {
-    atomic_data::cfg_s3! {
-        fn write_s3(&self, py: Python, path: &str) -> PyResult<()> {
-            use atomic_compute::io::s3::s3_impl::{S3Uri, write_text};
-            let s3uri = S3Uri::parse(path).ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "save_as_text_file: invalid S3 URI: {path}"
-                ))
-            })?;
-            let content: String = self
-                .elements
-                .iter()
-                .map(|item| {
-                    let s = item
-                        .bind(py)
-                        .str()
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-                    format!("{s}\n")
-                })
-                .collect();
-            let key = format!("{}/part-0", s3uri.key.trim_end_matches('/'));
-            write_text(&s3uri.bucket, &key, content)
-                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-            Ok(())
-        }
-    }
-    atomic_data::cfg_not_s3! {
-        fn write_s3(&self, _py: Python, _path: &str) -> PyResult<()> {
-            Err(pyo3::exceptions::PyIOError::new_err(
-                "save_as_text_file: s3:// URIs require the 's3' feature flag",
+    fn write_s3(&self, py: Python, path: &str) -> PyResult<()> {
+        use atomic_compute::io::s3::{S3Uri, write_text};
+        let s3uri = S3Uri::parse(path).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "save_as_text_file: invalid S3 URI: {path}"
             ))
-        }
+        })?;
+        let content: String = self
+            .elements
+            .iter()
+            .map(|item| {
+                let s = item
+                    .bind(py)
+                    .str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                format!("{s}\n")
+            })
+            .collect();
+        let key = format!("{}/part-0", s3uri.key.trim_end_matches('/'));
+        write_text(&s3uri.bucket, &key, content)
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        Ok(())
     }
 }

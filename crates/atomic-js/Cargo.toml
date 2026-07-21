@@ -22,8 +22,5 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
-[features]
-s3 = ["atomic-compute/s3"]
-
 [build-dependencies]
 napi-build = "2"

@@ -83,31 +83,15 @@ impl Context {
     ///
     /// URI schemes:
     /// - `s3://bucket/prefix` — lists all objects under the prefix; each key is one partition.
-    ///   Requires the `s3` feature flag.
     /// - `file:///absolute/path` or `/absolute/path` or `relative/path` — reads a local file
     ///   (single partition) or, if the path is a directory, all files in the directory (one
     ///   partition per file).
     ///
     /// Each partition yields one line per element.
     pub fn text_file(self: &Arc<Self>, uri: &str) -> TypedRdd<String> {
-        use crate::io::{TextFileRdd, TextFileSource};
+        use crate::io::text_file_rdd::{TextFileRdd, resolve};
 
-        let sources: Vec<TextFileSource> = if uri.starts_with("s3://") {
-            s3_sources(uri)
-        } else {
-            let path = std::path::Path::new(uri.strip_prefix("file://").unwrap_or(uri));
-            if path.is_dir() {
-                std::fs::read_dir(path)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|entry| entry.ok())
-                    .map(|entry| TextFileSource::Local(entry.path()))
-                    .collect()
-            } else {
-                vec![TextFileSource::Local(path.to_path_buf())]
-            }
-        };
-
+        let sources = resolve(uri);
         let id = self.new_rdd_id();
         let rdd = Arc::new(TextFileRdd::new(id, sources));
         TypedRdd::new(rdd, self.clone())
@@ -118,37 +102,5 @@ impl Context {
         rdds: &[Arc<dyn Rdd<Item = T>>],
     ) -> crate::error::ComputeResult<UnionRdd<T>> {
         UnionRdd::new(self.new_rdd_id(), rdds)
-    }
-}
-
-crate::cfg_s3! {
-    fn s3_sources(uri: &str) -> Vec<crate::io::TextFileSource> {
-        use crate::io::TextFileSource;
-        use crate::io::s3::s3_impl::S3Uri;
-        let Some(s3uri) = S3Uri::parse(uri) else {
-            return vec![];
-        };
-        let keys = crate::io::s3::s3_impl::list_keys(&s3uri.bucket, &s3uri.key);
-        if keys.is_empty() {
-            vec![TextFileSource::S3 {
-                bucket: s3uri.bucket,
-                key: s3uri.key,
-            }]
-        } else {
-            keys.into_iter()
-                .map(|k| TextFileSource::S3 {
-                    bucket: s3uri.bucket.clone(),
-                    key: k,
-                })
-                .collect()
-        }
-    }
-}
-
-crate::cfg_not_s3! {
-    fn s3_sources(uri: &str) -> Vec<crate::io::TextFileSource> {
-        let _ = uri;
-        log::warn!("text_file: s3:// URI requested but 's3' feature is disabled");
-        vec![]
     }
 }

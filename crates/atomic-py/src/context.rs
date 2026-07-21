@@ -74,9 +74,9 @@ impl PyContext {
 
     /// Create an RDD from lines of a text file or S3 object.
     ///
-    /// Accepts local paths (`/path/to/file`, `file:///path`) and, when built
-    /// with the `s3` feature, S3 URIs (`s3://bucket/key`).  A directory path
-    /// or S3 prefix produces one partition per file/object.
+    /// Accepts local paths (`/path/to/file`, `file:///path`) and S3 URIs
+    /// (`s3://bucket/key`).  A directory path or S3 prefix produces one
+    /// partition per file/object.
     pub fn text_file(&self, py: Python, path: &str) -> PyResult<PyRdd> {
         let lines: Vec<String> = self
             .inner

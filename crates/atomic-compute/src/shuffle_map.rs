@@ -1,5 +1,5 @@
-use atomic_data::{data::Data, distributed::WireDecode};
 use atomic_data::partitioner::PartitionerSchema;
+use atomic_data::{data::Data, distributed::WireDecode};
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 

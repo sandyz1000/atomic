@@ -26,6 +26,3 @@ serde_json = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
-
-[features]
-s3 = ["atomic-compute/s3"]

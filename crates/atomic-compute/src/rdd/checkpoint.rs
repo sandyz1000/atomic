@@ -1,7 +1,7 @@
 /// RDD checkpointing — lineage truncation.
 ///
 /// `CheckpointRdd<T>` is a leaf RDD that reads pre-materialized partitions from disk
-/// (local path or `s3://` when the `s3` feature is enabled). It has no parent
+/// (local path or `s3://`). It has no parent
 /// dependencies, so the entire upstream DAG is truncated.
 ///
 /// Create via `TypedRdd::checkpoint(dir)` which materialises the current RDD, writes
@@ -38,22 +38,17 @@ impl Split for CheckpointSplit {
 #[derive(Debug, Clone)]
 pub enum CheckpointStore {
     Local(PathBuf),
-    #[cfg(feature = "s3")]
-    S3 {
-        bucket: String,
-        prefix: String,
-    },
+    S3 { bucket: String, prefix: String },
 }
 
 impl CheckpointStore {
     /// Parse a URI into a `CheckpointStore`.
     pub fn from_uri(uri: &str) -> Self {
-        if uri.starts_with("s3://") {
-            if let Some(store) = s3_checkpoint_store(uri) {
-                return store;
+        if let Some(s3) = crate::io::s3::S3Uri::parse(uri) {
+            CheckpointStore::S3 {
+                bucket: s3.bucket,
+                prefix: s3.key,
             }
-            log::warn!("CheckpointStore: s3:// URI requires 's3' feature; falling back to /tmp");
-            CheckpointStore::Local(std::env::temp_dir())
         } else {
             CheckpointStore::Local(PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri)))
         }
@@ -66,12 +61,10 @@ impl CheckpointStore {
                 base.join(format!("{rdd_id}"))
                     .join(format!("{partition}.bin")),
             ),
-            #[cfg(feature = "s3")]
             CheckpointStore::S3 { .. } => None,
         }
     }
 
-    crate::cfg_s3! {
     /// S3 key for a given rdd_id / partition (S3 only).
     pub fn s3_partition_key(&self, rdd_id: usize, partition: usize) -> Option<(&str, String)> {
         match self {
@@ -80,23 +73,6 @@ impl CheckpointStore {
             }
             CheckpointStore::Local(_) => None,
         }
-    }
-    } // cfg_s3!
-}
-
-crate::cfg_s3! {
-    fn s3_checkpoint_store(uri: &str) -> Option<CheckpointStore> {
-        use crate::io::s3::s3_impl::S3Uri;
-        let s3 = S3Uri::parse(uri)?;
-        Some(CheckpointStore::S3 {
-            bucket: s3.bucket,
-            prefix: s3.key,
-        })
-    }
-}
-crate::cfg_not_s3! {
-    fn s3_checkpoint_store(_uri: &str) -> Option<CheckpointStore> {
-        None
     }
 }
 
@@ -198,9 +174,8 @@ where
                 Ok(Box::new(items.into_iter()))
             }
 
-            #[cfg(feature = "s3")]
             CheckpointStore::S3 { bucket, prefix } => {
-                use crate::io::s3::s3_impl::read_lines;
+                use crate::io::s3::read_lines;
                 // For S3 we store bincode-encoded bytes as a base64 object.
                 // Read the object, base64-decode, then bincode-decode.
                 let key = format!("{prefix}/{}/{idx}.bin", self.vals.id);

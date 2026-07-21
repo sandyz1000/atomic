@@ -102,16 +102,6 @@ macro_rules! cfg_not_js {
 }
 
 #[macro_export]
-macro_rules! cfg_s3 {
-    ($($item:item)*) => { $(#[cfg(feature = "s3")] $item)* };
-}
-
-#[macro_export]
-macro_rules! cfg_not_s3 {
-    ($($item:item)*) => { $(#[cfg(not(feature = "s3"))] $item)* };
-}
-
-#[macro_export]
 macro_rules! cfg_k8s {
     ($($item:item)*) => { $(#[cfg(feature = "k8s")] $item)* };
 }

@@ -237,8 +237,7 @@ impl JsRdd {
 
     /// Write each element as a line to `path`.
     ///
-    /// Accepts a local file path or, when built with the `s3` feature, an
-    /// S3 URI (`s3://bucket/prefix`).
+    /// Accepts a local file path or an S3 URI (`s3://bucket/prefix`).
     #[napi]
     pub fn save_as_text_file(&self, path: String) -> Result<()> {
         if path.starts_with("s3://") {
@@ -362,34 +361,25 @@ impl JsRdd {
 // A plain (non-`#[napi]`) impl block — napi's proc-macro rejects any impl item it
 // doesn't recognize as a napi export, so private helpers live in their own block.
 impl JsRdd {
-    atomic_data::cfg_s3! {
-        fn write_s3(&self, path: &str) -> Result<()> {
-            use atomic_compute::io::s3::s3_impl::{S3Uri, write_text};
-            let s3uri = S3Uri::parse(path).ok_or_else(|| {
-                Error::from_reason(format!("save_as_text_file: invalid S3 URI: {path}"))
-            })?;
-            let content: String = self
-                .elements
-                .iter()
-                .map(|elem| {
-                    let line = match elem {
-                        JsonValue::String(s) => s.clone(),
-                        other => other.to_string(),
-                    };
-                    format!("{line}\n")
-                })
-                .collect();
-            let key = format!("{}/part-0", s3uri.key.trim_end_matches('/'));
-            write_text(&s3uri.bucket, &key, content)
-                .map_err(|e| Error::from_reason(format!("save_as_text_file S3: {e}")))?;
-            Ok(())
-        }
-    }
-    atomic_data::cfg_not_s3! {
-        fn write_s3(&self, _path: &str) -> Result<()> {
-            Err(Error::from_reason(
-                "save_as_text_file: s3:// URIs require the 's3' feature flag",
-            ))
-        }
+    fn write_s3(&self, path: &str) -> Result<()> {
+        use atomic_compute::io::s3::{S3Uri, write_text};
+        let s3uri = S3Uri::parse(path).ok_or_else(|| {
+            Error::from_reason(format!("save_as_text_file: invalid S3 URI: {path}"))
+        })?;
+        let content: String = self
+            .elements
+            .iter()
+            .map(|elem| {
+                let line = match elem {
+                    JsonValue::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                format!("{line}\n")
+            })
+            .collect();
+        let key = format!("{}/part-0", s3uri.key.trim_end_matches('/'));
+        write_text(&s3uri.bucket, &key, content)
+            .map_err(|e| Error::from_reason(format!("save_as_text_file S3: {e}")))?;
+        Ok(())
     }
 }

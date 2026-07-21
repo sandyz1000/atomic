@@ -176,9 +176,8 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
                         .map_err(|e| BaseError::Other(format!("checkpoint write failed: {e}")))?;
                 }
 
-                #[cfg(feature = "s3")]
                 CheckpointStore::S3 { bucket, prefix } => {
-                    use crate::io::s3::s3_impl::write_text;
+                    use crate::io::s3::write_text;
                     let bytes = bincode::encode_to_vec(data, bincode::config::standard())
                         .map_err(|e| BaseError::Other(format!("checkpoint encode: {e}")))?;
                     let b64 =

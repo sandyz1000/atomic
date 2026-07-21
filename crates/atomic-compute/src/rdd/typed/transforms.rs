@@ -298,7 +298,7 @@ impl<T: Data> TypedRdd<T> {
     /// Write each partition as a text file.
     ///
     /// URI schemes:
-    /// - `s3://bucket/prefix` — uploads `part-N` objects to that prefix (requires `s3` feature).
+    /// - `s3://bucket/prefix` — uploads `part-N` objects to that prefix.
     /// - Local path — creates the directory and writes `part-N` files inside it.
     ///
     /// Each element is converted to a string via `Display` and written as one line.
@@ -331,16 +331,14 @@ impl<T: Data> TypedRdd<T> {
         Ok(())
     }
 
-    crate::cfg_s3! {
     fn write_s3(&self, uri: &str) -> Result<(), BaseError>
     where
         T: std::fmt::Display + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        use crate::io::s3::s3_impl::{S3Uri, write_text};
-        let s3uri = S3Uri::parse(uri).ok_or_else(|| {
-            BaseError::Other(format!("save_as_text_file: invalid S3 URI: {uri}"))
-        })?;
+        use crate::io::s3::{S3Uri, write_text};
+        let s3uri = S3Uri::parse(uri)
+            .ok_or_else(|| BaseError::Other(format!("save_as_text_file: invalid S3 URI: {uri}")))?;
         for (idx, partition) in self.collect_partitions()?.into_iter().enumerate() {
             let key = format!("{}/part-{idx}", s3uri.key.trim_end_matches('/'));
             let content: String = partition
@@ -352,18 +350,6 @@ impl<T: Data> TypedRdd<T> {
         }
         Ok(())
     }
-    } // cfg_s3!
-    crate::cfg_not_s3! {
-    fn write_s3(&self, _uri: &str) -> Result<(), BaseError>
-    where
-        T: std::fmt::Display + Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
-    {
-        Err(BaseError::Other(
-            "save_as_text_file: s3:// URI requires the 's3' feature flag".to_owned(),
-        ))
-    }
-    } // cfg_not_s3!
 }
 
 impl<T: Data> TypedRdd<T> {
