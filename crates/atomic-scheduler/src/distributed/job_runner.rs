@@ -9,8 +9,7 @@ use std::{
 };
 
 use atomic_data::distributed::{
-    OpKind, PipelineOp, StateMergePayload, StepKind, TaskEnvelope, TaskResultEnvelope,
-    decode_payload,
+    EngineStep, StateMergePayload, Step, StepKind, TaskEnvelope, TaskResultEnvelope, decode_payload,
 };
 use parking_lot::Mutex;
 
@@ -37,7 +36,7 @@ pub(crate) struct PartitionTask {
 
 /// Job-level context shared across all partitions of one `run_native_job_inner` call.
 struct DispatchContext<'a> {
-    ops: &'a [PipelineOp],
+    steps: &'a [Step],
     broadcasts: &'a [(usize, Vec<u8>)],
     plan: &'a CacheDispatch,
     state_ids: &'a [Option<u64>],
@@ -120,14 +119,14 @@ impl DistributedScheduler {
         .resolve(shard)
     }
 
-    /// Check that `target` supports every capability required by `task`'s ops.
+    /// Check that `target` supports every capability required by `task`'s steps.
     /// Returns the first unsupported capability as an error, or `Ok(())` if all pass.
     fn worker_accepts_task(
         &self,
         target: &SocketAddrV4,
         task: &TaskEnvelope,
     ) -> Result<(), SchedulerError> {
-        for op in &task.ops {
+        for op in &task.steps {
             let cap = Self::required_capability(op);
             if !self.worker_has_capability(target, &cap) {
                 log::warn!(
@@ -147,9 +146,9 @@ impl DistributedScheduler {
     /// otherwise the regular `task_timeout`.
     pub(crate) fn effective_timeout(&self, task: &TaskEnvelope) -> Option<Duration> {
         let is_agent_step = task
-            .ops
+            .steps
             .iter()
-            .any(|o| matches!(o.kind, OpKind::Engine(StepKind::AgentStep)));
+            .any(|o| matches!(o.kind, StepKind::Engine(EngineStep::AgentStep)));
         if is_agent_step {
             Some(
                 self.agent_step_timeout
@@ -289,9 +288,9 @@ impl DistributedScheduler {
                     );
                     if attempt < self.max_failures
                         && task
-                            .ops
+                            .steps
                             .iter()
-                            .any(|o| matches!(o.kind, OpKind::Engine(StepKind::AgentStep)))
+                            .any(|o| matches!(o.kind, StepKind::Engine(EngineStep::AgentStep)))
                     {
                         // No per-input checkpointing within a partition (by design — see
                         // notes/agentic-task-future-design.md): retrying re-runs every input
@@ -325,22 +324,23 @@ impl DistributedScheduler {
     /// Run a native job, attaching broadcast variable payloads to every `TaskEnvelope`.
     pub async fn run_native_job_with_broadcasts(
         &self,
-        ops: Vec<PipelineOp>,
+        steps: Vec<Step>,
         partitions: Vec<Vec<u8>>,
         broadcasts: Vec<(usize, Vec<u8>)>,
     ) -> LibResult<Vec<Vec<u8>>> {
         if broadcasts.is_empty() {
-            return self.run_native_job(ops, partitions).await;
+            return self.run_native_job(steps, partitions).await;
         }
-        self.run_native_job_inner(ops, partitions, broadcasts).await
+        self.run_native_job_inner(steps, partitions, broadcasts)
+            .await
     }
 
     pub async fn run_native_job(
         &self,
-        ops: Vec<PipelineOp>,
+        steps: Vec<Step>,
         partitions: Vec<Vec<u8>>,
     ) -> LibResult<Vec<Vec<u8>>> {
-        self.run_native_job_inner(ops, partitions, vec![]).await
+        self.run_native_job_inner(steps, partitions, vec![]).await
     }
 
     /// Build one [`PartitionTask`] per partition: envelope(s), locality hint.
@@ -402,7 +402,7 @@ impl DistributedScheduler {
                             fb_attempt,
                             partition_id,
                             format!("{trace}-recompute"),
-                            ctx.ops.to_vec(),
+                            ctx.steps.to_vec(),
                             partition_data,
                         )
                         .with_broadcasts(ctx.broadcasts.to_vec());
@@ -420,7 +420,7 @@ impl DistributedScheduler {
                             attempt_id,
                             partition_id,
                             trace,
-                            ctx.ops.to_vec(),
+                            ctx.steps.to_vec(),
                             partition_data,
                         )
                         .with_broadcasts(ctx.broadcasts.to_vec()),
@@ -659,11 +659,11 @@ impl DistributedScheduler {
 
     async fn run_native_job_inner(
         &self,
-        ops: Vec<PipelineOp>,
+        steps: Vec<Step>,
         partitions: Vec<Vec<u8>>,
         broadcasts: Vec<(usize, Vec<u8>)>,
     ) -> LibResult<Vec<Vec<u8>>> {
-        let pipeline_label = ops
+        let pipeline_label = steps
             .iter()
             .map(|o| o.op_id.as_str())
             .collect::<Vec<_>>()
@@ -685,9 +685,9 @@ impl DistributedScheduler {
         // Distributed stateful-streaming merge: each partition is one state shard.
         // For report-back affinity (G1), decode the per-partition state_id before the
         // partitions vec is consumed, so `pin_state_shard` can look up registered locs.
-        let is_merge_state = ops
+        let is_merge_state = steps
             .iter()
-            .any(|o| matches!(o.kind, OpKind::Engine(StepKind::MergeState { .. })));
+            .any(|o| matches!(o.kind, StepKind::Engine(EngineStep::MergeState { .. })));
         let state_ids: Vec<Option<u64>> = if is_merge_state {
             partitions
                 .iter()
@@ -701,9 +701,9 @@ impl DistributedScheduler {
             vec![None; num_partitions]
         };
 
-        let plan = self.plan_cache_dispatch(&ops, num_partitions);
+        let plan = self.plan_cache_dispatch(&steps, num_partitions);
         let ctx = DispatchContext {
-            ops: &ops,
+            steps: &steps,
             broadcasts: &broadcasts,
             plan: &plan,
             state_ids: &state_ids,
@@ -738,9 +738,9 @@ impl DistributedScheduler {
 
         // AgentStep stages are never speculated: each partition runs exactly once to
         // avoid duplicate LLM cost and non-deterministic "first winner" results.
-        let has_agent_step = ops
+        let has_agent_step = steps
             .iter()
-            .any(|o| matches!(o.kind, OpKind::Engine(StepKind::AgentStep)));
+            .any(|o| matches!(o.kind, StepKind::Engine(EngineStep::AgentStep)));
         if let Some(multiplier) = self.speculation_multiplier {
             if !has_agent_step {
                 self.run_speculation_monitor(

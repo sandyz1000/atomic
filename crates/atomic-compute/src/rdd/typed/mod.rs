@@ -11,7 +11,7 @@ use crate::task_traits::{BinaryTask, UnaryTask};
 use atomic_data::cache::StorageLevel;
 use atomic_data::dependency::Dependency;
 use atomic_data::distributed::{
-    OpKind, PipelineOp, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
+    EngineStep, Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
 use atomic_data::error::BaseError;
 use atomic_data::partitioner::Partitioner;
@@ -33,13 +33,13 @@ mod sort;
 mod task_api;
 mod transforms;
 
-/// Accumulated ops waiting to be dispatched to workers as a single pipeline.
+/// Accumulated steps waiting to be dispatched to workers as a single pipeline.
 ///
 /// `source_partitions[i]` holds the rkyv-encoded `Vec<T>` for partition `i`.
-/// `ops` is the ordered list of operations to apply on each partition.
+/// `steps` is the ordered list of operations to apply on each partition.
 struct StagedPipeline {
     source_partitions: Vec<Vec<u8>>,
-    ops: Vec<PipelineOp>,
+    steps: Vec<Step>,
 }
 
 pub type RddRef<T> = Arc<dyn Rdd<Item = T>>;
@@ -49,7 +49,7 @@ pub type RddRef<T> = Arc<dyn Rdd<Item = T>>;
 /// This is the recommended way to work with RDDs in atomic. Unlike trait-based operations,
 /// TypedRdd provides methods that can be chained naturally without type erasure issues.
 ///
-/// In distributed mode, `_task` transformations accumulate ops lazily into a
+/// In distributed mode, `_task` transformations accumulate steps lazily into a
 /// `StagedPipeline` and only dispatch them when an action (`collect`, `fold_task`, …)
 /// is called — sending the full chain as a single `TaskEnvelope` per partition.
 ///
@@ -64,7 +64,7 @@ pub type RddRef<T> = Arc<dyn Rdd<Item = T>>;
 pub struct TypedRdd<T> {
     rdd: RddRef<T>,
     context: Arc<Context>,
-    /// Lazily accumulated pipeline of ops (distributed mode only).
+    /// Lazily accumulated pipeline of steps (distributed mode only).
     /// `None` means no pipeline has been started yet; the `rdd` field is authoritative.
     staged: Option<StagedPipeline>,
     _marker: PhantomData<T>,

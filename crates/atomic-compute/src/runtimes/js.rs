@@ -49,7 +49,7 @@ thread_local! {
     static FN_CACHE: RefCell<HashMap<u64, String>> = RefCell::new(HashMap::new());
 }
 
-/// [`OpDispatcher`] for `TaskRuntime::JavaScript` ops.
+/// [`Dispatcher`] for `TaskRuntime::JavaScript` steps.
 ///
 /// Decodes the [`JsTaskPayload`] from `op.payload` and evaluates the partition
 /// through the thread-local V8 runtime.
@@ -174,7 +174,7 @@ pub fn run_tool_call(fn_source: &str, args_json: &str) -> Result<String, String>
 impl JsDispatcher {
     fn dispatch_impl(
         &self,
-        op: &atomic_data::distributed::PipelineOp,
+        op: &atomic_data::distributed::Step,
         data: &[u8],
     ) -> Result<Vec<u8>, JsTaskError> {
         let spec: JsTaskPayload = serde_json::from_slice(&op.payload)?;
@@ -183,10 +183,10 @@ impl JsDispatcher {
     }
 }
 
-impl crate::runtimes::OpDispatcher for JsDispatcher {
+impl crate::runtimes::Dispatcher for JsDispatcher {
     fn dispatch(
         &self,
-        op: &atomic_data::distributed::PipelineOp,
+        op: &atomic_data::distributed::Step,
         _partition_id: usize,
         data: &[u8],
     ) -> ComputeResult<Vec<u8>> {

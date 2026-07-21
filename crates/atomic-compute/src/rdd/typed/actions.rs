@@ -16,7 +16,7 @@ impl<T: Data + Clone> TypedRdd<T> {
             if let Some(ref staged) = self.staged {
                 let result_bytes = self
                     .context
-                    .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+                    .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
                     .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
                 return result_bytes
                     .into_iter()
@@ -63,7 +63,7 @@ impl<T: Data + Clone> TypedRdd<T> {
             if let Some(ref staged) = self.staged {
                 let result_bytes = self
                     .context
-                    .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+                    .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
                     .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
                 return result_bytes
                     .into_iter()
@@ -437,23 +437,23 @@ impl<T: Data + Clone> TypedRdd<T> {
             return Ok(());
         }
 
-        let op = PipelineOp {
+        let op = Step {
             op_id: F::NAME.to_string(),
-            kind: OpKind::Task(TaskAction::Foreach),
+            kind: StepKind::Task(TaskAction::Foreach),
             runtime: TaskRuntime::Native,
             payload: task.encode_params(),
         };
-        let (source_partitions, mut ops) = match &self.staged {
+        let (source_partitions, mut steps) = match &self.staged {
             None => {
                 let src = Context::encode_rdd_partitions(self.rdd.clone())
                     .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
                 (src, vec![])
             }
-            Some(s) => (s.source_partitions.clone(), s.ops.clone()),
+            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
         };
-        ops.push(op);
+        steps.push(op);
         self.context
-            .dispatch_pipeline(source_partitions, ops)
+            .dispatch_pipeline(source_partitions, steps)
             .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
         Ok(())
     }
@@ -555,17 +555,17 @@ impl<T: Data + Clone> TypedRdd<T> {
         T: WireEncode,
         Vec<T>: WireEncode + WireDecode,
     {
-        let (source, ops) = match &self.staged {
+        let (source, steps) = match &self.staged {
             None => {
                 let src = Context::encode_rdd_partitions(self.rdd.clone())
                     .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
                 (src, vec![])
             }
-            Some(s) => (s.source_partitions.clone(), s.ops.clone()),
+            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
         };
         let result_bytes = self
             .context
-            .dispatch_pipeline(source, ops)
+            .dispatch_pipeline(source, steps)
             .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
 
         result_bytes

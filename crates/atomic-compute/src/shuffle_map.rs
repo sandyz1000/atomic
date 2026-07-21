@@ -3,9 +3,8 @@ use atomic_data::partitioner::PartitionerSchema;
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 
-// `ShuffleMapPayload` moved to `atomic_data::distributed::ShuffleMapPayload` so
-// scheduler and compute runtimes share one wire payload type.
-
+/// Wire payload for the `ShuffleMap` engine step, shared by scheduler and runtime.
+///
 /// Generic shuffle-write function for `(K, V)` pairs.
 ///
 /// Called by `NativeBackend` when it sees `StepKind::ShuffleMap`.

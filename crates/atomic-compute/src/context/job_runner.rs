@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use atomic_data::data::Data;
 use atomic_data::distributed::{
-    OpKind, PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
+    ResultStatus, Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
 use atomic_data::partial::{ApproximateEvaluator, result::PartialResult};
 use atomic_data::rdd::{Rdd, RddBase};
@@ -34,14 +34,14 @@ impl Context {
         U: Data + Clone + WireDecode,
         Vec<U>: WireDecode,
     {
-        let ops = vec![PipelineOp {
+        let steps = vec![Step {
             op_id: op_id.to_string(),
-            kind: OpKind::Task(action),
+            kind: StepKind::Task(action),
             runtime: TaskRuntime::Native,
             payload,
         }];
         let encoded = Self::encode_rdd_partitions(rdd)?;
-        let result_bytes = self.dispatch_pipeline(encoded, ops)?;
+        let result_bytes = self.dispatch_pipeline(encoded, steps)?;
         result_bytes
             .into_iter()
             .map(|bytes| Vec::<U>::decode_wire(&bytes).map_err(ComputeError::from))
@@ -61,14 +61,14 @@ impl Context {
         Vec<T>: WireEncode + WireDecode,
     {
         let payload = zero.encode_wire()?;
-        let ops = vec![PipelineOp {
+        let steps = vec![Step {
             op_id: op_id.to_string(),
-            kind: OpKind::Task(TaskAction::Fold),
+            kind: StepKind::Task(TaskAction::Fold),
             runtime: TaskRuntime::Native,
             payload,
         }];
         let encoded = Self::encode_rdd_partitions(rdd)?;
-        let partition_results_raw = self.dispatch_pipeline(encoded, ops.clone())?;
+        let partition_results_raw = self.dispatch_pipeline(encoded, steps.clone())?;
 
         let mut partition_values: Vec<T> = partition_results_raw
             .into_iter()
@@ -84,9 +84,9 @@ impl Context {
 
         // Combine partition results via Reduce on the driver.
         let combined_data = partition_values.encode_wire()?;
-        let reduce_ops = vec![PipelineOp {
+        let reduce_ops = vec![Step {
             op_id: op_id.to_string(),
-            kind: OpKind::Task(TaskAction::Reduce),
+            kind: StepKind::Task(TaskAction::Reduce),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }];
@@ -109,20 +109,20 @@ impl Context {
         }
     }
 
-    /// Dispatch a full pipeline of ops over pre-encoded partition bytes.
+    /// Dispatch a full pipeline of steps over pre-encoded partition bytes.
     ///
-    /// - **Local mode**: runs all ops via `NativeBackend` in-process.
+    /// - **Local mode**: runs all steps via `NativeBackend` in-process.
     /// - **Distributed mode**: sends one `TaskEnvelope` per partition to a worker via TCP.
     ///
     /// Returns raw result bytes per partition; callers decode into the concrete type.
     pub fn dispatch_pipeline(
         &self,
         source_partitions: Vec<Vec<u8>>,
-        ops: Vec<PipelineOp>,
+        steps: Vec<Step>,
     ) -> ComputeResult<Vec<Vec<u8>>> {
         let broadcasts = self.broadcast_snapshot();
         self.pipeline_executor()
-            .run_pipeline(source_partitions, ops, broadcasts)
+            .run_pipeline(source_partitions, steps, broadcasts)
     }
 
     /// Build the [`PipelineExecutor`] for the active runtime — a local thread pool
@@ -161,7 +161,7 @@ impl Context {
     pub fn run_pending_shuffle_stages(
         self: &Arc<Self>,
         rdd: &Arc<dyn RddBase>,
-        preceding_ops: Vec<PipelineOp>,
+        preceding_steps: Vec<Step>,
     ) -> ComputeResult<()> {
         let sched = match &self.scheduler {
             Schedulers::Distributed(s) => s.clone(),
@@ -169,25 +169,23 @@ impl Context {
         };
 
         let dispatched = env::Env::run_in_async_rt(|| {
-            futures::executor::block_on(sched.run_pending_shuffle_stages(rdd, preceding_ops))
+            futures::executor::block_on(sched.run_pending_shuffle_stages(rdd, preceding_steps))
         })?;
 
         for stage in dispatched {
+            let num_output_partitions = stage.dep.spec.num_output_partitions;
             self.active_shuffle_stages.insert(
                 stage.shuffle_id,
                 super::ActiveShuffleStage {
                     shuffle_id: stage.shuffle_id,
                     dep: stage.dep,
-                    ops: stage.ops,
+                    steps: stage.steps,
                 },
             );
             log::info!(
                 "shuffle map stage complete: shuffle_id={} num_reduce_partitions={}",
                 stage.shuffle_id,
-                self.active_shuffle_stages
-                    .get(&stage.shuffle_id)
-                    .map(|entry| entry.dep.spec.num_output_partitions)
-                    .unwrap_or(0)
+                num_output_partitions,
             );
         }
 
@@ -205,8 +203,8 @@ impl Context {
         stages: super::ActiveShuffleStages,
     ) {
         driver_scheduler.set_map_output_recovery(Arc::new(move |shuffle_id, map_id| {
-            let (dep, ops) = match stages.get(&shuffle_id) {
-                Some(entry) => (Arc::clone(&entry.dep), entry.ops.clone()),
+            let (dep, steps) = match stages.get(&shuffle_id) {
+                Some(entry) => (Arc::clone(&entry.dep), entry.steps.clone()),
                 None => {
                     log::error!(
                         "map-output recovery: no dispatched stage recorded for \
@@ -242,7 +240,7 @@ impl Context {
             env::Env::run_in_async_rt(move || {
                 tokio::spawn(async move {
                     let res = dist
-                        .rerun_shuffle_map_partition(shuffle_id, map_id, ops, partition)
+                        .rerun_shuffle_map_partition(shuffle_id, map_id, steps, partition)
                         .await;
                     let _ = tx.send(res);
                 });
@@ -336,9 +334,9 @@ impl Context {
     {
         use crate::rdd::TypedRdd;
         if matches!(self.scheduler, Schedulers::Distributed(_))
-            && let Some((partitions, ops)) = rdd.extract_staged_pipeline()
+            && let Some((partitions, steps)) = rdd.extract_staged_pipeline()
         {
-            let raw = self.dispatch_pipeline(partitions, ops)?;
+            let raw = self.dispatch_pipeline(partitions, steps)?;
             let mut out: Vec<T> = Vec::new();
             for bytes in raw {
                 let decoded = Vec::<T>::decode_wire(&bytes).map_err(|e| {

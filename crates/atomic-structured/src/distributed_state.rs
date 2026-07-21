@@ -4,7 +4,7 @@
 //! `Mutex<StateStore>`, which grows unbounded as windows accumulate.
 //! [`DistributedStateEngine`] instead shards the state by `StateKey` across the
 //! cluster: each micro-batch's partials are routed by a stable hash to one of
-//! `num_shards` shards, and a [`StepKind::MergeState`] task merges them into that
+//! `num_shards` shards, and a [`EngineStep::MergeState`] task merges them into that
 //! shard's persistent state on the owning worker (`WORKER_STATE_STORE`), returning
 //! only the cells to emit. The driver computes the partials and assembles the
 //! output, but never holds the full cross-batch state.
@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use atomic_compute::context::Context;
 use atomic_data::distributed::{
-    OpKind, PipelineOp, StateMergePayload, StepKind, TaskRuntime, decode_payload,
+    EngineStep, StateMergePayload, Step, StepKind, TaskRuntime, decode_payload,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 
@@ -195,9 +195,9 @@ impl BatchEngine for DistributedStateEngine {
             );
         }
 
-        let ops = vec![PipelineOp {
+        let steps = vec![Step {
             op_id: String::new(),
-            kind: OpKind::Engine(StepKind::MergeState {
+            kind: StepKind::Engine(EngineStep::MergeState {
                 merge_fn: WINDOWED_MERGE_FN.to_string(),
             }),
             runtime: TaskRuntime::Native,
@@ -206,7 +206,7 @@ impl BatchEngine for DistributedStateEngine {
 
         let results = self
             .sc
-            .dispatch_pipeline(source_partitions, ops)
+            .dispatch_pipeline(source_partitions, steps)
             .map_err(|e| StructuredError::Sql(format!("distributed state merge: {e}")))?;
 
         // Reassemble emitted cells from every shard into the output batch.

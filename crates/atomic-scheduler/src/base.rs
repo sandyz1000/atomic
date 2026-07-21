@@ -427,7 +427,7 @@ impl SchedulerState {
     pub fn add_output_loc_to_stage(&self, stage_id: usize, partition: usize, host: String) {
         self.stage_cache
             .get_mut(&stage_id)
-            .unwrap()
+            .expect("stage must exist in stage_cache before add_output_loc is called")
             .add_output_loc(partition, host);
     }
 
@@ -438,12 +438,18 @@ impl SchedulerState {
 
     #[inline]
     pub fn fetch_from_stage_cache(&self, id: usize) -> Stage {
-        self.stage_cache.get(&id).unwrap().clone()
+        self.stage_cache
+            .get(&id)
+            .expect("stage must exist in stage_cache")
+            .clone()
     }
 
     #[inline]
     pub fn fetch_from_shuffle_to_cache(&self, id: usize) -> Stage {
-        self.shuffle_to_map_stage.get(&id).unwrap().clone()
+        self.shuffle_to_map_stage
+            .get(&id)
+            .expect("stage must exist in shuffle_to_map_stage")
+            .clone()
     }
 
     #[inline]
@@ -579,7 +585,7 @@ impl SchedulerState {
     pub fn remove_output_loc_from_stage(&self, shuffle_id: usize, map_id: usize, server_uri: &str) {
         self.shuffle_to_map_stage
             .get_mut(&shuffle_id)
-            .unwrap()
+            .expect("stage must exist in shuffle_to_map_stage before remove_output_loc is called")
             .remove_output_loc(map_id, server_uri);
     }
 

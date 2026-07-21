@@ -27,7 +27,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::{OpKind, PipelineOp, StateMergePayload, StepKind, TaskRuntime};
+use atomic_data::distributed::{EngineStep, StateMergePayload, Step, StepKind, TaskRuntime};
 
 use crate::OutputMode;
 use crate::distributed_state::{MODE_APPEND, mode_code, shard_of};
@@ -583,9 +583,9 @@ impl BatchEngine for DistributedSessionEngine {
             );
         }
 
-        let ops = vec![PipelineOp {
+        let steps = vec![Step {
             op_id: String::new(),
-            kind: OpKind::Engine(StepKind::MergeState {
+            kind: StepKind::Engine(EngineStep::MergeState {
                 merge_fn: SESSION_MERGE_FN.to_string(),
             }),
             runtime: TaskRuntime::Native,
@@ -594,7 +594,7 @@ impl BatchEngine for DistributedSessionEngine {
 
         let results = self
             .sc
-            .dispatch_pipeline(source_partitions, ops)
+            .dispatch_pipeline(source_partitions, steps)
             .map_err(|e| StructuredError::Sql(format!("distributed session merge: {e}")))?;
 
         let mut emitted: Vec<(Vec<GroupVal>, Session)> = Vec::new();

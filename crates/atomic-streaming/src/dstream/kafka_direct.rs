@@ -32,7 +32,7 @@ use atomic_compute::context::Context;
 use atomic_compute::rdd::ParallelCollection;
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::distributed::{KafkaConsumePayload, OpKind, PipelineOp, StepKind, TaskRuntime};
+use atomic_data::distributed::{KafkaConsumePayload, StepKind, Step, EngineStep, TaskRuntime};
 use atomic_data::error::BaseError;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::split::{Split, SplitStruct};
@@ -222,7 +222,7 @@ impl DirectKafkaInputDStream {
 
         if sc.is_distributed() {
             let id = sc.new_rdd_id();
-            let (source_partitions, ops) =
+            let (source_partitions, steps) =
                 build_staged_pipeline(&self.brokers, &ranges, self.max_records_per_partition);
             Some(Arc::new(DirectKafkaBatchRdd {
                 id,
@@ -230,7 +230,7 @@ impl DirectKafkaInputDStream {
                 ranges,
                 max_records: self.max_records_per_partition,
                 source_partitions,
-                ops,
+                steps,
             }))
         } else {
             // Local mode: consume all ranges on the driver and hand back a ParallelCollection.
@@ -306,8 +306,8 @@ pub struct DirectKafkaBatchRdd {
     /// Pre-built source bytes for the distributed staged pipeline.
     /// `source_partitions[i]` = bincode-encoded `KafkaConsumePayload` for partition `i`.
     source_partitions: Vec<Vec<u8>>,
-    /// Singleton op: `[PipelineOp { action: KafkaConsume, payload: [] }]`.
-    ops: Vec<PipelineOp>,
+    /// Singleton op: `[Step { action: KafkaConsume, payload: [] }]`.
+    steps: Vec<Step>,
 }
 
 impl RddBase for DirectKafkaBatchRdd {
@@ -344,11 +344,11 @@ impl RddBase for DirectKafkaBatchRdd {
     /// instead of running the compute path locally.
     fn extract_staged_pipeline(
         &self,
-    ) -> Option<(Vec<Vec<u8>>, Vec<atomic_data::distributed::PipelineOp>)> {
+    ) -> Option<(Vec<Vec<u8>>, Vec<atomic_data::distributed::Step>)> {
         if self.source_partitions.is_empty() {
             None
         } else {
-            Some((self.source_partitions.clone(), self.ops.clone()))
+            Some((self.source_partitions.clone(), self.steps.clone()))
         }
     }
 }
@@ -445,10 +445,10 @@ pub fn build_staged_pipeline(
     brokers: &str,
     ranges: &[OffsetRange],
     max_records: usize,
-) -> (Vec<Vec<u8>>, Vec<PipelineOp>) {
-    let ops = vec![PipelineOp {
+) -> (Vec<Vec<u8>>, Vec<Step>) {
+    let steps = vec![Step {
         op_id: String::new(), // KafkaConsume dispatched by action variant, not op_id
-        kind: OpKind::Engine(StepKind::KafkaConsume),
+        kind: StepKind::Engine(EngineStep::KafkaConsume),
         runtime: TaskRuntime::Native,
         payload: vec![], // config is per-partition in source_partitions (data)
     }];
@@ -468,7 +468,7 @@ pub fn build_staged_pipeline(
         })
         .collect();
 
-    (source_partitions, ops)
+    (source_partitions, steps)
 }
 
 // ── DistributedSource impl for DirectKafkaInputDStream ───────────────────────
@@ -481,7 +481,7 @@ impl crate::dstream::distributed_source::DistributedSource for DirectKafkaInputD
         _batch_time_ms: u64,
     ) -> Vec<crate::dstream::distributed_source::SourcePartitionTask> {
         use crate::dstream::distributed_source::SourcePartitionTask;
-        use atomic_data::distributed::{OpKind, PipelineOp, StepKind, TaskRuntime};
+        use atomic_data::distributed::{StepKind, Step, EngineStep, TaskRuntime};
 
         self.fetch_offset_ranges()
             .into_iter()
@@ -497,9 +497,9 @@ impl crate::dstream::distributed_source::DistributedSource for DirectKafkaInputD
                 let partition_bytes = bincode::encode_to_vec(&payload, bincode::config::standard())
                     .unwrap_or_default();
                 SourcePartitionTask {
-                    op: PipelineOp {
+                    op: Step {
                         op_id: String::new(),
-                        kind: OpKind::Engine(StepKind::KafkaConsume),
+                        kind: StepKind::Engine(EngineStep::KafkaConsume),
                         runtime: TaskRuntime::Native,
                         payload: vec![],
                     },

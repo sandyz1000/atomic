@@ -164,7 +164,7 @@ pub fn run_tool_call(source: &str, args_json: &str) -> Result<String, PythonTask
     })
 }
 
-/// [`OpDispatcher`] for `TaskRuntime::Python` ops.
+/// [`Dispatcher`] for `TaskRuntime::Python` steps.
 ///
 /// Owns a [`PyWorkerPool`] and forwards pickled task bytes + partition data to it.
 /// Constructed by [`ComputeEngine::default`]; the pool starts on first construction.
@@ -181,7 +181,7 @@ impl PythonDispatcher {
 
     fn dispatch_impl(
         &self,
-        op: &atomic_data::distributed::PipelineOp,
+        op: &atomic_data::distributed::Step,
         data: &[u8],
     ) -> Result<Vec<u8>, PythonTaskError> {
         let spec: PythonTaskPayload = serde_json::from_slice(&op.payload)?;
@@ -189,10 +189,10 @@ impl PythonDispatcher {
     }
 }
 
-impl crate::runtimes::OpDispatcher for PythonDispatcher {
+impl crate::runtimes::Dispatcher for PythonDispatcher {
     fn dispatch(
         &self,
-        op: &atomic_data::distributed::PipelineOp,
+        op: &atomic_data::distributed::Step,
         _partition_id: usize,
         data: &[u8],
     ) -> ComputeResult<Vec<u8>> {

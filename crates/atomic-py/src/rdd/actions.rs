@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use atomic_data::distributed::{OpKind, PipelineOp, PythonTaskPayload, TaskAction, TaskRuntime};
+use atomic_data::distributed::{PythonTaskPayload, Step, StepKind, TaskAction, TaskRuntime};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyIterator, PyList, PyTuple};
 
@@ -17,7 +17,7 @@ impl PyRdd {
             if let Some(ref staged) = self.staged {
                 let result_bytes = self
                     .context
-                    .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+                    .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
                     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
                 return Self::collect_distributed(py, result_bytes);
             }
@@ -73,9 +73,9 @@ impl PyRdd {
             };
             let payload = serde_json::to_vec(&payload_struct)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            let op = PipelineOp {
+            let op = Step {
                 op_id: "atomic::task::python".to_string(),
-                kind: OpKind::Task(TaskAction::Reduce),
+                kind: StepKind::Task(TaskAction::Reduce),
                 runtime: TaskRuntime::Python,
                 payload,
             };
@@ -84,7 +84,7 @@ impl PyRdd {
             let staged = self.staged.as_ref().unwrap();
             let result_bytes = self
                 .context
-                .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+                .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             let json_mod = PyModule::import(py, "json")?;
@@ -138,9 +138,9 @@ impl PyRdd {
             };
             let payload = serde_json::to_vec(&payload_struct)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-            let op = PipelineOp {
+            let op = Step {
                 op_id: "atomic::task::python".to_string(),
-                kind: OpKind::Task(TaskAction::Fold),
+                kind: StepKind::Task(TaskAction::Fold),
                 runtime: TaskRuntime::Python,
                 payload,
             };
@@ -149,7 +149,7 @@ impl PyRdd {
             let staged = self.staged.as_ref().unwrap();
             let result_bytes = self
                 .context
-                .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+                .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             let json_mod = PyModule::import(py, "json")?;

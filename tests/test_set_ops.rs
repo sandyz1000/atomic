@@ -98,7 +98,7 @@ async fn test_subtract() {
     let ctx = ctx();
     let rdd = ctx.parallelize_typed(vec![1i32, 2, 3, 4], 2);
     let other = ctx.parallelize_typed(vec![2i32, 4], 2);
-    let mut result = rdd.subtract(other).collect().unwrap();
+    let mut result = rdd.subtract(other).unwrap().collect().unwrap();
     result.sort();
     assert_eq!(result, vec![1, 3]);
 }
@@ -108,7 +108,7 @@ async fn test_subtract_empty_other() {
     let ctx = ctx();
     let rdd = ctx.parallelize_typed(vec![1i32, 2, 3], 2);
     let empty = ctx.parallelize_typed(Vec::<i32>::new(), 2);
-    let mut result = rdd.subtract(empty).collect().unwrap();
+    let mut result = rdd.subtract(empty).unwrap().collect().unwrap();
     result.sort();
     assert_eq!(result, vec![1, 2, 3]);
 }
@@ -120,7 +120,7 @@ async fn test_intersection() {
     let ctx = ctx();
     let a = ctx.parallelize_typed(vec![1i32, 2, 3], 2);
     let b = ctx.parallelize_typed(vec![2i32, 3, 4], 2);
-    let mut result = a.intersection(b).collect().unwrap();
+    let mut result = a.intersection(b).unwrap().collect().unwrap();
     result.sort();
     assert_eq!(result, vec![2, 3]);
 }

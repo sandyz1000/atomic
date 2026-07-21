@@ -1,6 +1,6 @@
 use atomic_data::{
     dependency::Dependency,
-    distributed::{OpKind, PipelineOp, ShuffleMapPayload, StepKind, TaskEnvelope, TaskRuntime},
+    distributed::{EngineStep, ShuffleMapPayload, Step, StepKind, TaskEnvelope, TaskRuntime},
     rdd::RddBase,
 };
 use futures::future::try_join_all;
@@ -18,18 +18,18 @@ use crate::{
 pub struct ActiveShuffleStage {
     pub shuffle_id: usize,
     pub dep: Arc<atomic_data::dependency::ErasedShuffleDependency>,
-    pub ops: Vec<PipelineOp>,
+    pub steps: Vec<Step>,
 }
 
 use super::DistributedScheduler;
 
 impl DistributedScheduler {
     /// Build the exact op pipeline for one distributed shuffle-map stage:
-    /// any preceding staged ops followed by the `ShuffleMap` engine step.
+    /// any preceding staged steps followed by the `ShuffleMap` engine step.
     fn shuffle_map_ops(
         spec: &atomic_data::dependency::ShuffleSpec,
-        fallback_preceding: &[PipelineOp],
-    ) -> LibResult<Vec<PipelineOp>> {
+        fallback_preceding: &[Step],
+    ) -> LibResult<Vec<Step>> {
         let payload = bincode::encode_to_vec(
             ShuffleMapPayload {
                 type_id: spec.type_id.to_string(),
@@ -39,46 +39,46 @@ impl DistributedScheduler {
         )
         .map_err(|e| SchedulerError::TaskFailed(format!("shuffle-map payload encode: {e}")))?;
 
-        let mut ops = if spec.preceding_ops.is_empty() {
+        let mut steps = if spec.preceding_steps.is_empty() {
             fallback_preceding.to_vec()
         } else {
-            spec.preceding_ops.clone()
+            spec.preceding_steps.clone()
         };
-        ops.push(PipelineOp {
+        steps.push(Step {
             op_id: format!("shuffle-map-{}", spec.shuffle_id),
-            kind: OpKind::Engine(StepKind::ShuffleMap {
+            kind: StepKind::Engine(EngineStep::ShuffleMap {
                 shuffle_id: spec.shuffle_id,
                 num_output_partitions: spec.num_output_partitions,
             }),
             runtime: TaskRuntime::Native,
             payload,
         });
-        Ok(ops)
+        Ok(steps)
     }
 
     /// Traverse the RDD dependencies and run every pending shuffle-map stage on workers.
     ///
     /// Returns one descriptor per dispatched shuffle stage so callers can persist recovery
-    /// metadata (`dep + ops`) alongside scheduler state.
+    /// metadata (`dep + steps`) alongside scheduler state.
     pub async fn run_pending_shuffle_stages(
         &self,
         rdd: &Arc<dyn RddBase>,
-        preceding_ops: Vec<PipelineOp>,
+        preceding_steps: Vec<Step>,
     ) -> LibResult<Vec<ActiveShuffleStage>> {
         let mut dispatched = Vec::new();
         for dep in rdd.get_dependencies() {
             if let Dependency::Shuffle(shuffle_dep) = dep {
                 let spec = &shuffle_dep.spec;
-                let ops = Self::shuffle_map_ops(spec, &preceding_ops)?;
+                let steps = Self::shuffle_map_ops(spec, &preceding_steps)?;
                 let parent_partitions = shuffle_dep.encode_partitions().map_err(|e| {
                     SchedulerError::TaskFailed(format!("shuffle input encode: {e}"))
                 })?;
-                self.run_shuffle_map_stage(spec.shuffle_id, ops.clone(), parent_partitions)
+                self.run_shuffle_map_stage(spec.shuffle_id, steps.clone(), parent_partitions)
                     .await?;
                 dispatched.push(ActiveShuffleStage {
                     shuffle_id: spec.shuffle_id,
                     dep: shuffle_dep,
-                    ops,
+                    steps,
                 });
             }
         }
@@ -98,16 +98,16 @@ impl DistributedScheduler {
     pub async fn run_shuffle_map_stage(
         &self,
         shuffle_id: usize,
-        ops: Vec<PipelineOp>,
+        steps: Vec<Step>,
         partitions: Vec<Vec<u8>>,
     ) -> LibResult<()> {
         let max_retries = self.max_failures;
         super::retry::retry_with_backoff(max_retries, 200, || {
-            let ops = ops.clone();
+            let steps = steps.clone();
             let partitions = partitions.clone();
             async move {
                 let result = self
-                    .run_shuffle_map_stage_inner(shuffle_id, ops, partitions)
+                    .run_shuffle_map_stage_inner(shuffle_id, steps, partitions)
                     .await;
                 if let Err(ref e) = result {
                     // Clear stale map output URIs so the reduce phase doesn't try
@@ -165,13 +165,13 @@ impl DistributedScheduler {
     /// its fresh URI in the `MapOutputTracker`.
     ///
     /// Called from the driver's fetch-failure recovery hook when the worker that
-    /// held `map_id`'s output died between the map and reduce phases. `ops` and
+    /// held `map_id`'s output died between the map and reduce phases. `steps` and
     /// `partition` are the same pipeline and input bytes the original map task ran.
     pub async fn rerun_shuffle_map_partition(
         &self,
         shuffle_id: usize,
         map_id: usize,
-        ops: Vec<PipelineOp>,
+        steps: Vec<Step>,
         partition: Vec<u8>,
     ) -> LibResult<()> {
         use std::sync::atomic::Ordering;
@@ -182,7 +182,7 @@ impl DistributedScheduler {
         let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
         let trace_id = format!("shuffle-map-recovery-{shuffle_id}-{map_id}");
         let task = TaskEnvelope::new(
-            0, stage_id, task_id, attempt_id, map_id, trace_id, ops, partition,
+            0, stage_id, task_id, attempt_id, map_id, trace_id, steps, partition,
         );
 
         let uri = self.submit_shuffle_map_task(&task).await?.ok_or_else(|| {
@@ -207,7 +207,7 @@ impl DistributedScheduler {
     async fn run_shuffle_map_stage_inner(
         &self,
         shuffle_id: usize,
-        ops: Vec<PipelineOp>,
+        steps: Vec<Step>,
         partitions: Vec<Vec<u8>>,
     ) -> LibResult<()> {
         use std::sync::atomic::Ordering;
@@ -231,7 +231,7 @@ impl DistributedScheduler {
                 attempt_id,
                 part_id,
                 trace_id,
-                ops.clone(),
+                steps.clone(),
                 data,
             );
             async move {

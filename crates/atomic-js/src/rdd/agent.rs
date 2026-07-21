@@ -1,5 +1,5 @@
 use atomic_data::distributed::{
-    AgentFindings, AgentStepPayload, OpKind, PipelineOp, ResolvedTool, ScriptRuntime, StepKind,
+    AgentFindings, AgentStepPayload, EngineStep, ResolvedTool, ScriptRuntime, Step, StepKind,
     TaskRuntime, WireDecode,
 };
 use napi::bindgen_prelude::*;
@@ -42,9 +42,9 @@ impl JsRdd {
         // accepts both rkyv (Rust callers) and JSON arrays (Python/JS callers).
         let source_partitions = self.encode_source_partitions()?;
 
-        let op = PipelineOp {
+        let op = Step {
             op_id: String::new(),
-            kind: OpKind::Engine(StepKind::AgentStep),
+            kind: StepKind::Engine(EngineStep::AgentStep),
             runtime: TaskRuntime::Native,
             payload: payload_bytes,
         };

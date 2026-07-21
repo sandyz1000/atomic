@@ -12,7 +12,7 @@ use std::{
 use atomic_data::{
     data::Data,
     dependency::ErasedShuffleDependency,
-    distributed::{OpKind, PipelineOp, StepKind, TaskEnvelope, TaskRuntime, WorkerCapabilities},
+    distributed::{EngineStep, Step, StepKind, TaskEnvelope, TaskRuntime, WorkerCapabilities},
     partial::{ApproximateEvaluator, result::PartialResult},
     rdd::Rdd,
     task::{ShuffleMapTask, TaskOption},
@@ -279,10 +279,10 @@ impl DistributedScheduler {
         )
         .map_err(|e| SchedulerError::TaskFailed(format!("shuffle-map payload encode: {e}")))?;
 
-        let mut ops: Vec<PipelineOp> = spec.preceding_ops.clone();
-        ops.push(PipelineOp {
+        let mut steps: Vec<Step> = spec.preceding_steps.clone();
+        steps.push(Step {
             op_id: format!("shuffle-map-{}", spec.shuffle_id),
-            kind: OpKind::Engine(StepKind::ShuffleMap {
+            kind: StepKind::Engine(EngineStep::ShuffleMap {
                 shuffle_id: spec.shuffle_id,
                 num_output_partitions: spec.num_output_partitions,
             }),
@@ -302,7 +302,7 @@ impl DistributedScheduler {
             attempt_id,
             task.meta.partition,
             trace,
-            ops,
+            steps,
             data,
         ))
     }
@@ -439,23 +439,19 @@ impl NativeScheduler for DistributedScheduler {
             return SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0);
         }
 
+        let round_robin = |s: &mut VecDeque<SocketAddrV4>| {
+            let addr = s.pop_back().expect("server list checked non-empty above");
+            s.push_front(addr);
+            addr
+        };
+
         if !task.is_pinned() {
-            let socket_addr = servers
-                .pop_back()
-                .expect("server list checked non-empty above");
-            servers.push_front(socket_addr);
-            return socket_addr;
+            return round_robin(&mut servers);
         }
 
         let preferred = match task.preferred_locations().first().copied() {
             Some(ip) => ip,
-            None => {
-                let socket_addr = servers
-                    .pop_back()
-                    .expect("server list checked non-empty above");
-                servers.push_front(socket_addr);
-                return socket_addr;
-            }
+            None => return round_robin(&mut servers),
         };
 
         if let Some((pos, _)) = servers
@@ -470,11 +466,7 @@ impl NativeScheduler for DistributedScheduler {
             target_host
         } else {
             log::warn!("pinned preferred worker {preferred} not live; falling back to round-robin");
-            let socket_addr = servers
-                .pop_back()
-                .expect("server list checked non-empty above");
-            servers.push_front(socket_addr);
-            socket_addr
+            round_robin(&mut servers)
         }
     }
 
@@ -643,7 +635,7 @@ pub fn start_register_server(port: u16, scheduler: Arc<DistributedScheduler>) {
 mod tests {
     use super::*;
     use atomic_data::distributed::{
-        OpKind, PipelineOp, ResultStatus, StepKind, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope,
+        EngineStep, ResultStatus, Step, StepKind, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope,
         TaskResultEnvelope, TaskRuntime, TransportFrameKind, WireDecode, WireEncode,
         encode_transport_frame, parse_transport_header,
     };
@@ -715,26 +707,26 @@ mod tests {
 
     #[test]
     fn plan_serve_cached() {
-        use atomic_data::distributed::{OpKind, PipelineOp, StepKind, TaskAction, TaskRuntime};
+        use atomic_data::distributed::{EngineStep, Step, StepKind, TaskAction, TaskRuntime};
         let sched = DistributedScheduler::new(4, true);
         let ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
         sched.register_cache_locs(&[(700, 0), (700, 1)], ip);
 
-        let cache_op = PipelineOp {
+        let cache_op = Step {
             op_id: String::new(),
-            kind: OpKind::Engine(StepKind::Cache { rdd_id: 700 }),
+            kind: StepKind::Engine(EngineStep::Cache { rdd_id: 700 }),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
-        let map_op = PipelineOp {
+        let map_op = Step {
             op_id: "m".into(),
-            kind: OpKind::Task(TaskAction::Map),
+            kind: StepKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
-        let ops = vec![map_op.clone(), cache_op];
+        let steps = vec![map_op.clone(), cache_op];
 
-        match sched.plan_cache_dispatch(&ops, 2) {
+        match sched.plan_cache_dispatch(&steps, 2) {
             CacheDispatch::Serve {
                 rdd_id,
                 post_ops,
@@ -746,7 +738,10 @@ mod tests {
             }
             other => panic!("expected Serve, got {other:?}"),
         }
-        assert_eq!(sched.plan_cache_dispatch(&ops, 3), CacheDispatch::Recompute);
+        assert_eq!(
+            sched.plan_cache_dispatch(&steps, 3),
+            CacheDispatch::Recompute
+        );
         assert_eq!(
             sched.plan_cache_dispatch(std::slice::from_ref(&map_op), 2),
             CacheDispatch::Recompute
@@ -833,7 +828,7 @@ mod tests {
             let mut payload = vec![0_u8; payload_len];
             socket.read_exact(&mut payload).await.expect("read payload");
             let task = TaskEnvelope::decode_wire(&payload).expect("decode task");
-            assert_eq!(task.ops[0].op_id, "mycrate::double");
+            assert_eq!(task.steps[0].op_id, "mycrate::double");
             let response = TaskResultEnvelope::ok(
                 task.run_id,
                 task.stage_id,
@@ -856,9 +851,9 @@ mod tests {
             0,
             0,
             "trace-1".to_string(),
-            vec![PipelineOp {
+            vec![Step {
                 op_id: "mycrate::double".to_string(),
-                kind: OpKind::Task(TaskAction::Map),
+                kind: StepKind::Task(TaskAction::Map),
                 runtime: TaskRuntime::Native,
                 payload: vec![],
             }],
@@ -954,21 +949,21 @@ mod tests {
     fn distributed_scheduler_does_not_support_closure_tasks() {
         let sched = DistributedScheduler::new(4, true);
         assert!(
-            !<DistributedScheduler as NativeScheduler>::supports_closure_tasks(&sched),
+            !sched.supports_closure_tasks(),
             "distributed scheduler must reject closure-backed ResultTask execution"
         );
     }
 
-    fn envelope_with_ops(ops: Vec<PipelineOp>) -> TaskEnvelope {
-        TaskEnvelope::new(0, 0, 0, 0, 0, "test".to_string(), ops, Vec::new())
+    fn envelope_with_ops(steps: Vec<Step>) -> TaskEnvelope {
+        TaskEnvelope::new(0, 0, 0, 0, 0, "test".to_string(), steps, Vec::new())
     }
 
     #[test]
     fn effective_timeout_uses_agent_step_default_when_unset() {
         let sched = DistributedScheduler::new(4, true);
-        let task = envelope_with_ops(vec![PipelineOp {
+        let task = envelope_with_ops(vec![Step {
             op_id: String::new(),
-            kind: OpKind::Engine(StepKind::AgentStep),
+            kind: StepKind::Engine(EngineStep::AgentStep),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }]);
@@ -982,9 +977,9 @@ mod tests {
     fn effective_timeout_uses_configured_agent_step_timeout() {
         let sched =
             DistributedScheduler::new(4, true).with_agent_step_timeout(Duration::from_secs(60));
-        let task = envelope_with_ops(vec![PipelineOp {
+        let task = envelope_with_ops(vec![Step {
             op_id: String::new(),
-            kind: OpKind::Engine(StepKind::AgentStep),
+            kind: StepKind::Engine(EngineStep::AgentStep),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }]);
@@ -997,9 +992,9 @@ mod tests {
     #[test]
     fn effective_timeout_falls_back_to_task_timeout_for_non_agent_ops() {
         let sched = DistributedScheduler::new(4, true);
-        let task = envelope_with_ops(vec![PipelineOp {
+        let task = envelope_with_ops(vec![Step {
             op_id: String::new(),
-            kind: OpKind::Task(TaskAction::Map),
+            kind: StepKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }]);

@@ -25,7 +25,7 @@ use parking_lot::Mutex;
 
 use atomic_compute::context::Context;
 use atomic_data::distributed::{
-    OpKind, PipelineOp, StateMergePayload, StepKind, TaskRuntime, decode_payload,
+    EngineStep, StateMergePayload, Step, StepKind, TaskRuntime, decode_payload,
 };
 
 use crate::distributed_state::shard_of;
@@ -612,9 +612,9 @@ impl BatchEngine for DistributedJoinEngine {
             );
         }
 
-        let ops = vec![PipelineOp {
+        let steps = vec![Step {
             op_id: String::new(),
-            kind: OpKind::Engine(StepKind::MergeState {
+            kind: StepKind::Engine(EngineStep::MergeState {
                 merge_fn: JOIN_MERGE_FN.to_string(),
             }),
             runtime: TaskRuntime::Native,
@@ -623,7 +623,7 @@ impl BatchEngine for DistributedJoinEngine {
 
         let results = self
             .sc
-            .dispatch_pipeline(source_partitions, ops)
+            .dispatch_pipeline(source_partitions, steps)
             .map_err(|e| StructuredError::Sql(format!("distributed join merge: {e}")))?;
 
         let mut matched: Vec<(JoinRow, Option<JoinRow>)> = Vec::new();

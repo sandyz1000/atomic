@@ -142,9 +142,9 @@ binary: `./my_app --worker --port 10001`.
   dispatches task envelopes via `DistributedScheduler` + `NativeBackend`. Driver and workers run
   the same binary; the dispatch table is linked at compile time. Tasks are registered with
   `#[task]` and dispatched by string ID.
-- **One backend** — `NativeBackend` only. It holds a `HashMap<TaskRuntime, Box<dyn OpDispatcher>>`:
+- **One backend** — `NativeBackend` only. It holds a `HashMap<TaskRuntime, Box<dyn Dispatcher>>`:
   `Native` (`runtimes/native.rs`), `Python` (`runtimes/py.rs`), `JavaScript` (`runtimes/js.rs`).
-  Adding a runtime = one `impl OpDispatcher` + one `HashMap::insert`. No Docker or WASM backends.
+  Adding a runtime = one `impl Dispatcher` + one `HashMap::insert`. No Docker or WASM backends.
 - **Shuffle** — `reduce_by_key` / `group_by_key` are lazy (`ShuffleDependency` + `ShuffledRdd`).
   The scheduler splits the DAG at shuffle boundaries. Map output lives in `DashMapShuffleCache`,
   served over HTTP by `ShuffleManager`; `ShuffleFetcher` pulls on the reduce side.
@@ -153,7 +153,7 @@ binary: `./my_app --worker --port 10001`.
 
 Distributed tasks use `atomic_data::distributed`:
 
-- `TaskEnvelope` — rkyv metadata + `Vec<PipelineOp>` + input partition bytes.
+- `TaskEnvelope` — rkyv metadata + `Vec<Step>` + input partition bytes.
 - `TaskResultEnvelope` — rkyv result or failure, with `partition_id` for ordering.
 - `WorkerCapabilities` — advertised limits (`max_tasks`, `registry_fingerprint`); the scheduler
   skips workers at capacity and logs a clear error on fingerprint mismatch.

@@ -166,8 +166,7 @@ impl PartitionAgentRunner {
             {
                 Ok(r) => r,
                 Err(e) => {
-                    // Count the attempted round and flag the finding as unreliable,
-                    // instead of silently returning rounds: 0 with confidence: 1.0.
+                    // failed round: report 0 confidence.
                     answer = format!("error: {e}");
                     rounds_done = round + 1;
                     confidence = 0.0;

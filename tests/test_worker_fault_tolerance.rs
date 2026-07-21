@@ -26,11 +26,11 @@ fn worker_addr(port: u16) -> SocketAddrV4 {
     SocketAddrV4::new(Ipv4Addr::LOCALHOST, port)
 }
 
-fn capabilities(ops: &[&str]) -> WorkerCapabilities {
+fn capabilities(steps: &[&str]) -> WorkerCapabilities {
     WorkerCapabilities::new(
         "test-worker".to_string(),
         4,
-        ops.iter().map(|s| s.to_string()).collect(),
+        steps.iter().map(|s| s.to_string()).collect(),
     )
 }
 
@@ -104,7 +104,7 @@ fn test_worker_with_empty_ops_accepts_all() {
 /// after the 3rd failure `next_executor` errors.
 #[tokio::test]
 async fn test_worker_tcp_removal() {
-    use atomic_data::distributed::{OpKind, PipelineOp, TaskAction, TaskEnvelope, TaskRuntime};
+    use atomic_data::distributed::{Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime};
 
     // Bind an ephemeral port — the listener immediately drops each connection
     // to simulate a dead worker.
@@ -138,9 +138,9 @@ async fn test_worker_tcp_removal() {
         0,
         0,
         "test".to_string(),
-        vec![PipelineOp {
+        vec![Step {
             op_id: "no.op".to_string(),
-            kind: OpKind::Task(TaskAction::Map),
+            kind: StepKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }],
@@ -187,7 +187,7 @@ async fn test_worker_tcp_removal() {
 /// setup overhead.
 #[tokio::test]
 async fn test_exponential_backoff() {
-    use atomic_data::distributed::{OpKind, PipelineOp, TaskAction, TaskEnvelope, TaskRuntime};
+    use atomic_data::distributed::{Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -215,9 +215,9 @@ async fn test_exponential_backoff() {
         0,
         0,
         "test".to_string(),
-        vec![PipelineOp {
+        vec![Step {
             op_id: "no.op".to_string(),
-            kind: OpKind::Task(TaskAction::Map),
+            kind: StepKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
         }],

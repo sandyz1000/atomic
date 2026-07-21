@@ -1,4 +1,4 @@
-//! Integration tests for the `OpDispatcher` trait pattern and `NativeBackend` orchestration.
+//! Integration tests for the `Dispatcher` trait pattern and `NativeBackend` orchestration.
 //!
 //! These tests verify the cross-cutting behaviour of `NativeBackend::execute()` that is
 //! independent of any single runtime — broadcast loading, accumulator draining, and
@@ -10,7 +10,7 @@ use atomic_compute::runtimes::{Backend, ComputeEngine};
 use atomic_compute::task;
 use atomic_compute::task_traits::UnaryTask;
 use atomic_data::distributed::{
-    OpKind, PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
+    ResultStatus, Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
 use std::sync::Arc;
 
@@ -36,17 +36,17 @@ fn decode<T: WireDecode>(data: &[u8]) -> T {
     T::decode_wire(data).expect("decode")
 }
 
-fn native_op(op_id: &str, action: TaskAction) -> PipelineOp {
-    PipelineOp {
+fn native_op(op_id: &str, action: TaskAction) -> Step {
+    Step {
         op_id: op_id.to_string(),
-        kind: OpKind::Task(action),
+        kind: StepKind::Task(action),
         runtime: TaskRuntime::Native,
         payload: vec![],
     }
 }
 
-fn envelope(ops: Vec<PipelineOp>, data: Vec<u8>) -> TaskEnvelope {
-    TaskEnvelope::new(10, 20, 30, 0, 0, "dispatch-test".to_string(), ops, data)
+fn envelope(steps: Vec<Step>, data: Vec<u8>) -> TaskEnvelope {
+    TaskEnvelope::new(10, 20, 30, 0, 0, "dispatch-test".to_string(), steps, data)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ fn single_op_square_pipeline() {
     assert_eq!(output, vec![4, 9, 16]);
 }
 
-/// Two-op pipeline: square then negate — verifies data threading between ops.
+/// Two-op pipeline: square then negate — verifies data threading between steps.
 #[test]
 fn two_op_pipeline_square_then_negate() {
     let backend = ComputeEngine::default();
@@ -87,7 +87,7 @@ fn two_op_pipeline_square_then_negate() {
     assert_eq!(output, vec![-9, -16]);
 }
 
-/// A failed op mid-pipeline short-circuits: subsequent ops do not run.
+/// A failed op mid-pipeline short-circuits: subsequent steps do not run.
 #[test]
 fn failed_op_mid_pipeline_produces_fatal_failure() {
     let backend = ComputeEngine::default();
@@ -179,9 +179,9 @@ fn task_fn_capture_roundtrips_over_wire() {
     let t = atomic_compute::task_fn!([factor: i32] |x: i32| -> i32 { x * factor });
     let (op_id, payload) = op_meta(&t);
 
-    let op = PipelineOp {
+    let op = Step {
         op_id,
-        kind: OpKind::Task(TaskAction::Map),
+        kind: StepKind::Task(TaskAction::Map),
         runtime: TaskRuntime::Native,
         payload,
     };

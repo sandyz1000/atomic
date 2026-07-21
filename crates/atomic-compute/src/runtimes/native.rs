@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use atomic_data::accumulator;
 use atomic_data::broadcast;
 use atomic_data::distributed::{
-    OpKind, PipelineOp, StepKind, TaskEnvelope, TaskResultEnvelope, TaskRuntime, decode_payload,
+    EngineStep, Step, StepKind, TaskEnvelope, TaskResultEnvelope, TaskRuntime, decode_payload,
 };
 
 use crate::error::{ComputeError, ComputeResult};
-use crate::runtimes::{Backend, OpDispatcher};
+use crate::runtimes::{Backend, Dispatcher};
 use crate::task_registry::{
     AGENT_RUNNER_REGISTRY, SHUFFLE_MAP_REGISTRY, SORT_SHUFFLE_MAP_REGISTRY, STATE_MERGE_REGISTRY,
     TASK_REGISTRY,
@@ -19,7 +19,7 @@ fn decode_or_invalid<T: bincode::Decode<()>>(bytes: &[u8], label: &str) -> Compu
     decode_payload(bytes).map_err(|e| ComputeError::InvalidPayload(format!("{label} decode: {e}")))
 }
 
-/// Handles `TaskRuntime::Native` ops — both compile-time `#[task]` registry
+/// Handles `TaskRuntime::Native` steps — both compile-time `#[task]` registry
 /// lookups and shuffle-map writes.
 pub(crate) struct NativeDispatcher {}
 
@@ -29,15 +29,10 @@ impl NativeDispatcher {
     }
 }
 
-impl OpDispatcher for NativeDispatcher {
-    fn dispatch(
-        &self,
-        op: &PipelineOp,
-        partition_id: usize,
-        data: &[u8],
-    ) -> ComputeResult<Vec<u8>> {
+impl Dispatcher for NativeDispatcher {
+    fn dispatch(&self, op: &Step, partition_id: usize, data: &[u8]) -> ComputeResult<Vec<u8>> {
         match &op.kind {
-            OpKind::Engine(StepKind::ShuffleMap {
+            StepKind::Engine(EngineStep::ShuffleMap {
                 shuffle_id,
                 num_output_partitions,
             }) => {
@@ -70,7 +65,7 @@ impl OpDispatcher for NativeDispatcher {
                     }
                 }
             }
-            OpKind::Engine(StepKind::Cache { rdd_id }) => {
+            StepKind::Engine(EngineStep::Cache { rdd_id }) => {
                 // Terminal identity op: store this partition's bytes for later reuse.
                 atomic_data::cache::worker_partition_cache().put(
                     *rdd_id,
@@ -80,21 +75,21 @@ impl OpDispatcher for NativeDispatcher {
                 Ok(data.to_vec())
             }
             #[cfg(feature = "kafka")]
-            OpKind::Engine(StepKind::KafkaConsume) => {
+            StepKind::Engine(EngineStep::KafkaConsume) => {
                 // The per-partition consume config is shipped in `source_partitions[i]`
                 // (i.e. `data`), not in `op.payload` (which is empty for KafkaConsume).
                 let payload: atomic_data::distributed::KafkaConsumePayload =
                     decode_or_invalid(data, "KafkaConsume data")?;
                 kafka_consume_handler(&payload)
             }
-            OpKind::Engine(StepKind::ReadFileSplit) => {
+            StepKind::Engine(EngineStep::ReadFileSplit) => {
                 // Per-partition config shipped in `data` (bincode-encoded FileSplitPayload);
                 // `op.payload` is empty.
                 let payload: atomic_data::distributed::FileSplitPayload =
                     decode_or_invalid(data, "ReadFileSplit data")?;
                 file_split_handler(&payload)
             }
-            OpKind::Engine(StepKind::MergeState { merge_fn }) => {
+            StepKind::Engine(EngineStep::MergeState { merge_fn }) => {
                 // Per-shard input shipped in `data` (bincode-encoded StateMergePayload).
                 // The merge fn is content-agnostic; the shard's state persists across
                 // batches in the worker-global WORKER_STATE_STORE.
@@ -152,7 +147,7 @@ impl OpDispatcher for NativeDispatcher {
                 store.put(payload.state_id, new_state);
                 Ok(emitted)
             }
-            OpKind::Engine(StepKind::AgentStep) => {
+            StepKind::Engine(EngineStep::AgentStep) => {
                 let payload: atomic_data::distributed::AgentStepPayload =
                     serde_json::from_slice(&op.payload).map_err(|e| {
                         ComputeError::InvalidPayload(format!("AgentStep payload decode: {e}"))
@@ -169,7 +164,7 @@ impl OpDispatcher for NativeDispatcher {
                     .run_partition(&payload, data)
                     .map_err(ComputeError::InvalidPayload)
             }
-            OpKind::Task(action) => match TASK_REGISTRY.get(op.op_id.as_str()) {
+            StepKind::Task(action) => match TASK_REGISTRY.get(op.op_id.as_str()) {
                 None => {
                     let registered: Vec<&str> = TASK_REGISTRY.keys().copied().collect();
                     Err(ComputeError::UnknownOperation(format!(
@@ -191,21 +186,21 @@ impl OpDispatcher for NativeDispatcher {
 
 /// Multi-runtime task executor.
 ///
-/// Routes each [`PipelineOp`] to the [`OpDispatcher`] registered for its
+/// Routes each [`Step`] to the [`Dispatcher`] registered for its
 /// [`TaskRuntime`] via an O(1) [`HashMap`] lookup.  Adding a new runtime requires
-/// only one new `impl OpDispatcher` and one entry in [`ComputeEngine::default`] —
+/// only one new `impl Dispatcher` and one entry in [`ComputeEngine::default`] —
 /// `execute()` never changes.
 ///
 /// This is only valid when the driver and worker run the same binary; the
 /// dispatch table is built at compile time from all `#[task]`-annotated functions
 /// linked into the binary.
 pub struct ComputeEngine {
-    dispatchers: HashMap<TaskRuntime, Box<dyn OpDispatcher>>,
+    dispatchers: HashMap<TaskRuntime, Box<dyn Dispatcher>>,
 }
 
 impl Default for ComputeEngine {
     fn default() -> Self {
-        let mut dispatchers: HashMap<TaskRuntime, Box<dyn OpDispatcher>> = HashMap::new();
+        let mut dispatchers: HashMap<TaskRuntime, Box<dyn Dispatcher>> = HashMap::new();
         dispatchers.insert(TaskRuntime::Native, Box::new(NativeDispatcher::new()));
         add_python(&mut dispatchers);
         add_js(&mut dispatchers);
@@ -214,7 +209,7 @@ impl Default for ComputeEngine {
 }
 
 crate::cfg_python! {
-    fn add_python(dispatchers: &mut HashMap<TaskRuntime, Box<dyn OpDispatcher>>) {
+    fn add_python(dispatchers: &mut HashMap<TaskRuntime, Box<dyn Dispatcher>>) {
         dispatchers.insert(
             TaskRuntime::Python,
             Box::new(crate::runtimes::py::PythonDispatcher::new(
@@ -226,11 +221,11 @@ crate::cfg_python! {
     }
 }
 crate::cfg_not_python! {
-    fn add_python(_dispatchers: &mut HashMap<TaskRuntime, Box<dyn OpDispatcher>>) {}
+    fn add_python(_dispatchers: &mut HashMap<TaskRuntime, Box<dyn Dispatcher>>) {}
 }
 
 crate::cfg_js! {
-    fn add_js(dispatchers: &mut HashMap<TaskRuntime, Box<dyn OpDispatcher>>) {
+    fn add_js(dispatchers: &mut HashMap<TaskRuntime, Box<dyn Dispatcher>>) {
         dispatchers.insert(
             TaskRuntime::JavaScript,
             Box::new(crate::runtimes::js::JsDispatcher::new()),
@@ -238,7 +233,7 @@ crate::cfg_js! {
     }
 }
 crate::cfg_not_js! {
-    fn add_js(_dispatchers: &mut HashMap<TaskRuntime, Box<dyn OpDispatcher>>) {}
+    fn add_js(_dispatchers: &mut HashMap<TaskRuntime, Box<dyn Dispatcher>>) {}
 }
 
 /// Disambiguates `resolve_input` output: either proceed with pipeline bytes, or
@@ -271,8 +266,8 @@ fn resolve_input(task: &TaskEnvelope, worker_id: &str) -> ComputeResult<InputDat
         None => task.data.clone(),
     };
 
-    if task.ops.is_empty() {
-        // A pure cache serve (cache_source + no ops) returns the cached bytes;
+    if task.steps.is_empty() {
+        // A pure cache serve (cache_source + no steps) returns the cached bytes;
         // a genuinely empty pipeline without a cache source is an error.
         return if task.cache_source.is_some() {
             Ok(InputData::EarlyReturn(TaskResultEnvelope::ok(
@@ -303,7 +298,7 @@ fn resolve_input(task: &TaskEnvelope, worker_id: &str) -> ComputeResult<InputDat
 ///
 /// [`BroadcastError`]: atomic_data::broadcast::BroadcastError
 fn run_pipeline(
-    dispatchers: &HashMap<TaskRuntime, Box<dyn OpDispatcher>>,
+    dispatchers: &HashMap<TaskRuntime, Box<dyn Dispatcher>>,
     task: &TaskEnvelope,
     worker_id: &str,
     mut data: Vec<u8>,
@@ -316,7 +311,7 @@ fn run_pipeline(
             .map_err(|e| ComputeError::InvalidPayload(e.to_string()))?;
     }
 
-    for op in &task.ops {
+    for op in &task.steps {
         log::info!(
             "[{}] pipeline op '{}' {:?} data_bytes={}",
             worker_id,
@@ -343,17 +338,17 @@ fn build_result_envelope(
     let acc_deltas = accumulator::drain_deltas();
 
     let shuffle_server_uri = task
-        .ops
+        .steps
         .iter()
-        .any(|op| matches!(op.kind, OpKind::Engine(StepKind::ShuffleMap { .. })))
+        .any(|op| matches!(op.kind, StepKind::Engine(EngineStep::ShuffleMap { .. })))
         .then(atomic_data::env::get_shuffle_server_uri)
         .flatten();
 
     let cached_partitions: Vec<(usize, usize)> = task
-        .ops
+        .steps
         .iter()
         .filter_map(|op| match op.kind {
-            OpKind::Engine(StepKind::Cache { rdd_id }) => Some((rdd_id, task.partition_id)),
+            StepKind::Engine(EngineStep::Cache { rdd_id }) => Some((rdd_id, task.partition_id)),
             _ => None,
         })
         .collect();
@@ -361,9 +356,9 @@ fn build_result_envelope(
     // Report state shard IDs merged by any `MergeState` op so the driver can build
     // `state_locs` for report-back affinity (autoscaling-robust pinning, G1).
     let held_state_ids: Vec<u64> = task
-        .ops
+        .steps
         .iter()
-        .filter(|op| matches!(op.kind, OpKind::Engine(StepKind::MergeState { .. })))
+        .filter(|op| matches!(op.kind, StepKind::Engine(EngineStep::MergeState { .. })))
         .filter_map(|_| {
             decode_payload::<atomic_data::distributed::StateMergePayload>(&task.data)
                 .ok()
@@ -554,10 +549,10 @@ fn write_shard_checkpoint(dir: &str, state_id: u64, bytes: &[u8]) -> ComputeResu
 mod tests {
     use super::*;
     use atomic_data::distributed::{
-        OpKind, PipelineOp, ResultStatus, StepKind, TaskAction, TaskRuntime,
+        EngineStep, ResultStatus, Step, StepKind, TaskAction, TaskRuntime,
     };
 
-    fn make_task(op_id: &str, kind: OpKind, runtime: TaskRuntime, data: Vec<u8>) -> TaskEnvelope {
+    fn make_task(op_id: &str, kind: StepKind, runtime: TaskRuntime, data: Vec<u8>) -> TaskEnvelope {
         TaskEnvelope::new(
             1,
             2,
@@ -565,7 +560,7 @@ mod tests {
             0,
             0,
             "test-trace".to_string(),
-            vec![PipelineOp {
+            vec![Step {
                 op_id: op_id.to_string(),
                 kind,
                 runtime,
@@ -580,7 +575,7 @@ mod tests {
         let backend = ComputeEngine::default();
         let task = make_task(
             "no.such.op",
-            OpKind::Task(TaskAction::Map),
+            StepKind::Task(TaskAction::Map),
             TaskRuntime::Native,
             vec![],
         );
@@ -594,7 +589,7 @@ mod tests {
         let backend = ComputeEngine::default();
         let task = make_task(
             "nonexistent",
-            OpKind::Task(TaskAction::Map),
+            StepKind::Task(TaskAction::Map),
             TaskRuntime::Native,
             vec![],
         );
@@ -618,7 +613,7 @@ mod tests {
         let backend = ComputeEngine::default();
         let task = make_task(
             "no.such.op",
-            OpKind::Task(TaskAction::Map),
+            StepKind::Task(TaskAction::Map),
             TaskRuntime::Native,
             vec![],
         );
@@ -633,7 +628,7 @@ mod tests {
         // reports (rdd_id, partition_id) for driver-side locality registration.
         let task = make_task(
             "",
-            OpKind::Engine(StepKind::Cache { rdd_id: 9001 }),
+            StepKind::Engine(EngineStep::Cache { rdd_id: 9001 }),
             TaskRuntime::Native,
             data.clone(),
         );
@@ -654,7 +649,7 @@ mod tests {
         let cached = vec![7u8, 8, 9];
         atomic_data::cache::worker_partition_cache().put(9100, 0, cached.clone());
 
-        // No ops + cache_source = a pure locality serve from the worker cache.
+        // No steps + cache_source = a pure locality serve from the worker cache.
         let task =
             TaskEnvelope::new(1, 2, 3, 0, 0, "t".into(), vec![], vec![]).with_cache_source(9100);
         let result = backend.execute("w", &task).unwrap();

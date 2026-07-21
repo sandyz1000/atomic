@@ -116,8 +116,8 @@ where
         )
     }
 
-    /// Variant used when a staged pipeline (from `_task` ops) precedes the shuffle.
-    /// `staged` carries `(source_partitions, preceding_ops)` so workers run the ops
+    /// Variant used when a staged pipeline (from `_task` steps) precedes the shuffle.
+    /// `staged` carries `(source_partitions, preceding_steps)` so workers run the steps
     /// before writing shuffle buckets.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_staged(
@@ -127,7 +127,7 @@ where
         aggregator: Arc<Aggregator<K, V, C>>,
         part: Partitioner,
         fetcher: Arc<ShuffleFetcher>,
-        staged: Option<(Vec<Vec<u8>>, Vec<atomic_data::distributed::PipelineOp>)>,
+        staged: Option<(Vec<Vec<u8>>, Vec<atomic_data::distributed::Step>)>,
         comparator: Option<atomic_data::dependency::KeyComparator<K>>,
     ) -> Self {
         let mut vals = RddVals::new(id);
@@ -164,8 +164,8 @@ where
                 )
             });
         let dep_box = ErasedShuffleDependency::from_typed_with_key(shuffle_dep, shuffle_key);
-        let dep_box = if let Some((src_parts, ops)) = staged {
-            dep_box.with_staged_pipeline(src_parts, ops)
+        let dep_box = if let Some((src_parts, steps)) = staged {
+            dep_box.with_staged_pipeline(src_parts, steps)
         } else {
             dep_box
         };

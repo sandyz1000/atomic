@@ -23,7 +23,7 @@ pub trait UnaryTask<T, U>: Clone + Send + Sync + 'static {
     /// Apply the task function to a single input element. Takes `&self` so a task
     /// carrying captured/bound parameters can read them; a parameter-free task ignores it.
     fn call(&self, input: T) -> U;
-    /// rkyv-encoded bound parameters shipped in `PipelineOp.payload` and decoded by the
+    /// rkyv-encoded bound parameters shipped in `Step.payload` and decoded by the
     /// worker's dispatch handler. Empty for a zero-sized (parameter-free) task; a task
     /// carrying captured values (`task_fn!([cap] …)`) overrides this to encode its fields.
     fn encode_params(&self) -> Vec<u8> {
@@ -53,7 +53,7 @@ pub trait BinaryTask<T>: Clone + Send + Sync + 'static {
     /// Combine two values of type `T` into one. Takes `&self` so a task carrying
     /// bound parameters can read them; a parameter-free task ignores it.
     fn call(&self, a: T, b: T) -> T;
-    /// rkyv-encoded bound parameters shipped in `PipelineOp.payload`. Empty for a
+    /// rkyv-encoded bound parameters shipped in `Step.payload`. Empty for a
     /// parameter-free task. Note: a `Fold`/`Aggregate` op already uses `payload` for its
     /// zero value, so a binary task cannot both carry params and be used as a fold.
     fn encode_params(&self) -> Vec<u8> {

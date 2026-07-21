@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use atomic_compute::rdd::ParallelCollection;
 use atomic_data::data::Data;
-use atomic_data::distributed::{FileSplitPayload, OpKind, PipelineOp, StepKind, TaskRuntime};
+use atomic_data::distributed::{EngineStep, FileSplitPayload, Step, StepKind, TaskRuntime};
 use atomic_data::rdd::Rdd;
 use parking_lot::Mutex;
 
@@ -43,7 +43,7 @@ use crate::dstream::{DStream, DStreamBase, InputStreamBase};
 #[derive(Debug, Clone)]
 pub struct SourcePartitionTask {
     /// The pipeline op the worker executes over this partition's bytes.
-    pub op: PipelineOp,
+    pub op: Step,
     /// Bincode-encoded per-partition config (e.g. `KafkaConsumePayload`,
     /// `FileSplitPayload`).  Passed as the task's `data` field.
     pub partition_bytes: Vec<u8>,
@@ -143,11 +143,11 @@ impl<S: DistributedSource> DStream<S::Item> for DistributedInputDStream<S> {
         let sc = &self.state.ssc.sc;
 
         // All tasks in a single-op source share the same op; take it from the first.
-        let ops = vec![tasks[0].op.clone()];
+        let steps = vec![tasks[0].op.clone()];
         let source_partitions: Vec<Vec<u8>> =
             tasks.iter().map(|t| t.partition_bytes.clone()).collect();
 
-        match sc.dispatch_pipeline(source_partitions, ops) {
+        match sc.dispatch_pipeline(source_partitions, steps) {
             Ok(raw_batches) => {
                 let all_items = self.source.decode_results(raw_batches);
                 // Commit only after successful dispatch so uncommitted splits are
@@ -242,9 +242,9 @@ impl DistributedSource for DistributedFileSource {
                 let partition_bytes = bincode::encode_to_vec(&payload, bincode::config::standard())
                     .unwrap_or_default();
                 let task = SourcePartitionTask {
-                    op: PipelineOp {
+                    op: Step {
                         op_id: String::new(),
-                        kind: OpKind::Engine(StepKind::ReadFileSplit),
+                        kind: StepKind::Engine(EngineStep::ReadFileSplit),
                         runtime: TaskRuntime::Native,
                         payload: vec![],
                     },

@@ -23,7 +23,7 @@ impl PyRdd {
             self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
+            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.steps.clone());
             self.staged = saved_staged;
             let result_bytes = self
                 .context
@@ -110,7 +110,7 @@ impl PyRdd {
             self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
+            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.steps.clone());
             self.staged = saved_staged;
             let result_bytes = self
                 .context
@@ -252,7 +252,7 @@ impl PyRdd {
             self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
+            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.steps.clone());
             self.staged = saved_staged;
             let result_bytes = self
                 .context
@@ -330,7 +330,7 @@ impl PyRdd {
             self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
 
             let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.ops.clone());
+            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.steps.clone());
             self.staged = saved_staged;
             let result_bytes = self
                 .context

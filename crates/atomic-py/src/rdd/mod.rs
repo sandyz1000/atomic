@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::{OpKind, PipelineOp, PythonTaskPayload, TaskAction, TaskRuntime};
+use atomic_data::distributed::{PythonTaskPayload, Step, StepKind, TaskAction, TaskRuntime};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
@@ -35,7 +35,7 @@ pub(crate) fn verify_picklable(py: Python<'_>, f: Py<PyAny>) -> PyResult<()> {
 #[derive(Clone)]
 struct StagedPyPipeline {
     source_partitions: Vec<Vec<u8>>,
-    ops: Vec<PipelineOp>,
+    steps: Vec<Step>,
 }
 
 /// An in-memory distributed dataset (RDD) of Python objects.
@@ -141,14 +141,14 @@ impl PyRdd {
         Ok(partitions)
     }
 
-    fn push_op(&mut self, py: Python, op: PipelineOp) -> PyResult<()> {
+    fn push_op(&mut self, py: Python, op: Step) -> PyResult<()> {
         if let Some(ref mut staged) = self.staged {
-            staged.ops.push(op);
+            staged.steps.push(op);
         } else {
             let source_partitions = self.encode_source_partitions(py)?;
             self.staged = Some(StagedPyPipeline {
                 source_partitions,
-                ops: vec![op],
+                steps: vec![op],
             });
         }
         Ok(())
@@ -166,9 +166,9 @@ impl PyRdd {
         };
         let payload = serde_json::to_vec(&payload_struct)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        let op = PipelineOp {
+        let op = Step {
             op_id: "atomic::task::python".to_string(),
-            kind: OpKind::Task(action),
+            kind: StepKind::Task(action),
             runtime: TaskRuntime::Python,
             payload,
         };

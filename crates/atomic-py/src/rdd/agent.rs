@@ -1,5 +1,5 @@
 use atomic_data::distributed::{
-    AgentFindings, AgentStepPayload, OpKind, PipelineOp, ResolvedTool, ScriptRuntime, StepKind,
+    AgentFindings, AgentStepPayload, EngineStep, ResolvedTool, ScriptRuntime, Step, StepKind,
     TaskRuntime, WireDecode,
 };
 use pyo3::prelude::*;
@@ -41,9 +41,9 @@ impl PyRdd {
         // accepts both rkyv (Rust callers) and JSON arrays (Python/JS callers).
         let source_partitions = self.encode_source_partitions(py)?;
 
-        let op = PipelineOp {
+        let op = Step {
             op_id: String::new(),
-            kind: OpKind::Engine(StepKind::AgentStep),
+            kind: StepKind::Engine(EngineStep::AgentStep),
             runtime: TaskRuntime::Native,
             payload: payload_bytes,
         };

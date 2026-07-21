@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::{JsTaskPayload, OpKind, PipelineOp, TaskAction, TaskRuntime};
+use atomic_data::distributed::{JsTaskPayload, Step, StepKind, TaskAction, TaskRuntime};
 use napi::JsValue as _;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -26,7 +26,7 @@ pub(crate) fn slice_positions(total: usize, np: usize) -> impl Iterator<Item = (
 #[derive(Clone)]
 struct StagedJsPipeline {
     source_partitions: Vec<Vec<u8>>,
-    ops: Vec<PipelineOp>,
+    steps: Vec<Step>,
 }
 
 /// A distributed dataset (RDD) of JavaScript values.
@@ -97,19 +97,19 @@ impl JsRdd {
         };
         let payload = serde_json::to_vec(&payload_struct)
             .map_err(|e| Error::from_reason(format!("JsTaskPayload encode: {e}")))?;
-        let op = PipelineOp {
+        let op = Step {
             op_id: "atomic::task::js".to_string(),
-            kind: OpKind::Task(action),
+            kind: StepKind::Task(action),
             runtime: TaskRuntime::JavaScript,
             payload,
         };
         if let Some(ref mut staged) = self.staged {
-            staged.ops.push(op);
+            staged.steps.push(op);
         } else {
             let source_partitions = self.encode_source_partitions()?;
             self.staged = Some(StagedJsPipeline {
                 source_partitions,
-                ops: vec![op],
+                steps: vec![op],
             });
         }
         Ok(())
@@ -140,7 +140,7 @@ impl JsRdd {
             .ok_or_else(|| Error::from_reason("no staged pipeline to dispatch"))?;
         let result_bytes = self
             .context
-            .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+            .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
             .map_err(|e| Error::from_reason(format!("dispatch_pipeline: {e}")))?;
         let mut all = Vec::new();
         for bytes in result_bytes {
@@ -160,7 +160,7 @@ impl JsRdd {
             .ok_or_else(|| Error::from_reason("no staged pipeline to dispatch"))?;
         let result_bytes = self
             .context
-            .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+            .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
             .map_err(|e| Error::from_reason(format!("dispatch_pipeline: {e}")))?;
         result_bytes
             .into_iter()

@@ -1,11 +1,11 @@
 use std::net::SocketAddrV4;
 
-use atomic_data::distributed::{OpKind, PipelineOp, StepKind};
+use atomic_data::distributed::{EngineStep, Step, StepKind};
 
 use super::DistributedScheduler;
 
 /// Outcome of [`DistributedScheduler::plan_cache_dispatch`]: either recompute the
-/// staged pipeline, or serve a cached RDD and run the ops after the cache boundary.
+/// staged pipeline, or serve a cached RDD and run the steps after the cache boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheDispatch {
     /// Run the pipeline as given (computes + caches when it ends in a `Cache` op).
@@ -14,7 +14,7 @@ pub enum CacheDispatch {
     /// `post_ops` on top.
     Serve {
         rdd_id: usize,
-        post_ops: Vec<PipelineOp>,
+        post_ops: Vec<Step>,
         locs: Vec<SocketAddrV4>,
     },
 }
@@ -22,16 +22,16 @@ pub enum CacheDispatch {
 impl DistributedScheduler {
     /// Decide whether a staged pipeline can be served from cache. If its terminal
     /// `Cache { rdd_id }` op's partitions are all present in `cache_locs`, return a
-    /// `Serve` plan (read from cache + run the ops after the cache boundary, each
+    /// `Serve` plan (read from cache + run the steps after the cache boundary, each
     /// pinned to a holding worker); otherwise `Recompute` the full pipeline.
-    pub fn plan_cache_dispatch(&self, ops: &[PipelineOp], num_partitions: usize) -> CacheDispatch {
-        let Some(idx) = ops
+    pub fn plan_cache_dispatch(&self, steps: &[Step], num_partitions: usize) -> CacheDispatch {
+        let Some(idx) = steps
             .iter()
-            .rposition(|o| matches!(o.kind, OpKind::Engine(StepKind::Cache { .. })))
+            .rposition(|o| matches!(o.kind, StepKind::Engine(EngineStep::Cache { .. })))
         else {
             return CacheDispatch::Recompute;
         };
-        let OpKind::Engine(StepKind::Cache { rdd_id }) = ops[idx].kind else {
+        let StepKind::Engine(EngineStep::Cache { rdd_id }) = steps[idx].kind else {
             return CacheDispatch::Recompute;
         };
         let Some(entry) = self.cache_endpoints.get(&rdd_id) else {
@@ -47,7 +47,7 @@ impl DistributedScheduler {
         }
         CacheDispatch::Serve {
             rdd_id,
-            post_ops: ops[idx + 1..].to_vec(),
+            post_ops: steps[idx + 1..].to_vec(),
             locs,
         }
     }

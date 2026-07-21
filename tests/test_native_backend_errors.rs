@@ -4,12 +4,12 @@
 //! The existing inline test in `native_executor.rs` covers the unknown-op-id path.
 //! These tests add coverage for:
 //!
-//!   • Empty `ops` vector: should return `Err` (or `FatalFailure`), not panic.
+//!   • Empty `steps` vector: should return `Err` (or `FatalFailure`), not panic.
 //!     Currently handled at the top of `NativeBackend::execute` in `native_executor.rs` —
 //!     returning `Err(Error::UnknownOperation("empty pipeline"))`.
 //!
 //!   • Multi-op pipeline data threading: each op must receive the OUTPUT of the
-//!     previous op as its input. Verifies the `for op in &task.ops` loop in
+//!     previous op as its input. Verifies the `for op in &task.steps` loop in
 //!     `native_executor.rs`.
 //!
 //!   • FatalFailure is propagated cleanly — the scheduler must never see a panic.
@@ -23,7 +23,7 @@ use atomic_compute::runtimes::{Backend, ComputeEngine};
 use atomic_compute::task;
 use atomic_compute::task_traits::UnaryTask;
 use atomic_data::distributed::{
-    OpKind, PipelineOp, ResultStatus, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
+    ResultStatus, Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
 use std::sync::Arc;
 
@@ -54,14 +54,14 @@ fn decode<T: WireDecode>(data: &[u8]) -> T {
     T::decode_wire(data).expect("decode failed")
 }
 
-fn make_envelope_with_ops(ops: Vec<PipelineOp>, data: Vec<u8>) -> TaskEnvelope {
-    TaskEnvelope::new(1, 1, 1, 0, 0, "test".to_string(), ops, data)
+fn make_envelope_with_ops(steps: Vec<Step>, data: Vec<u8>) -> TaskEnvelope {
+    TaskEnvelope::new(1, 1, 1, 0, 0, "test".to_string(), steps, data)
 }
 
-fn single_op(op_id: &str, action: TaskAction) -> PipelineOp {
-    PipelineOp {
+fn single_op(op_id: &str, action: TaskAction) -> Step {
+    Step {
         op_id: op_id.to_string(),
-        kind: OpKind::Task(action),
+        kind: StepKind::Task(action),
         runtime: TaskRuntime::Native,
         payload: vec![],
     }
@@ -69,7 +69,7 @@ fn single_op(op_id: &str, action: TaskAction) -> PipelineOp {
 
 // ── Empty pipeline ────────────────────────────────────────────────────────────
 
-/// Empty `ops` must return `Err`, not panic.
+/// Empty `steps` must return `Err`, not panic.
 ///
 /// `NativeBackend::execute` guards against this at the top of the function —
 /// returning `Err(Error::UnknownOperation("empty pipeline"))`.
@@ -127,11 +127,11 @@ fn test_unknown_op_fatal() {
 fn test_2op_thread() {
     let backend = ComputeEngine::default();
     let input: Vec<i32> = vec![1, 2, 3];
-    let ops = vec![
+    let steps = vec![
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
         single_op(<DoubleVal as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
     ];
-    let task = make_envelope_with_ops(ops, encode(input));
+    let task = make_envelope_with_ops(steps, encode(input));
     let result = backend.execute("worker-0", &task).unwrap();
     assert_eq!(result.status, ResultStatus::Success);
     let output: Vec<i32> = decode(&result.data);
@@ -148,12 +148,12 @@ fn test_2op_thread() {
 fn test_3op_thread() {
     let backend = ComputeEngine::default();
     let input: Vec<i32> = vec![5, -3, 8];
-    let ops = vec![
+    let steps = vec![
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
         single_op(<DoubleVal as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
     ];
-    let task = make_envelope_with_ops(ops, encode(input));
+    let task = make_envelope_with_ops(steps, encode(input));
     let result = backend.execute("worker-0", &task).unwrap();
     assert_eq!(result.status, ResultStatus::Success);
     let output: Vec<i32> = decode(&result.data);
@@ -161,16 +161,16 @@ fn test_3op_thread() {
 }
 
 /// A failing op mid-pipeline must produce `FatalFailure` and NOT execute
-/// subsequent ops (the pipeline stops at the first error).
+/// subsequent steps (the pipeline stops at the first error).
 #[test]
 fn test_mid_op_shortcircuit() {
     let backend = ComputeEngine::default();
-    let ops = vec![
+    let steps = vec![
         single_op(<AddTen as UnaryTask<i32, i32>>::NAME, TaskAction::Map),
         single_op("DOES_NOT_EXIST", TaskAction::Map), // fails here
         single_op(<DoubleVal as UnaryTask<i32, i32>>::NAME, TaskAction::Map), // must NOT run
     ];
-    let task = make_envelope_with_ops(ops, encode(vec![1i32]));
+    let task = make_envelope_with_ops(steps, encode(vec![1i32]));
     let result = backend.execute("worker-0", &task).unwrap();
     assert_eq!(result.status, ResultStatus::FatalFailure);
 }
@@ -184,9 +184,9 @@ fn test_fold_op_sums_partition() {
     let backend = ComputeEngine::default();
     let zero: i32 = 0;
     let items: Vec<i32> = vec![1, 2, 3, 4, 5];
-    let op = PipelineOp {
+    let op = Step {
         op_id: "atomic::builtin::sum::i32".to_string(),
-        kind: OpKind::Task(TaskAction::Fold),
+        kind: StepKind::Task(TaskAction::Fold),
         runtime: TaskRuntime::Native,
         payload: encode(zero),
     };

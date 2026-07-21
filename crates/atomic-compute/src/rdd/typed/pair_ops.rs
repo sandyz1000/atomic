@@ -58,7 +58,7 @@ where
         let staged_info = if self.context.is_distributed() {
             self.staged
                 .as_ref()
-                .map(|s| (s.source_partitions.clone(), s.ops.clone()))
+                .map(|s| (s.source_partitions.clone(), s.steps.clone()))
         } else {
             None
         };
@@ -148,7 +148,7 @@ where
         let staged_info = if self.context.is_distributed() {
             self.staged
                 .as_ref()
-                .map(|s| (s.source_partitions.clone(), s.ops.clone()))
+                .map(|s| (s.source_partitions.clone(), s.steps.clone()))
         } else {
             None
         };
@@ -355,7 +355,7 @@ where
         let staged_info = if self.context.is_distributed() {
             self.staged
                 .as_ref()
-                .map(|s| (s.source_partitions.clone(), s.ops.clone()))
+                .map(|s| (s.source_partitions.clone(), s.steps.clone()))
         } else {
             None
         };
@@ -415,7 +415,7 @@ where
         let staged_info = if self.context.is_distributed() {
             self.staged
                 .as_ref()
-                .map(|s| (s.source_partitions.clone(), s.ops.clone()))
+                .map(|s| (s.source_partitions.clone(), s.steps.clone()))
         } else {
             None
         };

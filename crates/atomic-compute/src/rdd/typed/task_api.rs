@@ -30,9 +30,9 @@ where
             );
         }
 
-        let op = PipelineOp {
+        let op = Step {
             op_id: F::NAME.to_string(),
-            kind: OpKind::Task(TaskAction::Map),
+            kind: StepKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: task.encode_params(),
         };
@@ -72,9 +72,9 @@ where
             );
         }
 
-        let op = PipelineOp {
+        let op = Step {
             op_id: F::NAME.to_string(),
-            kind: OpKind::Task(TaskAction::Filter),
+            kind: StepKind::Task(TaskAction::Filter),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
@@ -114,9 +114,9 @@ where
             );
         }
 
-        let op = PipelineOp {
+        let op = Step {
             op_id: F::NAME.to_string(),
-            kind: OpKind::Task(TaskAction::FlatMap),
+            kind: StepKind::Task(TaskAction::FlatMap),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
@@ -158,9 +158,9 @@ where
             return TypedRdd::new(Arc::new(MapPartitionsRdd::new(id, self.rdd, f)), context);
         }
 
-        let op = PipelineOp {
+        let op = Step {
             op_id: F::NAME.to_string(),
-            kind: OpKind::Task(TaskAction::MapPartitions),
+            kind: StepKind::Task(TaskAction::MapPartitions),
             runtime: TaskRuntime::Native,
             payload: task.encode_params(),
         };
@@ -201,30 +201,30 @@ where
             return Ok(results.into_iter().fold(init, |a, b| task.call(a, b)));
         }
 
-        // Build pipeline: existing staged ops (if any) + fold op.
+        // Build pipeline: existing staged steps (if any) + fold op.
         let fold_payload = init
             .encode_wire()
             .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
-        let fold_op = PipelineOp {
+        let fold_op = Step {
             op_id: F::NAME.to_string(),
-            kind: OpKind::Task(TaskAction::Fold),
+            kind: StepKind::Task(TaskAction::Fold),
             runtime: TaskRuntime::Native,
             payload: fold_payload,
         };
 
-        let (source_partitions, mut ops) = match &self.staged {
+        let (source_partitions, mut steps) = match &self.staged {
             None => {
                 let encoded = Context::encode_rdd_partitions(self.rdd.clone())
                     .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
                 (encoded, vec![])
             }
-            Some(s) => (s.source_partitions.clone(), s.ops.clone()),
+            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
         };
-        ops.push(fold_op);
+        steps.push(fold_op);
 
         let raw_partition_outputs = self
             .context
-            .dispatch_pipeline(source_partitions, ops.clone())
+            .dispatch_pipeline(source_partitions, steps.clone())
             .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
 
         let mut part_values: Vec<T> = raw_partition_outputs
@@ -276,26 +276,26 @@ where
             return Ok(results.into_iter().flatten().reduce(|a, b| task.call(a, b)));
         }
 
-        let reduce_op = PipelineOp {
+        let reduce_op = Step {
             op_id: F::NAME.to_string(),
-            kind: OpKind::Task(TaskAction::Reduce),
+            kind: StepKind::Task(TaskAction::Reduce),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
 
-        let (source_partitions, mut ops) = match &self.staged {
+        let (source_partitions, mut steps) = match &self.staged {
             None => {
                 let src = Context::encode_rdd_partitions(self.rdd.clone())
                     .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
                 (src, vec![])
             }
-            Some(s) => (s.source_partitions.clone(), s.ops.clone()),
+            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
         };
-        ops.push(reduce_op);
+        steps.push(reduce_op);
 
         let partition_results_raw = self
             .context
-            .dispatch_pipeline(source_partitions, ops)
+            .dispatch_pipeline(source_partitions, steps)
             .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
 
         let mut values: Vec<T> = partition_results_raw
@@ -310,9 +310,9 @@ where
                 let combined = values
                     .encode_wire()
                     .map_err(|e| BaseError::DowncastFailure(e.to_string()))?;
-                let driver_ops = vec![PipelineOp {
+                let driver_ops = vec![Step {
                     op_id: F::NAME.to_string(),
-                    kind: OpKind::Task(TaskAction::Reduce),
+                    kind: StepKind::Task(TaskAction::Reduce),
                     runtime: TaskRuntime::Native,
                     payload: vec![],
                 }];
@@ -350,18 +350,18 @@ where
     fn stage_op(
         staged: Option<StagedPipeline>,
         rdd: &RddRef<T>,
-        op: PipelineOp,
+        op: Step,
     ) -> Result<StagedPipeline, crate::error::ComputeError> {
         match staged {
             Some(mut s) => {
-                s.ops.push(op);
+                s.steps.push(op);
                 Ok(s)
             }
             None => {
                 let source_partitions = Context::encode_rdd_partitions(rdd.clone())?;
                 Ok(StagedPipeline {
                     source_partitions,
-                    ops: vec![op],
+                    steps: vec![op],
                 })
             }
         }
@@ -413,9 +413,9 @@ impl TypedRdd<String> {
             return TypedRdd::new(Arc::new(ParallelCollection::new(id, flat, 1)), context);
         }
 
-        let op = PipelineOp {
+        let op = Step {
             op_id: String::new(),
-            kind: OpKind::Engine(StepKind::AgentStep),
+            kind: StepKind::Engine(EngineStep::AgentStep),
             runtime: TaskRuntime::Native,
             payload: payload_bytes,
         };

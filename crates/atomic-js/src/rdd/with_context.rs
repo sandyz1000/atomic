@@ -283,7 +283,7 @@ impl JsRdd {
                 .ok_or_else(|| Error::from_reason("no staged pipeline"))?;
             let result_bytes = self
                 .context
-                .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+                .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
                 .map_err(|e| Error::from_reason(format!("dispatch_pipeline: {e}")))?;
 
             let mut acc: Option<JsonValue> = None;
@@ -338,7 +338,7 @@ impl JsRdd {
                 .ok_or_else(|| Error::from_reason("no staged pipeline"))?;
             let result_bytes = self
                 .context
-                .dispatch_pipeline(staged.source_partitions.clone(), staged.ops.clone())
+                .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
                 .map_err(|e| Error::from_reason(format!("dispatch_pipeline: {e}")))?;
 
             let mut acc = zero;

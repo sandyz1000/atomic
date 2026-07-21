@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use atomic_data::distributed::{
-    OpKind, PipelineOp, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope, TaskResultEnvelope,
+    Step, StepKind, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope, TaskResultEnvelope,
     TaskRuntime, TransportFrameKind, WireDecode, WireEncode, WorkerCapabilities,
     encode_transport_frame, parse_transport_header,
 };
@@ -26,10 +26,10 @@ use atomic_scheduler::{DistributedScheduler, LocalScheduler, NativeScheduler, St
 /// schedulers snapshot it at construction.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn noop_ops() -> Vec<PipelineOp> {
-    vec![PipelineOp {
+fn noop_ops() -> Vec<Step> {
+    vec![Step {
         op_id: "no.op".to_string(),
-        kind: OpKind::Task(TaskAction::Map),
+        kind: StepKind::Task(TaskAction::Map),
         runtime: TaskRuntime::Native,
         payload: vec![],
     }]

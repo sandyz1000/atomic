@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::WIRE_SCHEMA_V1;
 
-/// Which execution runtime handles a [`PipelineOp`] on the worker.
+/// Which execution runtime handles a [`Step`] on the worker.
 ///
 /// `Native` (the default) looks up `op_id` in the compile-time `TASK_REGISTRY`.
 /// `Python` and `JavaScript` dispatch the serialized partition-level function to
@@ -52,18 +52,18 @@ pub enum TaskRuntime {
 /// A [`TaskEnvelope`] carries a sequence of these; the worker threads partition
 /// data through them in order, feeding each step's output as the next step's input.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct PipelineOp {
+pub struct Step {
     /// Registered op_id, e.g. `"task_double::double"`. Looked up in the worker's
-    /// compile-time dispatch table. Empty string for Python/JS task ops.
+    /// compile-time dispatch table. Empty string for Python/JS task steps.
     pub op_id: String,
     /// What this step does: a registered task function applied with a combinator shape
-    /// ([`OpKind::Task`]), or a built-in engine step ([`OpKind::Engine`]). Authoritative
+    /// ([`StepKind::Task`]), or a built-in engine step ([`StepKind::Engine`]). Authoritative
     /// for Native runtime; informational (for observability) for Python and JavaScript.
-    pub kind: OpKind,
+    pub kind: StepKind,
     /// Which runtime executes this op. Defaults to [`TaskRuntime::Native`].
     pub runtime: TaskRuntime,
     /// rkyv-encoded config: fold zero value for Fold/Aggregate; serde_json-encoded
-    /// [`PythonTaskPayload`] / [`JsTaskPayload`] for Python/JS ops; empty for Map/Filter.
+    /// [`PythonTaskPayload`] / [`JsTaskPayload`] for Python/JS steps; empty for Map/Filter.
     pub payload: Vec<u8>,
 }
 
@@ -112,7 +112,7 @@ pub enum TaskAction {
     Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum StepKind {
+pub enum EngineStep {
     /// Shuffle map phase: repartition elements by key into `num_output_partitions` buckets.
     ShuffleMap {
         shuffle_id: usize,
@@ -139,52 +139,52 @@ pub enum StepKind {
     /// Framework-native distributed sub-agent loop. The worker looks up the
     /// registered `AgentRunner` (installed by `atomic-nlq`) and runs a multi-round
     /// LLM plan→execute→evaluate loop over the partition's string inputs.
-    /// Config is in `PipelineOp.payload` (JSON-encoded `AgentStepPayload`);
+    /// Config is in `Step.payload` (JSON-encoded `AgentStepPayload`);
     /// input bytes are rkyv-encoded `Vec<String>` (or JSON fallback for Python/JS).
     /// Returns rkyv-encoded `Vec<AgentFindings>`.
     AgentStep,
     /// Kafka Direct source op (requires `kafka` feature). The worker `assign`+`seek`s to
     /// the given offset range and polls until `end_offset`, returning the messages as
     /// `rkyv`-encoded `Vec<String>`. `data` in the TaskEnvelope is ignored; all config
-    /// is in `PipelineOp.payload` (bincode-encoded `KafkaConsumePayload`).
+    /// is in `Step.payload` (bincode-encoded `KafkaConsumePayload`).
     #[cfg(feature = "kafka")]
     KafkaConsume,
 }
 
-/// What a [`PipelineOp`] does: apply a registered task function with a combinator shape
-/// ([`TaskAction`]), or run a built-in engine step ([`StepKind`]).
+/// What a [`Step`] does: apply a registered task function with a combinator shape
+/// ([`TaskAction`]), or run a built-in engine step ([`EngineStep`]).
 #[derive(
     Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum OpKind {
+pub enum StepKind {
     /// Registered task function applied with a combinator shape. `op_id` names the function.
     Task(TaskAction),
     /// Built-in engine step. `op_id` is empty.
-    Engine(StepKind),
+    Engine(EngineStep),
 }
 
-impl OpKind {
+impl StepKind {
     /// The combinator shape if this is a task op, else `None`.
     pub fn task_action(&self) -> Option<&TaskAction> {
         match self {
-            OpKind::Task(a) => Some(a),
-            OpKind::Engine(_) => None,
+            StepKind::Task(a) => Some(a),
+            StepKind::Engine(_) => None,
         }
     }
 
     /// The engine step if this is an engine op, else `None`.
-    pub fn engine_step(&self) -> Option<&StepKind> {
+    pub fn engine_step(&self) -> Option<&EngineStep> {
         match self {
-            OpKind::Engine(s) => Some(s),
-            OpKind::Task(_) => None,
+            StepKind::Engine(s) => Some(s),
+            StepKind::Task(_) => None,
         }
     }
 }
 
-/// Config for a [`StepKind::AgentStep`] op.
+/// Config for a [`EngineStep::AgentStep`] op.
 ///
-/// Serialized as JSON into `PipelineOp.payload` so it can be decoded by the
+/// Serialized as JSON into `Step.payload` so it can be decoded by the
 /// worker's `NativeDispatcher` without a shared rkyv schema.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AgentStepPayload {
@@ -254,7 +254,7 @@ pub struct ResolvedTool {
 ///
 /// One `AgentFindings` is produced per input element in the partition.
 /// `Vec<AgentFindings>` is rkyv-encoded as the partition output of an
-/// [`StepKind::AgentStep`] op.
+/// [`EngineStep::AgentStep`] op.
 #[derive(
     Debug, Clone, PartialEq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
@@ -272,7 +272,7 @@ pub struct AgentFindings {
     pub budget_exceeded: bool,
 }
 
-/// Metadata carried in `PipelineOp.payload` for a Python task step.
+/// Metadata carried in `Step.payload` for a Python task step.
 ///
 /// Serialized as JSON so both Python (via `json` stdlib) and Rust (`serde_json`) can
 /// produce and consume it without a shared binary format.
@@ -284,7 +284,7 @@ pub struct PythonTaskPayload {
     pub zero_bytes: Vec<u8>,
 }
 
-/// Metadata carried in `PipelineOp.payload` for a JavaScript task step.
+/// Metadata carried in `Step.payload` for a JavaScript task step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsTaskPayload {
     /// JavaScript partition-level function source.
@@ -298,7 +298,7 @@ pub struct JsTaskPayload {
 }
 
 crate::cfg_kafka! {
-    /// Config for one Kafka Direct consume op shipped inside `PipelineOp.payload`.
+    /// Config for one Kafka Direct consume op shipped inside `Step.payload`.
     ///
     /// The worker creates a one-shot consumer, assigns to `(topic, partition)`,
     /// seeks to `start_offset`, polls until it reaches `end_offset` or `max_records`
@@ -350,9 +350,9 @@ pub struct FileSplitPayload {
     pub end_byte: Option<u64>,
 }
 
-/// Payload for one `StepKind::ShuffleMap` pipeline op.
+/// Payload for one `EngineStep::ShuffleMap` pipeline op.
 ///
-/// Sent in `PipelineOp.payload` and decoded on the worker by the native runtime.
+/// Sent in `Step.payload` and decoded on the worker by the native runtime.
 #[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub struct ShuffleMapPayload {
     /// `SHUFFLE_MAP_REGISTRY` key for the concrete `(K, V)` pair.
@@ -394,10 +394,10 @@ pub enum ResultStatus {
 /// The wire envelope sent from driver to worker for every distributed task.
 ///
 /// Contains everything the worker needs to execute one partition of work:
-/// - an ordered pipeline of operations (`ops`) — each carries an `op_id`, `action`, and `payload`
+/// - an ordered pipeline of operations (`steps`) — each carries an `op_id`, `action`, and `payload`
 /// - the partition elements (`data`, rkyv-encoded `Vec<T>`)
 ///
-/// Workers execute `ops` in order, threading partition data through each step.
+/// Workers execute `steps` in order, threading partition data through each step.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct TaskEnvelope {
     pub version: u16,
@@ -409,7 +409,7 @@ pub struct TaskEnvelope {
     /// Correlates scheduler logs and worker logs.
     pub trace_id: String,
     /// Ordered pipeline of operations to apply to the partition.
-    pub ops: Vec<PipelineOp>,
+    pub steps: Vec<Step>,
     /// Serialized partition elements (rkyv-encoded `Vec<T>`).
     pub data: Vec<u8>,
     /// Every broadcast id this task reads. Always the full set the task needs; the
@@ -434,7 +434,7 @@ impl TaskEnvelope {
         attempt_id: usize,
         partition_id: usize,
         trace_id: String,
-        ops: Vec<PipelineOp>,
+        steps: Vec<Step>,
         data: Vec<u8>,
     ) -> Self {
         Self {
@@ -445,7 +445,7 @@ impl TaskEnvelope {
             attempt_id,
             partition_id,
             trace_id,
-            ops,
+            steps,
             data,
             broadcast_ids: vec![],
             broadcast_values: vec![],
@@ -510,7 +510,7 @@ pub struct TaskResultEnvelope {
     pub accumulator_deltas: Vec<(usize, Vec<u8>)>,
     /// Partitions this task cached on its worker: `(rdd_id, partition_id)` pairs.
     pub cached_partitions: Vec<(usize, usize)>,
-    /// State shards merged on this worker: the `state_id` values from any `MergeState` ops.
+    /// State shards merged on this worker: the `state_id` values from any `MergeState` steps.
     /// The driver uses these to update `state_locs` for autoscaling-robust shard affinity.
     pub held_state_ids: Vec<u64>,
 }
@@ -646,7 +646,7 @@ impl TaskResultEnvelope {
     }
 
     /// Attach the state shard IDs merged on this worker (called by NativeBackend for
-    /// `MergeState` ops). The driver uses these to build `state_locs` for affinity routing.
+    /// `MergeState` steps). The driver uses these to build `state_locs` for affinity routing.
     pub fn with_held_state_ids(mut self, ids: Vec<u64>) -> Self {
         self.held_state_ids = ids;
         self

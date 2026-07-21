@@ -78,32 +78,37 @@ impl<T: Data> TypedRdd<T> {
     }
 
     /// Return a new RDD containing elements only in this RDD but not in `other`.
-    pub fn subtract(self, other: TypedRdd<T>) -> TypedRdd<T>
+    /// Materialise the other side of a binary set operation into a hash set,
+    /// choosing the distributed op path or local run_job as appropriate.
+    fn materialize_other_set(
+        &self,
+        other: &TypedRdd<T>,
+    ) -> Result<Arc<std::collections::HashSet<T>>, BaseError>
     where
         T: Eq + std::hash::Hash + Clone + WireEncode,
         Vec<T>: WireEncode + WireDecode,
     {
-        use std::collections::HashSet;
-        // Distributed materialises the other side via the op path; the closure `run_job`
-        // would run over the empty driver placeholder RDD.
-        let other_set: Arc<HashSet<T>> = Arc::new(if self.context.is_distributed() {
-            other
-                .collect_distributed()
-                .unwrap_or_default()
-                .into_iter()
-                .collect()
+        let ctx = self.context.clone();
+        let items: Vec<T> = if ctx.is_distributed() {
+            other.collect_distributed()?
         } else {
-            self.context
-                .run_job(other.rdd, |iter| iter.collect::<Vec<T>>())
-                .unwrap_or_default()
+            ctx.run_job(other.rdd.clone(), |iter| iter.collect::<Vec<T>>())?
                 .into_iter()
                 .flatten()
                 .collect()
-        });
-        let other_set_clone = Arc::clone(&other_set);
+        };
+        Ok(Arc::new(items.into_iter().collect()))
+    }
+
+    pub fn subtract(self, other: TypedRdd<T>) -> Result<TypedRdd<T>, BaseError>
+    where
+        T: Eq + std::hash::Hash + Clone + WireEncode,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        let other_set = self.materialize_other_set(&other)?;
         let filter_fn =
             move |_idx: usize, iter: Box<dyn Iterator<Item = T>>| -> Box<dyn Iterator<Item = T>> {
-                let set = Arc::clone(&other_set_clone);
+                let set = Arc::clone(&other_set);
                 Box::new(
                     iter.filter(move |x| !set.contains(x))
                         .collect::<Vec<_>>()
@@ -111,36 +116,21 @@ impl<T: Data> TypedRdd<T> {
                 )
             };
         let id = self.context.new_rdd_id();
-        let subtract_rdd = MapPartitionsRdd::new(id, self.rdd, filter_fn);
-        TypedRdd::new(Arc::new(subtract_rdd), self.context)
+        Ok(TypedRdd::new(
+            Arc::new(MapPartitionsRdd::new(id, self.rdd, filter_fn)),
+            self.context,
+        ))
     }
 
-    pub fn intersection(self, other: TypedRdd<T>) -> TypedRdd<T>
+    pub fn intersection(self, other: TypedRdd<T>) -> Result<TypedRdd<T>, BaseError>
     where
         T: Eq + std::hash::Hash + Clone + WireEncode,
         Vec<T>: WireEncode + WireDecode,
     {
-        use std::collections::HashSet;
-        // Distributed materialises the other side via the op path; the closure `run_job`
-        // would run over the empty driver placeholder RDD.
-        let other_set: Arc<HashSet<T>> = Arc::new(if self.context.is_distributed() {
-            other
-                .collect_distributed()
-                .unwrap_or_default()
-                .into_iter()
-                .collect()
-        } else {
-            self.context
-                .run_job(other.rdd, |iter| iter.collect::<Vec<T>>())
-                .unwrap_or_default()
-                .into_iter()
-                .flatten()
-                .collect()
-        });
-        let other_set_clone = Arc::clone(&other_set);
+        let other_set = self.materialize_other_set(&other)?;
         let filter_fn =
             move |_idx: usize, iter: Box<dyn Iterator<Item = T>>| -> Box<dyn Iterator<Item = T>> {
-                let set = Arc::clone(&other_set_clone);
+                let set = Arc::clone(&other_set);
                 Box::new(
                     iter.filter(move |x| set.contains(x))
                         .collect::<Vec<_>>()
@@ -148,8 +138,10 @@ impl<T: Data> TypedRdd<T> {
                 )
             };
         let id = self.context.new_rdd_id();
-        let intersect_rdd = MapPartitionsRdd::new(id, self.rdd, filter_fn);
-        TypedRdd::new(Arc::new(intersect_rdd), self.context)
+        Ok(TypedRdd::new(
+            Arc::new(MapPartitionsRdd::new(id, self.rdd, filter_fn)),
+            self.context,
+        ))
     }
 }
 

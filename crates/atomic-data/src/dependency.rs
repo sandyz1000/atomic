@@ -2,7 +2,7 @@ use bincode::Encode;
 
 use crate::aggregator::Aggregator;
 use crate::data::Data;
-use crate::distributed::{PipelineOp, WireEncode};
+use crate::distributed::{Step, WireEncode};
 use crate::error::BaseResult;
 // use crate::env;
 use crate::partitioner::Partitioner;
@@ -151,7 +151,7 @@ pub struct ShuffleSpec {
     pub type_id: &'static str,
     /// Ops that run on workers *before* the ShuffleMap op, non-empty when a `_task` pipeline
     /// precedes the shuffle. Paired with [`staged_partitions`](Self::staged_partitions).
-    pub preceding_ops: Vec<PipelineOp>,
+    pub preceding_steps: Vec<Step>,
     /// Pre-encoded worker input for a staged-pipeline shuffle. When `Some`, these bytes are the
     /// shuffle input instead of encoding the parent RDD through the executor.
     pub staged_partitions: Option<Vec<Vec<u8>>>,
@@ -447,22 +447,22 @@ impl ErasedShuffleDependency {
             num_output_partitions: dep.partitioner.get_num_of_partitions(),
             partitioner_spec: dep.partitioner.to_spec(),
             type_id: shuffle_key,
-            preceding_ops: vec![],
+            preceding_steps: vec![],
             staged_partitions: None,
         };
         ErasedShuffleDependency { spec, exec: dep }
     }
 
     /// Attach a staged `_task` pipeline that precedes the shuffle: `source_partitions`
-    /// (already rkyv-encoded) become the worker input and `preceding_ops` run before the
+    /// (already rkyv-encoded) become the worker input and `preceding_steps` run before the
     /// ShuffleMap op, in place of encoding the parent RDD.
     pub fn with_staged_pipeline(
         mut self,
         source_partitions: Vec<Vec<u8>>,
-        preceding_ops: Vec<PipelineOp>,
+        preceding_steps: Vec<Step>,
     ) -> Self {
         self.spec.staged_partitions = Some(source_partitions);
-        self.spec.preceding_ops = preceding_ops;
+        self.spec.preceding_steps = preceding_steps;
         self
     }
 }
