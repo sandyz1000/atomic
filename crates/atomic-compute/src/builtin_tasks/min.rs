@@ -1,4 +1,4 @@
-use crate::task_registry::TaskEntry;
+use crate::register_binary_task;
 use crate::task_traits::BinaryTask;
 
 /// Built-in: return the lesser of two `Ord` values.
@@ -26,29 +26,7 @@ macro_rules! impl_min_task {
             }
         }
 
-        inventory::submit! {
-            TaskEntry {
-                task_name: concat!("atomic::builtin::min::", stringify!($ty)),
-                body_hash: 0,
-handler: |action, payload, data| {
-                    use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
-                    let _ = payload;
-                    let task = MinTask::<$ty>::default();
-                    match action {
-                        TaskAction::Fold | TaskAction::Aggregate | TaskAction::Reduce => {
-                            let items = ::std::vec::Vec::<$ty>::decode_wire(data)
-                                .map_err(|e| e.to_string())?;
-                            let mut iter = items.into_iter();
-                            let first = iter.next()
-                                .ok_or_else(|| "min: empty partition".to_string())?;
-                            let result = iter.fold(first, |a, b| task.call(a, b));
-                            result.encode_wire().map_err(|e| e.to_string())
-                        }
-                        other => Err(format!("MinTask does not support action {:?}", other)),
-                    }
-                },
-            }
-        }
+        register_binary_task!(MinTask<$ty>, $ty);
     };
 }
 
@@ -58,3 +36,4 @@ impl_min_task!(u32);
 impl_min_task!(u64);
 impl_min_task!(f32);
 impl_min_task!(f64);
+impl_min_task!(String);

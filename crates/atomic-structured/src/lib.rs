@@ -27,6 +27,7 @@ pub mod frame;
 cfg_kafka! {
     pub mod kafka;
 }
+pub mod map_groups_state;
 pub mod query;
 pub mod session_window;
 pub mod sink;

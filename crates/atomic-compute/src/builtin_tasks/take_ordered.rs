@@ -1,4 +1,8 @@
-use crate::task_registry::TaskEntry;
+use atomic_data::distributed::WireDecode;
+use atomic_data::error::DataResult;
+
+use crate::register_partition_task;
+use crate::task_traits::PartitionTask;
 
 /// Built-in: return the first K elements in ascending order from a partition.
 ///
@@ -6,37 +10,22 @@ use crate::task_registry::TaskEntry;
 /// produces its local first-K ascending; the driver merges and re-truncates.
 ///
 /// `payload` must be a wire-encoded `u64` (the K value).
+#[derive(Default)]
 pub struct TakeOrderedTask<T>(std::marker::PhantomData<T>);
-
-impl<T> Default for TakeOrderedTask<T> {
-    fn default() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
 
 macro_rules! impl_take_ordered_task {
     ($ty:ty) => {
-        inventory::submit! {
-            TaskEntry {
-                task_name: concat!("atomic::builtin::take_ordered::", stringify!($ty)),
-                body_hash: 0,
-handler: |action, payload, data| {
-                    use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
-                    match action {
-                        TaskAction::Collect => {
-                            let k = u64::decode_wire(payload)
-                                .map_err(|e| e.to_string())? as usize;
-                            let mut items = ::std::vec::Vec::<$ty>::decode_wire(data)
-                                .map_err(|e| e.to_string())?;
-                            items.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
-                            items.truncate(k);
-                            items.encode_wire().map_err(|e| e.to_string())
-                        }
-                        other => Err(format!("TakeOrderedTask does not support action {:?}", other)),
-                    }
-                },
+        impl PartitionTask<$ty> for TakeOrderedTask<$ty> {
+            const NAME: &'static str = concat!("atomic::builtin::take_ordered::", stringify!($ty));
+            fn transform(&self, mut items: Vec<$ty>, payload: &[u8]) -> DataResult<Vec<$ty>> {
+                let k = u64::decode_wire(payload)? as usize;
+                items.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
+                items.truncate(k);
+                Ok(items)
             }
         }
+
+        register_partition_task!(TakeOrderedTask<$ty>, $ty);
     };
 }
 
@@ -46,3 +35,4 @@ impl_take_ordered_task!(u32);
 impl_take_ordered_task!(u64);
 impl_take_ordered_task!(f32);
 impl_take_ordered_task!(f64);
+impl_take_ordered_task!(String);

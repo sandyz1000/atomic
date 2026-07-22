@@ -467,6 +467,39 @@ where
         Ok(self.variance()?.sqrt())
     }
 
+    /// Single-pass summary statistics (count, mean, sum, min, max, variance, stdev).
+    ///
+    /// Uses the built-in [`StatCounterTask`](crate::builtin_tasks::stats::StatCounterTask) —
+    /// each worker folds its partition into one accumulator; the driver merges them. Unlike
+    /// calling `mean`/`variance`/`min`/`max` separately, this makes one pass over the data.
+    pub fn stats(&self) -> Result<crate::builtin_tasks::stats::StatCounter, DataError>
+    where
+        crate::builtin_tasks::stats::StatCounterTask<T>:
+            AggregateTask<(u64, f64, f64, f64, f64), T> + Default,
+    {
+        let acc = self.aggregate_task(
+            crate::builtin_tasks::stats::STAT_ZERO,
+            crate::builtin_tasks::stats::StatCounterTask::<T>::default(),
+        )?;
+        Ok(crate::builtin_tasks::stats::StatCounter::from_tuple(acc))
+    }
+
+    /// Approximate number of distinct elements via HyperLogLog (~1.6% standard error).
+    ///
+    /// Uses the built-in [`HllTask`](crate::builtin_tasks::hll::HllTask) — each worker folds its
+    /// partition into a register vector; the driver merges them register-wise and estimates the
+    /// cardinality. Far cheaper in memory than an exact `distinct().count()` on large datasets.
+    pub fn count_approx_distinct(&self) -> Result<u64, DataError>
+    where
+        crate::builtin_tasks::hll::HllTask<T>: AggregateTask<Vec<u8>, T> + Default,
+    {
+        let regs = self.aggregate_task(
+            crate::builtin_tasks::hll::hll_zero(),
+            crate::builtin_tasks::hll::HllTask::<T>::default(),
+        )?;
+        Ok(crate::builtin_tasks::hll::hll_estimate(&regs))
+    }
+
     /// Build (or extend) a `StagedPipeline` for distributed lazy dispatch.
     ///
     /// If a pipeline was already staged, appends `op` and returns it.

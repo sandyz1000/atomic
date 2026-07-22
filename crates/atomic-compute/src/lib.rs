@@ -68,7 +68,7 @@ pub mod __macro_support {
         PartitionerEntry, ShuffleKeyEntry, ShuffleMapEntry, SortShuffleMapEntry, StateMergeEntry,
         TaskEntry,
     };
-    pub use crate::task_traits::{AggregateTask, BinaryTask, UnaryTask};
+    pub use crate::task_traits::{AggregateTask, BinaryTask, PartitionTask, UnaryTask};
     pub use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
     pub use atomic_data::partitioner::{NamedPartitioner, Partitioner, TypedPartitioner};
     pub use inventory;
@@ -191,7 +191,7 @@ macro_rules! register_aggregate_task {
                     match action {
                         TaskAction::Aggregate | TaskAction::Fold => {
                             let zero = <$acc>::decode_wire(payload).map_err(|e| e.to_string())?;
-                            let items = ::std::vec::Vec::<$elem>::decode_wire(data)
+                            let items = Vec::<$elem>::decode_wire(data)
                                 .map_err(|e| e.to_string())?;
                             let task = <$task>::default();
                             let acc = items.into_iter().fold(zero, |a, x| task.seq(a, x));
@@ -200,6 +200,81 @@ macro_rules! register_aggregate_task {
                         other => ::std::result::Result::Err(::std::format!(
                             "aggregate task '{}' does not support action {:?}",
                             <$task as AggregateTask<$acc, $elem>>::NAME,
+                            other
+                        )),
+                    }
+                },
+            }
+        }
+    };
+}
+
+/// Register a [`BinaryTask`](crate::task_traits::BinaryTask) as a dispatchable builtin, keyed by
+/// its `NAME`. Handles the `Fold` / `Aggregate` / `Reduce` actions by folding the partition
+/// through `BinaryTask::call`, seeded by the first element — so an empty partition returns empty
+/// bytes (the driver skips it) rather than needing an identity value. Use this for monoid-shaped
+/// reductions with no identity element (`max`, `min`); reductions that fold from a zero payload
+/// (`sum`) register their own handler.
+#[macro_export]
+macro_rules! register_binary_task {
+    ($task:ty, $elem:ty) => {
+        $crate::__macro_support::inventory::submit! {
+            $crate::__macro_support::TaskEntry {
+                task_name: <$task as $crate::__macro_support::BinaryTask<$elem>>::NAME,
+                body_hash: 0,
+                handler: |action, payload, data| {
+                    use $crate::__macro_support::{BinaryTask, TaskAction, WireDecode, WireEncode};
+                    let _ = payload;
+                    match action {
+                        TaskAction::Fold | TaskAction::Aggregate | TaskAction::Reduce => {
+                            let items = Vec::<$elem>::decode_wire(data).map_err(|e| e.to_string())?;
+                            let mut iter = items.into_iter();
+                            let ::std::option::Option::Some(first) = iter.next() else {
+                                return ::std::result::Result::Ok(Vec::new());
+                            };
+                            let task = <$task>::default();
+                            let result = iter.fold(first, |a, b| task.call(a, b));
+                            result.encode_wire().map_err(|e| e.to_string())
+                        }
+                        other => ::std::result::Result::Err(::std::format!(
+                            "binary task '{}' does not support action {:?}",
+                            <$task as BinaryTask<$elem>>::NAME,
+                            other
+                        )),
+                    }
+                },
+            }
+        }
+    };
+}
+
+/// Register a [`PartitionTask`](crate::task_traits::PartitionTask) as a dispatchable builtin,
+/// keyed by its `NAME`. Handles the `Map` / `Collect` actions by decoding the partition into a
+/// `Vec`, running [`PartitionTask::transform`](crate::task_traits::PartitionTask::transform)
+/// (which reads the op `payload`), and re-encoding. Use this for whole-partition reductions with
+/// no element-level combine (`top_k`, `take_ordered`, `distinct`, `sort`).
+#[macro_export]
+macro_rules! register_partition_task {
+    ($task:ty, $elem:ty) => {
+        $crate::__macro_support::inventory::submit! {
+            $crate::__macro_support::TaskEntry {
+                task_name: <$task as $crate::__macro_support::PartitionTask<$elem>>::NAME,
+                body_hash: 0,
+                handler: |action, payload, data| {
+                    use $crate::__macro_support::{
+                        PartitionTask, TaskAction, WireDecode, WireEncode,
+                    };
+                    match action {
+                        TaskAction::Map | TaskAction::Collect => {
+                            let items = Vec::<$elem>::decode_wire(data).map_err(|e| e.to_string())?;
+                            let out = <$task>::default()
+                                .transform(items, payload)
+                                .map_err(|e| e.to_string())?;
+                            out.encode_wire().map_err(|e| e.to_string())
+                        }
+                        other => ::std::result::Result::Err(::std::format!(
+                            "partition task '{}' does not support action {:?}",
+                            <$task as PartitionTask<$elem>>::NAME,
                             other
                         )),
                     }

@@ -129,8 +129,8 @@ impl<T: Data + Clone> TypedRdd<T> {
         Vec<T>: WireEncode + WireDecode,
     {
         if self.context.is_distributed() && self.staged.is_some() {
-            let elements = self.collect_distributed()?;
-            return Ok(elements.len() as u64);
+            // Sum per-partition lengths incrementally — never concatenate all elements.
+            return self.reduce_partitions(0u64, |acc, part| acc + part.len() as u64);
         }
         let counting_func = |iter: Box<dyn Iterator<Item = T>>| iter.count() as u64;
         Ok(self
@@ -514,10 +514,28 @@ impl<T: Data + Clone> TypedRdd<T> {
         Vec<T>: WireEncode + WireDecode,
     {
         if self.context.is_distributed() {
-            // Collect the staged pipeline's output (or the raw partitions if no pipeline),
-            // then compute max on the driver from the returned elements.
-            let elements = self.collect_distributed()?;
-            return Ok(elements.into_iter().max());
+            // Primitive types reduce on the worker via the builtin `MaxTask` (one value per
+            // partition crosses the wire); other types reduce per-partition on the driver.
+            if let Some(name) = crate::builtin_tasks::max_task_name::<T>() {
+                let parts = self.dispatch_with_step(name, TaskAction::Reduce, vec![])?;
+                let mut best: Option<T> = None;
+                for b in parts {
+                    if b.is_empty() {
+                        continue; // empty partition — no value
+                    }
+                    let v = T::decode_wire(&b)
+                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                    best = Some(best.map_or(v.clone(), |c| c.max(v)));
+                }
+                return Ok(best);
+            }
+            return self.reduce_partitions(None, |acc: Option<T>, part| {
+                match (acc, part.into_iter().max()) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, None) => a,
+                    (None, b) => b,
+                }
+            });
         }
         let max_partition = move |iter: Box<dyn Iterator<Item = T>>| iter.max();
         let partition_maxes = self.context.run_job(self.rdd.clone(), max_partition)?;
@@ -540,8 +558,26 @@ impl<T: Data + Clone> TypedRdd<T> {
         Vec<T>: WireEncode + WireDecode,
     {
         if self.context.is_distributed() {
-            let elements = self.collect_distributed()?;
-            return Ok(elements.into_iter().min());
+            if let Some(name) = crate::builtin_tasks::min_task_name::<T>() {
+                let parts = self.dispatch_with_step(name, TaskAction::Reduce, vec![])?;
+                let mut best: Option<T> = None;
+                for b in parts {
+                    if b.is_empty() {
+                        continue;
+                    }
+                    let v = T::decode_wire(&b)
+                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                    best = Some(best.map_or(v.clone(), |c| c.min(v)));
+                }
+                return Ok(best);
+            }
+            return self.reduce_partitions(None, |acc: Option<T>, part| {
+                match (acc, part.into_iter().min()) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, None) => a,
+                    (None, b) => b,
+                }
+            });
         }
         let min_partition = move |iter: Box<dyn Iterator<Item = T>>| iter.min();
         let partition_mins = self.context.run_job(self.rdd.clone(), min_partition)?;
@@ -583,8 +619,71 @@ impl<T: Data + Clone> TypedRdd<T> {
         Ok(counts)
     }
 
+    /// Dispatch the staged pipeline (or raw partitions) with one extra builtin step appended,
+    /// returning the raw per-partition result bytes. Empty blobs (e.g. a per-partition reducer
+    /// that produced no value) are preserved for the caller to skip.
+    fn dispatch_with_step(
+        &self,
+        task_name: &str,
+        action: TaskAction,
+        payload: Vec<u8>,
+    ) -> Result<Vec<Vec<u8>>, DataError>
+    where
+        T: WireEncode,
+        Vec<T>: WireEncode,
+    {
+        let (source, mut steps) = match &self.staged {
+            None => {
+                let src = Context::encode_rdd_partitions(self.rdd.clone())
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                (src, vec![])
+            }
+            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
+        };
+        steps.push(Step {
+            task_name: task_name.to_string(),
+            kind: StepKind::Task(action),
+            runtime: TaskRuntime::Native,
+            payload,
+        });
+        self.context
+            .dispatch_pipeline(source, steps)
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))
+    }
+
+    /// Dispatch the staged pipeline (or raw partitions) and fold the per-partition `Vec<T>`
+    /// outputs into `acc` one partition at a time. Unlike [`collect_distributed`], this never
+    /// concatenates all partitions on the driver — it holds one partition's `Vec<T>` plus the
+    /// accumulator at a time.
+    fn reduce_partitions<A, F>(&self, zero: A, mut per_partition: F) -> Result<A, DataError>
+    where
+        T: WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+        F: FnMut(A, Vec<T>) -> A,
+    {
+        let (source, steps) = match &self.staged {
+            None => {
+                let src = Context::encode_rdd_partitions(self.rdd.clone())
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                (src, vec![])
+            }
+            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
+        };
+        let parts = self
+            .context
+            .dispatch_pipeline(source, steps)
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+        let mut acc = zero;
+        for b in parts {
+            let v =
+                Vec::<T>::decode_wire(&b).map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+            acc = per_partition(acc, v);
+        }
+        Ok(acc)
+    }
+
     /// Internal helper: dispatch the staged pipeline (or raw partitions) to workers
-    /// and return all elements as a flat `Vec<T>`. Used by `max`, `min`, `count`.
+    /// and return all elements as a flat `Vec<T>`. Used by `first`, `take`, `is_empty`.
     pub(crate) fn collect_distributed(&self) -> Result<Vec<T>, DataError>
     where
         T: WireEncode,
@@ -621,7 +720,30 @@ impl<T: Data + Clone> TypedRdd<T> {
         Vec<T>: WireEncode + WireDecode,
     {
         if self.context.is_distributed() {
-            let mut all_items = self.collect_distributed()?;
+            // Primitives: each worker emits its local top-k via the builtin `TopKTask`
+            // (≤ k per partition); other types truncate per-partition on the driver.
+            let mut all_items: Vec<T> =
+                if let Some(name) = crate::builtin_tasks::top_k_task_name::<T>() {
+                    let payload = (k as u64)
+                        .encode_wire()
+                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                    let parts = self.dispatch_with_step(name, TaskAction::Collect, payload)?;
+                    let mut all = Vec::new();
+                    for b in parts {
+                        all.extend(
+                            Vec::<T>::decode_wire(&b)
+                                .map_err(|e| DataError::DowncastFailure(e.to_string()))?,
+                        );
+                    }
+                    all
+                } else {
+                    self.reduce_partitions(Vec::new(), |mut acc: Vec<T>, mut part| {
+                        part.sort_by(|a, b| b.cmp(a));
+                        part.truncate(k);
+                        acc.extend(part);
+                        acc
+                    })?
+                };
             all_items.sort_by(|a, b| b.cmp(a));
             all_items.truncate(k);
             return Ok(all_items);
@@ -648,7 +770,28 @@ impl<T: Data + Clone> TypedRdd<T> {
         Vec<T>: WireEncode + WireDecode,
     {
         if self.context.is_distributed() {
-            let mut all_items = self.collect_distributed()?;
+            let mut all_items: Vec<T> =
+                if let Some(name) = crate::builtin_tasks::take_ordered_task_name::<T>() {
+                    let payload = (k as u64)
+                        .encode_wire()
+                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                    let parts = self.dispatch_with_step(name, TaskAction::Collect, payload)?;
+                    let mut all = Vec::new();
+                    for b in parts {
+                        all.extend(
+                            Vec::<T>::decode_wire(&b)
+                                .map_err(|e| DataError::DowncastFailure(e.to_string()))?,
+                        );
+                    }
+                    all
+                } else {
+                    self.reduce_partitions(Vec::new(), |mut acc: Vec<T>, mut part| {
+                        part.sort();
+                        part.truncate(k);
+                        acc.extend(part);
+                        acc
+                    })?
+                };
             all_items.sort();
             all_items.truncate(k);
             return Ok(all_items);

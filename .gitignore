@@ -44,3 +44,6 @@ __pycache__
 
 extensions
 .pi-subagents
+
+
+.DS_Store

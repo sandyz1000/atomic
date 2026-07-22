@@ -305,6 +305,147 @@ impl<T: Data + Clone> TypedRdd<T> {
         };
         self.map_rdd(|id, rdd| MapPartitionsRdd::new(id, rdd, func))
     }
+
+    /// Zip the elements with their index in the RDD, producing `(element, index)`.
+    ///
+    /// Indices are assigned in partition order: partition `p` starts at the sum of the
+    /// sizes of all lower-numbered partitions. This runs a job to count each partition
+    /// first, so it is eager in that one pass; the returned RDD is otherwise lazy.
+    pub fn zip_with_index(self) -> Result<TypedRdd<(T, u64)>, DataError>
+    where
+        T: Clone,
+    {
+        // One count per partition, in partition order (collect preserves that order).
+        let counts: Vec<u64> = self
+            .clone()
+            .map_partitions(|iter| {
+                Box::new(std::iter::once(iter.count() as u64)) as Box<dyn Iterator<Item = u64>>
+            })
+            .collect()?;
+        // Exclusive prefix sum → the starting index of each partition.
+        let mut offsets = Vec::with_capacity(counts.len());
+        let mut acc = 0u64;
+        for c in counts {
+            offsets.push(acc);
+            acc += c;
+        }
+        let offsets = Arc::new(offsets);
+        Ok(self.map_partitions_with_index(move |idx, iter| {
+            let base = offsets.get(idx).copied().unwrap_or(0);
+            Box::new(iter.enumerate().map(move |(i, x)| (x, base + i as u64)))
+        }))
+    }
+
+    /// Zip the elements with a unique (but not contiguous) id, producing `(element, id)`.
+    ///
+    /// Element `i` of partition `p` gets id `p + i * numPartitions`. Unlike
+    /// [`zip_with_index`](Self::zip_with_index) this needs no count pass, so it is fully lazy,
+    /// at the cost of gaps in the id sequence.
+    pub fn zip_with_unique_id(self) -> TypedRdd<(T, u64)>
+    where
+        T: Clone,
+    {
+        let n = self.rdd.number_of_splits().max(1) as u64;
+        self.map_partitions_with_index(move |idx, iter| {
+            let p = idx as u64;
+            Box::new(iter.enumerate().map(move |(i, x)| (x, p + (i as u64) * n)))
+        })
+    }
+
+    /// Split the RDD into several RDDs by `weights`, assigning each element to exactly one
+    /// output. Weights are normalised to sum to 1; `seed` makes the split reproducible and
+    /// guarantees the parts are disjoint (each element draws one value, placed by cumulative
+    /// weight band).
+    pub fn random_split(self, weights: &[f64], seed: u64) -> Vec<TypedRdd<T>>
+    where
+        T: Clone,
+    {
+        let total: f64 = weights.iter().copied().filter(|w| *w > 0.0).sum();
+        if total <= 0.0 {
+            return Vec::new();
+        }
+        // Cumulative acceptance bands over [0, 1).
+        let mut bounds = Vec::with_capacity(weights.len() + 1);
+        let mut acc = 0.0f64;
+        bounds.push(0.0f64);
+        for w in weights {
+            acc += w.max(0.0) / total;
+            bounds.push(acc);
+        }
+        (0..weights.len())
+            .map(|k| {
+                let lb = bounds[k];
+                let ub = if k + 1 == weights.len() {
+                    1.0
+                } else {
+                    bounds[k + 1]
+                };
+                self.clone().map_partitions_with_index(move |idx, iter| {
+                    // Per-partition deterministic stream; identical across every band, so a
+                    // given element lands in exactly one band → disjoint parts.
+                    let mut rng = atomic_utils::random::rng_from_seed(seed ^ (idx as u64));
+                    Box::new(iter.filter(move |_| {
+                        let x = rng.random::<f64>();
+                        x >= lb && x < ub
+                    }))
+                })
+            })
+            .collect()
+    }
+
+    /// Pipe each partition through an external shell command, one element per input line
+    /// (`Display`), collecting the command's stdout lines as the output elements.
+    ///
+    /// The command runs once per partition via `sh -c`. A partition whose command fails to
+    /// spawn or exits non-zero yields no output for that partition.
+    ///
+    /// Subprocess-hygiene exception: spawning a per-partition process *is* the defining
+    /// behavior of `pipe` (it exists to shell out to an arbitrary user command), so there is
+    /// no Rust-crate substitute. This is not a general dispatch-path spawn.
+    pub fn pipe(self, command: &str) -> TypedRdd<String>
+    where
+        T: std::fmt::Display + Clone,
+    {
+        let command = command.to_string();
+        self.map_partitions(move |iter| {
+            let lines = run_pipe(&command, iter);
+            Box::new(lines.into_iter()) as Box<dyn Iterator<Item = String>>
+        })
+    }
+}
+
+/// Run one partition's elements through `sh -c command`, feeding each element as a stdin
+/// line and returning the command's stdout split into lines. Errors collapse to no output.
+fn run_pipe<T: std::fmt::Display>(command: &str, iter: Box<dyn Iterator<Item = T>>) -> Vec<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = match Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        for item in iter {
+            if writeln!(stdin, "{item}").is_err() {
+                break;
+            }
+        }
+        // Drop stdin to signal EOF before waiting on output.
+    }
+    match child.wait_with_output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 impl<T: Data> TypedRdd<T> {

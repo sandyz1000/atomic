@@ -4,6 +4,10 @@ use crate::task_traits::BinaryTask;
 /// Built-in: add two values.
 ///
 /// Used by `TypedRdd::count()` to sum per-partition counts.
+///
+/// Registered by hand rather than via `register_binary_task!`: `sum` folds from the zero in
+/// `payload` (the fold identity) for `Fold`/`Aggregate` and reduces without one for `Reduce`,
+/// whereas the shared macro seeds from the first element and ignores the payload.
 #[derive(Clone, Copy)]
 pub struct SumTask<T>(std::marker::PhantomData<T>);
 

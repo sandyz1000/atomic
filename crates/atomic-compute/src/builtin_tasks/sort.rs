@@ -1,37 +1,26 @@
-use crate::task_registry::TaskEntry;
+use atomic_data::error::DataResult;
+
+use crate::register_partition_task;
+use crate::task_traits::PartitionTask;
 
 /// Built-in: sort all elements within a partition in ascending order.
 ///
 /// Used by `TypedRdd::sort_within_partitions()` and as the local sort step
 /// before a merge-sort across partitions for `sort_by` / `sort_by_key`.
+#[derive(Default)]
 pub struct SortTask<T>(std::marker::PhantomData<T>);
-
-impl<T> Default for SortTask<T> {
-    fn default() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
 
 macro_rules! impl_sort_task {
     ($ty:ty) => {
-        inventory::submit! {
-            TaskEntry {
-                task_name: concat!("atomic::builtin::sort::", stringify!($ty)),
-                body_hash: 0,
-handler: |action, _payload, data| {
-                    use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
-                    match action {
-                        TaskAction::Map | TaskAction::Collect => {
-                            let mut items = ::std::vec::Vec::<$ty>::decode_wire(data)
-                                .map_err(|e| e.to_string())?;
-                            items.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
-                            items.encode_wire().map_err(|e| e.to_string())
-                        }
-                        other => Err(format!("SortTask does not support action {:?}", other)),
-                    }
-                },
+        impl PartitionTask<$ty> for SortTask<$ty> {
+            const NAME: &'static str = concat!("atomic::builtin::sort::", stringify!($ty));
+            fn transform(&self, mut items: Vec<$ty>, _payload: &[u8]) -> DataResult<Vec<$ty>> {
+                items.sort_by(|a, b| a.partial_cmp(b).unwrap_or(::std::cmp::Ordering::Equal));
+                Ok(items)
             }
         }
+
+        register_partition_task!(SortTask<$ty>, $ty);
     };
 }
 

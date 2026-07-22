@@ -4,6 +4,7 @@ use crate::dstream::mapped::ForEachDStream;
 use crate::dstream::{DStream, DStreamGraph, InputStreamBase, OutputOperation};
 use crate::errors::{StreamingError, StreamingResult};
 use crate::scheduler::job::JobScheduler;
+use crate::scheduler::streaming::{StreamingListener, StreamingListenerEvent};
 use atomic_compute::context::Context;
 use atomic_data::data::Data;
 use atomic_data::rdd::Rdd;
@@ -50,6 +51,8 @@ pub struct StreamingContext {
     /// Set when `start()` is called.
     scheduler: Mutex<Option<Arc<JobScheduler>>>,
     next_stream_id: AtomicUsize,
+    /// Lifecycle listeners notified of batch/receiver events by the scheduler.
+    listeners: Mutex<Vec<Arc<dyn StreamingListener>>>,
 }
 
 impl StreamingContext {
@@ -66,11 +69,25 @@ impl StreamingContext {
             state: Mutex::new(StreamingContextState::Initialized),
             scheduler: Mutex::new(None),
             next_stream_id: AtomicUsize::new(0),
+            listeners: Mutex::new(Vec::new()),
         })
     }
 
     fn next_stream_id(&self) -> usize {
         self.next_stream_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Register a [`StreamingListener`] to receive batch and receiver lifecycle events.
+    /// Listeners must be added before `start()`.
+    pub fn add_streaming_listener(&self, listener: Arc<dyn StreamingListener>) {
+        self.listeners.lock().push(listener);
+    }
+
+    /// Deliver an event to every registered listener. Called by the scheduler.
+    pub fn post_event(&self, event: StreamingListenerEvent) {
+        for l in self.listeners.lock().iter() {
+            l.on_event(&event);
+        }
     }
 
     // Input stream factories
@@ -191,6 +208,67 @@ impl StreamingContext {
             .lock()
             .add_input_stream(stream.clone() as Arc<dyn InputStreamBase>);
         stream
+    }
+
+    // Transformations
+
+    /// A DStream of the per-batch element count — each batch produces a single-element
+    /// RDD holding `parent_batch.count()`.
+    pub fn count<T>(
+        self: &Arc<Self>,
+        stream: Arc<dyn DStream<T>>,
+    ) -> Arc<crate::dstream::transformed::TransformedDStream<T, u64>>
+    where
+        T: Data
+            + Clone
+            + atomic_data::distributed::WireEncode
+            + atomic_data::distributed::WireDecode,
+        Vec<T>: atomic_data::distributed::WireEncode + atomic_data::distributed::WireDecode,
+    {
+        let id = self.next_stream_id();
+        let sc = self.sc.clone();
+        Arc::new(crate::dstream::transformed::TransformedDStream::new(
+            id,
+            stream,
+            move |rdd, _t| {
+                let typed = atomic_compute::rdd::TypedRdd::<T>::new(rdd, sc.clone());
+                let n = typed.count().unwrap_or(0);
+                sc.parallelize_typed(vec![n], 1).into_rdd()
+            },
+        ))
+    }
+
+    /// A DStream of per-batch value counts — each batch produces an RDD of `(value, count)`
+    /// pairs over the distinct elements in that batch.
+    pub fn count_by_value<T>(
+        self: &Arc<Self>,
+        stream: Arc<dyn DStream<T>>,
+    ) -> Arc<crate::dstream::transformed::TransformedDStream<T, (T, u64)>>
+    where
+        T: Data
+            + Clone
+            + Eq
+            + std::hash::Hash
+            + atomic_data::distributed::WireEncode
+            + atomic_data::distributed::WireDecode,
+        Vec<T>: atomic_data::distributed::WireEncode + atomic_data::distributed::WireDecode,
+        (T, u64): Data + Clone,
+    {
+        let id = self.next_stream_id();
+        let sc = self.sc.clone();
+        Arc::new(crate::dstream::transformed::TransformedDStream::new(
+            id,
+            stream,
+            move |rdd, _t| {
+                let typed = atomic_compute::rdd::TypedRdd::<T>::new(rdd, sc.clone());
+                let pairs: Vec<(T, u64)> = typed
+                    .count_by_value()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                sc.parallelize_typed(pairs, 1).into_rdd()
+            },
+        ))
     }
 
     // Output operation registration

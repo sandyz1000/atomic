@@ -1,6 +1,8 @@
 use crate::checkpoint::Checkpoint;
 use crate::context::StreamingContext;
 use crate::errors::{StreamingError, StreamingResult};
+use crate::scheduler::info::BatchInfo;
+use crate::scheduler::streaming::StreamingListenerEvent;
 use crate::streaming_support::batch_timer::{next_tick_ms, now_ms};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -85,6 +87,9 @@ impl JobScheduler {
         // Align to the next batch boundary and start the graph at the previous one
         let zero_time_ms = next_tick_ms(now_ms(), batch_ms) - batch_ms;
         ssc.graph.lock().start(zero_time_ms);
+        ssc.post_event(StreamingListenerEvent::StreamingStarted {
+            time_ms: zero_time_ms,
+        });
 
         log::info!(
             "Streaming batch loop started (batch={}ms, zero_time={}ms)",
@@ -115,6 +120,15 @@ impl JobScheduler {
             let num_jobs = jobs.len();
             let mut all_succeeded = true;
 
+            let mut batch_info = BatchInfo::new(batch_time_ms, now_ms());
+            ssc.post_event(StreamingListenerEvent::BatchSubmitted {
+                batch_info: batch_info.clone(),
+            });
+            batch_info.processing_start_time_ms = Some(now_ms());
+            ssc.post_event(StreamingListenerEvent::BatchStarted {
+                batch_info: batch_info.clone(),
+            });
+
             for job in jobs {
                 if stop.load(Ordering::SeqCst) {
                     break;
@@ -124,6 +138,11 @@ impl JobScheduler {
                     all_succeeded = false;
                 }
             }
+
+            batch_info.processing_end_time_ms = Some(now_ms());
+            ssc.post_event(StreamingListenerEvent::BatchCompleted {
+                batch_info: batch_info.clone(),
+            });
 
             if all_succeeded {
                 last_completed_batch_ms = Some(batch_time_ms);

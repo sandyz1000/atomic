@@ -8,7 +8,7 @@ use atomic_compute::context::Context;
 use atomic_compute::env::Config;
 use atomic_compute::runtimes::{Backend, ComputeEngine};
 use atomic_compute::task;
-use atomic_compute::task_traits::UnaryTask;
+use atomic_compute::task_traits::{BinaryTask, UnaryTask};
 use atomic_data::distributed::{
     ResultStatus, Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
@@ -237,4 +237,91 @@ fn foreach_runs_side_effect_over_wire() {
     assert_eq!(result.status, ResultStatus::Success);
     assert!(result.data.is_empty(), "foreach produces no output");
     assert_eq!(FE_SUM.load(Ordering::SeqCst), 10);
+}
+
+#[task]
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+/// A binary `#[task]` dispatched with `Fold` folds the partition from the payload zero.
+/// Exercises the generated binary handler, which routes through `BinaryTask::call()`.
+#[test]
+fn fold_dispatches_binary() {
+    let op = Step {
+        task_name: <Add as BinaryTask<i32>>::NAME.to_string(),
+        kind: StepKind::Task(TaskAction::Fold),
+        runtime: TaskRuntime::Native,
+        payload: encode(0i32),
+    };
+    let task = envelope(vec![op], encode(vec![1i32, 2, 3, 4]));
+    let result = ComputeEngine::default().execute("w", &task).unwrap();
+    assert_eq!(result.status, ResultStatus::Success);
+    assert_eq!(decode::<i32>(&result.data), 10);
+}
+
+/// `Reduce` reduces the partition with no zero value.
+#[test]
+fn reduce_dispatches_binary() {
+    let op = native_op(<Add as BinaryTask<i32>>::NAME, TaskAction::Reduce);
+    let task = envelope(vec![op], encode(vec![5i32, 7, 9]));
+    let result = ComputeEngine::default().execute("w", &task).unwrap();
+    assert_eq!(result.status, ResultStatus::Success);
+    assert_eq!(decode::<i32>(&result.data), 21);
+}
+
+/// The generated worker handler and the driver-side `call()` produce identical output —
+/// the single execution contract Part 1 enforces (dispatch routes through `call()`, not the
+/// bare function). If the handler ever diverges from `call()`, this fails.
+#[test]
+fn dispatch_matches_local_call() {
+    let input: Vec<i32> = vec![2, 3, 4];
+    let local: Vec<i32> = input.iter().map(|&x| Square.call(x)).collect();
+    let task = envelope(
+        vec![native_op(
+            <Square as UnaryTask<i32, i32>>::NAME,
+            TaskAction::Map,
+        )],
+        encode(input),
+    );
+    let result = ComputeEngine::default().execute("w", &task).unwrap();
+    assert_eq!(result.status, ResultStatus::Success);
+    assert_eq!(local, decode::<Vec<i32>>(&result.data));
+}
+
+/// The builtin `MaxTask` reduces a partition to its single maximum (the worker-side path
+/// `TypedRdd::max` dispatches for primitive types).
+#[test]
+fn max_builtin_reduces_partition() {
+    let op = native_op("atomic::builtin::max::i32", TaskAction::Reduce);
+    let task = envelope(vec![op], encode(vec![3i32, 9, 2, 7]));
+    let result = ComputeEngine::default().execute("w", &task).unwrap();
+    assert_eq!(result.status, ResultStatus::Success);
+    assert_eq!(decode::<i32>(&result.data), 9);
+}
+
+/// An empty partition yields empty bytes (not an error), so `max`/`min` over an RDD with
+/// empty partitions doesn't fail the job — the driver skips empty results.
+#[test]
+fn max_builtin_empty_partition() {
+    let op = native_op("atomic::builtin::max::i32", TaskAction::Reduce);
+    let task = envelope(vec![op], encode(Vec::<i32>::new()));
+    let result = ComputeEngine::default().execute("w", &task).unwrap();
+    assert_eq!(result.status, ResultStatus::Success);
+    assert!(result.data.is_empty(), "empty partition → empty bytes");
+}
+
+/// The builtin `TopKTask` returns each partition's local top-k (k from the payload).
+#[test]
+fn top_k_builtin_local_topk() {
+    let op = Step {
+        task_name: "atomic::builtin::top_k::i32".to_string(),
+        kind: StepKind::Task(TaskAction::Collect),
+        runtime: TaskRuntime::Native,
+        payload: encode(2u64),
+    };
+    let task = envelope(vec![op], encode(vec![5i32, 1, 9, 3, 7]));
+    let result = ComputeEngine::default().execute("w", &task).unwrap();
+    assert_eq!(result.status, ResultStatus::Success);
+    assert_eq!(decode::<Vec<i32>>(&result.data), vec![9, 7]);
 }

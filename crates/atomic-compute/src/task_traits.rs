@@ -1,3 +1,5 @@
+use atomic_data::error::DataResult;
+
 /// Marker + dispatch trait for unary `#[task]` functions: `fn(T) -> U`.
 ///
 /// Covers `Map` (T→U), `Filter` (T→bool), and `FlatMap` (T→Vec<U>) actions.
@@ -59,6 +61,23 @@ pub trait BinaryTask<T>: Clone + Send + Sync + 'static {
     fn encode_params(&self) -> Vec<u8> {
         Vec::new()
     }
+}
+
+/// Marker + dispatch trait for whole-partition transforms: `Vec<T> -> Vec<T>`.
+///
+/// Covers reductions that consume a partition all at once rather than element-by-element —
+/// local top-k, bounded ordered take, dedup, in-partition sort. Unlike [`BinaryTask`] and
+/// [`AggregateTask`] there is no element-level combine; the whole partition is transformed and
+/// the cross-partition merge happens driver-side.
+///
+/// The `Map` / `Collect` dispatch handler decodes the partition into a `Vec<T>`, calls
+/// [`transform`](Self::transform), and re-encodes. `payload` carries the op parameter (e.g. the
+/// `k` for top-k), or is empty for a parameter-free transform.
+pub trait PartitionTask<T>: Default + Send + Sync + 'static {
+    /// Compile-time task_name — must match the `inventory` registration in the worker.
+    const NAME: &'static str;
+    /// Transform the partition. `payload` holds any wire-encoded op parameter.
+    fn transform(&self, items: Vec<T>, payload: &[u8]) -> DataResult<Vec<T>>;
 }
 
 /// Marker + dispatch trait for accumulator-typed reductions: `seqOp: fn(A, T) -> A`

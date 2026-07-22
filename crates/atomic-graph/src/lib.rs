@@ -3,6 +3,7 @@
 pub mod algo;
 pub mod graph;
 pub mod pregel;
+pub mod structural;
 pub mod topology;
 
 /// Shuffle-map handlers for the concrete `(K, V)` pair types the built-in algorithms
