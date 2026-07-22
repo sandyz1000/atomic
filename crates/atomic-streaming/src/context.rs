@@ -45,8 +45,9 @@ pub struct StreamingContext {
     pub batch_duration: Duration,
     pub graph: Mutex<DStreamGraph>,
     pub checkpoint_dir: Mutex<Option<PathBuf>>,
-    /// Must be a multiple of `batch_duration`.
-    pub checkpoint_duration: Option<Duration>,
+    /// Checkpoint cadence. `None` writes after every batch; `Some(d)` writes only on batches
+    /// whose time is a multiple of `d`. Should be a multiple of `batch_duration`.
+    pub checkpoint_duration: Mutex<Option<Duration>>,
     state: Mutex<StreamingContextState>,
     /// Set when `start()` is called.
     scheduler: Mutex<Option<Arc<JobScheduler>>>,
@@ -65,7 +66,7 @@ impl StreamingContext {
             batch_duration,
             graph: Mutex::new(graph),
             checkpoint_dir: Mutex::new(None),
-            checkpoint_duration: None,
+            checkpoint_duration: Mutex::new(None),
             state: Mutex::new(StreamingContextState::Initialized),
             scheduler: Mutex::new(None),
             next_stream_id: AtomicUsize::new(0),
@@ -271,6 +272,47 @@ impl StreamingContext {
         ))
     }
 
+    /// Wrap `stream` so each batch's RDD is cached in memory, reusing computed partitions across
+    /// repeated actions on the same batch. Mirrors `DStream.cache()`.
+    pub fn cache<T: Data + Clone>(
+        self: &Arc<Self>,
+        stream: Arc<dyn DStream<T>>,
+    ) -> Arc<crate::dstream::cached::CachedDStream<T>> {
+        self.persist(stream, atomic_data::cache::StorageLevel::MemoryOnly)
+    }
+
+    /// Wrap `stream` so each batch's RDD is persisted at `level`. Mirrors `DStream.persist(level)`.
+    pub fn persist<T: Data + Clone>(
+        self: &Arc<Self>,
+        stream: Arc<dyn DStream<T>>,
+        level: atomic_data::cache::StorageLevel,
+    ) -> Arc<crate::dstream::cached::CachedDStream<T>> {
+        Arc::new(crate::dstream::cached::CachedDStream::new(stream, level))
+    }
+
+    /// Combine two streams per batch: `func` receives both parents' RDDs for the same batch
+    /// time and returns a new RDD. Mirrors `DStream.transformWith`.
+    pub fn transform_with<T, U, V, F>(
+        self: &Arc<Self>,
+        stream1: Arc<dyn DStream<T>>,
+        stream2: Arc<dyn DStream<U>>,
+        func: F,
+    ) -> Arc<crate::dstream::transformed::TransformedWithDStream<T, U, V>>
+    where
+        T: Data + Clone,
+        U: Data + Clone,
+        V: Data + Clone,
+        F: Fn(Arc<dyn Rdd<Item = T>>, Arc<dyn Rdd<Item = U>>, u64) -> Arc<dyn Rdd<Item = V>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let id = self.next_stream_id();
+        Arc::new(crate::dstream::transformed::TransformedWithDStream::new(
+            id, stream1, stream2, func,
+        ))
+    }
+
     // Output operation registration
 
     /// Register a `foreach_rdd` output operation on `stream`.
@@ -401,6 +443,33 @@ impl StreamingContext {
         let _ = std::fs::create_dir_all(&path);
         *self.checkpoint_dir.lock() = Some(path.clone());
         log::info!("Checkpointing enabled at {:?}", path);
+    }
+
+    /// Enable checkpointing at `dir` with a fixed `interval` between writes, rather than after
+    /// every batch. `interval` should be a multiple of the batch duration.
+    pub fn checkpoint_with_interval(self: &Arc<Self>, dir: impl Into<PathBuf>, interval: Duration) {
+        self.checkpoint(dir);
+        *self.checkpoint_duration.lock() = Some(interval);
+    }
+
+    /// Restore a `StreamingContext` from a checkpoint at `dir` if one exists, otherwise build a
+    /// fresh one with `creating_func` and enable checkpointing on it. Mirrors
+    /// `StreamingContext.getOrCreate`.
+    pub fn get_or_create<F>(
+        sc: Arc<Context>,
+        checkpoint_dir: impl Into<PathBuf>,
+        creating_func: F,
+    ) -> std::io::Result<Arc<Self>>
+    where
+        F: FnOnce(Arc<Context>) -> Arc<Self>,
+    {
+        let dir = checkpoint_dir.into();
+        if let Some(restored) = Self::from_checkpoint(sc.clone(), dir.clone())? {
+            return Ok(restored);
+        }
+        let ssc = creating_func(sc);
+        ssc.checkpoint(dir);
+        Ok(ssc)
     }
 
     /// Start the streaming computation.

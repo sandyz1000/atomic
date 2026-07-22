@@ -130,10 +130,13 @@ where
     parent: Arc<dyn DStream<T>>,
     ssc: Arc<StreamingContext>,
     reduce_func: Arc<F>,
-    /// Optional inverse reduce for incremental windowing (not yet used; reserved).
-    _inv_reduce_func: Arc<Finv>,
+    /// Inverse of `reduce_func`, used to subtract expired batches on the incremental path.
+    inv_reduce_func: Arc<Finv>,
     window_duration: Duration,
     slide_duration: Duration,
+    /// The last computed `(batch_time, reduced_value)`, seeding the next slide's incremental
+    /// update. `None` before the first computation or after an empty window.
+    window_state: Mutex<Option<(u64, T)>>,
     generated: Mutex<HashMap<u64, Arc<dyn Rdd<Item = T>>>>,
 }
 
@@ -157,11 +160,48 @@ where
             parent,
             ssc,
             reduce_func: Arc::new(reduce_func),
-            _inv_reduce_func: Arc::new(inv_reduce_func),
+            inv_reduce_func: Arc::new(inv_reduce_func),
             window_duration,
             slide_duration,
+            window_state: Mutex::new(None),
             generated: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Reduce one parent batch at `t` to a single value, or `None` when that batch is empty.
+    fn batch_reduced(&self, t: u64) -> Option<T> {
+        let rdd = self.parent.get_or_compute(t)?;
+        let items = self
+            .ssc
+            .sc
+            .run_job(rdd, |iter| iter.collect::<Vec<T>>())
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<T>>();
+        let mut iter = items.into_iter();
+        let first = iter.next()?;
+        Some(iter.fold(first, |acc, x| (self.reduce_func)(acc, x)))
+    }
+
+    /// Fold `values` together with `reduce_func`, returning `None` for an empty slice.
+    fn reduce_all(&self, values: Vec<T>) -> Option<T> {
+        let mut iter = values.into_iter();
+        let first = iter.next()?;
+        Some(iter.fold(first, |acc, x| (self.reduce_func)(acc, x)))
+    }
+
+    /// The full (non-incremental) window reduction: reduce every batch whose time lies in
+    /// `(valid_time - window, valid_time]` and combine them.
+    fn full_window(&self, valid_time_ms: u64, parent_slide_ms: u64, num_steps: u64) -> Option<T> {
+        let mut reduced: Vec<T> = Vec::new();
+        for i in 0..num_steps {
+            let t = valid_time_ms.saturating_sub(i * parent_slide_ms);
+            if let Some(v) = self.batch_reduced(t) {
+                reduced.push(v);
+            }
+        }
+        self.reduce_all(reduced)
     }
 }
 
@@ -193,41 +233,54 @@ where
         let parent_slide_ms = self.parent.slide_duration().as_millis() as u64;
         let num_steps = (window_ms / parent_slide_ms).max(1);
         let ctx = self.ssc.sc.clone();
-        let f = self.reduce_func.clone();
 
-        // Collect all elements from batches in the window, reduce per batch,
-        // then reduce the per-batch results into a single value.
-        let mut all_elements: Vec<T> = Vec::new();
-        for i in 0..num_steps {
-            let t = valid_time_ms.saturating_sub(i * parent_slide_ms);
-            if let Some(rdd) = self.parent.get_or_compute(t) {
-                let batch_items = ctx
-                    .run_job(rdd, |iter| iter.collect::<Vec<T>>())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<T>>();
-                all_elements.extend(batch_items);
+        let mut state = self.window_state.lock();
+
+        // Incremental path: reuse the previous window's value, adding the batches that entered
+        // and subtracting (via the inverse) the batches that expired. Applies only when the
+        // previous state is exactly one parent-slide behind, so entered/left are single batches.
+        let reduced = match &*state {
+            Some((last_t, last_val)) if valid_time_ms == last_t + parent_slide_ms => {
+                let entered = self.batch_reduced(valid_time_ms);
+                // The batch that just fell out of the trailing edge of the window.
+                let expired_t = valid_time_ms.saturating_sub(window_ms);
+                let expired = if valid_time_ms >= window_ms {
+                    self.batch_reduced(expired_t)
+                } else {
+                    None
+                };
+
+                let mut acc = last_val.clone();
+                if let Some(e) = entered {
+                    acc = (self.reduce_func)(acc, e);
+                }
+                if let Some(x) = expired {
+                    acc = (self.inv_reduce_func)(acc, x);
+                }
+                Some(acc)
+            }
+            // Full recompute on the first call or after an irregular slide.
+            _ => self.full_window(valid_time_ms, parent_slide_ms, num_steps),
+        };
+
+        match reduced {
+            Some(v) => {
+                *state = Some((valid_time_ms, v.clone()));
+                Some(Arc::new(ParallelCollection::new(
+                    ctx.new_rdd_id(),
+                    std::iter::once(v),
+                    1,
+                )))
+            }
+            None => {
+                *state = None;
+                Some(Arc::new(ParallelCollection::<T>::new(
+                    ctx.new_rdd_id(),
+                    std::iter::empty::<T>(),
+                    1,
+                )))
             }
         }
-
-        if all_elements.is_empty() {
-            return Some(Arc::new(ParallelCollection::<T>::new(
-                ctx.new_rdd_id(),
-                std::iter::empty::<T>(),
-                1,
-            )));
-        }
-
-        // Reduce all elements to a single value, then produce a single-element RDD.
-        let mut iter = all_elements.into_iter();
-        let first = iter.next().unwrap();
-        let reduced = iter.fold(first, |acc, x| f(acc, x));
-        Some(Arc::new(ParallelCollection::new(
-            ctx.new_rdd_id(),
-            std::iter::once(reduced),
-            1,
-        )))
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = T>>> {

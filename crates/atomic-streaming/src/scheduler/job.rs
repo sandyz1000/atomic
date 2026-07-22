@@ -154,8 +154,16 @@ impl JobScheduler {
                 batch_time_ms
             );
 
-            // Write checkpoint if a directory was configured.
-            if let Some(dir) = ssc.checkpoint_dir.lock().clone() {
+            // Write checkpoint if a directory was configured and this batch is due — every
+            // batch when no interval is set, else only on multiples of the interval.
+            let due = match *ssc.checkpoint_duration.lock() {
+                Some(interval) => {
+                    let ms = interval.as_millis() as u64;
+                    ms == 0 || batch_time_ms.is_multiple_of(ms)
+                }
+                None => true,
+            };
+            if let Some(dir) = ssc.checkpoint_dir.lock().clone().filter(|_| due) {
                 let cp = Checkpoint::new(
                     batch_time_ms,
                     ssc.batch_duration.as_millis() as u64,

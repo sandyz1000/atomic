@@ -1,3 +1,4 @@
+pub mod cached;
 pub mod distributed_source;
 pub mod input;
 
