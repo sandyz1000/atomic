@@ -44,6 +44,7 @@ pub mod rdd;
 pub mod receiver;
 pub mod scheduler;
 pub mod streaming_support;
+pub mod wal;
 
 // cfg_kafka! is defined once in `atomic_data` and shared workspace-wide.
 pub use atomic_data::cfg_kafka;

@@ -69,6 +69,64 @@ fn test_windowed_multi_batch() {
 }
 
 #[test]
+fn test_reduced_window_inverse() {
+    use atomic_streaming::dstream::windowed::ReducedWindowedDStream;
+
+    let sc = local_sc();
+    let batch_ms = 60u64;
+    let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(batch_ms));
+
+    let queue: Arc<Mutex<VecDeque<Arc<dyn Rdd<Item = i32>>>>> =
+        Arc::new(Mutex::new(VecDeque::new()));
+    // One value per batch so windowed sums are predictable: 10, 20, 30.
+    queue.lock().push_back(make_rdd(&sc, vec![10]));
+    queue.lock().push_back(make_rdd(&sc, vec![20]));
+    queue.lock().push_back(make_rdd(&sc, vec![30]));
+
+    let raw_stream = ssc.queue_stream(Arc::clone(&queue), true);
+    // 2-batch window sliding every batch, reduce = +, inverse = -.
+    let reduced = Arc::new(ReducedWindowedDStream::new(
+        next_id(),
+        raw_stream as Arc<dyn DStream<i32>>,
+        ssc.clone(),
+        |a: i32, b: i32| a + b,
+        |a: i32, b: i32| a - b,
+        Duration::from_millis(batch_ms * 2),
+        Duration::from_millis(batch_ms),
+    ));
+
+    let results: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
+    let res_cl = Arc::clone(&results);
+    let sc_cl = sc.clone();
+    ssc.foreach_rdd(reduced as Arc<dyn DStream<i32>>, move |rdd, _t| {
+        if let Ok(parts) = sc_cl.run_job(rdd.get_rdd(), |iter| iter.collect::<Vec<i32>>()) {
+            let mut v = res_cl.lock();
+            for p in parts {
+                v.extend(p);
+            }
+        }
+    });
+
+    ssc.start().unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    ssc.stop(false, false);
+
+    let got = results.lock().clone();
+    // The incremental add+subtract path must run cleanly: outputs are non-negative sums (no
+    // over-subtraction from the inverse) and at least one window combines two batches (> the
+    // largest single input, 30). Exact values depend on queue-source timing.
+    assert!(!got.is_empty(), "got {got:?}");
+    assert!(
+        got.iter().all(|&x| x >= 0),
+        "inverse over-subtracted: {got:?}"
+    );
+    assert!(
+        got.iter().any(|&x| x > 30),
+        "no multi-batch window formed: {got:?}"
+    );
+}
+
+#[test]
 fn test_windowed_empty_queue() {
     let sc = local_sc();
     let ssc = StreamingContext::new(Arc::clone(&sc), Duration::from_millis(50));
