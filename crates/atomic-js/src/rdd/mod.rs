@@ -98,7 +98,7 @@ impl JsRdd {
         let payload = serde_json::to_vec(&payload_struct)
             .map_err(|e| Error::from_reason(format!("JsTaskPayload encode: {e}")))?;
         let op = Step {
-            op_id: "atomic::task::js".to_string(),
+            task_name: "atomic::task::js".to_string(),
             kind: StepKind::Task(action),
             runtime: TaskRuntime::JavaScript,
             payload,

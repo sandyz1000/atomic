@@ -16,7 +16,7 @@ macro_rules! impl_sort_task {
     ($ty:ty) => {
         inventory::submit! {
             TaskEntry {
-                op_id: concat!("atomic::builtin::sort::", stringify!($ty)),
+                task_name: concat!("atomic::builtin::sort::", stringify!($ty)),
                 body_hash: 0,
 handler: |action, _payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};

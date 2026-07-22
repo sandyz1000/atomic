@@ -5,7 +5,7 @@ use super::WIRE_SCHEMA_V1;
 
 /// Which execution runtime handles a [`Step`] on the worker.
 ///
-/// `Native` (the default) looks up `op_id` in the compile-time `TASK_REGISTRY`.
+/// `Native` (the default) looks up `task_name` in the compile-time `TASK_REGISTRY`.
 /// `Python` and `JavaScript` dispatch the serialized partition-level function to
 /// the respective runtime; the worker calls `fn(partition)` without inspecting
 /// `action`.
@@ -36,7 +36,7 @@ use super::WIRE_SCHEMA_V1;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum TaskRuntime {
-    /// Compile-time `TASK_REGISTRY` lookup via `op_id` (default for `#[task]` functions).
+    /// Compile-time `TASK_REGISTRY` lookup via `task_name` (default for `#[task]` functions).
     #[default]
     Native = 0,
     /// Pickled partition-level Python callable executed in the subprocess worker pool.
@@ -53,9 +53,9 @@ pub enum TaskRuntime {
 /// data through them in order, feeding each step's output as the next step's input.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct Step {
-    /// Registered op_id, e.g. `"task_double::double"`. Looked up in the worker's
+    /// Registered task_name, e.g. `"task_double::double"`. Looked up in the worker's
     /// compile-time dispatch table. Empty string for Python/JS task steps.
-    pub op_id: String,
+    pub task_name: String,
     /// What this step does: a registered task function applied with a combinator shape
     /// ([`StepKind::Task`]), or a built-in engine step ([`StepKind::Engine`]). Authoritative
     /// for Native runtime; informational (for observability) for Python and JavaScript.
@@ -100,7 +100,7 @@ pub enum TaskAction {
 }
 
 /// A built-in engine step that runs fixed worker logic rather than a registered task
-/// function. Unlike [`TaskAction`], these carry no `op_id` — the variant selects the behavior.
+/// function. Unlike [`TaskAction`], these carry no `task_name` — the variant selects the behavior.
 ///
 /// `KafkaConsume` is `#[cfg(feature = "kafka")]`-gated and declared **last**, intentionally.
 /// Variants with struct fields can't carry explicit discriminants in Rust (unlike
@@ -158,9 +158,9 @@ pub enum EngineStep {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {
-    /// Registered task function applied with a combinator shape. `op_id` names the function.
+    /// Registered task function applied with a combinator shape. `task_name` names the function.
     Task(TaskAction),
-    /// Built-in engine step. `op_id` is empty.
+    /// Built-in engine step. `task_name` is empty.
     Engine(EngineStep),
 }
 
@@ -196,13 +196,13 @@ pub struct AgentStepPayload {
     pub max_rounds: u32,
     /// Tool IDs the agent may invoke via `TOOL_CALL: <ref> <json_args>`.
     ///
-    /// Each entry is either a `#[task]` op_id (dispatched through `TASK_REGISTRY` on the
+    /// Each entry is either a `#[task]` task_name (dispatched through `TASK_REGISTRY` on the
     /// worker — no entry needed in `resolved_tools`) or a name resolved into
     /// `resolved_tools` by the driver before staging. Resolution happens once,
     /// driver-side, so workers never need a `ToolRegistry`.
     pub tool_refs: Vec<String>,
     /// Resolved Python/JS tool source for any `tool_refs` entry that isn't a `#[task]`
-    /// op_id. Populated by the driver (see `atomic-nlq`'s tool resolution) before this
+    /// task_name. Populated by the driver (see `atomic-nlq`'s tool resolution) before this
     /// payload is staged into a pipeline op; empty for Rust-only tool_refs.
     #[serde(default)]
     pub resolved_tools: Vec<ResolvedTool>,
@@ -394,7 +394,7 @@ pub enum ResultStatus {
 /// The wire envelope sent from driver to worker for every distributed task.
 ///
 /// Contains everything the worker needs to execute one partition of work:
-/// - an ordered pipeline of operations (`steps`) — each carries an `op_id`, `action`, and `payload`
+/// - an ordered pipeline of operations (`steps`) — each carries a `task_name`, `action`, and `payload`
 /// - the partition elements (`data`, rkyv-encoded `Vec<T>`)
 ///
 /// Workers execute `steps` in order, threading partition data through each step.

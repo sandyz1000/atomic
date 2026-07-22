@@ -223,7 +223,7 @@ impl DistributedScheduler {
         ))
     }
 
-    /// Unified capability check. For regular steps, `cap` is the `op_id`.
+    /// Unified capability check. For regular steps, `cap` is the `task_name`.
     /// For shuffle steps, `cap` is `"shuffle:<shuffle_key>"`.
     ///
     /// An empty `cap` means the op (e.g. `EngineStep::Cache`) is handled by the
@@ -243,7 +243,7 @@ impl DistributedScheduler {
 
     /// Resolve the required capability string for a pipeline op.
     ///
-    /// Regular steps use their `op_id`. `ShuffleMap` steps use `"shuffle:<key>"` where
+    /// Regular steps use their `task_name`. `ShuffleMap` steps use `"shuffle:<key>"` where
     /// `<key>` is the stringify-based type key — the first field of the
     /// bincode-encoded `ShuffleMapPayload`.
     pub(crate) fn required_capability(op: &Step) -> String {
@@ -253,7 +253,7 @@ impl DistributedScheduler {
                     decode_payload(&op.payload).unwrap_or_else(|_| "<invalid-payload>".to_string());
                 format!("shuffle:{key}")
             }
-            _ => op.op_id.clone(),
+            _ => op.task_name.clone(),
         }
     }
 }

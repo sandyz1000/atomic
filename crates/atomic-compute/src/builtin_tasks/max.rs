@@ -7,7 +7,7 @@ use crate::task_traits::BinaryTask;
 /// then combine the per-partition maxima on the driver.
 ///
 /// `const NAME` encodes the element type via `stringify!(T)` so different
-/// instantiations (`MaxTask<i32>`, `MaxTask<String>`, …) each get a unique op_id.
+/// instantiations (`MaxTask<i32>`, `MaxTask<String>`, …) each get a unique task_name.
 #[derive(Clone, Copy)]
 pub struct MaxTask<T>(std::marker::PhantomData<T>);
 
@@ -34,11 +34,12 @@ macro_rules! impl_max_task {
 
         inventory::submit! {
             TaskEntry {
-                op_id: concat!("atomic::builtin::max::", stringify!($ty)),
+                task_name: concat!("atomic::builtin::max::", stringify!($ty)),
                 body_hash: 0,
 handler: |action, payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
                     let _ = payload;
+                    let task = MaxTask::<$ty>::default();
                     match action {
                         TaskAction::Fold | TaskAction::Aggregate | TaskAction::Reduce => {
                             let items = ::std::vec::Vec::<$ty>::decode_wire(data)
@@ -46,7 +47,7 @@ handler: |action, payload, data| {
                             let mut iter = items.into_iter();
                             let first = iter.next()
                                 .ok_or_else(|| "max: empty partition".to_string())?;
-                            let result = iter.fold(first, |a, b| if a >= b { a } else { b });
+                            let result = iter.fold(first, |a, b| task.call(a, b));
                             result.encode_wire().map_err(|e| e.to_string())
                         }
                         other => Err(format!("MaxTask does not support action {:?}", other)),

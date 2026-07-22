@@ -43,7 +43,7 @@ atomic_compute::register_shuffle_map!(String, u32);
 // ── Task functions ─────────────────────────────────────────────────────────────
 //
 // Each function is registered in TASK_REGISTRY at link time.
-// Workers receive a TaskEnvelope with the op_id and execute the registered handler
+// Workers receive a TaskEnvelope with the task_name and execute the registered handler
 // directly — only data travels over the wire, not function code.
 
 /// Split a line into lowercase words, stripping punctuation.

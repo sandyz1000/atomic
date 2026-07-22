@@ -9,7 +9,7 @@ use syn::{
 
 /// Compute a stable FNV-1a 64-bit hash of the closure's normalized token text.
 ///
-/// Used to generate a content-stable `op_id` for `task_fn!` closures.
+/// Used to generate a content-stable `task_name` for `task_fn!` closures.
 /// The result is stable across line-number changes and reformatting because
 /// it hashes the logical token stream, not the source position.
 fn fnv1a_hash(s: &str) -> u64 {
@@ -71,11 +71,11 @@ impl Parse for TaskFnInput {
 /// 2. **Generates a zero-sized task struct** (PascalCase of the function name) that
 ///    implements `UnaryTask` or `BinaryTask` from `atomic_compute::__macro_support`.
 ///    The struct carries `const NAME: &'static str` matching the inventory registration,
-///    so the op-id is available statically at the call site — inspired by rusty-celery.
+///    so the `task_name` is available statically at the call site — inspired by rusty-celery.
 ///
 /// 3. **Registers a dispatch handler** into the global compile-time task registry
 ///    via the `inventory` crate. When the binary runs as a worker, incoming
-///    `TaskEnvelope` messages are dispatched to the handler by `op_id`.
+///    `TaskEnvelope` messages are dispatched to the handler by `task_name`.
 ///
 /// # Generated names
 ///
@@ -85,13 +85,13 @@ impl Parse for TaskFnInput {
 /// | `fn is_positive` | `struct IsPositive` |
 /// | `fn flat_map_words` | `struct FlatMapWords` |
 ///
-/// The `op_id` defaults to `"<crate>::<module>::<fn_name>"` but can be overridden:
+/// The `task_name` defaults to `"<crate>::<module>::<fn_name>"` but can be overridden:
 ///
 /// ```ignore
-/// #[task]                        // op_id = "mycrate::mymod::double"
+/// #[task]                        // task_name = "mycrate::mymod::double"
 /// fn double(x: i32) -> i32 { x * 2 }
 ///
-/// #[task(name = "custom.op.v1")]  // op_id = "custom.op.v1"
+/// #[task(name = "custom.op.v1")]  // task_name = "custom.op.v1"
 /// fn double_v1(x: i32) -> i32 { x * 2 }
 /// ```
 ///
@@ -228,8 +228,8 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
     let body_hash_short = format!("{:08x}", body_hash_val as u32);
     let body_hash_lit = proc_macro2::Literal::u64_suffixed(body_hash_val);
 
-    // op_id: custom names are left as-is (user owns stability); generated names
-    // include the body hash so a body change produces a new op_id and workers fail
+    // task_name: custom names are left as-is (user owns stability); generated names
+    // include the body hash so a body change produces a new task_name and workers fail
     // loudly instead of silently executing stale logic.
     let op_id_expr: proc_macro2::TokenStream = if let Some(ref name) = custom_name {
         quote! { #name }
@@ -237,16 +237,21 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { concat!(module_path!(), "::", #fn_name_str, "::", #body_hash_short) }
     };
 
+    // The dispatch handler routes through the generated task struct's trait method
+    // (`__task.call(...)`), not the bare function, so a manual `call()` override runs on
+    // the worker exactly as it does locally — matching `task_fn!` and keeping the trait
+    // method the single execution contract.
     let dispatch_body = if num_args == 2 {
         quote! {
-            use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
+            use ::atomic_compute::__macro_support::{BinaryTask, TaskAction, WireDecode, WireEncode};
+            let __task = #struct_name;
             match action {
                 TaskAction::Fold | TaskAction::Aggregate => {
                     let zero = <#input_type>::decode_wire(payload)
                         .map_err(|e| e.to_string())?;
                     let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
                         .map_err(|e| e.to_string())?;
-                    let result = items.into_iter().fold(zero, |acc, x| #fn_name(acc, x));
+                    let result = items.into_iter().fold(zero, |acc, x| __task.call(acc, x));
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 TaskAction::Reduce => {
@@ -255,7 +260,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
                     let mut iter = items.into_iter();
                     let first = iter.next()
                         .ok_or_else(|| "reduce called on empty partition".to_string())?;
-                    let result = iter.fold(first, |acc, x| #fn_name(acc, x));
+                    let result = iter.fold(first, |acc, x| __task.call(acc, x));
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 other => Err(::std::format!(
@@ -266,20 +271,21 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     } else if is_bool_return {
         quote! {
-            use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
+            use ::atomic_compute::__macro_support::{TaskAction, UnaryTask, WireDecode, WireEncode};
+            let __task = #struct_name;
             match action {
                 TaskAction::Map | TaskAction::Collect => {
                     let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
                         .map_err(|e| e.to_string())?;
                     let result: ::std::vec::Vec<bool> =
-                        items.into_iter().map(#fn_name).collect();
+                        items.into_iter().map(|x| __task.call(x)).collect();
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 TaskAction::Filter => {
                     let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
                         .map_err(|e| e.to_string())?;
                     let result: ::std::vec::Vec<#input_type> =
-                        items.into_iter().filter(|x| #fn_name(x.clone())).collect();
+                        items.into_iter().filter(|x| __task.call(x.clone())).collect();
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 other => Err(::std::format!(
@@ -290,25 +296,26 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     } else if is_vec_return {
         quote! {
-            use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
+            use ::atomic_compute::__macro_support::{TaskAction, UnaryTask, WireDecode, WireEncode};
+            let __task = #struct_name;
             match action {
                 TaskAction::Map | TaskAction::Collect => {
                     let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
                         .map_err(|e| e.to_string())?;
                     let result: ::std::vec::Vec<#output_type> =
-                        items.into_iter().map(#fn_name).collect();
+                        items.into_iter().map(|x| __task.call(x)).collect();
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 TaskAction::FlatMap => {
                     let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
                         .map_err(|e| e.to_string())?;
                     let result: ::std::vec::Vec<_> =
-                        items.into_iter().flat_map(#fn_name).collect();
+                        items.into_iter().flat_map(|x| __task.call(x)).collect();
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 TaskAction::MapPartitions => {
                     let items = <#input_type>::decode_wire(data).map_err(|e| e.to_string())?;
-                    let result = #fn_name(items);
+                    let result = __task.call(items);
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 other => Err(::std::format!(
@@ -319,20 +326,21 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            use ::atomic_compute::__macro_support::{TaskAction, WireDecode, WireEncode};
+            use ::atomic_compute::__macro_support::{TaskAction, UnaryTask, WireDecode, WireEncode};
+            let __task = #struct_name;
             match action {
                 TaskAction::Map | TaskAction::Collect => {
                     let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
                         .map_err(|e| e.to_string())?;
                     let result: ::std::vec::Vec<#output_type> =
-                        items.into_iter().map(#fn_name).collect();
+                        items.into_iter().map(|x| __task.call(x)).collect();
                     result.encode_wire().map_err(|e| e.to_string())
                 }
                 TaskAction::Foreach => {
                     let items = ::std::vec::Vec::<#input_type>::decode_wire(data)
                         .map_err(|e| e.to_string())?;
                     for x in items {
-                        #fn_name(x);
+                        __task.call(x);
                     }
                     ::std::result::Result::Ok(::std::vec::Vec::new())
                 }
@@ -390,11 +398,11 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         // 2. Zero-sized task struct with statically-known NAME.
         //    Inspired by rusty-celery: the struct is what you pass to map_task / fold_task,
-        //    giving the RDD API access to the op_id without runtime lookup.
+        //    giving the RDD API access to the task_name without runtime lookup.
         #task_struct_impl
 
         // 3. Dispatch handler: decodes partition bytes, applies the requested action,
-        //    re-encodes the result. Called by NativeBackend when op_id matches.
+        //    re-encodes the result. Called by NativeBackend when task_name matches.
         #[doc(hidden)]
         fn #dispatch_fn_name(
             action: &::atomic_compute::__macro_support::TaskAction,
@@ -408,7 +416,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
         //    The worker binary collects all submitted entries at startup.
         ::atomic_compute::__macro_support::inventory::submit! {
             ::atomic_compute::__macro_support::TaskEntry {
-                op_id: #op_id_expr,
+                task_name: #op_id_expr,
                 body_hash: #body_hash_lit,
                 handler: #dispatch_fn_name,
             }
@@ -424,7 +432,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Binary (fold) closures infer the return type from the first argument type.
 ///
 /// The generated struct is registered in the compile-time task registry using the
-/// source location (`file:line:column`) as its stable `op_id`.
+/// source location (`file:line:column`) as its stable `task_name`.
 ///
 /// # Usage
 ///
@@ -558,7 +566,7 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
     //   ✗  Changing the closure body (intentional — short_hash catches this)
     //
     // Duplicate bodies: two closures with identical bodies in the same module at the
-    // same action+types share the same op_id. This is safe — their handlers are
+    // same action+types share the same task_name. This is safe — their handlers are
     // functionally identical and the registry deduplicates them at startup.
 
     // Hash only the body, not the full closure, so argument names (x vs item) and
@@ -578,7 +586,7 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
 
     // Determine Action label and type string from the signature.
     // (is_bool / is_vec / num_inputs are computed later; replicate the detection here
-    //  for op_id construction before the if-else branches below.)
+    //  for task_name construction before the if-else branches below.)
     let (action_label, types_str): (String, String) = if num_inputs == 2 {
         let (_, t) = &typed_args[0];
         ("Reduce".to_owned(), normalise_ty(t))
@@ -616,7 +624,7 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
         }
     };
 
-    // The full op_id is built at compile time using module_path!() so it picks up the
+    // The full task_name is built at compile time using module_path!() so it picks up the
     // correct module at the call site, not in the macro crate itself.
     let op_id_suffix = format!("{action_label}<{types_str}>::{short_hash}");
     let op_id_expr = quote! {
@@ -682,7 +690,7 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
 
                 ::atomic_compute::__macro_support::inventory::submit! {
                     ::atomic_compute::__macro_support::TaskEntry {
-                        op_id: #op_id_expr,
+                        task_name: #op_id_expr,
                         body_hash: #body_hash,
                         handler: #dispatch_fn_ident,
                     }
@@ -823,7 +831,7 @@ pub fn task_fn(input: TokenStream) -> TokenStream {
 
                 ::atomic_compute::__macro_support::inventory::submit! {
                     ::atomic_compute::__macro_support::TaskEntry {
-                        op_id: #op_id_expr,
+                        task_name: #op_id_expr,
                         body_hash: #body_hash,
                         handler: #dispatch_fn_ident,
                     }

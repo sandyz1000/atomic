@@ -23,7 +23,7 @@ impl Context {
     /// returning decoded `Vec<U>` per partition.
     pub fn run_native_job_map<T, U>(
         self: &Arc<Self>,
-        op_id: &str,
+        task_name: &str,
         action: TaskAction,
         payload: Vec<u8>,
         rdd: Arc<dyn Rdd<Item = T>>,
@@ -35,7 +35,7 @@ impl Context {
         Vec<U>: WireDecode,
     {
         let steps = vec![Step {
-            op_id: op_id.to_string(),
+            task_name: task_name.to_string(),
             kind: StepKind::Task(action),
             runtime: TaskRuntime::Native,
             payload,
@@ -52,7 +52,7 @@ impl Context {
     /// then combine the per-partition results into a single value on the driver.
     pub fn run_native_job_fold<T>(
         self: &Arc<Self>,
-        op_id: &str,
+        task_name: &str,
         zero: T,
         rdd: Arc<dyn Rdd<Item = T>>,
     ) -> ComputeResult<T>
@@ -62,7 +62,7 @@ impl Context {
     {
         let payload = zero.encode_wire()?;
         let steps = vec![Step {
-            op_id: op_id.to_string(),
+            task_name: task_name.to_string(),
             kind: StepKind::Task(TaskAction::Fold),
             runtime: TaskRuntime::Native,
             payload,
@@ -85,7 +85,7 @@ impl Context {
         // Combine partition results via Reduce on the driver.
         let combined_data = partition_values.encode_wire()?;
         let reduce_ops = vec![Step {
-            op_id: op_id.to_string(),
+            task_name: task_name.to_string(),
             kind: StepKind::Task(TaskAction::Reduce),
             runtime: TaskRuntime::Native,
             payload: vec![],
@@ -96,7 +96,7 @@ impl Context {
             0,
             0,
             0,
-            format!("driver-reduce-{}", op_id),
+            format!("driver-reduce-{}", task_name),
             reduce_ops,
             combined_data,
         );

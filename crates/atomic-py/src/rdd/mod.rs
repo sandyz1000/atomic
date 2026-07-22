@@ -167,7 +167,7 @@ impl PyRdd {
         let payload = serde_json::to_vec(&payload_struct)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let op = Step {
-            op_id: "atomic::task::python".to_string(),
+            task_name: "atomic::task::python".to_string(),
             kind: StepKind::Task(action),
             runtime: TaskRuntime::Python,
             payload,

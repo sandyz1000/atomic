@@ -17,7 +17,7 @@ macro_rules! impl_distinct_task {
     ($ty:ty) => {
         inventory::submit! {
             TaskEntry {
-                op_id: concat!("atomic::builtin::distinct::", stringify!($ty)),
+                task_name: concat!("atomic::builtin::distinct::", stringify!($ty)),
                 body_hash: 0,
 handler: |action, _payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};

@@ -11,7 +11,7 @@
 ///    `UnaryTask` or `BinaryTask` with a statically-known `NAME` (rusty-celery–inspired).
 /// 3. Generates `__atomic_dispatch_<fn>` that decodes rkyv partition bytes,
 ///    applies the function for the requested `TaskAction`, and re-encodes results.
-/// 4. Registers a `TaskEntry { op_id, handler }` via `inventory::submit!` so
+/// 4. Registers a `TaskEntry { task_name, handler }` via `inventory::submit!` so
 ///    the worker binary can dispatch by name at startup.
 ///
 /// # Running locally (no workers needed)
@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Chain (double → keep positives → sum): {}", chain_sum);
 
     // task_fn! — inline closure wrapped into a distributed-compatible UnaryTask/BinaryTask.
-    // Equivalent to #[task] fn but anonymous; uses source location as the stable op_id.
+    // Equivalent to #[task] fn but anonymous; uses source location as the stable task_name.
     // Unary closures require an explicit return type annotation (`-> T`).
     let doubled_inline = ctx
         .parallelize_typed(data.clone(), 2)

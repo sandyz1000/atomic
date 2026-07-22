@@ -665,7 +665,7 @@ impl DistributedScheduler {
     ) -> LibResult<Vec<Vec<u8>>> {
         let pipeline_label = steps
             .iter()
-            .map(|o| o.op_id.as_str())
+            .map(|o| o.task_name.as_str())
             .collect::<Vec<_>>()
             .join("→");
         let (run_id, stage_id) = {

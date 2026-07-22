@@ -18,7 +18,7 @@ macro_rules! impl_top_k_task {
     ($ty:ty) => {
         inventory::submit! {
             TaskEntry {
-                op_id: concat!("atomic::builtin::top_k::", stringify!($ty)),
+                task_name: concat!("atomic::builtin::top_k::", stringify!($ty)),
                 body_hash: 0,
 handler: |action, payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};

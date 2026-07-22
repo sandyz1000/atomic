@@ -45,7 +45,7 @@ impl DistributedScheduler {
             dep.preceding_steps.clone()
         };
         steps.push(Step {
-            op_id: format!("shuffle-map-{}", dep.get_shuffle_id()),
+            task_name: format!("shuffle-map-{}", dep.get_shuffle_id()),
             kind: StepKind::Engine(EngineStep::ShuffleMap {
                 shuffle_id: dep.get_shuffle_id(),
                 num_output_partitions: dep.get_num_output_partitions(),

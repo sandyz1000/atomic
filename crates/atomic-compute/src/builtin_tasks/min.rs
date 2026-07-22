@@ -28,11 +28,12 @@ macro_rules! impl_min_task {
 
         inventory::submit! {
             TaskEntry {
-                op_id: concat!("atomic::builtin::min::", stringify!($ty)),
+                task_name: concat!("atomic::builtin::min::", stringify!($ty)),
                 body_hash: 0,
 handler: |action, payload, data| {
                     use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
                     let _ = payload;
+                    let task = MinTask::<$ty>::default();
                     match action {
                         TaskAction::Fold | TaskAction::Aggregate | TaskAction::Reduce => {
                             let items = ::std::vec::Vec::<$ty>::decode_wire(data)
@@ -40,7 +41,7 @@ handler: |action, payload, data| {
                             let mut iter = items.into_iter();
                             let first = iter.next()
                                 .ok_or_else(|| "min: empty partition".to_string())?;
-                            let result = iter.fold(first, |a, b| if a <= b { a } else { b });
+                            let result = iter.fold(first, |a, b| task.call(a, b));
                             result.encode_wire().map_err(|e| e.to_string())
                         }
                         other => Err(format!("MinTask does not support action {:?}", other)),

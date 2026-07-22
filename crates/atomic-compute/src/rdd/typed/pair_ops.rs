@@ -1,3 +1,7 @@
+use atomic_data::partitioner::{CustomPartitioner, NamedPartitioner};
+
+use crate::builtin_tasks::{max::MaxTask, min::MinTask, sum::SumTask};
+
 use super::*;
 
 impl<K, V> TypedRdd<(K, V)>
@@ -82,7 +86,7 @@ where
     /// Triggers a shuffle.
     pub fn partition_by<P>(self, partitioner: P) -> TypedRdd<(K, V)>
     where
-        P: atomic_data::partitioner::CustomPartitioner + 'static,
+        P: CustomPartitioner + 'static,
         V: bincode::Encode + bincode::Decode<()>,
         K: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
@@ -100,7 +104,7 @@ where
     /// shipped state is its partition count; the worker rebuilds it via `P::create`.
     pub fn partition_by_named<P>(self, partitioner: P) -> TypedRdd<(K, V)>
     where
-        P: atomic_data::partitioner::NamedPartitioner,
+        P: NamedPartitioner,
         V: bincode::Encode + bincode::Decode<()>,
         K: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
@@ -270,6 +274,78 @@ where
             move |c1, c2| merge.call(c1, c2),
             num_partitions,
         )
+    }
+
+    /// Transform each value with a registered unary task, keeping the key — the
+    /// content-addressed, key-preserving form of a value map.
+    pub fn map_values_task<W, B>(self, task: B) -> TypedRdd<(K, W)>
+    where
+        W: Data + Clone,
+        B: UnaryTask<V, W>,
+    {
+        self.map_rdd(move |id, rdd| MapperRdd::new(id, rdd, move |(k, v)| (k, task.call(v))))
+    }
+
+    /// Flat-map each value with a registered task returning `Vec<W>`, pairing every produced
+    /// element with the original key.
+    pub fn flat_map_values_task<W, B>(self, task: B) -> TypedRdd<(K, W)>
+    where
+        W: Data + Clone,
+        B: UnaryTask<V, Vec<W>>,
+    {
+        self.map_rdd(move |id, rdd| {
+            FlatMapperRdd::new(id, rdd, move |(k, v)| {
+                Box::new(task.call(v).into_iter().map(move |w| (k.clone(), w)))
+                    as Box<dyn Iterator<Item = (K, W)>>
+            })
+        })
+    }
+
+    /// Sum the values for each key using the built-in `SumTask<V>` (numeric `V`).
+    ///
+    /// Shorthand for [`reduce_by_key_task`](Self::reduce_by_key_task) with the sum monoid.
+    pub fn sum_values(self) -> TypedRdd<(K, V)>
+    where
+        SumTask<V>: BinaryTask<V> + Default,
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        self.reduce_by_key_task(SumTask::<V>::default())
+    }
+
+    /// Maximum value for each key using the built-in `MaxTask<V>` (`V: Ord`).
+    pub fn max_values(self) -> TypedRdd<(K, V)>
+    where
+        MaxTask<V>: BinaryTask<V> + Default,
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        self.reduce_by_key_task(MaxTask::<V>::default())
+    }
+
+    /// Minimum value for each key using the built-in `MinTask<V>` (`V: Ord`).
+    pub fn min_values(self) -> TypedRdd<(K, V)>
+    where
+        MinTask<V>: BinaryTask<V> + Default,
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        self.reduce_by_key_task(MinTask::<V>::default())
+    }
+
+    /// Count the values for each key, producing `(K, u64)`.
+    ///
+    /// A `combine_by_key` with `C = u64` — value-agnostic, so it works for any `V`.
+    pub fn count_values(self, num_partitions: usize) -> TypedRdd<(K, u64)>
+    where
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        self.combine_by_key(|_v| 1u64, |c, _v| c + 1, |a, b| a + b, num_partitions)
     }
 
     /// Return elements whose key is NOT present in `other`.

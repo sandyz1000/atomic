@@ -7,7 +7,7 @@ use crate::rdd::mapper::MapperRdd;
 use crate::rdd::parallel_collection::ParallelCollection;
 use crate::rdd::partitionwise_sampled::PartitionwiseSampledRdd;
 use crate::runtimes::Backend;
-use crate::task_traits::{BinaryTask, UnaryTask};
+use crate::task_traits::{AggregateTask, BinaryTask, UnaryTask};
 use atomic_data::cache::StorageLevel;
 use atomic_data::dependency::Dependency;
 use atomic_data::distributed::{

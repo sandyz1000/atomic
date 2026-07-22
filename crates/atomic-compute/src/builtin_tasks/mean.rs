@@ -1,45 +1,31 @@
-use crate::task_registry::TaskEntry;
+use crate::register_aggregate_task;
+use crate::task_traits::AggregateTask;
 
-/// Built-in: compute per-partition `(f64_sum, u64_count)` for mean calculation.
+/// Built-in: accumulate `(f64_sum, u64_count)` for mean calculation.
 ///
-/// Used by `TypedRdd::mean()`. Each worker returns `(sum, count)` for its
-/// partition; the driver combines them: `total_sum / total_count as f64`.
-///
-/// The driver reduce step uses a `SumTask<f64>` for the sum component and
-/// `SumTask<u64>` for the count component, or combines the tuple directly.
+/// The [`AggregateTask`] shape (`A = (f64, u64)`, `T = numeric`): each worker folds its
+/// partition into one `(sum, count)`; the driver merges them and divides. Registered for the
+/// numeric primitives via [`register_aggregate_task!`], keyed `atomic::builtin::mean::<ty>`.
+#[derive(Clone, Copy, Default)]
 pub struct MeanTask<T>(std::marker::PhantomData<T>);
-
-impl<T> Default for MeanTask<T> {
-    fn default() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
 
 macro_rules! impl_mean_task {
     ($ty:ty) => {
-        inventory::submit! {
-            TaskEntry {
-                op_id: concat!("atomic::builtin::mean::", stringify!($ty)),
-                body_hash: 0,
-handler: |action, _payload, data| {
-                    use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
-                    match action {
-                        TaskAction::Aggregate | TaskAction::Collect => {
-                            let items = ::std::vec::Vec::<$ty>::decode_wire(data)
-                                .map_err(|e| e.to_string())?;
-                            let count = items.len() as u64;
-                            let sum: f64 = items.into_iter().map(|x| x as f64).sum();
-                            (sum, count).encode_wire().map_err(|e| e.to_string())
-                        }
-                        other => Err(format!("MeanTask does not support action {:?}", other)),
-                    }
-                },
+        impl AggregateTask<(f64, u64), $ty> for MeanTask<$ty> {
+            const NAME: &'static str = concat!("atomic::builtin::mean::", stringify!($ty));
+            fn seq(&self, (sum, count): (f64, u64), x: $ty) -> (f64, u64) {
+                (sum + x as f64, count + 1)
+            }
+            fn comb(&self, a: (f64, u64), b: (f64, u64)) -> (f64, u64) {
+                (a.0 + b.0, a.1 + b.1)
             }
         }
+
+        register_aggregate_task!(MeanTask<$ty>, (f64, u64), $ty);
     };
 }
 
-// MeanTask uses `x as f64` so only integer and float primitives apply.
+// MeanTask uses `x as f64`, so only integer and float primitives apply.
 impl_mean_task!(i32);
 impl_mean_task!(i64);
 impl_mean_task!(u32);

@@ -438,7 +438,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         }
 
         let op = Step {
-            op_id: F::NAME.to_string(),
+            task_name: F::NAME.to_string(),
             kind: StepKind::Task(TaskAction::Foreach),
             runtime: TaskRuntime::Native,
             payload: task.encode_params(),
@@ -546,6 +546,41 @@ impl<T: Data + Clone> TypedRdd<T> {
         let min_partition = move |iter: Box<dyn Iterator<Item = T>>| iter.min();
         let partition_mins = self.context.run_job(self.rdd.clone(), min_partition)?;
         Ok(partition_mins.into_iter().flatten().min())
+    }
+
+    /// Bucketed counts of the elements over ascending `bucket_bounds`.
+    ///
+    /// `bucket_bounds` has `n + 1` ascending edges defining `n` buckets; returns a `Vec<u64>`
+    /// of length `n` where index `i` counts elements in `[bounds[i], bounds[i+1])`, with the
+    /// final bucket right-inclusive. Elements outside `[bounds[0], bounds[n]]` are dropped.
+    ///
+    /// Materialises to the driver and buckets there (the bucket edges are a runtime parameter,
+    /// so this is not a compile-time-registered task).
+    pub fn histogram(&self, bucket_bounds: &[f64]) -> Result<Vec<u64>, DataError>
+    where
+        T: crate::builtin_tasks::NumericValue + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        if bucket_bounds.len() < 2 {
+            return Ok(vec![]);
+        }
+        let n = bucket_bounds.len() - 1;
+        let lo = bucket_bounds[0];
+        let hi = bucket_bounds[n];
+        let mut counts = vec![0u64; n];
+        for x in self.collect()? {
+            let v = x.to_f64();
+            if v < lo || v > hi {
+                continue;
+            }
+            // Largest edge <= v; clamp the right-inclusive last edge into the final bucket.
+            let idx = bucket_bounds
+                .partition_point(|&b| b <= v)
+                .saturating_sub(1)
+                .min(n - 1);
+            counts[idx] += 1;
+        }
+        Ok(counts)
     }
 
     /// Internal helper: dispatch the staged pipeline (or raw partitions) to workers

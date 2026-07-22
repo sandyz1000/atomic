@@ -139,7 +139,7 @@ async fn test_worker_tcp_removal() {
         0,
         "test".to_string(),
         vec![Step {
-            op_id: "no.op".to_string(),
+            task_name: "no.op".to_string(),
             kind: StepKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
@@ -216,7 +216,7 @@ async fn test_exponential_backoff() {
         0,
         "test".to_string(),
         vec![Step {
-            op_id: "no.op".to_string(),
+            task_name: "no.op".to_string(),
             kind: StepKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],

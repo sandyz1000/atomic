@@ -196,7 +196,7 @@ impl BatchEngine for DistributedStateEngine {
         }
 
         let steps = vec![Step {
-            op_id: String::new(),
+            task_name: String::new(),
             kind: StepKind::Engine(EngineStep::MergeState {
                 merge_fn: WINDOWED_MERGE_FN.to_string(),
             }),

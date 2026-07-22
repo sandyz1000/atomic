@@ -1,6 +1,19 @@
+use rand::RngExt;
+
 use super::*;
 
 impl<T: Data> TypedRdd<T> {
+    /// Build a pair RDD keyed by a registered unary task applied to each element — the
+    /// content-addressed form of `key_by`. Produces `(task(x), x)`.
+    pub fn key_by_task<K, B>(self, task: B) -> TypedRdd<(K, T)>
+    where
+        K: Data + Clone,
+        T: Clone,
+        B: UnaryTask<T, K>,
+    {
+        self.map_rdd(move |id, rdd| MapperRdd::new(id, rdd, move |x| (task.call(x.clone()), x)))
+    }
+
     /// Union with another RDD - combine elements from both.
     ///
     /// # Example
@@ -424,5 +437,50 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
         };
         let rdd = PartitionwiseSampledRdd::new(id, self.rdd, sampler, false);
         TypedRdd::new(Arc::new(rdd), self.context)
+    }
+
+    /// Return a fixed-size random sample of exactly `num` elements (or fewer if the RDD is
+    /// smaller and `with_replacement` is false) as a driver-side `Vec<T>`.
+    ///
+    /// This is an **action**: it materialises the RDD and samples on the driver, seeded by
+    /// `seed` for reproducibility. `with_replacement = true` draws with replacement (elements
+    /// may repeat); `false` draws distinct elements.
+    pub fn take_sample(
+        &self,
+        with_replacement: bool,
+        num: usize,
+        seed: u64,
+    ) -> Result<Vec<T>, DataError>
+    where
+        T: Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        use rand::SeedableRng;
+
+        // This workspace's patched `rand` exposes only `RngExt::random`, not the `seq`
+        // sampling helpers (`choose_multiple`/`shuffle`), so both branches sample using a
+        // single uniform `random::<f64>()` draw per element.
+        let all: Vec<T> = self.collect()?;
+        if all.is_empty() || num == 0 {
+            return Ok(vec![]);
+        }
+        let mut rng = rand_pcg::Pcg64::seed_from_u64(seed);
+        if with_replacement {
+            let n = all.len();
+            Ok((0..num)
+                .map(|_| {
+                    let i = ((rng.random::<f64>() * n as f64) as usize).min(n - 1);
+                    all[i].clone()
+                })
+                .collect())
+        } else {
+            // Assign each element a random key, sort by it, take the first `num` —
+            // an unbiased fixed-size sample without replacement.
+            let take = num.min(all.len());
+            let mut keyed: Vec<(f64, T)> =
+                all.into_iter().map(|x| (rng.random::<f64>(), x)).collect();
+            keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            Ok(keyed.into_iter().take(take).map(|(_, x)| x).collect())
+        }
     }
 }

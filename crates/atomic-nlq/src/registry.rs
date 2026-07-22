@@ -181,10 +181,10 @@ impl ToolRegistry {
     /// Resolve `config.tool_refs` against this registry and `atomic-compute`'s
     /// `TASK_REGISTRY`, filling in `config.resolved_tools`. Call this once,
     /// driver-side, before staging `config` into a pipeline op (e.g. `rdd.agent_step(..)`)
-    /// — workers dispatch `TOOL_CALL:` by op_id / resolved-tool name and never consult
+    /// — workers dispatch `TOOL_CALL:` by task_name / resolved-tool name and never consult
     /// `ToolRegistry` directly.
     ///
-    /// - A `tool_refs` entry matching a `#[task]` op_id in `TASK_REGISTRY` is left as-is;
+    /// - A `tool_refs` entry matching a `#[task]` task_name in `TASK_REGISTRY` is left as-is;
     ///   the worker dispatches it through `TASK_REGISTRY` at call time.
     /// - A `Python`/`JavaScript` tool is resolved into `resolved_tools`.
     /// - A `Builtin` tool (`sql_query`, `llm_filter`, ...) is rejected: builtins run in the
@@ -224,7 +224,7 @@ impl ToolRegistry {
                 }
                 None => {
                     return Err(crate::errors::NlqError::ToolNotFound(format!(
-                        "'{name}' is not a registered #[task] op_id nor a ToolRegistry tool"
+                        "'{name}' is not a registered #[task] task_name nor a ToolRegistry tool"
                     )));
                 }
             }
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn resolve_agent_step_leaves_rust_op_id_unresolved() {
-        // Any #[task]-registered op_id (none registered in this crate's test binary,
+        // Any #[task]-registered task_name (none registered in this crate's test binary,
         // but the call path is identical) is left out of resolved_tools — it's
         // dispatched by the worker via TASK_REGISTRY at call time, not pre-resolved here.
         // We simulate "registered" by checking a genuinely unregistered name is rejected

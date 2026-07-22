@@ -58,9 +58,9 @@ fn make_envelope_with_ops(steps: Vec<Step>, data: Vec<u8>) -> TaskEnvelope {
     TaskEnvelope::new(1, 1, 1, 0, 0, "test".to_string(), steps, data)
 }
 
-fn single_op(op_id: &str, action: TaskAction) -> Step {
+fn single_op(task_name: &str, action: TaskAction) -> Step {
     Step {
-        op_id: op_id.to_string(),
+        task_name: task_name.to_string(),
         kind: StepKind::Task(action),
         runtime: TaskRuntime::Native,
         payload: vec![],
@@ -92,10 +92,10 @@ fn test_empty_pipeline() {
     );
 }
 
-// ── Unknown op_id → FatalFailure ──────────────────────────────────────────────
+// ── Unknown task_name → FatalFailure ──────────────────────────────────────────────
 
-/// An unknown op_id must produce `FatalFailure`, not panic, and include the
-/// op_id in the error message for easy debugging.
+/// An unknown task_name must produce `FatalFailure`, not panic, and include the
+/// task_name in the error message for easy debugging.
 ///
 /// This complements the inline test in `native_executor.rs` with an external call.
 #[test]
@@ -110,7 +110,7 @@ fn test_unknown_op_fatal() {
     let err = envelope.error.as_deref().unwrap_or("");
     assert!(
         err.contains("no.such.handler.xyz"),
-        "error message should name the missing op_id, got: {err}"
+        "error message should name the missing task_name, got: {err}"
     );
 }
 
@@ -185,7 +185,7 @@ fn test_fold_op_sums_partition() {
     let zero: i32 = 0;
     let items: Vec<i32> = vec![1, 2, 3, 4, 5];
     let op = Step {
-        op_id: "atomic::builtin::sum::i32".to_string(),
+        task_name: "atomic::builtin::sum::i32".to_string(),
         kind: StepKind::Task(TaskAction::Fold),
         runtime: TaskRuntime::Native,
         payload: encode(zero),

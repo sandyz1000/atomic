@@ -21,8 +21,8 @@ pub struct WorkerCapabilities {
     /// Port of the worker's ShuffleManager HTTP server. Used by the driver heartbeat
     /// to probe `GET /health`. `None` if the shuffle server is not yet started.
     pub shuffle_server_port: Option<u16>,
-    /// FNV-1a fingerprint of all `(op_id, body_hash)` pairs in the worker's
-    /// `TASK_REGISTRY`, sorted by op_id. The driver checks this against its own
+    /// FNV-1a fingerprint of all `(task_name, body_hash)` pairs in the worker's
+    /// `TASK_REGISTRY`, sorted by task_name. The driver checks this against its own
     /// fingerprint at registration time; a mismatch means the binaries diverged.
     /// Zero means "unknown" (old worker) — driver logs a warning but allows it.
     pub registry_fingerprint: u64,

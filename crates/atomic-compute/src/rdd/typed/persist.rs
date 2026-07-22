@@ -28,7 +28,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
             // The first action over this RDD runs the pipeline and caches each
             // partition's bytes on its worker under `cache_id` (see runtimes/native.rs).
             sp.steps.push(Step {
-                op_id: String::new(),
+                task_name: String::new(),
                 kind: StepKind::Engine(EngineStep::Cache { rdd_id: cache_id }),
                 runtime: TaskRuntime::Native,
                 payload: vec![],

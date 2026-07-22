@@ -164,7 +164,7 @@ impl Dispatcher for NativeDispatcher {
                     .run_partition(&payload, data)
                     .map_err(ComputeError::InvalidPayload)
             }
-            StepKind::Task(action) => match TASK_REGISTRY.get(op.op_id.as_str()) {
+            StepKind::Task(action) => match TASK_REGISTRY.get(op.task_name.as_str()) {
                 None => {
                     let registered: Vec<&str> = TASK_REGISTRY.keys().copied().collect();
                     Err(ComputeError::UnknownOperation(format!(
@@ -172,8 +172,8 @@ impl Dispatcher for NativeDispatcher {
                          Ensure this binary was compiled with the crate that defines \
                          #[task] or task_fn! for '{}'. \
                          Registered ops ({} total): [{}]",
-                        op.op_id,
-                        op.op_id,
+                        op.task_name,
+                        op.task_name,
                         registered.len(),
                         registered.join(", ")
                     )))
@@ -314,7 +314,7 @@ fn run_pipeline(
         log::info!(
             "[{}] pipeline op '{}' {:?} data_bytes={}",
             worker_id,
-            op.op_id,
+            op.task_name,
             op.kind,
             data.len(),
         );
@@ -551,7 +551,12 @@ mod tests {
         EngineStep, ResultStatus, Step, StepKind, TaskAction, TaskRuntime,
     };
 
-    fn make_task(op_id: &str, kind: StepKind, runtime: TaskRuntime, data: Vec<u8>) -> TaskEnvelope {
+    fn make_task(
+        task_name: &str,
+        kind: StepKind,
+        runtime: TaskRuntime,
+        data: Vec<u8>,
+    ) -> TaskEnvelope {
         TaskEnvelope::new(
             1,
             2,
@@ -560,7 +565,7 @@ mod tests {
             0,
             "test-trace".to_string(),
             vec![Step {
-                op_id: op_id.to_string(),
+                task_name: task_name.to_string(),
                 kind,
                 runtime,
                 payload: vec![],

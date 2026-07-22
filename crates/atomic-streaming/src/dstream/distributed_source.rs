@@ -243,7 +243,7 @@ impl DistributedSource for DistributedFileSource {
                     .unwrap_or_default();
                 let task = SourcePartitionTask {
                     op: Step {
-                        op_id: String::new(),
+                        task_name: String::new(),
                         kind: StepKind::Engine(EngineStep::ReadFileSplit),
                         runtime: TaskRuntime::Native,
                         payload: vec![],

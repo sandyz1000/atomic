@@ -28,7 +28,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn noop_ops() -> Vec<Step> {
     vec![Step {
-        op_id: "no.op".to_string(),
+        task_name: "no.op".to_string(),
         kind: StepKind::Task(TaskAction::Map),
         runtime: TaskRuntime::Native,
         payload: vec![],

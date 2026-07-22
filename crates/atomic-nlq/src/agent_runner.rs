@@ -58,7 +58,7 @@ cfg_not_js! {
     }
 }
 
-/// Dispatch one `TOOL_CALL:` to a Rust `#[task]` (by op_id, via `TASK_REGISTRY`) or a
+/// Dispatch one `TOOL_CALL:` to a Rust `#[task]` (by task_name, via `TASK_REGISTRY`) or a
 /// resolved Python/JS tool (via `AgentStepPayload.resolved_tools`). Always returns
 /// a string — errors are formatted as `"error: ..."` and fed back into the conversation
 /// rather than aborting the partition (per the design: a model that mistypes a tool ref
@@ -83,7 +83,7 @@ fn dispatch_tool(payload: &AgentStepPayload, tool_ref: &str, json_args: &str) ->
     }
 
     format!(
-        "error: tool '{tool_ref}' is not registered (not a TASK_REGISTRY op_id and not in \
+        "error: tool '{tool_ref}' is not registered (not a TASK_REGISTRY task_name and not in \
          resolved_tools) — check the tool name and retry, or proceed without it"
     )
 }
@@ -355,8 +355,8 @@ mod tests {
     #[test]
     fn dispatch_tool_invokes_registered_rust_task() {
         let payload = base_payload();
-        let op_id = ShoutTool::NAME;
-        let result = dispatch_tool(&payload, op_id, "\"hello\"");
+        let task_name = ShoutTool::NAME;
+        let result = dispatch_tool(&payload, task_name, "\"hello\"");
         assert_eq!(result, "HELLO!");
     }
 

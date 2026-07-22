@@ -68,7 +68,7 @@ pub mod __macro_support {
         PartitionerEntry, ShuffleKeyEntry, ShuffleMapEntry, SortShuffleMapEntry, StateMergeEntry,
         TaskEntry,
     };
-    pub use crate::task_traits::{BinaryTask, UnaryTask};
+    pub use crate::task_traits::{AggregateTask, BinaryTask, UnaryTask};
     pub use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
     pub use atomic_data::partitioner::{NamedPartitioner, Partitioner, TypedPartitioner};
     pub use inventory;
@@ -158,6 +158,54 @@ macro_rules! register_state_merge {
             name: $name,
             handler: $handler,
         });
+    };
+}
+
+/// Register a worker dispatch handler for a type implementing
+/// [`AggregateTask<Acc, Elem>`](task_traits::AggregateTask).
+///
+/// The `#[task]` macro only covers unary (`fn(T) -> U`) and binary (`fn(T, T) -> T`) shapes;
+/// an aggregate has two functions with a distinct accumulator type, so it registers through
+/// this macro instead (the same hand-registration path the numeric builtins use). The handler
+/// folds a partition into one `Acc` via [`seq`](task_traits::AggregateTask::seq) on the worker;
+/// the driver merges the per-partition accumulators with [`comb`](task_traits::AggregateTask::comb)
+/// (see [`TypedRdd::aggregate_task`](rdd::typed::TypedRdd::aggregate_task)).
+///
+/// `Acc` (decoded from `Step.payload`) is the zero accumulator; the task type must be `Default`.
+///
+/// ```rust,ignore
+/// atomic_compute::register_aggregate_task!(MyAgg, (f64, u64), f64);
+/// ```
+#[macro_export]
+macro_rules! register_aggregate_task {
+    ($task:ty, $acc:ty, $elem:ty) => {
+        $crate::__macro_support::inventory::submit! {
+            $crate::__macro_support::TaskEntry {
+                task_name:
+                    <$task as $crate::__macro_support::AggregateTask<$acc, $elem>>::NAME,
+                body_hash: 0,
+                handler: |action, payload, data| {
+                    use $crate::__macro_support::{
+                        AggregateTask, TaskAction, WireDecode, WireEncode,
+                    };
+                    match action {
+                        TaskAction::Aggregate | TaskAction::Fold => {
+                            let zero = <$acc>::decode_wire(payload).map_err(|e| e.to_string())?;
+                            let items = ::std::vec::Vec::<$elem>::decode_wire(data)
+                                .map_err(|e| e.to_string())?;
+                            let task = <$task>::default();
+                            let acc = items.into_iter().fold(zero, |a, x| task.seq(a, x));
+                            acc.encode_wire().map_err(|e| e.to_string())
+                        }
+                        other => ::std::result::Result::Err(::std::format!(
+                            "aggregate task '{}' does not support action {:?}",
+                            <$task as AggregateTask<$acc, $elem>>::NAME,
+                            other
+                        )),
+                    }
+                },
+            }
+        }
     };
 }
 

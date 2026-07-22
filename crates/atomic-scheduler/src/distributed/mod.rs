@@ -280,7 +280,7 @@ impl DistributedScheduler {
 
         let mut steps: Vec<Step> = shuffle_dep.preceding_steps.clone();
         steps.push(Step {
-            op_id: format!("shuffle-map-{}", shuffle_dep.get_shuffle_id()),
+            task_name: format!("shuffle-map-{}", shuffle_dep.get_shuffle_id()),
             kind: StepKind::Engine(EngineStep::ShuffleMap {
                 shuffle_id: shuffle_dep.get_shuffle_id(),
                 num_output_partitions: shuffle_dep.get_num_output_partitions(),
@@ -713,13 +713,13 @@ mod tests {
         sched.register_cache_locs(&[(700, 0), (700, 1)], ip);
 
         let cache_op = Step {
-            op_id: String::new(),
+            task_name: String::new(),
             kind: StepKind::Engine(EngineStep::Cache { rdd_id: 700 }),
             runtime: TaskRuntime::Native,
             payload: vec![],
         };
         let map_op = Step {
-            op_id: "m".into(),
+            task_name: "m".into(),
             kind: StepKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],
@@ -828,7 +828,7 @@ mod tests {
             let mut payload = vec![0_u8; payload_len];
             socket.read_exact(&mut payload).await.expect("read payload");
             let task = TaskEnvelope::decode_wire(&payload).expect("decode task");
-            assert_eq!(task.steps[0].op_id, "mycrate::double");
+            assert_eq!(task.steps[0].task_name, "mycrate::double");
             let response = TaskResultEnvelope::ok(
                 task.run_id,
                 task.stage_id,
@@ -852,7 +852,7 @@ mod tests {
             0,
             "trace-1".to_string(),
             vec![Step {
-                op_id: "mycrate::double".to_string(),
+                task_name: "mycrate::double".to_string(),
                 kind: StepKind::Task(TaskAction::Map),
                 runtime: TaskRuntime::Native,
                 payload: vec![],
@@ -962,7 +962,7 @@ mod tests {
     fn effective_timeout_uses_agent_step_default_when_unset() {
         let sched = DistributedScheduler::new(4, true);
         let task = envelope_with_ops(vec![Step {
-            op_id: String::new(),
+            task_name: String::new(),
             kind: StepKind::Engine(EngineStep::AgentStep),
             runtime: TaskRuntime::Native,
             payload: vec![],
@@ -978,7 +978,7 @@ mod tests {
         let sched =
             DistributedScheduler::new(4, true).with_agent_step_timeout(Duration::from_secs(60));
         let task = envelope_with_ops(vec![Step {
-            op_id: String::new(),
+            task_name: String::new(),
             kind: StepKind::Engine(EngineStep::AgentStep),
             runtime: TaskRuntime::Native,
             payload: vec![],
@@ -993,7 +993,7 @@ mod tests {
     fn effective_timeout_falls_back_to_task_timeout_for_non_agent_ops() {
         let sched = DistributedScheduler::new(4, true);
         let task = envelope_with_ops(vec![Step {
-            op_id: String::new(),
+            task_name: String::new(),
             kind: StepKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: vec![],

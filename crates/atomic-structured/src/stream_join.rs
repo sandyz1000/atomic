@@ -613,7 +613,7 @@ impl BatchEngine for DistributedJoinEngine {
         }
 
         let steps = vec![Step {
-            op_id: String::new(),
+            task_name: String::new(),
             kind: StepKind::Engine(EngineStep::MergeState {
                 merge_fn: JOIN_MERGE_FN.to_string(),
             }),

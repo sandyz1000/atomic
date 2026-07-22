@@ -37,8 +37,8 @@ use atomic_compute::task_traits::UnaryTask;
 use atomic_data::distributed::AgentStepPayload;
 
 /// A real Rust tool: looks up the typical CVSS severity band for a known issue class.
-/// Registered into `TASK_REGISTRY` at compile time by `#[task]`; dispatched by op_id
-/// when the subagent emits `TOOL_CALL: <op_id> "<issue_class>"`.
+/// Registered into `TASK_REGISTRY` at compile time by `#[task]`; dispatched by task_name
+/// when the subagent emits `TOOL_CALL: <task_name> "<issue_class>"`.
 #[atomic_compute::task]
 fn lookup_cve_severity(issue_class: String) -> String {
     let key = issue_class.trim_matches('"').to_lowercase();

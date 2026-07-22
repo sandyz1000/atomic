@@ -43,7 +43,7 @@ impl JsRdd {
         let source_partitions = self.encode_source_partitions()?;
 
         let op = Step {
-            op_id: String::new(),
+            task_name: String::new(),
             kind: StepKind::Engine(EngineStep::AgentStep),
             runtime: TaskRuntime::Native,
             payload: payload_bytes,

@@ -31,7 +31,7 @@ where
         }
 
         let op = Step {
-            op_id: F::NAME.to_string(),
+            task_name: F::NAME.to_string(),
             kind: StepKind::Task(TaskAction::Map),
             runtime: TaskRuntime::Native,
             payload: task.encode_params(),
@@ -73,7 +73,7 @@ where
         }
 
         let op = Step {
-            op_id: F::NAME.to_string(),
+            task_name: F::NAME.to_string(),
             kind: StepKind::Task(TaskAction::Filter),
             runtime: TaskRuntime::Native,
             payload: vec![],
@@ -115,7 +115,7 @@ where
         }
 
         let op = Step {
-            op_id: F::NAME.to_string(),
+            task_name: F::NAME.to_string(),
             kind: StepKind::Task(TaskAction::FlatMap),
             runtime: TaskRuntime::Native,
             payload: vec![],
@@ -159,7 +159,7 @@ where
         }
 
         let op = Step {
-            op_id: F::NAME.to_string(),
+            task_name: F::NAME.to_string(),
             kind: StepKind::Task(TaskAction::MapPartitions),
             runtime: TaskRuntime::Native,
             payload: task.encode_params(),
@@ -206,7 +206,7 @@ where
             .encode_wire()
             .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
         let fold_op = Step {
-            op_id: F::NAME.to_string(),
+            task_name: F::NAME.to_string(),
             kind: StepKind::Task(TaskAction::Fold),
             runtime: TaskRuntime::Native,
             payload: fold_payload,
@@ -277,7 +277,7 @@ where
         }
 
         let reduce_op = Step {
-            op_id: F::NAME.to_string(),
+            task_name: F::NAME.to_string(),
             kind: StepKind::Task(TaskAction::Reduce),
             runtime: TaskRuntime::Native,
             payload: vec![],
@@ -311,7 +311,7 @@ where
                     .encode_wire()
                     .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 let driver_ops = vec![Step {
-                    op_id: F::NAME.to_string(),
+                    task_name: F::NAME.to_string(),
                     kind: StepKind::Task(TaskAction::Reduce),
                     runtime: TaskRuntime::Native,
                     payload: vec![],
@@ -341,6 +341,130 @@ where
                 }
             }
         }
+    }
+
+    /// Aggregate with a distinct accumulator type using an
+    /// [`AggregateTask<Acc, T>`](crate::task_traits::AggregateTask).
+    ///
+    /// This is an **action**. Each partition folds its elements into one `Acc` via `seq`
+    /// (on workers in distributed mode, starting from the wire-encoded `zero`); the driver
+    /// merges the per-partition accumulators with `comb`. This is the general reduction
+    /// (`Acc != T`) that `fold_task`/`reduce_task` (`BinaryTask`, `Acc == T`) cannot express.
+    ///
+    /// The task type must be registered with
+    /// [`register_aggregate_task!`](crate::register_aggregate_task) so the worker carries its
+    /// handler.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // mean via (sum, count)
+    /// let (sum, n) = rdd.aggregate_task((0.0f64, 0u64), MeanTask::<i32>::default())?;
+    /// ```
+    pub fn aggregate_task<Acc, F>(&self, zero: Acc, task: F) -> Result<Acc, DataError>
+    where
+        Acc: Data + Clone + WireEncode + WireDecode,
+        F: AggregateTask<Acc, T>,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        if !self.context.is_distributed() {
+            let task_c = task.clone();
+            let z = zero.clone();
+            let seq_partition = move |iter: Box<dyn Iterator<Item = T>>| {
+                iter.fold(z.clone(), |a, x| task_c.seq(a, x))
+            };
+            let partials = self.context.run_job(self.rdd.clone(), seq_partition)?;
+            return Ok(partials.into_iter().fold(zero, |a, b| task.comb(a, b)));
+        }
+
+        let payload = zero
+            .encode_wire()
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+        let agg_op = Step {
+            task_name: F::NAME.to_string(),
+            kind: StepKind::Task(TaskAction::Aggregate),
+            runtime: TaskRuntime::Native,
+            payload,
+        };
+
+        let (source_partitions, mut steps) = match &self.staged {
+            None => {
+                let encoded = Context::encode_rdd_partitions(self.rdd.clone())
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                (encoded, vec![])
+            }
+            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
+        };
+        steps.push(agg_op);
+
+        let raw = self
+            .context
+            .dispatch_pipeline(source_partitions, steps)
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+
+        let partials: Vec<Acc> = raw
+            .into_iter()
+            .map(|b| Acc::decode_wire(&b).map_err(|e| DataError::DowncastFailure(e.to_string())))
+            .collect::<Result<_, _>>()?;
+
+        Ok(partials.into_iter().fold(zero, |a, b| task.comb(a, b)))
+    }
+
+    /// Arithmetic mean of the elements as `f64`.
+    ///
+    /// Uses the built-in [`MeanTask`](crate::builtin_tasks::mean::MeanTask) — each partition
+    /// accumulates `(sum, count)` on the worker; the driver merges and divides. Returns an
+    /// error on an empty RDD rather than `NaN`.
+    ///
+    /// Distributed `f64`/`f32` sums fold in partition-arrival order, so the result is not
+    /// bit-identical to local mode.
+    pub fn mean(&self) -> Result<f64, DataError>
+    where
+        crate::builtin_tasks::mean::MeanTask<T>: AggregateTask<(f64, u64), T> + Default,
+    {
+        let (sum, count) = self.aggregate_task(
+            (0.0f64, 0u64),
+            crate::builtin_tasks::mean::MeanTask::<T>::default(),
+        )?;
+        if count == 0 {
+            return Err(DataError::DowncastFailure(
+                "mean of empty collection".to_string(),
+            ));
+        }
+        Ok(sum / count as f64)
+    }
+
+    /// Population variance of the elements as `f64`.
+    ///
+    /// Uses the built-in [`VarianceTask`](crate::builtin_tasks::variance::VarianceTask) —
+    /// each partition accumulates Welford `(count, mean, m2)` on the worker; the driver merges
+    /// them and returns `m2 / count`. Returns an error on an empty RDD.
+    ///
+    /// Distributed float accumulation folds in partition-arrival order, so the result is not
+    /// bit-identical to local mode.
+    pub fn variance(&self) -> Result<f64, DataError>
+    where
+        crate::builtin_tasks::variance::VarianceTask<T>:
+            AggregateTask<(u64, f64, f64), T> + Default,
+    {
+        let (count, _mean, m2) = self.aggregate_task(
+            (0u64, 0.0f64, 0.0f64),
+            crate::builtin_tasks::variance::VarianceTask::<T>::default(),
+        )?;
+        if count == 0 {
+            return Err(DataError::DowncastFailure(
+                "variance of empty collection".to_string(),
+            ));
+        }
+        Ok(m2 / count as f64)
+    }
+
+    /// Population standard deviation of the elements as `f64` — `sqrt(variance())`.
+    pub fn stdev(&self) -> Result<f64, DataError>
+    where
+        crate::builtin_tasks::variance::VarianceTask<T>:
+            AggregateTask<(u64, f64, f64), T> + Default,
+    {
+        Ok(self.variance()?.sqrt())
     }
 
     /// Build (or extend) a `StagedPipeline` for distributed lazy dispatch.
@@ -414,7 +538,7 @@ impl TypedRdd<String> {
         }
 
         let op = Step {
-            op_id: String::new(),
+            task_name: String::new(),
             kind: StepKind::Engine(EngineStep::AgentStep),
             runtime: TaskRuntime::Native,
             payload: payload_bytes,

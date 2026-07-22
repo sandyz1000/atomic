@@ -65,7 +65,7 @@ impl Executor {
             .map(|k| k.to_string())
             .collect();
         // Shuffle map types use a "shuffle:<key>" prefix to avoid colliding with
-        // regular op_ids. After Fix 2, SHUFFLE_MAP_REGISTRY is keyed by the stable
+        // regular task_names. After Fix 2, SHUFFLE_MAP_REGISTRY is keyed by the stable
         // stringify!-based string (e.g. "String::u32") instead of type_name.
         registered_ops.extend(
             crate::task_registry::SHUFFLE_MAP_REGISTRY

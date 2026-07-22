@@ -36,9 +36,9 @@ fn decode<T: WireDecode>(data: &[u8]) -> T {
     T::decode_wire(data).expect("decode")
 }
 
-fn native_op(op_id: &str, action: TaskAction) -> Step {
+fn native_op(task_name: &str, action: TaskAction) -> Step {
     Step {
-        op_id: op_id.to_string(),
+        task_name: task_name.to_string(),
         kind: StepKind::Task(action),
         runtime: TaskRuntime::Native,
         payload: vec![],
@@ -177,10 +177,10 @@ fn task_fn_capture_roundtrips_over_wire() {
     }
     let factor = 3i32;
     let t = atomic_compute::task_fn!([factor: i32] |x: i32| -> i32 { x * factor });
-    let (op_id, payload) = op_meta(&t);
+    let (task_name, payload) = op_meta(&t);
 
     let op = Step {
-        op_id,
+        task_name,
         kind: StepKind::Task(TaskAction::Map),
         runtime: TaskRuntime::Native,
         payload,

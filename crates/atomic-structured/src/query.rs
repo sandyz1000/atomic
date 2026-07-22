@@ -16,10 +16,10 @@ use crate::sink::Sink;
 use crate::source::StreamSource;
 
 // Output-op ids for structured queries live in their own high range.
-static NEXT_OP_ID: AtomicUsize = AtomicUsize::new(0xA000_0000);
+static NEXT_OUTPUT_OP_ID: AtomicUsize = AtomicUsize::new(0xA000_0000);
 
-fn next_op_id() -> usize {
-    NEXT_OP_ID.fetch_add(1, Ordering::Relaxed)
+fn next_output_op_id() -> usize {
+    NEXT_OUTPUT_OP_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Computes the rows to emit for one micro-batch. Stateless and windowed engines
@@ -135,14 +135,14 @@ impl QueryRunner {
 /// `OutputOperation` that runs the query once per batch via its `QueryRunner`.
 pub(crate) struct QueryOutputOp {
     runner: Arc<QueryRunner>,
-    op_id: usize,
+    output_op_id: usize,
 }
 
 impl QueryOutputOp {
     pub(crate) fn new(runner: Arc<QueryRunner>) -> Self {
         QueryOutputOp {
             runner,
-            op_id: next_op_id(),
+            output_op_id: next_output_op_id(),
         }
     }
 }
@@ -150,7 +150,7 @@ impl QueryOutputOp {
 impl OutputOperation for QueryOutputOp {
     fn generate_job(&self, time_ms: u64) -> Option<StreamingJob> {
         let runner = self.runner.clone();
-        Some(StreamingJob::new(time_ms, self.op_id, move || {
+        Some(StreamingJob::new(time_ms, self.output_op_id, move || {
             runner
                 .run_batch(time_ms)
                 .map_err(|e| StreamingError::Internal(e.to_string()))

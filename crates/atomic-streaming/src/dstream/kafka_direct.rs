@@ -447,7 +447,7 @@ pub fn build_staged_pipeline(
     max_records: usize,
 ) -> (Vec<Vec<u8>>, Vec<Step>) {
     let steps = vec![Step {
-        op_id: String::new(), // KafkaConsume dispatched by action variant, not op_id
+        task_name: String::new(), // KafkaConsume dispatched by action variant, not task_name
         kind: StepKind::Engine(EngineStep::KafkaConsume),
         runtime: TaskRuntime::Native,
         payload: vec![], // config is per-partition in source_partitions (data)
@@ -498,7 +498,7 @@ impl crate::dstream::distributed_source::DistributedSource for DirectKafkaInputD
                     .unwrap_or_default();
                 SourcePartitionTask {
                     op: Step {
-                        op_id: String::new(),
+                        task_name: String::new(),
                         kind: StepKind::Engine(EngineStep::KafkaConsume),
                         runtime: TaskRuntime::Native,
                         payload: vec![],

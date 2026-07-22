@@ -33,8 +33,8 @@ pub type ShuffleMapHandlerFn = fn(
 /// into [`TASK_REGISTRY`] at startup.
 pub struct TaskEntry {
     /// Stable identifier for this task, e.g. `"mycrate::mymod::double::a1b2c3d4"`.
-    /// Matches the `op_id` field in [`atomic_data::distributed::TaskEnvelope`].
-    pub op_id: &'static str,
+    /// Matches the `task_name` field in [`atomic_data::distributed::TaskEnvelope`].
+    pub task_name: &'static str,
     /// FNV-1a hash of the function/closure body tokens, computed at compile time.
     /// Used to build [`REGISTRY_FINGERPRINT`] — a single value that captures
     /// the entire task registry state for driver/worker version checking.
@@ -48,34 +48,34 @@ inventory::collect!(TaskEntry);
 /// Global compile-time task registry — built once at startup from all
 /// `inventory::submit!(TaskEntry { ... })` calls linked into the binary.
 ///
-/// Keyed by `op_id`. Workers call `TASK_REGISTRY.get(op_id)` to dispatch.
+/// Keyed by `task_name`. Workers call `TASK_REGISTRY.get(task_name)` to dispatch.
 ///
-/// Panics at startup if two entries share the same `op_id` AND point to different
+/// Panics at startup if two entries share the same `task_name` AND point to different
 /// handler addresses (a sign of a copy-paste error in `#[task(name = "…")]`).
-/// Identical handlers for the same `op_id` are silently deduplicated — this is the
+/// Identical handlers for the same `task_name` are silently deduplicated — this is the
 /// expected case for two `task_fn!` closures with the same body in the same module.
 pub static TASK_REGISTRY: Lazy<HashMap<&'static str, TaskHandlerFn>> = Lazy::new(|| {
     let mut map: HashMap<&'static str, TaskHandlerFn> = HashMap::new();
     for entry in inventory::iter::<TaskEntry> {
-        if let Some(&existing) = map.get(entry.op_id) {
-            // Two handlers for the same op_id: allow only if they carry the same
+        if let Some(&existing) = map.get(entry.task_name) {
+            // Two handlers for the same task_name: allow only if they carry the same
             // body_hash (identical task_fn! bodies).  A hash collision here means
             // a copy-paste error in `#[task(name = "…")]`.
             let existing_hash = inventory::iter::<TaskEntry>
                 .into_iter()
-                .find(|e| e.op_id == entry.op_id)
+                .find(|e| e.task_name == entry.task_name)
                 .map(|e| e.body_hash)
                 .unwrap_or(0);
             if existing_hash != entry.body_hash {
                 panic!(
-                    "Atomic task registry: duplicate op_id \"{}\" with different bodies.\n\
+                    "Atomic task registry: duplicate task_name \"{}\" with different bodies.\n\
                          Fix: give each task a unique name.",
-                    entry.op_id
+                    entry.task_name
                 );
             }
             let _ = existing;
         } else {
-            map.insert(entry.op_id, entry.handler);
+            map.insert(entry.task_name, entry.handler);
         }
     }
     map
@@ -83,7 +83,7 @@ pub static TASK_REGISTRY: Lazy<HashMap<&'static str, TaskHandlerFn>> = Lazy::new
 
 /// A single `u64` that fingerprints the entire compiled-in task registry.
 ///
-/// Computed at startup by sorting all `(op_id, body_hash)` pairs and folding
+/// Computed at startup by sorting all `(task_name, body_hash)` pairs and folding
 /// them with FNV-1a. Two binaries with identical task implementations produce
 /// the same fingerprint even if compiled independently.
 ///
@@ -95,7 +95,7 @@ pub static REGISTRY_FINGERPRINT: Lazy<u64> = Lazy::new(|| {
 
     let mut entries: Vec<(&str, u64)> = inventory::iter::<TaskEntry>
         .into_iter()
-        .map(|e| (e.op_id, e.body_hash))
+        .map(|e| (e.task_name, e.body_hash))
         .collect();
     // Sort for determinism — inventory iteration order is not guaranteed.
     entries.sort_unstable_by_key(|(id, _)| *id);
@@ -218,7 +218,7 @@ pub static STATE_MERGE_REGISTRY: Lazy<HashMap<&'static str, StateMergeFn>> = Laz
 /// Lets distributed `partition_by_named` ship a user partitioner by **name**
 /// (no closure serialization): the driver puts the name in the shuffle's
 /// `PartitionerSchema::Custom`, and the worker rebuilds the partitioner via this
-/// factory — mirroring how `#[task]` ships compute by op_id.
+/// factory — mirroring how `#[task]` ships compute by task_name.
 pub struct PartitionerEntry {
     /// The partitioner's stable registry name (`<P as NamedPartitioner>::NAME`).
     pub name: fn() -> &'static str,
@@ -294,26 +294,26 @@ pub trait AgentRunner: Send + Sync {
     fn run_partition(&self, payload: &AgentStepPayload, inputs: &[u8]) -> Result<Vec<u8>, String>;
 }
 
-/// Invoke a registered `fn(String) -> String` `#[task]` by its op_id, using the same
+/// Invoke a registered `fn(String) -> String` `#[task]` by its task_name, using the same
 /// `TaskAction::Map` wire encoding the macro generates for that signature.
 ///
 /// Used by `agent_step` tool dispatch (`atomic-nlq`'s `TOOL_CALL:` handling) to call a
-/// Rust tool by op_id with one JSON-text argument and get one JSON-text result back —
+/// Rust tool by task_name with one JSON-text argument and get one JSON-text result back —
 /// the `fn(String) -> String` shape `AgentStepPayload.tool_refs` requires for Rust tools
 /// (see `agent-step-tool-calling` design notes: `serde_json::Value` has no rkyv impl, so
 /// the wire-level signature must be `String` in/out).
-pub fn invoke_str_task(op_id: &str, arg: String) -> Result<String, String> {
+pub fn invoke_str_task(task_name: &str, arg: String) -> Result<String, String> {
     let handler = TASK_REGISTRY
-        .get(op_id)
-        .ok_or_else(|| format!("tool '{op_id}' is not registered in TASK_REGISTRY"))?;
+        .get(task_name)
+        .ok_or_else(|| format!("tool '{task_name}' is not registered in TASK_REGISTRY"))?;
     let data = vec![arg]
         .encode_wire()
-        .map_err(|e| format!("encode tool arg for '{op_id}': {e}"))?;
+        .map_err(|e| format!("encode tool arg for '{task_name}': {e}"))?;
     let result = handler(&TaskAction::Map, &[], &data)?;
     let mut out = Vec::<String>::decode_wire(&result)
-        .map_err(|e| format!("decode tool result for '{op_id}': {e}"))?;
+        .map_err(|e| format!("decode tool result for '{task_name}': {e}"))?;
     out.pop()
-        .ok_or_else(|| format!("tool '{op_id}' returned no output"))
+        .ok_or_else(|| format!("tool '{task_name}' returned no output"))
 }
 
 /// Global agent runner registry — populated once by [`register_agent_runner`].
