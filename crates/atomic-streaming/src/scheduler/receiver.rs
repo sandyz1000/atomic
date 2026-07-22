@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wal_cleared_on_commit() {
+    fn test_commit_clears() {
         let dir = tempfile::tempdir().unwrap();
         let wal = Arc::new(FileWriteAheadLog::open(dir.path()).unwrap());
         let tracker = ReceiverTracker::new(true).with_wal(wal);

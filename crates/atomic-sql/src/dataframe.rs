@@ -339,14 +339,94 @@ impl DataFrame {
         values.sort();
 
         let header = format!("{col1}_{col2}");
+        // Consume `values` so each label is cloned once (for the predicate) and moved into the
+        // alias, rather than cloned twice.
         let mut aggs = Vec::with_capacity(values.len());
-        for v in &values {
+        for v in values {
             let hit = when(c2_str().eq(lit(v.clone())), lit(1i64))
                 .otherwise(lit(0i64))
                 .map_err(AtomicSqlError::from)?;
-            aggs.push(sum(hit).alias(v.clone()));
+            aggs.push(sum(hit).alias(v));
         }
         let out = self.inner.aggregate(vec![col(col1).alias(header)], aggs)?;
+        Ok(Self::new(out))
+    }
+
+    /// Group by `group_columns` with a `ROLLUP` grouping set — one aggregate row per prefix of
+    /// the columns plus a grand total. Mirrors `DataFrame.rollup(cols).agg(...)`.
+    pub fn rollup(self, group_columns: &[&str], aggs: Vec<Expr>) -> Result<Self> {
+        let cols: Vec<Expr> = group_columns.iter().map(|c| col(*c)).collect();
+        Ok(Self::new(self.inner.aggregate(
+            vec![datafusion::logical_expr::rollup(cols)],
+            aggs,
+        )?))
+    }
+
+    /// Group by `group_columns` with a `CUBE` grouping set — one aggregate row per subset of the
+    /// columns. Mirrors `DataFrame.cube(cols).agg(...)`.
+    pub fn cube(self, group_columns: &[&str], aggs: Vec<Expr>) -> Result<Self> {
+        let cols: Vec<Expr> = group_columns.iter().map(|c| col(*c)).collect();
+        Ok(Self::new(self.inner.aggregate(
+            vec![datafusion::logical_expr::cube(cols)],
+            aggs,
+        )?))
+    }
+
+    /// Pivot table: group by `group_column`, spread the distinct values of `pivot_column` into
+    /// their own columns, filling cells with `agg` applied to `value_column` (a two-argument
+    /// aggregate constructor such as `sum`/`avg` from `functions_aggregate`).
+    ///
+    /// DataFusion has no native pivot, so the distinct pivot values are read first (one pass),
+    /// then one conditional aggregate is built per value. Mirrors
+    /// `DataFrame.groupBy(group).pivot(pivot).agg(...)`.
+    pub async fn pivot<A>(
+        self,
+        group_column: &str,
+        pivot_column: &str,
+        value_column: &str,
+        agg: A,
+    ) -> Result<Self>
+    where
+        A: Fn(Expr) -> Expr,
+    {
+        use datafusion::arrow::array::{Array, StringArray};
+        use datafusion::logical_expr::{cast, when};
+
+        let pivot_str = || cast(col(pivot_column), DataType::Utf8);
+
+        // Distinct pivot values (as strings) become the output columns.
+        let batches = self
+            .inner
+            .clone()
+            .select(vec![pivot_str().alias("__p")])?
+            .distinct()?
+            .collect()
+            .await?;
+        let mut values: Vec<String> = Vec::new();
+        for batch in &batches {
+            let arr = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| AtomicSqlError::Execution("pivot: expected string column".into()))?;
+            for i in 0..arr.len() {
+                if arr.is_valid(i) {
+                    values.push(arr.value(i).to_string());
+                }
+            }
+        }
+        values.sort();
+
+        // For each pivot value, aggregate `value_column` over only the matching rows. Consume
+        // `values` so each label is cloned once (for the predicate) and moved into the alias.
+        let mut aggs = Vec::with_capacity(values.len());
+        for v in values {
+            let masked = when(pivot_str().eq(lit(v.clone())), col(value_column))
+                .otherwise(lit(datafusion::scalar::ScalarValue::Null))
+                .map_err(AtomicSqlError::from)?;
+            aggs.push(agg(masked).alias(v));
+        }
+        let out = self.inner.aggregate(vec![col(group_column)], aggs)?;
         Ok(Self::new(out))
     }
 

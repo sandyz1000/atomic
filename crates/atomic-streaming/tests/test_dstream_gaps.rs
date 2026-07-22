@@ -77,7 +77,7 @@ fn test_transform_with() {
 }
 
 #[test]
-fn test_get_or_create_fresh() {
+fn test_getorcreate_fresh() {
     let sc = local_sc();
     let dir = tempfile::tempdir().unwrap();
     let created = Arc::new(Mutex::new(false));

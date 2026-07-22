@@ -103,6 +103,65 @@ async fn test_repartition_preserves_rows() {
 }
 
 #[tokio::test]
+async fn test_rollup() {
+    use datafusion::functions_aggregate::expr_fn::count;
+    use datafusion::logical_expr::col;
+    let ctx = ctx_with_skewed_keys();
+    let df = ctx.sql("SELECT key, value FROM t").await.unwrap();
+    // ROLLUP(key) → one row per key + a grand-total row (key = NULL).
+    let batches = df
+        .rollup(&["key"], vec![count(col("value")).alias("c")])
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    // 3 distinct keys + 1 total = 4 rows.
+    assert_eq!(total_rows(&batches), 4);
+}
+
+#[tokio::test]
+async fn test_cube() {
+    use datafusion::functions_aggregate::expr_fn::count;
+    use datafusion::logical_expr::col;
+    let ctx = ctx_with_skewed_keys();
+    let df = ctx.sql("SELECT key, value FROM t").await.unwrap();
+    // CUBE over one column == ROLLUP over one column: 3 keys + total = 4 rows.
+    let batches = df
+        .cube(&["key"], vec![count(col("value")).alias("c")])
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(total_rows(&batches), 4);
+}
+
+#[tokio::test]
+async fn test_pivot() {
+    use datafusion::functions_aggregate::expr_fn::sum;
+    let ctx = AtomicSqlContext::new();
+    // key column groups; value column is pivoted; count of 1s per (key, value) cell.
+    ctx.register_batches("p", vec![make_kv_batch(&[1, 1, 2], &[10, 20, 10])])
+        .unwrap();
+    let df = ctx.sql("SELECT key, value FROM p").await.unwrap();
+    let batches = df
+        .pivot("key", "value", "value", sum)
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    // One row per distinct key (1 and 2) → 2 rows; columns "10" and "20".
+    assert_eq!(total_rows(&batches), 2);
+    let cols: Vec<String> = batches[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    assert!(cols.contains(&"10".to_string()) && cols.contains(&"20".to_string()));
+}
+
+#[tokio::test]
 async fn test_global_temp_view() {
     let ctx = ctx_with_skewed_keys();
     let df = ctx.sql("SELECT key FROM t WHERE key = 2").await.unwrap();
