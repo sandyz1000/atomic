@@ -76,13 +76,96 @@ where
     ED: GraphData,
     ED::Archived: GraphDecode<ED>,
 {
+    run_inner(graph, num_iter, reset_prob, None)
+}
+
+/// Compute PageRank until convergence (max rank change across vertices drops below
+/// `tol`) or `max_iterations` is reached.
+///
+/// Runs the shared Pregel loop ([`pregel::run_until_convergence`]) with a rank-delta
+/// stop test evaluated after each superstep.
+pub fn run_until_convergence<VD, ED>(
+    graph: &Graph<VD, ED>,
+    tol: f64,
+    reset_prob: f64,
+    max_iterations: usize,
+) -> VertexMap<f64>
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+{
     let n = graph.num_vertices();
     if n == 0 {
         return HashMap::new();
     }
     let nf = n as f64;
+    let (verts, edges) = prepare_weighted_graph(graph, nf, reset_prob, None);
+    let wg = Graph::from_vertices_edges(graph.context().clone(), verts, edges);
 
-    // Out-degree per source, computed on the engine.
+    let converged = |before: &[(VertexId, PrVertex)], after: &[(VertexId, PrVertex)]| {
+        let prev_ranks: HashMap<VertexId, f64> =
+            before.iter().map(|(vid, pv)| (*vid, pv.rank)).collect();
+        let max_delta = after
+            .iter()
+            .map(|(vid, pv)| (pv.rank - prev_ranks.get(vid).copied().unwrap_or(0.0)).abs())
+            .fold(0.0f64, f64::max);
+        max_delta < tol
+    };
+
+    let result = pregel::run_until_convergence::<PrVertex, f64, f64, _, _, _>(
+        &wg,
+        max_iterations,
+        PrSend,
+        PrMerge,
+        PrVprog,
+        &converged,
+    );
+    result
+        .collect_vertices()
+        .into_iter()
+        .map(|(vid, pv)| (vid, pv.rank))
+        .collect()
+}
+
+/// Compute personalized PageRank biased toward `sources`.
+///
+/// The teleportation vector concentrates `reset_prob` only on the source vertices
+/// (divided equally among them) instead of uniformly across all vertices.
+pub fn run_personalized<VD, ED>(
+    graph: &Graph<VD, ED>,
+    sources: &[VertexId],
+    num_iter: usize,
+    reset_prob: f64,
+) -> VertexMap<f64>
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+{
+    let source_set: std::collections::HashSet<VertexId> = sources.iter().copied().collect();
+    run_inner(graph, num_iter, reset_prob, Some(&source_set))
+}
+
+/// Build the weighted vertex and edge vectors PageRank iterates over: each vertex carries
+/// the precomputed `base`/`damping` constants, each edge the weight `1 / out_degree(src)`.
+/// `sources` is `None` for uniform teleportation, `Some(set)` for personalized (the reset
+/// mass goes only to those vertices).
+fn prepare_weighted_graph<VD, ED>(
+    graph: &Graph<VD, ED>,
+    nf: f64,
+    reset_prob: f64,
+    sources: Option<&std::collections::HashSet<VertexId>>,
+) -> (Vec<(VertexId, PrVertex)>, Vec<Edge<f64>>)
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+{
+    // Out-degree per source.
     let out_deg: HashMap<VertexId, i64> = graph
         .edges
         .clone()
@@ -93,21 +176,34 @@ where
         .into_iter()
         .collect();
 
-    // Weighted graph: vertex = PrVertex(rank = 1/n), edge attr = 1/out_degree(src).
+    let num_sources = sources.map(|s| s.len() as f64).unwrap_or(nf);
+
+    // Weighted vertices.
     let verts: Vec<(VertexId, PrVertex)> = graph
         .collect_vertices()
         .into_iter()
         .map(|(vid, _)| {
+            let base = if let Some(srcs) = sources {
+                if srcs.contains(&vid) {
+                    reset_prob / num_sources
+                } else {
+                    0.0
+                }
+            } else {
+                reset_prob / nf
+            };
             (
                 vid,
                 PrVertex {
                     rank: 1.0 / nf,
-                    base: reset_prob / nf,
+                    base,
                     damping: 1.0 - reset_prob,
                 },
             )
         })
         .collect();
+
+    // Weighted edges: attr = 1 / out_degree(src).
     let edges: Vec<Edge<f64>> = graph
         .collect_edges()
         .into_iter()
@@ -121,10 +217,30 @@ where
         })
         .collect();
 
+    (verts, edges)
+}
+
+/// Shared PageRank inner loop for the fixed-iteration entry points.
+fn run_inner<VD, ED>(
+    graph: &Graph<VD, ED>,
+    num_iter: usize,
+    reset_prob: f64,
+    sources: Option<&std::collections::HashSet<VertexId>>,
+) -> VertexMap<f64>
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+{
+    let n = graph.num_vertices();
+    if n == 0 {
+        return HashMap::new();
+    }
+    let nf = n as f64;
+    let (verts, edges) = prepare_weighted_graph(graph, nf, reset_prob, sources);
     let wg = Graph::from_vertices_edges(graph.context().clone(), verts, edges);
-    let result =
-        pregel::run::<PrVertex, f64, f64, _, _, _>(&wg, num_iter, PrSend, PrMerge, PrVprog);
-    result
+    pregel::run::<PrVertex, f64, f64, _, _, _>(&wg, num_iter, PrSend, PrMerge, PrVprog)
         .collect_vertices()
         .into_iter()
         .map(|(vid, pv)| (vid, pv.rank))
@@ -172,5 +288,36 @@ mod tests {
         let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 0)], ());
         let ranks = run(&g, 20, 0.15);
         assert!((ranks[&0] - ranks[&1]).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_convergence_matches() {
+        let ctx = Context::local().unwrap();
+        let fixed = run(&star_graph(ctx.clone()), 30, 0.15);
+        let converged = run_until_convergence(&star_graph(ctx), 1e-6, 0.15, 30);
+        for (vid, r) in &fixed {
+            assert!((converged[vid] - r).abs() < 1e-3, "vertex {vid} diverged");
+        }
+    }
+
+    #[test]
+    fn test_personalized_bias() {
+        let ctx = Context::local().unwrap();
+        // Undirected-ish triangle so every vertex has out-edges.
+        let g: Graph<(), ()> = Graph::from_edges(
+            ctx,
+            vec![
+                edge(0, 1),
+                edge(1, 2),
+                edge(2, 0),
+                edge(1, 0),
+                edge(2, 1),
+                edge(0, 2),
+            ],
+            (),
+        );
+        let ranks = run_personalized(&g, &[0], 30, 0.15);
+        assert!(ranks[&0] > ranks[&1], "source should outrank non-source");
+        assert!(ranks[&0] > ranks[&2], "source should outrank non-source");
     }
 }

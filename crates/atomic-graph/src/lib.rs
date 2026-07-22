@@ -2,6 +2,7 @@
 
 pub mod algo;
 pub mod graph;
+pub mod neighbors;
 pub mod pregel;
 pub mod structural;
 pub mod topology;
@@ -18,4 +19,13 @@ mod shuffle_registry {
     // Triplet-join intermediates with unit edge attribute (CC / LP / SSSP / SCC).
     atomic_compute::register_shuffle_map!(i64, (i64, ()));
     atomic_compute::register_shuffle_map!(i64, (i64, (), i64));
+}
+
+/// Concrete `i64`-attribute triplet/neighbour shapes the tests shuffle through
+/// `collect_neighbors` and `map_triplets`. Callers with their own attribute types register
+/// the matching shapes in their own binary.
+#[cfg(test)]
+mod test_shuffle_registry {
+    atomic_compute::register_shuffle_map!(i64, (i64, i64));
+    atomic_compute::register_shuffle_map!(i64, (i64, i64, i64));
 }

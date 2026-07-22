@@ -3,6 +3,10 @@ name = "atomic-sql"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Enables the Avro data source, forwarding to DataFusion's optional Avro support.
+avro = ["datafusion/avro"]
+
 [dependencies]
 datafusion = { workspace = true }
 async-trait = { workspace = true }

@@ -45,6 +45,7 @@ pub mod udf;
 
 // Re-export the most commonly used types at the crate root.
 pub use context::AtomicSqlContext;
+pub use context::DataFormat;
 pub use dataframe::DataFrame;
 pub use errors::{AtomicSqlError, Result};
 pub use rdd_table::RddTableProvider;

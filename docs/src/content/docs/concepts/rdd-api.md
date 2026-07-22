@@ -23,7 +23,9 @@ dispatch to workers in distributed mode.
 
 Use these for any work that should run on workers. The closure variants
 (`map`, `filter`, `flat_map`, `reduce`, `fold`) run only on the driver's local
-scheduler and cannot dispatch to workers.
+scheduler and cannot dispatch to workers. Closure-based `fold(zero)(op)` and
+`reduce(op)` are available for driver-local work; prefer the `_task` forms for
+distributed workloads.
 
 ```rust
 use atomic_compute::task;
@@ -45,13 +47,18 @@ the staged pipeline and aggregate the results.
 | Action | Returns |
 |---|---|
 | `collect()` | All elements as a `Vec<T>` |
-| `count()` | Number of elements |
+| `count()` | Number of elements (per-partition, O(numPartitions) wire cost) |
 | `take(n)` / `first()` | First `n` elements / first element |
-| `reduce_task(F)` / `fold_task(z, F)` | A single reduced value |
-| `aggregate(...)` | A folded accumulator |
-| `for_each(F)` / `for_each_partition(F)` | Nothing; runs `F` for its side effects |
+| `reduce(F)` / `reduce_task(F)` | Pairwise reduction; `None` if empty |
+| `fold(zero, op)` / `fold_task(zero, F)` | Fold with initial value |
+| `aggregate(zero, seq, comb)` / `aggregate_task(A, F)` | Fold into accumulator type |
+| `tree_reduce(F, depth)` / `tree_aggregate(zero, seq, comb, depth)` | Balanced-tree merge |
+| `for_each(F)` / `for_each_partition(F)` / `for_each_task(F)` | Nothing; runs `F` for side effects |
 | `count_by_value()` | A map of value to occurrence count |
 | `max()` / `min()` / `top(n)` / `take_ordered(n)` | Ordered selections |
+| `histogram(bucket_bounds)` | Bucket counts for numeric types |
+| `stats()` | Single-pass `StatCounter` (count, mean, min, max, variance, stdev) |
+| `count_approx(distinct?)` | Approximate distinct count (HyperLogLog) |
 | `is_empty()` | Whether the RDD has no elements |
 
 ## Pair operations
@@ -66,14 +73,20 @@ in local and distributed mode.
 |---|---|---|
 | `reduce_by_key_task(B)` | `BinaryTask<V>` | Combine values per key |
 | `fold_by_key_task(zero, B, n)` | `BinaryTask<V>` | Fold values per key from `zero` |
-| `aggregate_by_key_task(L, M, n)` | `UnaryTask<V,C>` + `BinaryTask<C>` | Aggregate per key into a different accumulator type `C` (lift each value, then merge) |
-| `reduce_by_key_locally_task(B)` | `BinaryTask<V>` | Reduce per key to a driver `HashMap` — no shuffle (map-side combine, then merge on driver) |
-| `group_by_key()` | — | Collect all values per key |
-| `join` / `left_outer_join` / `right_outer_join` / `full_outer_join` | — | Keyed joins |
-| `cogroup(other)` | — | Group both sides by key |
+| `aggregate_by_key_task(L, M, n)` | `UnaryTask<V,C>` + `BinaryTask<C>` | Aggregate per key into accumulator type `C` |
+| `combine_by_key(CC, MV, MC)` | — | Generalised shuffle combine with custom create/merge/combine |
+| `reduce_by_key_locally_task(B)` | `BinaryTask<V>` | Reduce per key to driver `HashMap` — no shuffle |
+| `group_by_key()` | — | Collect all values per key (shuffle) |
+| `join` / `left_outer_join` / `right_outer_join` / `full_outer_join` | — | Keyed joins (shuffle or local) |
+| `cogroup(other)` / `cogroup_shuffle(other, n)` | — | Group both sides by key |
 | `sort_by_key()` / `sort_by_task(F, asc)` | `UnaryTask<T,(K,T)>` | Globally ordered output |
-| `repartition_and_sort(P, asc)` | — | Partition by a registered `NamedPartitioner` and key-sort within each partition, one shuffle (secondary sort) |
+| `repartition_and_sort(P, asc)` | — | Partition by registered `NamedPartitioner` + key-sort, one shuffle |
 | `repartition_shuffle(n)` | — | Redistribute elements across `n` partitions |
+| `sum_values()` / `max_values()` / `min_values()` / `count_values(n)` | — | Numeric per-key sugar; consume binary task internally |
+| `map_values_task(B)` / `flat_map_values_task(B)` | `UnaryTask<V, W>` / `UnaryTask<V, Vec<W>>` | Transform values, keep keys |
+| `partition_by(P)` / `partition_by_named(P)` | — | Repartition by partitioner |
+| `subtract_by_key(other)` | — | Keys in self but not in other |
+| `collect_as_map()` / `lookup(key)` / `count_by_key()` | — | Convenience lookups |
 
 To transform values while keeping keys, use `map_task` / `flat_map_task` with a
 pair-shaped task (`(K, V) -> (K, U)`); to key elements, map to `(K, T)` and then

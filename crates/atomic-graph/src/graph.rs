@@ -148,6 +148,58 @@ where
         self.edges.collect().unwrap_or_default()
     }
 
+    /// Return a randomly chosen vertex id, or `None` if the graph is empty.
+    ///
+    /// Samples one id uniformly. Only the ids cross the wire — vertex attributes are
+    /// projected away before the driver-side sample.
+    pub fn pick_random_vertex(&self) -> Option<VertexId> {
+        let ids = self.vertices.clone().map_partitions(|iter| {
+            Box::new(iter.map(|(vid, _)| vid)) as Box<dyn Iterator<Item = VertexId>>
+        });
+        ids.take_sample(false, 1, rand::random::<u64>())
+            .ok()?
+            .into_iter()
+            .next()
+    }
+
+    /// Return the edge attribute for `(src, dst)` if the edge exists.
+    ///
+    /// In local mode this filters the edge RDD on the driver; in distributed mode
+    /// it dispatches the filter to workers.
+    pub fn find(&self, src: VertexId, dst: VertexId) -> Option<ED> {
+        let filtered = self.edges.clone().map_partitions(move |iter| {
+            Box::new(iter.filter(move |e| e.src == src && e.dst == dst))
+                as Box<dyn Iterator<Item = Edge<ED>>>
+        });
+        filtered.take(1).ok()?.into_iter().next().map(|e| e.attr)
+    }
+
+    /// Map each edge's attribute using the full edge triplet (source vertex + edge +
+    /// destination vertex data), returning a new graph with transformed edge attributes.
+    ///
+    /// This is the composition `triplets().map(triplet → new_attr)` — a convenience
+    /// over the separate [`triplets`](Self::triplets) call.
+    pub fn map_triplets<ED2, F>(&self, f: F) -> Graph<VD, ED2>
+    where
+        ED2: GraphData,
+        ED2::Archived: GraphDecode<ED2>,
+        F: Fn(&EdgeTriplet<VD, ED>) -> ED2 + Clone + Send + Sync + 'static,
+        (VertexId, ED): GraphData,
+        (VertexId, ED, VD): GraphData,
+        ((VertexId, ED), VD): GraphData,
+        ((VertexId, ED, VD), VD): GraphData,
+    {
+        let new_edges = self.triplets().map_partitions(move |iter| {
+            let f = f.clone();
+            Box::new(iter.map(move |t| Edge {
+                src: t.src_id,
+                dst: t.dst_id,
+                attr: f(&t),
+            })) as Box<dyn Iterator<Item = Edge<ED2>>>
+        });
+        Graph::from_rdds(self.ctx.clone(), self.vertices.clone(), new_edges)
+    }
+
     /// Replace every vertex attribute via `f`, keeping the edge RDD unchanged.
     ///
     /// `f` runs as a driver-side RDD map (`O(V)`); the distributed work in the
@@ -251,5 +303,57 @@ where
         self.triplets()
             .flat_map_task::<(VertexId, A), S>(send)
             .reduce_by_key_task(merge)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn weighted(src: VertexId, dst: VertexId, w: i64) -> Edge<i64> {
+        Edge { src, dst, attr: w }
+    }
+
+    // 0 → 1 (weight 5), 1 → 2 (weight 7); vertex attrs are labels.
+    fn sample() -> Graph<i64, i64> {
+        let ctx = Context::local().unwrap();
+        Graph::from_vertices_edges(
+            ctx,
+            vec![(0, 100), (1, 200), (2, 300)],
+            vec![weighted(0, 1, 5), weighted(1, 2, 7)],
+        )
+    }
+
+    #[test]
+    fn test_find_hit() {
+        assert_eq!(sample().find(1, 2), Some(7));
+    }
+
+    #[test]
+    fn test_find_miss() {
+        assert_eq!(sample().find(2, 0), None);
+    }
+
+    #[test]
+    fn test_pick_vertex() {
+        let vid = sample().pick_random_vertex().unwrap();
+        assert!([0, 1, 2].contains(&vid));
+    }
+
+    #[test]
+    fn test_pick_empty() {
+        let ctx = Context::local().unwrap();
+        let g: Graph<(), ()> = Graph::from_vertices_edges(ctx, vec![], vec![]);
+        assert_eq!(g.pick_random_vertex(), None);
+    }
+
+    #[test]
+    fn test_map_triplets() {
+        // New edge attr = src_label + dst_label + weight.
+        let g = sample().map_triplets(|t| t.src_attr + t.dst_attr + t.attr);
+        let mut edges = g.collect_edges();
+        edges.sort_by_key(|e| e.src);
+        assert_eq!(edges[0].attr, 100 + 200 + 5);
+        assert_eq!(edges[1].attr, 200 + 300 + 7);
     }
 }

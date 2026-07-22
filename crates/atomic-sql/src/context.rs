@@ -38,6 +38,16 @@ pub struct AtomicSqlContext {
     sc: Option<Arc<Context>>,
 }
 
+/// Data source format for [`AtomicSqlContext::read`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataFormat {
+    Csv,
+    Parquet,
+    Json,
+    #[cfg(feature = "avro")]
+    Avro,
+}
+
 impl AtomicSqlContext {
     /// Create a context with default configuration.
     pub fn new() -> Self {
@@ -201,6 +211,20 @@ impl AtomicSqlContext {
         Ok(())
     }
 
+    atomic_data::cfg_avro! {
+        /// Register an Avro file or directory as a table named `name`. Requires the `avro`
+        /// feature (forwards to DataFusion's Avro support).
+        pub async fn register_avro(
+            &self,
+            name: &str,
+            path: &str,
+            options: datafusion::prelude::AvroReadOptions<'_>,
+        ) -> Result<()> {
+            self.session.register_avro(name, path, options).await?;
+            Ok(())
+        }
+    }
+
     /// Remove a previously registered table.
     pub fn deregister_table(&self, name: &str) -> Result<()> {
         self.session.deregister_table(name)?;
@@ -213,6 +237,79 @@ impl AtomicSqlContext {
         let provider = Arc::new(AtomicTableProvider::from_batches(batches)?);
         let df = self.session.read_table(provider)?;
         Ok(DataFrame::new(df))
+    }
+
+    /// Read a registered table by name, returning a lazy [`DataFrame`].
+    /// Analogous to Spark's `spark.table(name)`.
+    pub async fn table(&self, name: &str) -> Result<DataFrame> {
+        let df = self.session.table(name).await?;
+        Ok(DataFrame::new(df))
+    }
+
+    /// List the names of all registered tables in the default catalog/schema.
+    pub fn table_names(&self) -> Result<Vec<String>> {
+        let catalog = self
+            .session
+            .catalog("datafusion")
+            .ok_or_else(|| AtomicSqlError::Internal("default catalog not found".into()))?;
+        let schema = catalog
+            .schema("public")
+            .ok_or_else(|| AtomicSqlError::Internal("default schema not found".into()))?;
+        Ok(schema.table_names().into_iter().collect())
+    }
+
+    /// Directly read a data source by path, returning a lazy [`DataFrame`].
+    /// Analogous to `spark.read.format(fmt).load(path)`.
+    pub async fn read(&self, format: DataFormat, path: &str) -> Result<DataFrame> {
+        let name = format!("__read_{}", path.replace(['/', '.', '-'], "_"));
+        match format {
+            DataFormat::Csv => {
+                self.session
+                    .register_csv(&name, path, CsvReadOptions::default())
+                    .await?;
+            }
+            DataFormat::Parquet => {
+                self.session
+                    .register_parquet(&name, path, ParquetReadOptions::default())
+                    .await?;
+            }
+            DataFormat::Json => {
+                self.session
+                    .register_json(&name, path, JsonReadOptions::default())
+                    .await?;
+            }
+            #[cfg(feature = "avro")]
+            DataFormat::Avro => {
+                self.session
+                    .register_avro(&name, path, datafusion::prelude::AvroReadOptions::default())
+                    .await?;
+            }
+        }
+        self.table(&name).await
+    }
+
+    /// Register `df` as a global temporary view named `global_temp.<name>`, replacing any
+    /// existing view of that name.
+    ///
+    /// DataFusion has no cross-session global catalog, so "global" here means the view lives in
+    /// a dedicated `global_temp` schema within this context — reachable as `global_temp.<name>`
+    /// in SQL. Sharing across separate `AtomicSqlContext`s requires a shared `SessionContext`.
+    pub fn create_or_replace_global_temp_view(&self, name: &str, df: DataFrame) -> Result<()> {
+        use datafusion::catalog::MemorySchemaProvider;
+        use datafusion::sql::TableReference;
+
+        let catalog = self
+            .session
+            .catalog("datafusion")
+            .ok_or_else(|| AtomicSqlError::Internal("default catalog not found".into()))?;
+        if catalog.schema("global_temp").is_none() {
+            catalog.register_schema("global_temp", Arc::new(MemorySchemaProvider::new()))?;
+        }
+        self.session.register_table(
+            TableReference::partial("global_temp", name),
+            df.into_inner().into_view(),
+        )?;
+        Ok(())
     }
 
     /// Access the inner DataFusion [`SessionContext`] for advanced use-cases.

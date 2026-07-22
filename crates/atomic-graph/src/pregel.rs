@@ -13,6 +13,11 @@ use crate::topology::{EdgeTriplet, VertexId};
 
 type VertexVal<VD, A> = (VD, Option<A>);
 type VertexPair<VD, A> = (VertexId, VertexVal<VD, A>);
+
+/// A convergence test comparing the vertex state before and after a superstep; returns
+/// `true` to stop iterating. Used by [`run_until_convergence`].
+type Converged<'a, VD> = &'a dyn Fn(&[(VertexId, VD)], &[(VertexId, VD)]) -> bool;
+
 /// Run up to `max_iterations` Pregel supersteps over `graph`.
 ///
 /// Vertex state must be initialized by the caller before the loop (set the starting
@@ -28,13 +33,75 @@ type VertexPair<VD, A> = (VertexId, VertexVal<VD, A>);
 ///
 /// `send` and `vprog` are registered `#[task]`s (`Copy` zero-sized markers); `merge`
 /// is a commutative-associative combiner.
-#[allow(clippy::type_complexity)]
 pub fn run<VD, ED, A, SendT, MergeF, VProgT>(
     graph: &Graph<VD, ED>,
     max_iterations: usize,
     send: SendT,
     merge: MergeF,
     vprog: VProgT,
+) -> Graph<VD, ED>
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+    A: GraphData,
+    A::Archived: GraphDecode<A>,
+    Option<A>: GraphData,
+    <Option<A> as rkyv::Archive>::Archived: GraphDecode<Option<A>>,
+    SendT: UnaryTask<EdgeTriplet<VD, ED>, Vec<(VertexId, A)>> + Copy,
+    VProgT: UnaryTask<VertexPair<VD, A>, (VertexId, VD)> + Copy,
+    MergeF: BinaryTask<A> + Copy,
+{
+    run_loop::<VD, ED, A, SendT, MergeF, VProgT>(graph, max_iterations, send, merge, vprog, None)
+}
+
+/// Run Pregel supersteps until `converged` reports the vertex state has settled, or
+/// `max_iterations` is reached (whichever comes first).
+///
+/// Identical to [`run`] except that after each superstep `converged(previous, current)`
+/// is evaluated against the vertex sets before and after the step; returning `true` stops
+/// the loop. A superstep that produces no messages still stops the loop as in [`run`].
+pub fn run_until_convergence<VD, ED, A, SendT, MergeF, VProgT>(
+    graph: &Graph<VD, ED>,
+    max_iterations: usize,
+    send: SendT,
+    merge: MergeF,
+    vprog: VProgT,
+    converged: Converged<'_, VD>,
+) -> Graph<VD, ED>
+where
+    VD: GraphData,
+    VD::Archived: GraphDecode<VD>,
+    ED: GraphData,
+    ED::Archived: GraphDecode<ED>,
+    A: GraphData,
+    A::Archived: GraphDecode<A>,
+    Option<A>: GraphData,
+    <Option<A> as rkyv::Archive>::Archived: GraphDecode<Option<A>>,
+    SendT: UnaryTask<EdgeTriplet<VD, ED>, Vec<(VertexId, A)>> + Copy,
+    VProgT: UnaryTask<VertexPair<VD, A>, (VertexId, VD)> + Copy,
+    MergeF: BinaryTask<A> + Copy,
+{
+    run_loop::<VD, ED, A, SendT, MergeF, VProgT>(
+        graph,
+        max_iterations,
+        send,
+        merge,
+        vprog,
+        Some(converged),
+    )
+}
+
+/// The shared superstep loop behind [`run`] and [`run_until_convergence`]. With
+/// `converged` set, the previous and current vertex sets are compared after each step.
+fn run_loop<VD, ED, A, SendT, MergeF, VProgT>(
+    graph: &Graph<VD, ED>,
+    max_iterations: usize,
+    send: SendT,
+    merge: MergeF,
+    vprog: VProgT,
+    converged: Option<Converged<'_, VD>>,
 ) -> Graph<VD, ED>
 where
     VD: GraphData,
@@ -56,6 +123,8 @@ where
         .max(1) as usize;
     let edges = graph.edges.clone();
     let mut vertices = graph.vertices.clone();
+    // The prior superstep's vertex set, kept only when a convergence test is active.
+    let mut prev: Option<Vec<(VertexId, VD)>> = None;
 
     for _ in 0..max_iterations {
         let g = Graph::from_rdds(ctx.clone(), vertices.clone(), edges.clone());
@@ -70,11 +139,27 @@ where
 
         // Apply the vertex program: (vid, (old_attr, Option<msg>)) -> (vid, new_attr).
         let joined = vertices.clone().left_outer_join::<A>(msgs_rdd);
-        let new_vertices = joined.map_task::<(VertexId, VD), VProgT>(vprog);
+        let vv = joined
+            .map_task::<(VertexId, VD), VProgT>(vprog)
+            .collect()
+            .unwrap_or_default();
+
+        let stop = match (converged, &prev) {
+            (Some(test), Some(before)) => test(before, &vv),
+            _ => false,
+        };
 
         // Materialize vertices so the next superstep starts from a fresh collection.
-        let vv = new_vertices.collect().unwrap_or_default();
-        vertices = ctx.parallelize_typed(vv, n);
+        if converged.is_some() {
+            vertices = ctx.parallelize_typed(vv.clone(), n);
+            prev = Some(vv);
+        } else {
+            vertices = ctx.parallelize_typed(vv, n);
+        }
+
+        if stop {
+            break;
+        }
     }
 
     Graph::from_rdds(ctx, vertices, edges)

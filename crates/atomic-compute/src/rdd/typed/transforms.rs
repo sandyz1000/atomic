@@ -3,6 +3,18 @@ use rand::RngExt;
 use super::*;
 
 impl<T: Data> TypedRdd<T> {
+    /// Build a pair RDD keyed by a closure applied to each element. Produces
+    /// `(f(x), x)`. For distributed workloads use [`key_by_task`](Self::key_by_task)
+    /// which dispatches via a registered `#[task]`.
+    pub fn key_by<K, F>(self, f: F) -> TypedRdd<(K, T)>
+    where
+        K: Data + Clone,
+        T: Clone,
+        F: Fn(&T) -> K + Clone + Send + Sync + 'static,
+    {
+        self.map_rdd(move |id, rdd| MapperRdd::new(id, rdd, move |x| (f(&x), x.clone())))
+    }
+
     /// Build a pair RDD keyed by a registered unary task applied to each element — the
     /// content-addressed form of `key_by`. Produces `(task(x), x)`.
     pub fn key_by_task<K, B>(self, task: B) -> TypedRdd<(K, T)>
@@ -167,8 +179,6 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// ```ignore
     /// let coalesced = rdd.coalesce(2, false);
     /// ```
-    /// `shuffle=true` reassigns whole partitions only (no element-level redistribution).
-    /// For element-level redistribution use [`repartition_shuffle`].
     /// `shuffle=true` reassigns whole partitions only (no element-level redistribution).
     /// For element-level redistribution use [`repartition_shuffle`].
     pub fn coalesce(self, num_partitions: usize, _shuffle: bool) -> TypedRdd<T>
@@ -623,5 +633,22 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
             keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             Ok(keyed.into_iter().take(take).map(|(_, x)| x).collect())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::context::Context;
+
+    #[test]
+    fn test_key_by() {
+        let mut got = Context::local()
+            .unwrap()
+            .parallelize_typed(vec![1, 2, 3], 2)
+            .key_by(|x: &i32| x % 2)
+            .collect()
+            .unwrap();
+        got.sort();
+        assert_eq!(got, vec![(0, 2), (1, 1), (1, 3)]);
     }
 }

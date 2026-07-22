@@ -163,6 +163,10 @@ pub struct StreamingQuery {
     ssc: Option<Arc<StreamingContext>>,
     source: Arc<dyn StreamSource>,
     runner: Arc<QueryRunner>,
+    /// Monotonically incrementing micro-batch counter.
+    epoch: AtomicUsize,
+    /// Timestamp of the last completed batch, in milliseconds since start.
+    last_batch_ms: parking_lot::Mutex<Option<u64>>,
 }
 
 impl StreamingQuery {
@@ -175,6 +179,8 @@ impl StreamingQuery {
             ssc: Some(ssc),
             source,
             runner,
+            epoch: AtomicUsize::new(0),
+            last_batch_ms: parking_lot::Mutex::new(None),
         }
     }
 
@@ -183,6 +189,8 @@ impl StreamingQuery {
             ssc: None,
             source,
             runner,
+            epoch: AtomicUsize::new(0),
+            last_batch_ms: parking_lot::Mutex::new(None),
         }
     }
 
@@ -205,6 +213,30 @@ impl StreamingQuery {
 
     /// Run one batch synchronously (used by `Trigger::Once`).
     pub(crate) fn run_once(&self) -> StructuredResult<()> {
-        self.runner.run_batch(0)
+        self.runner.run_batch(0)?;
+        *self.last_batch_ms.lock() = Some(0);
+        Ok(())
     }
+
+    /// The number of micro-batches processed so far.
+    pub fn epoch(&self) -> usize {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
+    /// A snapshot of the most recent progress.
+    pub fn last_progress(&self) -> QueryProgress {
+        QueryProgress {
+            epoch: self.epoch.load(Ordering::Relaxed),
+            last_batch_ms: *self.last_batch_ms.lock(),
+        }
+    }
+}
+
+/// A snapshot of streaming query progress.
+#[derive(Debug, Clone, Copy)]
+pub struct QueryProgress {
+    /// The current micro-batch number.
+    pub epoch: usize,
+    /// Timestamp (ms) of the last completed batch, or `None` before the first batch.
+    pub last_batch_ms: Option<u64>,
 }

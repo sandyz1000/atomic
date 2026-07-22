@@ -147,3 +147,22 @@ impl Sink for FileSink {
 pub fn shared<S: Sink + 'static>(sink: S) -> Arc<dyn Sink> {
     Arc::new(sink)
 }
+
+/// Sink that calls `f` once per row in each non-empty batch.
+pub fn foreach<F>(f: F) -> Arc<dyn Sink>
+where
+    F: Fn(&RecordBatch, usize) + Send + Sync + 'static,
+{
+    struct ForeachSink<F>(F);
+    impl<F: Fn(&RecordBatch, usize) + Send + Sync> Sink for ForeachSink<F> {
+        fn add_batch(&self, _epoch: u64, batches: &[RecordBatch]) -> StructuredResult<()> {
+            for batch in batches {
+                for row in 0..batch.num_rows() {
+                    (self.0)(batch, row);
+                }
+            }
+            Ok(())
+        }
+    }
+    Arc::new(ForeachSink(f))
+}

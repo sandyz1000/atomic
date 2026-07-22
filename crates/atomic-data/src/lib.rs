@@ -66,3 +66,8 @@ macro_rules! cfg_k8s {
 macro_rules! cfg_not_k8s {
     ($($item:item)*) => { $(#[cfg(not(feature = "k8s"))] $item)* };
 }
+
+#[macro_export]
+macro_rules! cfg_avro {
+    ($($item:item)*) => { $(#[cfg(feature = "avro")] $item)* };
+}

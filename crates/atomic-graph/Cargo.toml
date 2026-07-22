@@ -8,6 +8,7 @@ edition.workspace = true
 atomic-compute = { workspace = true }
 atomic-data = { workspace = true }
 log = { workspace = true }
+rand = { workspace = true }
 # serialization — graph value types travel the wire (rkyv) and shuffle (bincode)
 rkyv = { workspace = true }
 bincode = { workspace = true }

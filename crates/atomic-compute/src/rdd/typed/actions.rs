@@ -296,35 +296,19 @@ impl<T: Data + Clone> TypedRdd<T> {
         Vec<T>: WireEncode + WireDecode,
         F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
     {
-        let mut partials: Vec<T> = if self.context.is_distributed() {
-            self.collect_distributed()?
+        let partials: Vec<Option<T>> = if self.context.is_distributed() {
+            // Per-partition reduce: each partition sends 0 or 1 element.
+            self.reduce_partitions(Vec::new(), |mut acc: Vec<Option<T>>, part| {
+                acc.push(part.into_iter().reduce(&f));
+                acc
+            })?
         } else {
             let f_job = f.clone();
             let reduce_partition = move |iter: Box<dyn Iterator<Item = T>>| iter.reduce(&f_job);
-            self.context
-                .run_job(self.rdd.clone(), reduce_partition)?
-                .into_iter()
-                .flatten()
-                .collect()
+            self.context.run_job(self.rdd.clone(), reduce_partition)?
         };
 
-        let levels = depth.max(1);
-        for _ in 0..levels {
-            if partials.len() <= 1 {
-                break;
-            }
-            let mut next = Vec::with_capacity(partials.len() / 2 + 1);
-            let mut iter = partials.into_iter();
-            loop {
-                match (iter.next(), iter.next()) {
-                    (Some(a), Some(b)) => next.push(f(a, b)),
-                    (Some(a), None) => next.push(a),
-                    _ => break,
-                }
-            }
-            partials = next;
-        }
-        Ok(partials.into_iter().next())
+        tree_merge_opts(partials, f, depth)
     }
 
     /// Aggregate elements using a balanced binary tree of combine operations.
@@ -346,9 +330,14 @@ impl<T: Data + Clone> TypedRdd<T> {
         SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
         CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
     {
-        let mut partials: Vec<U> = if self.context.is_distributed() {
-            let elements = self.collect_distributed()?;
-            vec![elements.into_iter().fold(zero.clone(), &seq_fn)]
+        let partials: Vec<U> = if self.context.is_distributed() {
+            // Per-partition fold into accumulator, one U per partition.
+            let z = zero.clone();
+            let seq = seq_fn.clone();
+            self.reduce_partitions(Vec::new(), move |mut acc: Vec<U>, part| {
+                acc.push(part.into_iter().fold(z.clone(), &seq));
+                acc
+            })?
         } else {
             let z = zero.clone();
             let reduce_partition =
@@ -356,23 +345,7 @@ impl<T: Data + Clone> TypedRdd<T> {
             self.context.run_job(self.rdd.clone(), reduce_partition)?
         };
 
-        let levels = depth.max(1);
-        for _ in 0..levels {
-            if partials.len() <= 1 {
-                break;
-            }
-            let mut next = Vec::with_capacity(partials.len() / 2 + 1);
-            let mut iter = partials.into_iter();
-            loop {
-                match (iter.next(), iter.next()) {
-                    (Some(a), Some(b)) => next.push(comb_fn(a, b)),
-                    (Some(a), None) => next.push(a),
-                    _ => break,
-                }
-            }
-            partials = next;
-        }
-        Ok(partials.into_iter().next().unwrap_or(zero))
+        Ok(tree_merge(partials, comb_fn, depth).unwrap_or(zero))
     }
 
     /// Apply a function to each element (for side effects).
@@ -498,6 +471,83 @@ impl<T: Data + Clone> TypedRdd<T> {
         Ok(final_counts)
     }
 
+    /// Fold all elements with a closure, seeded by `zero`.
+    ///
+    /// The closure runs on the driver. In distributed mode each partition is dispatched and
+    /// folded one at a time (no full concatenation, bounded memory), but every element still
+    /// crosses the wire. For worker-side reduction use [`fold_task`](TypedRdd::fold_task) with
+    /// a registered `#[task]`.
+    pub fn fold(
+        &self,
+        zero: T,
+        op: impl Fn(T, T) -> T + Clone + Send + Sync + 'static,
+    ) -> Result<T, DataError>
+    where
+        T: Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        if self.context.is_distributed() {
+            let z = zero.clone();
+            let o = op.clone();
+            let partials: Vec<T> =
+                self.reduce_partitions(Vec::new(), move |mut acc: Vec<T>, part| {
+                    acc.push(part.into_iter().fold(z.clone(), &o));
+                    acc
+                })?;
+            let mut acc = zero;
+            for p in partials {
+                acc = op(acc, p);
+            }
+            return Ok(acc);
+        }
+        let z = zero.clone();
+        let o = op.clone();
+        let part = move |iter: Box<dyn Iterator<Item = T>>| iter.fold(z.clone(), &o);
+        Ok(self
+            .context
+            .run_job(self.rdd.clone(), part)?
+            .into_iter()
+            .fold(zero, op))
+    }
+
+    /// Reduce all elements with a closure. Returns `None` if the RDD is empty.
+    ///
+    /// The closure runs on the driver. In distributed mode each partition is dispatched and
+    /// reduced one at a time (bounded memory), but every element still crosses the wire. For
+    /// worker-side reduction use [`reduce_task`](TypedRdd::reduce_task) with a registered
+    /// `#[task]`.
+    pub fn reduce(
+        &self,
+        op: impl Fn(T, T) -> T + Clone + Send + Sync + 'static,
+    ) -> Result<Option<T>, DataError>
+    where
+        T: Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
+    {
+        if self.context.is_distributed() {
+            let o = op.clone();
+            return self.reduce_partitions(None, move |acc: Option<T>, part| {
+                let best = part.into_iter().reduce(&o);
+                match (acc, best) {
+                    (Some(a), Some(b)) => Some(o(a, b)),
+                    (a, None) => a,
+                    (None, b) => b,
+                }
+            });
+        }
+        let o_local = op.clone();
+        let part = move |iter: Box<dyn Iterator<Item = T>>| iter.reduce(&o_local);
+        let results: Vec<Option<T>> = self.context.run_job(self.rdd.clone(), part)?;
+        let mut merged: Option<T> = None;
+        for val in results.into_iter().flatten() {
+            merged = match merged {
+                Some(m) => Some(op(m, val)),
+                None => Some(val),
+            };
+        }
+        Ok(merged)
+    }
+
     /// Return the maximum element.
     ///
     /// In distributed mode, if a lazy pipeline is staged (from `map_task` etc.),
@@ -590,8 +640,9 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// of length `n` where index `i` counts elements in `[bounds[i], bounds[i+1])`, with the
     /// final bucket right-inclusive. Elements outside `[bounds[0], bounds[n]]` are dropped.
     ///
-    /// Materialises to the driver and buckets there (the bucket edges are a runtime parameter,
-    /// so this is not a compile-time-registered task).
+    /// In distributed mode, each partition produces its own bucket counts; the driver
+    /// sums them.  The bucket edges are a runtime parameter, so this is not a
+    /// compile-time-registered task — but per-partition work keeps memory bounded.
     pub fn histogram(&self, bucket_bounds: &[f64]) -> Result<Vec<u64>, DataError>
     where
         T: crate::builtin_tasks::NumericValue + WireEncode + WireDecode,
@@ -603,13 +654,31 @@ impl<T: Data + Clone> TypedRdd<T> {
         let n = bucket_bounds.len() - 1;
         let lo = bucket_bounds[0];
         let hi = bucket_bounds[n];
+        let bounds = bucket_bounds.to_vec(); // Arc-able copy
+
+        if self.context.is_distributed() {
+            return self.reduce_partitions(vec![0u64; n], move |mut counts, part| {
+                for x in part {
+                    let v = x.to_f64();
+                    if v < lo || v > hi {
+                        continue;
+                    }
+                    let idx = bounds
+                        .partition_point(|&b| b <= v)
+                        .saturating_sub(1)
+                        .min(n - 1);
+                    counts[idx] += 1;
+                }
+                counts
+            });
+        }
+
         let mut counts = vec![0u64; n];
         for x in self.collect()? {
             let v = x.to_f64();
             if v < lo || v > hi {
                 continue;
             }
-            // Largest edge <= v; clamp the right-inclusive last edge into the final bucket.
             let idx = bucket_bounds
                 .partition_point(|&b| b <= v)
                 .saturating_sub(1)
@@ -807,5 +876,112 @@ impl<T: Data + Clone> TypedRdd<T> {
         all_items.sort();
         all_items.truncate(k);
         Ok(all_items)
+    }
+}
+
+// ── Tree reduction helpers ──────────────────────────────────────────────────────
+
+/// Merge `Option<T>` values in a balanced binary tree of depth `levels`,
+/// using `f` as the combine function. Returns `None` for an empty input.
+fn tree_merge_opts<T, F>(
+    mut partials: Vec<Option<T>>,
+    f: F,
+    depth: usize,
+) -> Result<Option<T>, DataError>
+where
+    F: Fn(T, T) -> T,
+{
+    let levels = depth.max(1);
+    for _ in 0..levels {
+        if partials.len() <= 1 {
+            break;
+        }
+        let mut next = Vec::with_capacity(partials.len() / 2 + 1);
+        let mut iter = partials.into_iter();
+        while let Some(first) = iter.next() {
+            match (first, iter.next()) {
+                (Some(a), Some(Some(b))) => next.push(Some(f(a, b))),
+                (Some(a), None) => next.push(Some(a)),
+                (None, Some(Some(b))) => next.push(Some(b)),
+                (None, Some(None)) | (None, None) | (Some(_), Some(None)) => {}
+            }
+        }
+        partials = next;
+    }
+    Ok(partials.into_iter().next().flatten())
+}
+
+/// Merge `T` values in a balanced binary tree of depth `levels`,
+/// using `f` as the combine function.
+fn tree_merge<T, F>(mut partials: Vec<T>, f: F, depth: usize) -> Option<T>
+where
+    F: Fn(T, T) -> T,
+{
+    let levels = depth.max(1);
+    for _ in 0..levels {
+        if partials.len() <= 1 {
+            break;
+        }
+        let mut next = Vec::with_capacity(partials.len() / 2 + 1);
+        let mut iter = partials.into_iter();
+        while let Some(first) = iter.next() {
+            match iter.next() {
+                Some(second) => next.push(f(first, second)),
+                None => next.push(first),
+            }
+        }
+        partials = next;
+    }
+    partials.into_iter().next()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::context::Context;
+
+    fn rdd() -> crate::rdd::TypedRdd<i32> {
+        Context::local()
+            .unwrap()
+            .parallelize_typed(vec![1, 2, 3, 4, 5], 3)
+    }
+
+    #[test]
+    fn test_fold() {
+        // Zero is the identity 0, so the result is partition-count independent.
+        assert_eq!(rdd().fold(0, |a, b| a + b).unwrap(), 15);
+    }
+
+    #[test]
+    fn test_reduce() {
+        assert_eq!(rdd().reduce(|a, b| a + b).unwrap(), Some(15));
+    }
+
+    #[test]
+    fn test_reduce_empty() {
+        let empty = Context::local()
+            .unwrap()
+            .parallelize_typed(Vec::<i32>::new(), 2);
+        assert_eq!(empty.reduce(|a, b| a + b).unwrap(), None);
+    }
+
+    #[test]
+    fn test_tree_reduce() {
+        assert_eq!(rdd().tree_reduce(|a, b| a + b, 2).unwrap(), Some(15));
+    }
+
+    #[test]
+    fn test_tree_aggregate() {
+        // Accumulator differs from element type: count elements.
+        let n = rdd()
+            .tree_aggregate(0u64, |acc, _x| acc + 1, |a, b| a + b, 2)
+            .unwrap();
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn test_histogram() {
+        // Buckets [1,3), [3,5]; elements 1,2,3,4,5 → 2 in first, 3 in second.
+        let counts = rdd().histogram(&[1.0, 3.0, 5.0]).unwrap();
+        assert_eq!(counts, vec![2, 3]);
     }
 }
