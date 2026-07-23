@@ -151,13 +151,34 @@ impl DataFrame {
         )?))
     }
 
-    /// Set intersection with another DataFrame (distinct rows present in both).
+    /// Set intersection with another DataFrame, deduplicated (distinct rows in both). Mirrors
+    /// Spark `intersect`. DataFusion's plain `intersect` keeps duplicates, so this uses
+    /// `intersect_distinct`.
     pub fn intersect(self, other: DataFrame) -> Result<Self> {
+        Ok(Self::new(self.inner.intersect_distinct(other.inner)?))
+    }
+
+    /// Duplicate-preserving intersection (`INTERSECT ALL`). Mirrors Spark `intersectAll`.
+    ///
+    /// Multiplicity follows DataFusion's `INTERSECT ALL`, which keeps every left-side row that has
+    /// a match rather than Spark's exact `min(m, n)` per row — the two agree when the right side
+    /// has no duplicates.
+    pub fn intersect_all(self, other: DataFrame) -> Result<Self> {
         Ok(Self::new(self.inner.intersect(other.inner)?))
     }
 
-    /// Set difference — rows in `self` not present in `other` (distinct).
+    /// Set difference, deduplicated: distinct rows in `self` not present in `other`. Mirrors
+    /// Spark `except`. DataFusion's plain `except` keeps duplicates, so this uses
+    /// `except_distinct`.
     pub fn except(self, other: DataFrame) -> Result<Self> {
+        Ok(Self::new(self.inner.except_distinct(other.inner)?))
+    }
+
+    /// Duplicate-preserving difference (`EXCEPT ALL`). Mirrors Spark `exceptAll`.
+    ///
+    /// Multiplicity follows DataFusion's `EXCEPT ALL` rather than Spark's exact `max(m - n, 0)`
+    /// per row; the two agree when neither side has duplicates.
+    pub fn except_all(self, other: DataFrame) -> Result<Self> {
         Ok(Self::new(self.inner.except(other.inner)?))
     }
 

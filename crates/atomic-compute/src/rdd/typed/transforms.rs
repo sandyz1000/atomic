@@ -305,6 +305,19 @@ impl<T: Data + Clone> TypedRdd<T> {
         self.map_rdd(|id, rdd| MapPartitionsPairRdd::new(id, rdd, f))
     }
 
+    /// Apply a partial function to each element, keeping only the elements it maps to `Some`.
+    /// Mirrors Spark's `collect(PartialFunction)` — a fused filter + map. The closure runs on the
+    /// driver; for worker-side dispatch use `flat_map_task` with a `#[task]` returning `Vec<U>`.
+    pub fn collect_with<U, F>(self, f: F) -> TypedRdd<U>
+    where
+        U: Data + Clone,
+        F: Fn(T) -> Option<U> + Send + Sync + Clone + 'static,
+    {
+        self.map_partitions(move |iter| {
+            Box::new(iter.filter_map(f.clone())) as Box<dyn Iterator<Item = U>>
+        })
+    }
+
     /// Collect each partition into a `Vec<T>`, yielding one `Vec` per partition.
     pub fn glom(self) -> TypedRdd<Vec<T>>
     where
@@ -650,5 +663,18 @@ mod tests {
             .unwrap();
         got.sort();
         assert_eq!(got, vec![(0, 2), (1, 1), (1, 3)]);
+    }
+
+    #[test]
+    fn test_collect_with() {
+        // Keep evens, halved.
+        let mut got = Context::local()
+            .unwrap()
+            .parallelize_typed(vec![1, 2, 3, 4], 2)
+            .collect_with(|x: i32| (x % 2 == 0).then_some(x / 2))
+            .collect()
+            .unwrap();
+        got.sort();
+        assert_eq!(got, vec![1, 2]);
     }
 }

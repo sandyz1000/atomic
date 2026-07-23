@@ -58,6 +58,22 @@ fn test_cache_passthrough() {
 }
 
 #[test]
+fn test_glom() {
+    let sc = local_sc();
+    let ssc = StreamingContext::new(sc.clone(), Duration::from_millis(50));
+    let q = queue_of(&sc, vec![vec![1, 2, 3]]);
+    let stream = ssc.queue_stream(q, true) as Arc<dyn DStream<i32>>;
+    let glommed = ssc.glom(stream);
+    let got: Vec<Vec<i32>> = drain(&ssc, sc, glommed, 200);
+    // The single partition collapses to one Vec holding the batch.
+    assert!(got.iter().any(|v| {
+        let mut s = v.clone();
+        s.sort();
+        s == vec![1, 2, 3]
+    }));
+}
+
+#[test]
 fn test_transform_with() {
     let sc = local_sc();
     let ssc = StreamingContext::new(sc.clone(), Duration::from_millis(50));

@@ -272,6 +272,29 @@ impl StreamingContext {
         ))
     }
 
+    /// A DStream where each batch RDD is glommed: every partition becomes one `Vec<T>` element.
+    /// Mirrors `DStream.glom()`.
+    pub fn glom<T>(
+        self: &Arc<Self>,
+        stream: Arc<dyn DStream<T>>,
+    ) -> Arc<crate::dstream::transformed::TransformedDStream<T, Vec<T>>>
+    where
+        T: Data + Clone,
+        Vec<T>: Data + Clone,
+    {
+        let id = self.next_stream_id();
+        let sc = self.sc.clone();
+        Arc::new(crate::dstream::transformed::TransformedDStream::new(
+            id,
+            stream,
+            move |rdd, _t| {
+                atomic_compute::rdd::TypedRdd::<T>::new(rdd, sc.clone())
+                    .glom()
+                    .into_rdd()
+            },
+        ))
+    }
+
     /// Wrap `stream` so each batch's RDD is cached in memory, reusing computed partitions across
     /// repeated actions on the same batch. Mirrors `DStream.cache()`.
     pub fn cache<T: Data + Clone>(

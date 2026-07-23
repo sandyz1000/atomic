@@ -500,6 +500,21 @@ where
         Ok(crate::builtin_tasks::hll::hll_estimate(&regs))
     }
 
+    /// Approximate distinct count at a caller-chosen accuracy. `relative_sd` is the target
+    /// relative standard error (e.g. `0.05` for ~5%); smaller values use more registers and more
+    /// memory. The precision travels in the accumulator, so no new task registration is needed.
+    pub fn count_approx_distinct_sd(&self, relative_sd: f64) -> Result<u64, DataError>
+    where
+        crate::builtin_tasks::hll::HllTask<T>: AggregateTask<Vec<u8>, T> + Default,
+    {
+        let p = crate::builtin_tasks::hll::precision_for(relative_sd);
+        let regs = self.aggregate_task(
+            crate::builtin_tasks::hll::hll_zero_p(p),
+            crate::builtin_tasks::hll::HllTask::<T>::default(),
+        )?;
+        Ok(crate::builtin_tasks::hll::hll_estimate(&regs))
+    }
+
     /// Build (or extend) a `StagedPipeline` for distributed lazy dispatch.
     ///
     /// If a pipeline was already staged, appends `op` and returns it.

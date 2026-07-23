@@ -21,12 +21,14 @@
 // cfg_kafka!/cfg_not_kafka! are defined once in `atomic_data` and shared workspace-wide.
 pub use atomic_data::{cfg_kafka, cfg_not_kafka};
 
+pub mod dedup;
 pub mod distributed_state;
 pub mod errors;
 pub mod frame;
 cfg_kafka! {
     pub mod kafka;
 }
+pub mod map_groups_engine;
 pub mod map_groups_state;
 pub mod query;
 pub mod session_window;
@@ -39,10 +41,11 @@ pub mod windowed;
 
 pub use errors::{StructuredError, StructuredResult};
 pub use frame::{SessionBuilder, StreamWriter, StreamingDataFrame, WindowedBuilder};
+pub use map_groups_state::{GroupState, GroupStateTimeout};
 pub use query::StreamingQuery;
 pub use sink::Sink;
-pub use source::StreamSource;
-pub use state::{Agg, AggKind};
+pub use source::{FileStreamSource, RateSource, StreamSource};
+pub use state::{Agg, AggKind, GroupVal};
 pub use stream_join::JoinType;
 
 use std::time::Duration;
@@ -66,6 +69,8 @@ pub enum Trigger {
     ProcessingTime(Duration),
     /// Process exactly one batch, then terminate.
     Once,
+    /// Process every batch currently available, then terminate (drains the source).
+    AvailableNow,
 }
 
 impl Default for Trigger {

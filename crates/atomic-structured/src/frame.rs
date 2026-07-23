@@ -60,6 +60,62 @@ impl StreamingDataFrame {
         StreamWriter::new(self.source, Plan::Stateless(query.into()), self.watermark)
     }
 
+    /// Arbitrary per-group stateful processing over the stream. Rows are grouped by `key_cols`;
+    /// for each group `update(key, rows, state)` runs with a mutable [`GroupState<S>`] and returns
+    /// output rows, which are assembled into `output_schema`. `timeout` controls processing-time
+    /// eviction of idle groups. Mirrors `mapGroupsWithState` / `flatMapGroupsWithState`.
+    ///
+    /// Rows are `Vec<GroupVal>` (one scalar per column), so the update function is plain Rust with
+    /// no Arrow row API. Output columns must be `Int64` or `Utf8`.
+    pub fn map_groups_with_state<S, F>(
+        self,
+        key_cols: &[&str],
+        output_schema: datafusion::arrow::datatypes::SchemaRef,
+        timeout: crate::map_groups_state::GroupStateTimeout,
+        update: F,
+    ) -> StreamWriter
+    where
+        S: Send + 'static,
+        F: Fn(
+                &[crate::state::GroupVal],
+                Vec<crate::map_groups_engine::Row>,
+                &mut crate::map_groups_state::GroupState<S>,
+            ) -> Vec<crate::map_groups_engine::Row>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let engine: Arc<dyn BatchEngine> =
+            Arc::new(crate::map_groups_engine::MapGroupsStateEngine::<S>::new(
+                self.source.clone(),
+                key_cols.iter().map(|c| c.to_string()).collect(),
+                output_schema,
+                timeout,
+                Box::new(update),
+            ));
+        StreamWriter::new(self.source, Plan::MapGroupsState(engine), self.watermark)
+    }
+
+    /// Drop duplicate rows keyed by `key_cols`, keeping the first occurrence, with per-key state
+    /// evicted once the event-time watermark passes it. Requires [`with_watermark`] to have been
+    /// called; the watermark's column supplies the event time. Mirrors
+    /// `dropDuplicatesWithinWatermark`.
+    pub fn drop_duplicates_within_watermark(self, key_cols: &[&str]) -> StreamWriter {
+        let time_col = self
+            .watermark
+            .as_ref()
+            .map(|(c, _)| c.clone())
+            .unwrap_or_default();
+        StreamWriter::new(
+            self.source,
+            Plan::Dedup {
+                key_cols: key_cols.iter().map(|c| c.to_string()).collect(),
+                time_col,
+            },
+            self.watermark,
+        )
+    }
+
     /// Session window on `time_col` with inactivity `gap`.  Events within `gap` of each
     /// other coalesce into one session; a wider gap starts a new session.
     pub fn session_window(self, time_col: &str, gap: Duration) -> SessionBuilder {
@@ -221,6 +277,13 @@ impl SessionBuilder {
 
 enum Plan {
     Stateless(String),
+    Dedup {
+        key_cols: Vec<String>,
+        time_col: String,
+    },
+    /// A pre-built, type-erased `MapGroupsStateEngine` (generic over the user state `S`, so it
+    /// cannot live in this non-generic enum except behind `dyn`).
+    MapGroupsState(Arc<dyn BatchEngine>),
     Windowed {
         time_col: String,
         window_size_ms: u64,
@@ -257,6 +320,7 @@ pub struct StreamWriter {
     trigger: Trigger,
     sink: Option<Arc<dyn Sink>>,
     checkpoint_dir: Option<PathBuf>,
+    query_name: Option<String>,
 }
 
 impl StreamWriter {
@@ -269,11 +333,19 @@ impl StreamWriter {
             trigger: Trigger::default(),
             sink: None,
             checkpoint_dir: None,
+            query_name: None,
         }
     }
 
     pub fn output_mode(mut self, mode: OutputMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    /// Name this query. The name is exposed via [`StreamingQuery::name`] and, in the future,
+    /// used to label metrics. Mirrors `DataStreamWriter.queryName`.
+    pub fn query_name(mut self, name: impl Into<String>) -> Self {
+        self.query_name = Some(name.into());
         self
     }
 
@@ -334,6 +406,22 @@ impl StreamWriter {
                     query,
                 })
             }
+            Plan::Dedup { key_cols, time_col } => {
+                if time_col.is_empty() {
+                    return Err(StructuredError::Unsupported(
+                        "drop_duplicates_within_watermark requires with_watermark(..)".into(),
+                    ));
+                }
+                let delay = self.watermark.as_ref().map(|(_, d)| *d).unwrap_or(0);
+                Arc::new(crate::dedup::DedupEngine::new(
+                    self.source.clone(),
+                    key_cols,
+                    time_col,
+                    delay,
+                ))
+            }
+            // The engine was built by the typed `map_groups_with_state` builder; use it directly.
+            Plan::MapGroupsState(engine) => engine,
             Plan::Windowed {
                 time_col,
                 window_size_ms,
@@ -499,13 +587,21 @@ impl StreamWriter {
 
         let runner = QueryRunner::new(engine, sink);
         self.source.start();
+        let name = self.query_name;
 
-        match self.trigger {
+        let query = match self.trigger {
             Trigger::Once => {
                 let q = StreamingQuery::completed(self.source.clone(), runner);
                 q.run_once()?;
                 self.source.stop();
-                Ok(q)
+                q
+            }
+            Trigger::AvailableNow => {
+                // Drain all currently-available batches, then stop. 1M-batch safety cap.
+                let q = StreamingQuery::completed(self.source.clone(), runner);
+                q.run_available_now(1_000_000)?;
+                self.source.stop();
+                q
             }
             Trigger::ProcessingTime(_) => {
                 let op = Arc::new(QueryOutputOp::new(runner.clone()));
@@ -514,12 +610,9 @@ impl StreamWriter {
                     .add_output_stream(op as Arc<dyn OutputOperation>);
                 ssc.start()
                     .map_err(|e| StructuredError::Source(e.to_string()))?;
-                Ok(StreamingQuery::running(
-                    ssc.clone(),
-                    self.source.clone(),
-                    runner,
-                ))
+                StreamingQuery::running(ssc.clone(), self.source.clone(), runner)
             }
-        }
+        };
+        Ok(query.with_name(name))
     }
 }

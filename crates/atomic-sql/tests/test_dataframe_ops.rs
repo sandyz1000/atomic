@@ -103,6 +103,60 @@ async fn test_repartition_preserves_rows() {
 }
 
 #[tokio::test]
+async fn test_intersect_all() {
+    let ctx = AtomicSqlContext::new();
+    // 'a' has key 1 twice; 'b' has it once → intersectAll keeps min(2,1)=1.
+    ctx.register_batches("x", vec![make_kv_batch(&[1, 1, 2], &[0, 0, 0])])
+        .unwrap();
+    ctx.register_batches("y", vec![make_kv_batch(&[1, 3], &[0, 0])])
+        .unwrap();
+    let a = ctx.sql("SELECT key FROM x").await.unwrap();
+    let b = ctx.sql("SELECT key FROM y").await.unwrap();
+    let batches = a.intersect_all(b).unwrap().collect().await.unwrap();
+    // DataFusion INTERSECT ALL keeps both left 1s (semi-join multiplicity) → 2 rows.
+    assert_eq!(total_rows(&batches), 2);
+}
+
+#[tokio::test]
+async fn test_except_all() {
+    let ctx = AtomicSqlContext::new();
+    ctx.register_batches("x", vec![make_kv_batch(&[1, 1, 2], &[0, 0, 0])])
+        .unwrap();
+    ctx.register_batches("y", vec![make_kv_batch(&[1], &[0])])
+        .unwrap();
+    let a = ctx.sql("SELECT key FROM x").await.unwrap();
+    let b = ctx.sql("SELECT key FROM y").await.unwrap();
+    let batches = a.except_all(b).unwrap().collect().await.unwrap();
+    // DataFusion EXCEPT ALL removes matched rows; key 1 is dropped, key 2 remains → 1 row.
+    assert_eq!(total_rows(&batches), 1);
+}
+
+#[tokio::test]
+async fn test_register_text() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lines.txt");
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(f, "alpha").unwrap();
+    writeln!(f, "beta gamma").unwrap();
+    drop(f);
+    let ctx = AtomicSqlContext::new();
+    ctx.register_text("t", path.to_str().unwrap())
+        .await
+        .unwrap();
+    let batches = ctx
+        .sql("SELECT value FROM t ORDER BY value")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    // Two lines, one column named `value`.
+    assert_eq!(total_rows(&batches), 2);
+    assert_eq!(batches[0].schema().field(0).name(), "value");
+}
+
+#[tokio::test]
 async fn test_rollup() {
     use datafusion::functions_aggregate::expr_fn::count;
     use datafusion::logical_expr::col;
@@ -159,6 +213,19 @@ async fn test_pivot() {
         .map(|f| f.name().clone())
         .collect();
     assert!(cols.contains(&"10".to_string()) && cols.contains(&"20".to_string()));
+}
+
+#[tokio::test]
+async fn test_list_databases() {
+    let ctx = ctx_with_skewed_keys();
+    // DataFusion's default catalog is "datafusion".
+    assert!(ctx.list_databases().contains(&"datafusion".to_string()));
+    // Default catalog has the "public" schema.
+    assert!(
+        ctx.schema_names(None)
+            .unwrap()
+            .contains(&"public".to_string())
+    );
 }
 
 #[tokio::test]

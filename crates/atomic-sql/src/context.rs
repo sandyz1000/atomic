@@ -44,6 +44,7 @@ pub enum DataFormat {
     Csv,
     Parquet,
     Json,
+    Text,
     #[cfg(feature = "avro")]
     Avro,
 }
@@ -211,6 +212,31 @@ impl AtomicSqlContext {
         Ok(())
     }
 
+    /// Register a text file or directory as a single-column table (`value: Utf8`), one row per
+    /// line. Mirrors `DataFrameReader.text()`.
+    ///
+    /// Implemented over the CSV reader with a control-byte delimiter and no header, so each
+    /// line becomes one field. Lines containing a `0x01` byte would be mis-split, which does not
+    /// occur in ordinary text.
+    pub async fn register_text(&self, name: &str, path: &str) -> Result<()> {
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+        let schema = Schema::new(vec![Field::new("value", DataType::Utf8, true)]);
+        // The extension of the actual file path drives the reader's file matching; derive it so
+        // `.txt`, `.log`, extension-less, etc. all register.
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!(".{e}"))
+            .unwrap_or_default();
+        let options = CsvReadOptions::new()
+            .has_header(false)
+            .delimiter(0x01)
+            .file_extension(&ext)
+            .schema(&schema);
+        self.session.register_csv(name, path, options).await?;
+        Ok(())
+    }
+
     atomic_data::cfg_avro! {
         /// Register an Avro file or directory as a table named `name`. Requires the `avro`
         /// feature (forwards to DataFusion's Avro support).
@@ -258,6 +284,22 @@ impl AtomicSqlContext {
         Ok(schema.table_names().into_iter().collect())
     }
 
+    /// List the catalog names registered on this context. Mirrors `catalog.listDatabases()`
+    /// (DataFusion calls the top-level namespace a catalog).
+    pub fn list_databases(&self) -> Vec<String> {
+        self.session.catalog_names()
+    }
+
+    /// List the schema (namespace) names within `catalog`, or the default catalog when `None`.
+    pub fn schema_names(&self, catalog: Option<&str>) -> Result<Vec<String>> {
+        let name = catalog.unwrap_or("datafusion");
+        let cat = self
+            .session
+            .catalog(name)
+            .ok_or_else(|| AtomicSqlError::Internal(format!("catalog '{name}' not found")))?;
+        Ok(cat.schema_names())
+    }
+
     /// Directly read a data source by path, returning a lazy [`DataFrame`].
     /// Analogous to `spark.read.format(fmt).load(path)`.
     pub async fn read(&self, format: DataFormat, path: &str) -> Result<DataFrame> {
@@ -277,6 +319,9 @@ impl AtomicSqlContext {
                 self.session
                     .register_json(&name, path, JsonReadOptions::default())
                     .await?;
+            }
+            DataFormat::Text => {
+                self.register_text(&name, path).await?;
             }
             #[cfg(feature = "avro")]
             DataFormat::Avro => {

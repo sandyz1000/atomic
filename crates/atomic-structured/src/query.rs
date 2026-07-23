@@ -97,8 +97,11 @@ impl QueryRunner {
         Arc::new(QueryRunner { engine, sink })
     }
 
-    pub(crate) fn run_batch(&self, epoch: u64) -> StructuredResult<()> {
+    /// Process one micro-batch. Returns `true` when the batch produced output rows, which the
+    /// `AvailableNow` drain loop uses to detect an exhausted source.
+    pub(crate) fn run_batch(&self, epoch: u64) -> StructuredResult<bool> {
         let out = self.engine.process(epoch)?;
+        let had_output = out.iter().map(|b| b.num_rows()).sum::<usize>() > 0;
 
         // Exactly-once path: when the source exposes pending Kafka offsets, commit them
         // inside the sink's producer transaction instead of in a separate `post_commit`
@@ -106,12 +109,12 @@ impl QueryRunner {
         // a crash-restart neither re-produces the batch nor skips the source messages.
         // Offsets already committed inside the transaction — do NOT call post_commit.
         if self.commit_kafka_offsets(epoch, &out)? {
-            return Ok(());
+            return Ok(had_output);
         }
 
         self.sink.add_batch(epoch, &out)?;
         self.engine.post_commit(epoch);
-        Ok(())
+        Ok(had_output)
     }
 
     crate::cfg_kafka! {
@@ -153,6 +156,7 @@ impl OutputOperation for QueryOutputOp {
         Some(StreamingJob::new(time_ms, self.output_op_id, move || {
             runner
                 .run_batch(time_ms)
+                .map(|_| ())
                 .map_err(|e| StreamingError::Internal(e.to_string()))
         }))
     }
@@ -167,6 +171,8 @@ pub struct StreamingQuery {
     epoch: AtomicUsize,
     /// Timestamp of the last completed batch, in milliseconds since start.
     last_batch_ms: parking_lot::Mutex<Option<u64>>,
+    /// Optional user-assigned query name.
+    name: Option<String>,
 }
 
 impl StreamingQuery {
@@ -181,6 +187,7 @@ impl StreamingQuery {
             runner,
             epoch: AtomicUsize::new(0),
             last_batch_ms: parking_lot::Mutex::new(None),
+            name: None,
         }
     }
 
@@ -191,7 +198,19 @@ impl StreamingQuery {
             runner,
             epoch: AtomicUsize::new(0),
             last_batch_ms: parking_lot::Mutex::new(None),
+            name: None,
         }
+    }
+
+    /// Attach an optional query name (from `StreamWriter::query_name`).
+    pub(crate) fn with_name(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// The user-assigned query name, if any.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     /// Block until the query is stopped. Returns immediately for a `Once` query.
@@ -215,6 +234,21 @@ impl StreamingQuery {
     pub(crate) fn run_once(&self) -> StructuredResult<()> {
         self.runner.run_batch(0)?;
         *self.last_batch_ms.lock() = Some(0);
+        Ok(())
+    }
+
+    /// Drain the source: process batches until one yields no output (used by
+    /// `Trigger::AvailableNow`). Bounded by `max_batches` so a misbehaving source can't loop
+    /// forever.
+    pub(crate) fn run_available_now(&self, max_batches: u64) -> StructuredResult<()> {
+        for epoch in 0..max_batches {
+            let had_output = self.runner.run_batch(epoch)?;
+            self.epoch.store(epoch as usize + 1, Ordering::Relaxed);
+            *self.last_batch_ms.lock() = Some(epoch);
+            if !had_output {
+                break;
+            }
+        }
         Ok(())
     }
 

@@ -984,4 +984,10 @@ mod tests {
         let counts = rdd().histogram(&[1.0, 3.0, 5.0]).unwrap();
         assert_eq!(counts, vec![2, 3]);
     }
+
+    #[test]
+    fn test_approx_distinct_sd() {
+        // 5 distinct values; small-cardinality linear counting is exact here.
+        assert_eq!(rdd().count_approx_distinct_sd(0.05).unwrap(), 5);
+    }
 }
