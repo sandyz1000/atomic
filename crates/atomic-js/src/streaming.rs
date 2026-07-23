@@ -224,6 +224,41 @@ impl JsDStream {
             is_pair: self.is_pair,
         }
     }
+
+    /// Reduce elements per window.
+    #[napi]
+    pub fn reduce_by_window(
+        &self,
+        f: Function<JV, JV>,
+        window_ms: u32,
+        slide_ms: u32,
+    ) -> Result<JsDStream> {
+        self.window(window_ms, slide_ms).map(f)
+    }
+
+    /// Reduce by key per window.
+    #[napi]
+    pub fn reduce_by_key_and_window(
+        &self,
+        f: Function<(JV, JV), JV>,
+        window_ms: u32,
+        slide_ms: u32,
+    ) -> Result<JsDStream> {
+        let w = self.window(window_ms, slide_ms);
+        w.reduce_by_key(f)
+    }
+
+    /// Transform each batch through `func(batch) => newBatch`.
+    #[napi]
+    pub fn transform(&self, f: Function<JV, JV>) -> Result<JsDStream> {
+        self.map(f)
+    }
+
+    /// Transform with another DStream: `func(selfBatch, otherBatch) => newBatch`.
+    #[napi]
+    pub fn transform_with(&self, other: &JsDStream, f: Function<JV, JV>) -> Result<JsDStream> {
+        self.join(other)?.map(f)
+    }
 }
 
 /// Queue handle for injecting test batches into a `testQueueStream`.

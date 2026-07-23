@@ -422,4 +422,129 @@ impl PyRdd {
             Arc::clone(&self.context),
         ))
     }
+
+    /// Pipe each partition through `sh -c command`, feeding each element as a
+    /// stdin line and collecting stdout lines as the new elements.
+    ///
+    /// The command runs once per partition. A failing command produces no output
+    /// for that partition.
+    pub fn pipe(&self, py: Python, command: &str) -> PyResult<PyRdd> {
+        let np = self.num_partitions.max(1);
+        let total = self.elements.len();
+        let mut elements: Vec<Py<PyAny>> = Vec::new();
+        for (start, end) in super::slice_positions(total, np) {
+            let slice = &self.elements[start..end];
+            let mut child = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                for elem in slice {
+                    let line = elem
+                        .bind(py)
+                        .str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    let _ = writeln!(stdin, "{}", line);
+                }
+            }
+            if let Ok(output) = child.wait_with_output()
+                && output.status.success()
+            {
+                for line in String::from_utf8_lossy(&output.stdout).lines() {
+                    elements.push(line.to_string().into_pyobject(py)?.into_any().unbind());
+                }
+            }
+        }
+        Ok(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Zip elements with their 0-based index.
+    ///
+    /// Returns `(element, index)` pairs where indices are assigned in partition
+    /// order: partition `p` starts at the sum of sizes of lower-numbered partitions.
+    pub fn zip_with_index(&self, py: Python) -> PyRdd {
+        let elements: Vec<Py<PyAny>> = self
+            .elements
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let idx = i.into_pyobject(py).unwrap().into_any().unbind();
+                PyTuple::new(py, [e.bind(py).clone(), idx.bind(py).clone()])
+                    .map(|t| t.into_any().unbind())
+                    .unwrap_or_else(|_| py.None())
+            })
+            .collect();
+        PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context))
+    }
+
+    /// Zip elements with unique IDs (not contiguous, but no count pass needed).
+    ///
+    /// Element `i` of partition `p` gets id `p + i * num_partitions`.
+    pub fn zip_with_unique_id(&self, py: Python) -> PyRdd {
+        let np = self.num_partitions.max(1);
+        let total = self.elements.len();
+        let mut elements = Vec::new();
+        for (part_idx, (start, end)) in super::slice_positions(total, np).enumerate() {
+            for (i, elem) in self.elements[start..end].iter().enumerate() {
+                let id = (part_idx + i * np) as u64;
+                let id_obj = id.into_pyobject(py).unwrap().into_any().unbind();
+                let pair = PyTuple::new(py, [elem.bind(py).clone(), id_obj.bind(py).clone()])
+                    .map(|t| t.into_any().unbind())
+                    .unwrap_or_else(|_| py.None());
+                elements.push(pair);
+            }
+        }
+        PyRdd::from_data(py, elements, self.num_partitions, Arc::clone(&self.context))
+    }
+
+    /// Split the RDD into several RDDs by `weights`, returning a list of RDDs.
+    ///
+    /// Weights are normalised; each element is assigned to exactly one output by
+    /// drawing a deterministic sample from Python's `random.Random(seed)` per element.
+    /// The returned list has the same length as `weights`.
+    #[pyo3(signature = (weights, seed=0u64))]
+    pub fn random_split(&self, py: Python, weights: Vec<f64>, seed: u64) -> PyResult<Vec<PyRdd>> {
+        let total: f64 = weights.iter().copied().filter(|w| *w > 0.0).sum();
+        if total <= 0.0 || weights.is_empty() {
+            return Ok(vec![]);
+        }
+        // Cumulative bands over [0, 1).
+        let mut bounds: Vec<f64> = Vec::with_capacity(weights.len() + 1);
+        let mut acc = 0.0f64;
+        bounds.push(0.0f64);
+        for w in &weights {
+            acc += w.max(0.0) / total;
+            bounds.push(acc);
+        }
+        let random_mod = PyModule::import(py, "random")?;
+        let mut buckets: Vec<Vec<Py<PyAny>>> = (0..weights.len()).map(|_| Vec::new()).collect();
+        for (i, elem) in self.elements.iter().enumerate() {
+            let s = seed ^ (i as u64);
+            let rng = random_mod.call_method1("Random", (s.into_pyobject(py)?,))?;
+            let roll: f64 = rng.call_method0("random")?.extract()?;
+            for k in 0..weights.len() {
+                if roll >= bounds[k] && roll < bounds[k + 1] {
+                    buckets[k].push(elem.clone_ref(py));
+                    break;
+                }
+            }
+        }
+        Ok(buckets
+            .into_iter()
+            .map(|elems| {
+                PyRdd::from_data(py, elems, self.num_partitions, Arc::clone(&self.context))
+            })
+            .collect())
+    }
 }

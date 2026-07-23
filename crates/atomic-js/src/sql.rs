@@ -242,6 +242,44 @@ impl JsDataFrame {
     /// @param columns - Array of column name strings.
     ///
     /// @example
+    /// Equi-join with another DataFrame on `leftOn` = `rightOn`.
+    ///
+    /// `how` is one of `inner`, `left`, `right`, `full`/`outer`, `semi`, `anti`.
+    ///
+    /// ```typescript
+    /// const joined = orders.join(customers, "inner", ["customer_id"], ["id"]);
+    /// ```
+    #[napi]
+    pub fn join(
+        &self,
+        other: &JsDataFrame,
+        how: String,
+        left_on: Vec<String>,
+        right_on: Vec<String>,
+    ) -> Result<JsDataFrame> {
+        use datafusion::prelude::JoinType;
+        let jt = match how.to_ascii_lowercase().as_str() {
+            "inner" => JoinType::Inner,
+            "left" => JoinType::Left,
+            "right" => JoinType::Right,
+            "full" | "outer" => JoinType::Full,
+            "semi" | "leftsemi" => JoinType::LeftSemi,
+            "anti" | "leftanti" => JoinType::LeftAnti,
+            _ => return Err(Error::from_reason(format!("unknown join type: {how}"))),
+        };
+        let left: Vec<&str> = left_on.iter().map(String::as_str).collect();
+        let right: Vec<&str> = right_on.iter().map(String::as_str).collect();
+        let df = self
+            .inner
+            .clone()
+            .join(other.inner.clone(), jt, &left, &right, None)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
     /// ```typescript
     /// const slim = df.select(["id", "name"]);
     /// ```
@@ -339,6 +377,376 @@ impl JsDataFrame {
         run_sql_async(async move { df.write_csv(&path, Default::default(), None).await })
             .map(|_| ())
             .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))
+    }
+
+    /// Return the first `n` rows as an array of objects.
+    #[napi]
+    pub fn head(&self, n: u32) -> Result<Vec<serde_json::Value>> {
+        let df = self
+            .inner
+            .clone()
+            .limit(0, Some(n as usize))
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let batches = run_sql_async(df.collect())
+            .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))?;
+        Ok(batches_to_json_rows(&batches))
+    }
+
+    /// Alias for `filter(expr)`.
+    #[napi]
+    pub fn where_(&self, expr: String) -> Result<JsDataFrame> {
+        self.filter(expr)
+    }
+
+    /// Return a new DataFrame without the named columns.
+    #[napi]
+    pub fn drop(&self, cols: Vec<String>) -> Result<JsDataFrame> {
+        let all: Vec<String> = self
+            .inner
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .filter(|n| !cols.contains(n))
+            .collect();
+        self.select(all)
+    }
+
+    /// Remove duplicate rows.
+    #[napi]
+    pub fn distinct(&self) -> Result<JsDataFrame> {
+        let df = self
+            .inner
+            .clone()
+            .distinct()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Union with another DataFrame (same schema required).
+    #[napi]
+    pub fn union(&self, other: &JsDataFrame) -> Result<JsDataFrame> {
+        let df = self
+            .inner
+            .clone()
+            .union(other.inner.clone())
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Descriptive statistics via SQL DESCRIBE.
+    #[napi]
+    pub fn describe(&self) -> Result<JsDataFrame> {
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        session
+            .register_table(&view, df.into_view())
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let result_df = run_sql_async(async move {
+            let r = session.sql(&format!("DESCRIBE {view}")).await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Remove duplicate rows, optionally within the given columns.
+    #[napi]
+    pub fn drop_duplicates(&self, cols: Option<Vec<String>>) -> Result<JsDataFrame> {
+        let result_df = match cols {
+            Some(ref columns) if !columns.is_empty() => {
+                let view = tmp_view_name();
+                let cols_str = columns.join(", ");
+                let session = self.session.clone();
+                let df = self.inner.clone();
+                session
+                    .register_table(&view, df.into_view())
+                    .map_err(|e| Error::from_reason(e.to_string()))?;
+                run_sql_async(async move {
+                    let result = session
+                        .sql(&format!("SELECT DISTINCT ON ({cols_str}) * FROM {view}"))
+                        .await;
+                    let _ = session.deregister_table(&view);
+                    result
+                })
+                .map_err(|e: datafusion::error::DataFusionError| {
+                    Error::from_reason(e.to_string())
+                })?
+            }
+            _ => self
+                .inner
+                .clone()
+                .distinct()
+                .map_err(|e| Error::from_reason(e.to_string()))?,
+        };
+        Ok(JsDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// List of column names.
+    #[napi]
+    pub fn columns(&self) -> Vec<String> {
+        self.inner
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    }
+
+    /// List of `[column_name, dtype_string]` pairs.
+    #[napi]
+    pub fn dtypes(&self) -> Vec<Vec<String>> {
+        self.inner
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| vec![f.name().clone(), f.data_type().to_string()])
+            .collect()
+    }
+
+    /// Intersect with another DataFrame (same schema), deduplicated (Spark `intersect`).
+    #[napi]
+    pub fn intersect(&self, other: &JsDataFrame) -> Result<JsDataFrame> {
+        // DataFusion's `intersect` keeps duplicates (INTERSECT ALL); Spark's is distinct.
+        let df = self
+            .inner
+            .clone()
+            .intersect_distinct(other.inner.clone())
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Set difference — distinct rows in self not in other (Spark `except`).
+    #[napi]
+    pub fn except(&self, other: &JsDataFrame) -> Result<JsDataFrame> {
+        // DataFusion's `except` keeps duplicates (EXCEPT ALL); Spark's is distinct.
+        let df = self
+            .inner
+            .clone()
+            .except_distinct(other.inner.clone())
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Random sample at the given fraction (0.0 to 1.0).
+    #[napi]
+    pub fn sample(&self, fraction: f64) -> Result<JsDataFrame> {
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        if let Err(e) = session.register_table(&view, df.into_view()) {
+            return Err(Error::from_reason(e.to_string()));
+        }
+        let result_df = run_sql_async(async move {
+            let r = session
+                .sql(&format!("SELECT * FROM {view} WHERE random() < {fraction}"))
+                .await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Fill null values in a column with a numeric value.
+    #[napi]
+    pub fn fill_null(&self, col: String, value: f64) -> Result<JsDataFrame> {
+        let view = tmp_view_name();
+        let all_cols: Vec<String> = self
+            .inner
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        let sel: Vec<String> = all_cols
+            .iter()
+            .map(|c| {
+                if *c == col {
+                    format!("COALESCE({col}, {value}) AS {col}")
+                } else {
+                    c.clone()
+                }
+            })
+            .collect();
+        let cols_str = sel.join(", ");
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        if let Err(e) = session.register_table(&view, df.into_view()) {
+            return Err(Error::from_reason(e.to_string()));
+        }
+        let result_df = run_sql_async(async move {
+            let r = session.sql(&format!("SELECT {cols_str} FROM {view}")).await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Drop rows with nulls in any of the given columns.
+    #[napi]
+    pub fn drop_null(&self, cols: Vec<String>) -> Result<JsDataFrame> {
+        if cols.is_empty() {
+            return Ok(JsDataFrame {
+                inner: self.inner.clone(),
+                session: self.session.clone(),
+            });
+        }
+        let view = tmp_view_name();
+        let cond = cols
+            .iter()
+            .map(|c| format!("{c} IS NOT NULL"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        if let Err(e) = session.register_table(&view, df.into_view()) {
+            return Err(Error::from_reason(e.to_string()));
+        }
+        let result_df = run_sql_async(async move {
+            let r = session
+                .sql(&format!("SELECT * FROM {view} WHERE {cond}"))
+                .await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Pearson correlation between two numeric columns.
+    #[napi]
+    pub fn corr(&self, col1: String, col2: String) -> Result<f64> {
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        if let Err(e) = session.register_table(&view, df.into_view()) {
+            return Err(Error::from_reason(e.to_string()));
+        }
+        let batches = run_sql_async(async move {
+            session
+                .sql(&format!("SELECT CORR({col1}, {col2}) FROM {view}"))
+                .await?
+                .collect()
+                .await
+        })
+        .map_err(|e| Error::from_reason(e.to_string()))?;
+        if let Some(batch) = batches.first()
+            && batch.num_rows() > 0
+            && batch.num_columns() > 0
+        {
+            return Ok(arrow_scalar_to_json(batch.column(0).as_ref(), 0)
+                .as_f64()
+                .unwrap_or(f64::NAN));
+        }
+        Ok(f64::NAN)
+    }
+
+    /// Population covariance between two numeric columns.
+    #[napi]
+    pub fn cov(&self, col1: String, col2: String) -> Result<f64> {
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        if let Err(e) = session.register_table(&view, df.into_view()) {
+            return Err(Error::from_reason(e.to_string()));
+        }
+        let batches = run_sql_async(async move {
+            session
+                .sql(&format!("SELECT COVAR_POP({col1}, {col2}) FROM {view}"))
+                .await?
+                .collect()
+                .await
+        })
+        .map_err(|e| Error::from_reason(e.to_string()))?;
+        if let Some(batch) = batches.first()
+            && batch.num_rows() > 0
+            && batch.num_columns() > 0
+        {
+            return Ok(arrow_scalar_to_json(batch.column(0).as_ref(), 0)
+                .as_f64()
+                .unwrap_or(f64::NAN));
+        }
+        Ok(f64::NAN)
+    }
+
+    /// Cross-tabulation of two columns via SQL.
+    #[napi]
+    pub fn crosstab(&self, col1: String, col2: String) -> Result<JsDataFrame> {
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        if let Err(e) = session.register_table(&view, df.into_view()) {
+            return Err(Error::from_reason(e.to_string()));
+        }
+        let result_df = run_sql_async(async move {
+            let r = session
+                .sql(&format!(
+                    "SELECT {col1}, {col2}, COUNT(*) AS cnt FROM {view} GROUP BY {col1}, {col2}"
+                ))
+                .await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Return the last `n` rows.
+    #[napi]
+    pub fn tail(&self, n: u32) -> Result<Vec<serde_json::Value>> {
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        let total =
+            run_sql_async(df.clone().count()).map_err(|e| Error::from_reason(e.to_string()))?;
+        let offset = total.saturating_sub(n as usize);
+        if let Err(e) = session.register_table(&view, df.into_view()) {
+            return Err(Error::from_reason(e.to_string()));
+        }
+        let result = run_sql_async(async move {
+            let batches = session
+                .sql(&format!("SELECT * FROM {view} LIMIT {n} OFFSET {offset}"))
+                .await?
+                .collect()
+                .await?;
+            Ok::<_, datafusion::error::DataFusionError>(batches)
+        })
+        .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(batches_to_json_rows(&result))
     }
 }
 

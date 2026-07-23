@@ -5,7 +5,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde_json::Value as JsonValue;
 
-use super::JsRdd;
+use super::{JsRdd, SimpleLcg};
 
 #[napi]
 impl JsRdd {
@@ -323,5 +323,114 @@ impl JsRdd {
             .cloned()
             .collect();
         JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context))
+    }
+
+    /// Pipe each partition through `sh -c command`, feeding each element as a
+    /// stdin line and collecting stdout lines as the new elements.
+    #[napi]
+    pub fn pipe(&self, command: String) -> Result<JsRdd> {
+        let np = self.num_partitions.max(1);
+        let total = self.elements.len();
+        let mut elements: Vec<JsonValue> = Vec::new();
+        for (start, end) in super::slice_positions(total, np) {
+            let slice = &self.elements[start..end];
+            let mut child = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&command)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|e| Error::from_reason(format!("pipe: spawn failed: {e}")))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                for elem in slice {
+                    let line = match elem {
+                        JsonValue::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    let _ = writeln!(stdin, "{}", line);
+                }
+            }
+            if let Ok(output) = child.wait_with_output()
+                && output.status.success()
+            {
+                for line in String::from_utf8_lossy(&output.stdout).lines() {
+                    elements.push(JsonValue::String(line.to_string()));
+                }
+            }
+        }
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Zip elements with their 0-based index, producing `[element, index]` pairs.
+    #[napi]
+    pub fn zip_with_index(&self) -> JsRdd {
+        let elements: Vec<JsonValue> = self
+            .elements
+            .iter()
+            .enumerate()
+            .map(|(i, e)| serde_json::json!([e, i]))
+            .collect();
+        JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context))
+    }
+
+    /// Zip elements with unique IDs (not contiguous, but gap-free per partition).
+    ///
+    /// Element `i` of partition `p` gets id `p + i * numPartitions`.
+    #[napi]
+    pub fn zip_with_unique_id(&self) -> JsRdd {
+        let np = self.num_partitions.max(1);
+        let total = self.elements.len();
+        let mut elements = Vec::new();
+        for (part_idx, (start, end)) in super::slice_positions(total, np).enumerate() {
+            for (i, elem) in self.elements[start..end].iter().enumerate() {
+                let id = (part_idx + i * np) as u64;
+                elements.push(serde_json::json!([elem, id]));
+            }
+        }
+        JsRdd::from_data(elements, self.num_partitions, Arc::clone(&self.context))
+    }
+
+    /// Split the RDD into several RDDs by `weights`, returning an array of RDDs.
+    ///
+    /// Weights are normalised to sum to 1; each element is placed into exactly
+    /// one output by a deterministic `seed`-seeded random draw.
+    #[napi]
+    pub fn random_split(&self, weights: Vec<f64>, seed: Option<u32>) -> Vec<JsRdd> {
+        if weights.is_empty() {
+            return vec![];
+        }
+        let total: f64 = weights.iter().copied().filter(|w| *w > 0.0).sum();
+        if total <= 0.0 {
+            return vec![];
+        }
+        let mut bounds: Vec<f64> = Vec::with_capacity(weights.len() + 1);
+        let mut acc = 0.0f64;
+        bounds.push(0.0f64);
+        for w in &weights {
+            acc += w.max(0.0) / total;
+            bounds.push(acc);
+        }
+        let s = seed.unwrap_or(0) as u64;
+        let mut buckets: Vec<Vec<JsonValue>> = vec![Vec::new(); weights.len()];
+        for (i, elem) in self.elements.iter().enumerate() {
+            let mut rng = SimpleLcg::new(s ^ (i as u64));
+            let roll = rng.next_f64();
+            for k in 0..weights.len() {
+                if roll >= bounds[k] && roll < bounds[k + 1] {
+                    buckets[k].push(elem.clone());
+                    break;
+                }
+            }
+        }
+        buckets
+            .into_iter()
+            .map(|elems| JsRdd::from_data(elems, self.num_partitions, Arc::clone(&self.context)))
+            .collect()
     }
 }

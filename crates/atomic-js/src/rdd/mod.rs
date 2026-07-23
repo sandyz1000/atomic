@@ -192,3 +192,24 @@ impl JsRdd {
         }
     }
 }
+
+/// Tiny LCG for reproducible random sampling — no `rand` dependency needed
+/// in the binding crate.
+pub(crate) struct SimpleLcg {
+    state: u64,
+}
+
+impl SimpleLcg {
+    pub(crate) fn new(seed: u64) -> Self {
+        Self { state: seed | 1 }
+    }
+
+    /// Uniform [0, 1) from the top 53 bits.
+    pub(crate) fn next_f64(&mut self) -> f64 {
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.state >> 11) as f64 / (1u64 << 53) as f64
+    }
+}

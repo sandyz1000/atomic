@@ -62,7 +62,7 @@ pub fn exec_parallel(
     }
 
     let np = num_partitions.max(1);
-    let chunk_size = (elements.len() + np - 1) / np;
+    let chunk_size = elements.len().div_ceil(np);
     let fn_bytes_obj = PyBytes::new(py, &fn_bytes);
 
     // Build per-partition lists and repeat fn_bytes for each.

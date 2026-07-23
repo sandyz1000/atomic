@@ -253,6 +253,47 @@ impl PyDataFrame {
         })
     }
 
+    /// Equi-join with another DataFrame on `left_on` = `right_on`.
+    ///
+    /// `how` is one of `inner`, `left`, `right`, `full`/`outer`, `semi`, `anti`.
+    ///
+    /// ```python
+    /// joined = orders.join(customers, "inner", ["customer_id"], ["id"])
+    /// ```
+    pub fn join(
+        &self,
+        other: &PyDataFrame,
+        how: &str,
+        left_on: Vec<String>,
+        right_on: Vec<String>,
+    ) -> PyResult<Self> {
+        use datafusion::prelude::JoinType;
+        let jt = match how.to_ascii_lowercase().as_str() {
+            "inner" => JoinType::Inner,
+            "left" => JoinType::Left,
+            "right" => JoinType::Right,
+            "full" | "outer" => JoinType::Full,
+            "semi" | "leftsemi" => JoinType::LeftSemi,
+            "anti" | "leftanti" => JoinType::LeftAnti,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown join type: {other}"
+                )));
+            }
+        };
+        let left: Vec<&str> = left_on.iter().map(String::as_str).collect();
+        let right: Vec<&str> = right_on.iter().map(String::as_str).collect();
+        let df = self
+            .inner
+            .clone()
+            .join(other.inner.clone(), jt, &left, &right, None)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
     /// Keep only the specified columns.
     ///
     /// ```python
@@ -389,6 +430,450 @@ impl PyDataFrame {
         let py_bytes = pyo3::types::PyBytes::new(py, &ipc_bytes);
         let reader = pa_ipc.call_method1("open_file", (py_bytes,))?;
         Ok(reader.call_method0("read_all")?.into_any().unbind())
+    }
+
+    /// Return the first `n` rows as a list of dicts (action).
+    pub fn head(&self, py: Python<'_>, n: usize) -> PyResult<Py<PyAny>> {
+        let df = self
+            .inner
+            .clone()
+            .limit(0, Some(n))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let batches = run_sql_async(df.collect())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        batches_to_py_list(py, &batches)
+    }
+
+    /// Alias for `filter(expr)`.
+    pub fn r#where(&self, expr: &str) -> PyResult<Self> {
+        self.filter(expr)
+    }
+
+    /// Return a new DataFrame without the specified columns.
+    pub fn drop(&self, cols: Vec<String>) -> PyResult<Self> {
+        let all: Vec<String> = self
+            .inner
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .filter(|n| !cols.contains(n))
+            .collect();
+        self.select(all)
+    }
+
+    /// Return distinct rows (de-duplicate).
+    pub fn distinct(&self) -> PyResult<Self> {
+        let df = self
+            .inner
+            .clone()
+            .distinct()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Return the union of two DataFrames (they must have the same schema).
+    pub fn union(&self, other: &PyDataFrame) -> PyResult<Self> {
+        let df = self
+            .inner
+            .clone()
+            .union(other.inner.clone())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Descriptive statistics (count, mean, std, min, 25%, 50%, 75%, max)
+    /// for numeric columns. Returns a new DataFrame.
+    pub fn describe(&self) -> PyResult<Self> {
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        session
+            .register_table(&view, df.into_view())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let result_df = run_sql_async(async move {
+            let r = session.sql(&format!("DESCRIBE {view}")).await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e: datafusion::error::DataFusionError| {
+            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+        })?;
+        Ok(PyDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Remove duplicate rows, optionally considering only the given columns.
+    #[pyo3(signature = (cols=None))]
+    pub fn drop_duplicates(&self, cols: Option<Vec<String>>) -> PyResult<Self> {
+        let result_df = match cols {
+            Some(ref columns) if !columns.is_empty() => {
+                let view = tmp_view_name();
+                let cols_str = columns.join(", ");
+                let session = self.session.clone();
+                let df = self.inner.clone();
+                session
+                    .register_table(&view, df.into_view())
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                run_sql_async(async move {
+                    let result = session
+                        .sql(&format!("SELECT DISTINCT ON ({cols_str}) * FROM {view}"))
+                        .await;
+                    let _ = session.deregister_table(&view);
+                    result
+                })
+                .map_err(|e: datafusion::error::DataFusionError| {
+                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+                })?
+            }
+            _ => self
+                .inner
+                .clone()
+                .distinct()
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?,
+        };
+        Ok(PyDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// List of column names.
+    pub fn columns(&self) -> Vec<String> {
+        self.inner
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    }
+
+    /// List of `(column_name, dtype_string)` pairs.
+    pub fn dtypes(&self) -> Vec<(String, String)> {
+        self.inner
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| (f.name().clone(), f.data_type().to_string()))
+            .collect()
+    }
+
+    /// Intersect with another DataFrame (same schema).
+    ///
+    /// Returns rows that appear in both DataFrames (deduplicated).
+    pub fn intersect(&self, other: &PyDataFrame) -> PyResult<Self> {
+        // DataFusion's `intersect` keeps duplicates (INTERSECT ALL); Spark's `intersect` is
+        // distinct, so use `intersect_distinct`.
+        let df = self
+            .inner
+            .clone()
+            .intersect_distinct(other.inner.clone())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Set difference — rows in `self` that are not in `other` (deduplicated).
+    pub fn except(&self, other: &PyDataFrame) -> PyResult<Self> {
+        // DataFusion's `except` keeps duplicates (EXCEPT ALL); Spark's `except` is distinct.
+        let df = self
+            .inner
+            .clone()
+            .except_distinct(other.inner.clone())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Random sample at the given fraction (0.0 to 1.0).
+    ///
+    /// The returned row count is probabilistic, not exact.
+    pub fn sample(&self, fraction: f64) -> PyResult<Self> {
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        if let Err(e) = session.register_table(&view, df.into_view()) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string()));
+        }
+        let result_df = run_sql_async(async move {
+            let r = session
+                .sql(&format!("SELECT * FROM {view} WHERE random() < {fraction}"))
+                .await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e: datafusion::error::DataFusionError| {
+            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+        })?;
+        Ok(PyDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Fill null values in a numeric column with a replacement value.
+    ///
+    /// Non-null values in the column are left unchanged.
+    pub fn fill_null(&self, col: &str, value: f64) -> PyResult<Self> {
+        let view = tmp_view_name();
+        let all_cols: Vec<String> = self
+            .inner
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        let sel: Vec<String> = all_cols
+            .iter()
+            .map(|c| {
+                if *c == col {
+                    format!("COALESCE({col}, {value}) AS {col}")
+                } else {
+                    c.clone()
+                }
+            })
+            .collect();
+        let cols_str = sel.join(", ");
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        let result_df = run_sql_async(async move {
+            session.register_table(&view, df.into_view())?;
+            let r = session.sql(&format!("SELECT {cols_str} FROM {view}")).await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e: datafusion::error::DataFusionError| {
+            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+        })?;
+        Ok(PyDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Drop rows that contain null in any of the specified columns.
+    pub fn drop_null(&self, cols: Vec<String>) -> PyResult<Self> {
+        if cols.is_empty() {
+            return Ok(PyDataFrame {
+                inner: self.inner.clone(),
+                session: self.session.clone(),
+            });
+        }
+        let view = tmp_view_name();
+        let cond = cols
+            .iter()
+            .map(|c| format!("{c} IS NOT NULL"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        let result_df = run_sql_async(async move {
+            session.register_table(&view, df.into_view())?;
+            let r = session
+                .sql(&format!("SELECT * FROM {view} WHERE {cond}"))
+                .await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e: datafusion::error::DataFusionError| {
+            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+        })?;
+        Ok(PyDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Pearson correlation coefficient between two numeric columns.
+    ///
+    /// Returns `NaN` when the correlation is undefined (empty input or zero variance).
+    pub fn corr(&self, col1: &str, col2: &str) -> PyResult<f64> {
+        use datafusion::arrow::array::{Array, Float64Array};
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        let col1 = col1.to_string();
+        let col2 = col2.to_string();
+        let result = run_sql_async(async move {
+            session.register_table(&view, df.into_view())?;
+            let batches = session
+                .sql(&format!("SELECT CORR({col1}, {col2}) FROM {view}"))
+                .await?
+                .collect()
+                .await?;
+            let _ = session.deregister_table(&view);
+            Ok::<_, datafusion::error::DataFusionError>(batches)
+        })
+        .map_err(|e: datafusion::error::DataFusionError| {
+            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+        })?;
+        for batch in &result {
+            if batch.num_rows() > 0 && batch.num_columns() > 0 {
+                let arr = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err("expected f64 result")
+                    })?;
+                if arr.is_valid(0) {
+                    return Ok(arr.value(0));
+                }
+            }
+        }
+        Ok(f64::NAN)
+    }
+
+    /// Population covariance between two numeric columns.
+    ///
+    /// Returns `NaN` when the covariance is undefined.
+    pub fn cov(&self, col1: &str, col2: &str) -> PyResult<f64> {
+        use datafusion::arrow::array::{Array, Float64Array};
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        let col1 = col1.to_string();
+        let col2 = col2.to_string();
+        let result = run_sql_async(async move {
+            session.register_table(&view, df.into_view())?;
+            let batches = session
+                .sql(&format!("SELECT COVAR_POP({col1}, {col2}) FROM {view}"))
+                .await?
+                .collect()
+                .await?;
+            let _ = session.deregister_table(&view);
+            Ok::<_, datafusion::error::DataFusionError>(batches)
+        })
+        .map_err(|e: datafusion::error::DataFusionError| {
+            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+        })?;
+        for batch in &result {
+            if batch.num_rows() > 0 && batch.num_columns() > 0 {
+                let arr = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err("expected f64 result")
+                    })?;
+                if arr.is_valid(0) {
+                    return Ok(arr.value(0));
+                }
+            }
+        }
+        Ok(f64::NAN)
+    }
+
+    /// Cross-tabulation (contingency table) of two columns.
+    ///
+    /// Returns a DataFrame where each row corresponds to a distinct value of `col1`,
+    /// each column (after the first) corresponds to a distinct value of `col2`,
+    /// and cells contain the pair count.
+    pub fn crosstab(&self, col1: &str, col2: &str) -> PyResult<Self> {
+        let col1 = col1.to_string();
+        let col2 = col2.to_string();
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        if let Err(e) = session.register_table(&view, df.into_view()) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string()));
+        }
+        let result_df = run_sql_async(async move {
+            let r = session
+                .sql(&format!(
+                    "SELECT {col1}, {col2}, COUNT(*) AS cnt FROM {view} GROUP BY {col1}, {col2}"
+                ))
+                .await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e: datafusion::error::DataFusionError| {
+            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+        })?;
+        Ok(PyDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Return the last `n` rows as a list of dicts (action).
+    pub fn tail(&self, py: Python<'_>, n: usize) -> PyResult<Py<PyAny>> {
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        let total = run_sql_async(df.clone().count())
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let offset = total.saturating_sub(n);
+        let result = run_sql_async(async move {
+            session.register_table(&view, df.into_view())?;
+            let batches = session
+                .sql(&format!("SELECT * FROM {view} LIMIT {n} OFFSET {offset}"))
+                .await?
+                .collect()
+                .await?;
+            let _ = session.deregister_table(&view);
+            Ok::<_, datafusion::error::DataFusionError>(batches)
+        })
+        .map_err(|e: datafusion::error::DataFusionError| {
+            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+        })?;
+        batches_to_py_list(py, &result)
+    }
+
+    /// Repartition into `n` partitions using round-robin distribution.
+    pub fn repartition(&self, n: usize) -> PyResult<Self> {
+        use datafusion::prelude::Partitioning;
+        let df = self
+            .inner
+            .clone()
+            .repartition(Partitioning::RoundRobinBatch(n))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Coalesce into `n` partitions using round-robin repartition.
+    pub fn coalesce(&self, n: usize) -> PyResult<Self> {
+        use datafusion::prelude::Partitioning;
+        let df = self
+            .inner
+            .clone()
+            .repartition(Partitioning::RoundRobinBatch(n))
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Return the query plan as a formatted string.
+    ///
+    /// `verbose` — include physical plan details.
+    /// `analyze` — run the query and include execution metrics.
+    pub fn explain(&self, verbose: bool, analyze: bool) -> PyResult<Self> {
+        let df = self
+            .inner
+            .clone()
+            .explain(verbose, analyze)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -776,7 +1261,8 @@ fn python_dicts_to_batches(
                 }
                 Arc::new(b.finish())
             }
-            DataType::Utf8 | _ => {
+            // Utf8 and any other type fall back to a string column.
+            _ => {
                 let mut b = StringBuilder::new();
                 for row in rows {
                     let dict = row.bind(py).cast::<pyo3::types::PyDict>()?;

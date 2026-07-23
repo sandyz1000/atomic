@@ -200,6 +200,68 @@ impl JsRdd {
         ))
     }
 
+    /// Sum the values for each key, returning `[key, sum]`. Driver-side numeric reduction.
+    #[napi]
+    pub fn sum_values(&self) -> Result<JsRdd> {
+        self.reduce_values(|acc, v| {
+            let sum = acc.as_f64().unwrap_or(0.0) + v.as_f64().unwrap_or(0.0);
+            number_json(sum)
+        })
+    }
+
+    /// Keep the maximum value for each key, returning `[key, max]`.
+    #[napi]
+    pub fn max_values(&self) -> Result<JsRdd> {
+        self.reduce_values(|acc, v| {
+            if Self::json_compare(&v, &acc) == std::cmp::Ordering::Greater {
+                v
+            } else {
+                acc
+            }
+        })
+    }
+
+    /// Keep the minimum value for each key, returning `[key, min]`.
+    #[napi]
+    pub fn min_values(&self) -> Result<JsRdd> {
+        self.reduce_values(|acc, v| {
+            if Self::json_compare(&v, &acc) == std::cmp::Ordering::Less {
+                v
+            } else {
+                acc
+            }
+        })
+    }
+
+    /// Count the values per key, returning `[key, count]`.
+    #[napi]
+    pub fn count_values(&self) -> Result<JsRdd> {
+        let source = self.collect_rows()?;
+        let mut counts: HashMap<String, (JsonValue, i64)> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for pair in &source {
+            let (k, _) = Self::split_pair(pair)?;
+            let key_str = Self::key_to_string(&k)?;
+            counts
+                .entry(key_str.clone())
+                .and_modify(|(_, c)| *c += 1)
+                .or_insert_with(|| {
+                    order.push(key_str.clone());
+                    (k, 1)
+                });
+        }
+        let elements: Vec<JsonValue> = order
+            .into_iter()
+            .filter_map(|ks| counts.remove(&ks))
+            .map(|(k, c)| JsonValue::Array(vec![k, JsonValue::from(c)]))
+            .collect();
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
     /// Extract the key from each `[key, value]` pair.
     #[napi]
     pub fn keys(&self) -> Result<JsRdd> {
@@ -436,5 +498,477 @@ impl JsRdd {
             self.num_partitions,
             Arc::clone(&self.context),
         ))
+    }
+
+    /// Right outer join: every right key is preserved.
+    /// Emits `[key, [left_value, right_value]]` for matched keys and
+    /// `[key, [null, right_value]]` for unmatched right keys.
+    #[napi]
+    pub fn right_outer_join(&self, other: &JsRdd) -> Result<JsRdd> {
+        let mut left_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
+        for elem in &self.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("right_outer_join: requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "right_outer_join: requires 2-element arrays",
+                ));
+            }
+            let key_str = Self::key_to_string(&pair[0])?;
+            left_map.entry(key_str).or_default().push(pair[1].clone());
+        }
+        let mut elements = Vec::new();
+        for elem in &other.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("right_outer_join: requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "right_outer_join: requires 2-element arrays",
+                ));
+            }
+            let key = &pair[0];
+            let right_val = &pair[1];
+            let key_str = Self::key_to_string(key)?;
+            match left_map.get(&key_str) {
+                Some(left_vals) => {
+                    for lv in left_vals {
+                        elements.push(serde_json::json!([key, [lv, right_val]]));
+                    }
+                }
+                None => {
+                    elements.push(serde_json::json!([key, [JsonValue::Null, right_val]]));
+                }
+            }
+        }
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Full outer join: all keys from both sides preserved.
+    #[napi]
+    pub fn full_outer_join(&self, other: &JsRdd) -> Result<JsRdd> {
+        let mut left_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
+        for elem in &self.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("full_outer_join: requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "full_outer_join: requires 2-element arrays",
+                ));
+            }
+            let key_str = Self::key_to_string(&pair[0])?;
+            left_map.entry(key_str).or_default().push(pair[1].clone());
+        }
+        let mut right_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
+        for elem in &other.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("full_outer_join: requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "full_outer_join: requires 2-element arrays",
+                ));
+            }
+            let key_str = Self::key_to_string(&pair[0])?;
+            right_map.entry(key_str).or_default().push(pair[1].clone());
+        }
+        let mut all_keys: HashMap<String, (JsonValue, bool)> = HashMap::new();
+        for elem in &self.elements {
+            let pair = elem.as_array().unwrap();
+            all_keys.insert(
+                Self::key_to_string(&pair[0]).unwrap_or_default(),
+                (pair[0].clone(), true),
+            );
+        }
+        for elem in &other.elements {
+            let pair = elem.as_array().unwrap();
+            all_keys
+                .entry(Self::key_to_string(&pair[0]).unwrap_or_default())
+                .or_insert_with(|| (pair[0].clone(), true));
+        }
+        let mut elements = Vec::new();
+        for (key_str, (key_obj, _)) in &all_keys {
+            let left_vals = left_map.get(key_str).cloned().unwrap_or_default();
+            let right_vals = right_map.get(key_str).cloned().unwrap_or_default();
+            if left_vals.is_empty() && right_vals.is_empty() {
+                continue;
+            }
+            if left_vals.is_empty() {
+                for rv in &right_vals {
+                    elements.push(serde_json::json!([key_obj, [JsonValue::Null, rv]]));
+                }
+            } else if right_vals.is_empty() {
+                for lv in &left_vals {
+                    elements.push(serde_json::json!([key_obj, [lv, JsonValue::Null]]));
+                }
+            } else {
+                for lv in &left_vals {
+                    for rv in &right_vals {
+                        elements.push(serde_json::json!([key_obj, [lv, rv]]));
+                    }
+                }
+            }
+        }
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Co-group: `[key, [left_values], [right_values]]` for every key on either side.
+    #[napi]
+    pub fn cogroup(&self, other: &JsRdd) -> Result<JsRdd> {
+        let mut left_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
+        for elem in &self.elements {
+            let pair = elem
+                .as_array()
+                .ok_or_else(|| Error::from_reason("cogroup: requires [key, value] arrays"))?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason("cogroup: requires 2-element arrays"));
+            }
+            let key_str = Self::key_to_string(&pair[0])?;
+            left_map.entry(key_str).or_default().push(pair[1].clone());
+        }
+        let mut right_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
+        for elem in &other.elements {
+            let pair = elem
+                .as_array()
+                .ok_or_else(|| Error::from_reason("cogroup: requires [key, value] arrays"))?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason("cogroup: requires 2-element arrays"));
+            }
+            let key_str = Self::key_to_string(&pair[0])?;
+            right_map.entry(key_str).or_default().push(pair[1].clone());
+        }
+        let mut all_keys = std::collections::BTreeSet::new();
+        for k in left_map.keys() {
+            all_keys.insert(k.clone());
+        }
+        for k in right_map.keys() {
+            all_keys.insert(k.clone());
+        }
+        let elements: Vec<JsonValue> = all_keys
+            .iter()
+            .map(|ks| {
+                let left_vals: Vec<JsonValue> = left_map.get(ks).cloned().unwrap_or_default();
+                let right_vals: Vec<JsonValue> = right_map.get(ks).cloned().unwrap_or_default();
+                // Use the first-occurring key object from left or right.
+                let key_obj = left_map
+                    .get(ks)
+                    .and_then(|_v| {
+                        self.elements
+                            .iter()
+                            .find(|e| {
+                                e.as_array().is_some_and(|a| {
+                                    a.first().is_some_and(|k| {
+                                        Self::key_to_string(k).ok() == Some(ks.clone())
+                                    })
+                                })
+                            })
+                            .and_then(|e| e.as_array().and_then(|a| a.first().cloned()))
+                    })
+                    .or_else(|| {
+                        other
+                            .elements
+                            .iter()
+                            .find(|e| {
+                                e.as_array().is_some_and(|a| {
+                                    a.first().is_some_and(|k| {
+                                        Self::key_to_string(k).ok() == Some(ks.clone())
+                                    })
+                                })
+                            })
+                            .and_then(|e| e.as_array().and_then(|a| a.first().cloned()))
+                    })
+                    .unwrap_or(JsonValue::Null);
+                serde_json::json!([key_obj, left_vals, right_vals])
+            })
+            .collect();
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Fold values by key: `f(acc, value) => acc`, seeded by `zero`.
+    #[napi]
+    pub fn fold_by_key(
+        &self,
+        zero: JsonValue,
+        f: Function<FnArgs<(JsonValue, JsonValue)>, JsonValue>,
+    ) -> Result<JsRdd> {
+        let mut accum: HashMap<String, (JsonValue, JsonValue)> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for elem in &self.elements {
+            let pair = elem
+                .as_array()
+                .ok_or_else(|| Error::from_reason("fold_by_key: requires [key, value] arrays"))?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason("fold_by_key: requires 2-element arrays"));
+            }
+            let key = pair[0].clone();
+            let val = pair[1].clone();
+            let key_str = Self::key_to_string(&key)?;
+            match accum.get_mut(&key_str) {
+                Some((_, acc)) => {
+                    *acc = f.call(FnArgs::from((acc.clone(), val)))?;
+                }
+                None => {
+                    order.push(key_str.clone());
+                    let acc = f.call(FnArgs::from((zero.clone(), val)))?;
+                    accum.insert(key_str, (key, acc));
+                }
+            }
+        }
+        let elements = order
+            .iter()
+            .map(|ks| {
+                let (k, v) = &accum[ks];
+                Ok(serde_json::json!([k, v]))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Aggregate values by key with separate seq and comb functions.
+    #[napi]
+    pub fn aggregate_by_key(
+        &self,
+        zero: JsonValue,
+        seq_fn: Function<FnArgs<(JsonValue, JsonValue)>, JsonValue>,
+        _comb_fn: Function<FnArgs<(JsonValue, JsonValue)>, JsonValue>,
+    ) -> Result<JsRdd> {
+        let mut accum: HashMap<String, (JsonValue, JsonValue)> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for elem in &self.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("aggregate_by_key: requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "aggregate_by_key: requires 2-element arrays",
+                ));
+            }
+            let key = pair[0].clone();
+            let val = pair[1].clone();
+            let key_str = Self::key_to_string(&key)?;
+            match accum.get_mut(&key_str) {
+                Some((_, acc)) => {
+                    *acc = seq_fn.call(FnArgs::from((acc.clone(), val)))?;
+                }
+                None => {
+                    order.push(key_str.clone());
+                    let acc = seq_fn.call(FnArgs::from((zero.clone(), val)))?;
+                    accum.insert(key_str, (key, acc));
+                }
+            }
+        }
+        let elements = order
+            .iter()
+            .map(|ks| {
+                let (k, v) = &accum[ks];
+                Ok(serde_json::json!([k, v]))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Generalised `combine_by_key`: `create(val) => C`, `mergeVal(C, val) => C`,
+    /// `mergeCombiners(C, C) => C`.
+    #[napi]
+    pub fn combine_by_key(
+        &self,
+        create_combiner: Function<JsonValue, JsonValue>,
+        merge_value: Function<FnArgs<(JsonValue, JsonValue)>, JsonValue>,
+        _merge_combiners: Function<FnArgs<(JsonValue, JsonValue)>, JsonValue>,
+    ) -> Result<JsRdd> {
+        let mut accum: HashMap<String, (JsonValue, JsonValue)> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for elem in &self.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("combine_by_key: requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "combine_by_key: requires 2-element arrays",
+                ));
+            }
+            let key = pair[0].clone();
+            let val = pair[1].clone();
+            let key_str = Self::key_to_string(&key)?;
+            match accum.get_mut(&key_str) {
+                Some((_, combiner)) => {
+                    *combiner = merge_value.call(FnArgs::from((combiner.clone(), val)))?;
+                }
+                None => {
+                    order.push(key_str.clone());
+                    let c = create_combiner.call(val)?;
+                    accum.insert(key_str, (key, c));
+                }
+            }
+        }
+        let elements = order
+            .iter()
+            .map(|ks| {
+                let (k, v) = &accum[ks];
+                Ok(serde_json::json!([k, v]))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+
+    /// Driver-side `reduce_by_key` returning a JS object `{key: reducedValue}`.
+    #[napi]
+    pub fn reduce_by_key_locally(
+        &self,
+        f: Function<FnArgs<(JsonValue, JsonValue)>, JsonValue>,
+    ) -> Result<serde_json::Value> {
+        let mut accum: HashMap<String, JsonValue> = HashMap::new();
+        for elem in &self.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("reduce_by_key_locally: requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "reduce_by_key_locally: requires 2-element arrays",
+                ));
+            }
+            let key = &pair[0];
+            let val = &pair[1];
+            let key_str = Self::key_to_string(key)?;
+            match accum.remove(&key_str) {
+                Some(existing) => {
+                    accum.insert(key_str, f.call(FnArgs::from((existing, val.clone())))?);
+                }
+                None => {
+                    accum.insert(key_str, val.clone());
+                }
+            }
+        }
+        Ok(serde_json::to_value(accum).unwrap_or_default())
+    }
+
+    /// Collect pair RDD into a JS object `{key: value}`. Last value wins on duplicate keys.
+    #[napi]
+    pub fn collect_as_map(&self) -> Result<serde_json::Value> {
+        let mut map = serde_json::Map::new();
+        for elem in &self.elements {
+            let pair = elem.as_array().ok_or_else(|| {
+                Error::from_reason("collect_as_map: requires [key, value] arrays")
+            })?;
+            if pair.len() != 2 {
+                return Err(Error::from_reason(
+                    "collect_as_map: requires 2-element arrays",
+                ));
+            }
+            let key_str = Self::key_to_string(&pair[0])?;
+            map.insert(key_str, pair[1].clone());
+        }
+        Ok(serde_json::Value::Object(map))
+    }
+
+    /// Remove pairs whose key exists in `other`.
+    #[napi]
+    pub fn subtract_by_key(&self, other: &JsRdd) -> Result<JsRdd> {
+        let excluded: std::collections::HashSet<String> = other
+            .elements
+            .iter()
+            .filter_map(|e| {
+                e.as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|k| Self::key_to_string(k).ok())
+            })
+            .collect();
+        let elements: Vec<JsonValue> = self
+            .elements
+            .iter()
+            .filter(|e| {
+                if let Some(arr) = e.as_array()
+                    && let Some(k) = arr.first()
+                    && let Ok(ks) = Self::key_to_string(k)
+                {
+                    return !excluded.contains(&ks);
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+}
+
+// Non-`#[napi]` helpers for the value-reduction sugar methods above.
+impl JsRdd {
+    /// Split a `[key, value]` pair, erroring on any other shape.
+    fn split_pair(pair: &JsonValue) -> Result<(JsonValue, JsonValue)> {
+        let arr = pair
+            .as_array()
+            .ok_or_else(|| Error::from_reason("expected [key, value] pair"))?;
+        if arr.len() != 2 {
+            return Err(Error::from_reason("expected [key, value] pair"));
+        }
+        Ok((arr[0].clone(), arr[1].clone()))
+    }
+
+    /// Reduce the values of each key with `op`, preserving first-seen key order.
+    fn reduce_values(&self, op: impl Fn(JsonValue, JsonValue) -> JsonValue) -> Result<JsRdd> {
+        let source = self.collect_rows()?;
+        let mut accum: HashMap<String, (JsonValue, JsonValue)> = HashMap::new();
+        let mut order: Vec<String> = Vec::new();
+        for pair in &source {
+            let (k, v) = Self::split_pair(pair)?;
+            let key_str = Self::key_to_string(&k)?;
+            match accum.get_mut(&key_str) {
+                Some((_, acc)) => *acc = op(acc.clone(), v),
+                None => {
+                    order.push(key_str.clone());
+                    accum.insert(key_str, (k, v));
+                }
+            }
+        }
+        let elements: Vec<JsonValue> = order
+            .into_iter()
+            .filter_map(|ks| accum.remove(&ks))
+            .map(|(k, v)| JsonValue::Array(vec![k, v]))
+            .collect();
+        Ok(JsRdd::from_data(
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        ))
+    }
+}
+
+/// Wrap an `f64` as a JSON number, using an integer when the value is whole (so summing ints
+/// yields an int, not `5.0`).
+fn number_json(v: f64) -> JsonValue {
+    if v.fract() == 0.0 && v.abs() < i64::MAX as f64 {
+        JsonValue::from(v as i64)
+    } else {
+        JsonValue::from(v)
     }
 }

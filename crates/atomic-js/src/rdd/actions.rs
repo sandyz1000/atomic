@@ -5,7 +5,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use serde_json::Value as JsonValue;
 
-use super::JsRdd;
+use super::{JsRdd, SimpleLcg};
 
 #[napi]
 impl JsRdd {
@@ -197,11 +197,12 @@ impl JsRdd {
         &self,
         comparator: Option<Function<FnArgs<(JsonValue, JsonValue)>, f64>>,
     ) -> Result<JsonValue> {
-        if self.elements.is_empty() {
+        let elements = self.collect_rows()?;
+        if elements.is_empty() {
             return Err(Error::from_reason("max on empty RDD"));
         }
-        let mut result = self.elements[0].clone();
-        for elem in &self.elements[1..] {
+        let mut result = elements[0].clone();
+        for elem in &elements[1..] {
             let is_greater = match &comparator {
                 Some(cmp) => cmp.call(FnArgs::from((elem.clone(), result.clone())))? > 0.0,
                 None => Self::json_compare(elem, &result) == std::cmp::Ordering::Greater,
@@ -219,11 +220,12 @@ impl JsRdd {
         &self,
         comparator: Option<Function<FnArgs<(JsonValue, JsonValue)>, f64>>,
     ) -> Result<JsonValue> {
-        if self.elements.is_empty() {
+        let elements = self.collect_rows()?;
+        if elements.is_empty() {
             return Err(Error::from_reason("min on empty RDD"));
         }
-        let mut result = self.elements[0].clone();
-        for elem in &self.elements[1..] {
+        let mut result = elements[0].clone();
+        for elem in &elements[1..] {
             let is_less = match &comparator {
                 Some(cmp) => cmp.call(FnArgs::from((elem.clone(), result.clone())))? < 0.0,
                 None => Self::json_compare(elem, &result) == std::cmp::Ordering::Less,
@@ -355,6 +357,302 @@ impl JsRdd {
     #[napi]
     pub fn length(&self) -> u32 {
         self.elements.len() as u32
+    }
+
+    /// Balanced tree-reduce. `f(a, b)` merges two partial results.
+    /// `depth` (default 2) controls the number of tree merge levels.
+    #[napi]
+    pub fn tree_reduce(
+        &self,
+        f: Function<FnArgs<(JsonValue, JsonValue)>, JsonValue>,
+        depth: Option<u32>,
+    ) -> Result<JsonValue> {
+        let mut partials = self.collect_rows()?;
+        if partials.is_empty() {
+            return Err(Error::from_reason("treeReduce on empty RDD"));
+        }
+        let levels = depth.unwrap_or(2).max(1) as usize;
+        for _ in 0..levels {
+            if partials.len() <= 1 {
+                break;
+            }
+            let mut next = Vec::with_capacity(partials.len() / 2 + 1);
+            let mut iter = partials.into_iter();
+            while let Some(a) = iter.next() {
+                match iter.next() {
+                    Some(b) => next.push(f.call(FnArgs::from((a, b)))?),
+                    None => next.push(a),
+                }
+            }
+            partials = next;
+        }
+        partials
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::from_reason("treeReduce produced no value"))
+    }
+
+    /// Balanced tree-aggregate. `seqFn(acc, elem)` within partitions,
+    /// `combFn(acc, acc)` in a balanced tree across partitions.
+    #[napi]
+    pub fn tree_aggregate(
+        &self,
+        zero: JsonValue,
+        seq_fn: Function<FnArgs<(JsonValue, JsonValue)>, JsonValue>,
+        comb_fn: Function<FnArgs<(JsonValue, JsonValue)>, JsonValue>,
+        depth: Option<u32>,
+    ) -> Result<JsonValue> {
+        let elements = self.collect_rows()?;
+        let np = self.num_partitions.max(1);
+        let total = elements.len();
+        let levels = depth.unwrap_or(2).max(1) as usize;
+        let mut partials: Vec<JsonValue> = Vec::with_capacity(np);
+        for (start, end) in super::slice_positions(total, np) {
+            let mut acc = zero.clone();
+            for elem in &elements[start..end] {
+                acc = seq_fn.call(FnArgs::from((acc, elem.clone())))?;
+            }
+            partials.push(acc);
+        }
+        for _ in 0..levels {
+            if partials.len() <= 1 {
+                break;
+            }
+            let mut next = Vec::with_capacity(partials.len() / 2 + 1);
+            let mut iter = partials.into_iter();
+            while let Some(a) = iter.next() {
+                match iter.next() {
+                    Some(b) => next.push(comb_fn.call(FnArgs::from((a, b)))?),
+                    None => next.push(a),
+                }
+            }
+            partials = next;
+        }
+        Ok(partials.into_iter().next().unwrap_or(zero))
+    }
+
+    /// Single-pass summary statistics over numeric elements.
+    /// Returns `{count, mean, sum, min, max, variance, stdev}`.
+    /// All values are `NaN` for an empty RDD.
+    #[napi]
+    pub fn stats(&self) -> Result<serde_json::Value> {
+        let elements = self.collect_rows()?;
+        if elements.is_empty() {
+            return Ok(serde_json::json!({
+                "count": 0,
+                "mean": f64::NAN,
+                "sum": f64::NAN,
+                "min": f64::NAN,
+                "max": f64::NAN,
+                "variance": f64::NAN,
+                "stdev": f64::NAN,
+            }));
+        }
+        let nums: Vec<f64> = elements
+            .iter()
+            .map(|e| {
+                e.as_f64().ok_or_else(|| {
+                    Error::from_reason(format!("stats: element is not numeric: {e}"))
+                })
+            })
+            .collect::<Result<_>>()?;
+        let count = nums.len() as u64;
+        let sum: f64 = nums.iter().sum();
+        let mean = sum / count as f64;
+        let min = nums.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = nums.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let m2: f64 = nums.iter().map(|x| (x - mean) * (x - mean)).sum();
+        let variance = m2 / count as f64;
+        let stdev = variance.sqrt();
+        Ok(serde_json::json!({
+            "count": count,
+            "mean": mean,
+            "sum": sum,
+            "min": min,
+            "max": max,
+            "variance": variance,
+            "stdev": stdev,
+        }))
+    }
+
+    /// Arithmetic mean. Returns `NaN` if empty.
+    #[napi]
+    pub fn mean(&self) -> Result<f64> {
+        let elements = self.collect_rows()?;
+        if elements.is_empty() {
+            return Ok(f64::NAN);
+        }
+        let sum: f64 = elements
+            .iter()
+            .map(|e| {
+                e.as_f64()
+                    .ok_or_else(|| Error::from_reason(format!("mean: element is not numeric: {e}")))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .iter()
+            .sum();
+        Ok(sum / elements.len() as f64)
+    }
+
+    /// Population variance. Returns `NaN` if empty.
+    #[napi]
+    pub fn variance(&self) -> Result<f64> {
+        let elements = self.collect_rows()?;
+        if elements.is_empty() {
+            return Ok(f64::NAN);
+        }
+        let nums: Vec<f64> = elements
+            .iter()
+            .map(|e| {
+                e.as_f64().ok_or_else(|| {
+                    Error::from_reason(format!("variance: element is not numeric: {e}"))
+                })
+            })
+            .collect::<Result<_>>()?;
+        let m = nums.iter().sum::<f64>() / nums.len() as f64;
+        let m2: f64 = nums.iter().map(|v| (v - m) * (v - m)).sum();
+        Ok(m2 / nums.len() as f64)
+    }
+
+    /// Population standard deviation — `sqrt(variance())`.
+    #[napi]
+    pub fn stdev(&self) -> Result<f64> {
+        Ok(self.variance()?.sqrt())
+    }
+
+    /// Bucketed counts over ascending `bounds`. `bounds` has `n + 1` edges defining
+    /// `n` buckets. Returns `Array<number>` of length `n` counting elements in each
+    /// half-open interval `[bounds[i], bounds[i+1])`, with the final bucket
+    /// right-inclusive.
+    #[napi]
+    pub fn histogram(&self, bounds: Vec<f64>) -> Result<Vec<u32>> {
+        if bounds.len() < 2 {
+            return Ok(vec![]);
+        }
+        let n = bounds.len() - 1;
+        let lo = bounds[0];
+        let hi = bounds[n];
+        let elements = self.collect_rows()?;
+        let mut counts = vec![0u32; n];
+        for elem in &elements {
+            let v = elem.as_f64().unwrap_or(f64::NAN);
+            if v < lo || v > hi {
+                continue;
+            }
+            let idx = bounds
+                .partition_point(|&b| b <= v)
+                .saturating_sub(1)
+                .min(n - 1);
+            counts[idx] += 1;
+        }
+        Ok(counts)
+    }
+
+    /// Return a sampled subset of this RDD (lazy transform).
+    ///
+    /// `withReplacement = true` — Poisson sampling (elements may repeat).
+    /// `withReplacement = false` — Bernoulli sampling (each element at most once).
+    /// Optional `seed` makes the sample reproducible.
+    #[napi]
+    pub fn sample(
+        &self,
+        with_replacement: bool,
+        fraction: f64,
+        seed: Option<u32>,
+    ) -> Result<JsRdd> {
+        let source = self.collect_rows()?;
+        let s = seed.unwrap_or(0) as u64;
+        if with_replacement {
+            let elements: Vec<JsonValue> = source
+                .iter()
+                .enumerate()
+                .flat_map(|(i, elem)| {
+                    let mut rng = SimpleLcg::new(s ^ (i as u64));
+                    let mut n = 0u32;
+                    let mut remaining = fraction;
+                    loop {
+                        let roll = rng.next_f64();
+                        if roll < remaining {
+                            n += 1;
+                            remaining -= roll;
+                        } else {
+                            break;
+                        }
+                    }
+                    std::iter::repeat_n(elem.clone(), n as usize)
+                })
+                .collect();
+            Ok(JsRdd::from_data(
+                elements,
+                self.num_partitions,
+                Arc::clone(&self.context),
+            ))
+        } else {
+            let elements: Vec<JsonValue> = source
+                .iter()
+                .enumerate()
+                .filter(|(i, _elem)| {
+                    let mut rng = SimpleLcg::new(s ^ (*i as u64));
+                    rng.next_f64() < fraction
+                })
+                .map(|(_, e)| e.clone())
+                .collect();
+            Ok(JsRdd::from_data(
+                elements,
+                self.num_partitions,
+                Arc::clone(&self.context),
+            ))
+        }
+    }
+
+    /// Return a fixed-size random sample (action).
+    ///
+    /// `withReplacement = true` draws with replacement; `false` draws distinct
+    /// elements. `seed` makes the sample reproducible.
+    #[napi]
+    pub fn take_sample(
+        &self,
+        with_replacement: bool,
+        num: u32,
+        seed: Option<u32>,
+    ) -> Result<Vec<JsonValue>> {
+        let source = self.collect_rows()?;
+        if source.is_empty() || num == 0 {
+            return Ok(vec![]);
+        }
+        let s = seed.unwrap_or(0) as u64;
+        let mut rng = SimpleLcg::new(s);
+        let n = num as usize;
+        if with_replacement {
+            let result: Vec<JsonValue> = (0..n)
+                .map(|_| {
+                    let idx = (rng.next_f64() * source.len() as f64) as usize;
+                    source[idx.min(source.len() - 1)].clone()
+                })
+                .collect();
+            Ok(result)
+        } else {
+            let take = n.min(source.len());
+            let mut keyed: Vec<(f64, &JsonValue)> =
+                source.iter().map(|e| (rng.next_f64(), e)).collect();
+            keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            Ok(keyed
+                .into_iter()
+                .take(take)
+                .map(|(_, e)| e.clone())
+                .collect())
+        }
+    }
+
+    /// Approximate distinct count via hash-set cardinality (driver-side).
+    #[napi]
+    pub fn count_approx_distinct(&self) -> Result<u32> {
+        let elements = self.collect_rows()?;
+        let mut seen = HashMap::new();
+        for elem in &elements {
+            seen.insert(elem.to_string(), ());
+        }
+        Ok(seen.len() as u32)
     }
 }
 

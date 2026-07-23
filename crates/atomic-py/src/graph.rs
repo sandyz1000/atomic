@@ -229,6 +229,259 @@ impl PyGraph {
         Ok(PyGraph::rebuild(self.ctx.clone(), inner))
     }
 
+    /// Return a randomly chosen vertex id, or `None` if the graph is empty.
+    pub fn pick_random_vertex(&self) -> Option<VId> {
+        self.inner.pick_random_vertex()
+    }
+
+    /// Return the edge attribute for `(src, dst)` if the edge exists.
+    pub fn find(&self, src: VId, dst: VId) -> Option<f64> {
+        self.inner.find(src, dst)
+    }
+
+    /// Replace every vertex attribute via `f(vertex_id, current_attr) -> new_attr`.
+    pub fn map_vertices(&self, py: Python<'_>, f: Py<PyAny>) -> PyResult<PyGraph> {
+        let verts: Vec<(VId, f64)> = self
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .map(|(vid, vd)| {
+                let new_vd: f64 = f.call1(py, (vid, vd))?.extract(py)?;
+                Ok((vid, new_vd))
+            })
+            .collect::<PyResult<_>>()?;
+        let edges = self.inner.collect_edges();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        Ok(PyGraph::rebuild(self.ctx.clone(), inner))
+    }
+
+    /// Replace every edge attribute via `f(src_id, dst_id, current_attr) -> new_attr`.
+    pub fn map_edges(&self, py: Python<'_>, f: Py<PyAny>) -> PyResult<PyGraph> {
+        let verts = self.inner.collect_vertices();
+        let edges: Vec<Edge<f64>> = self
+            .inner
+            .collect_edges()
+            .into_iter()
+            .map(|e| {
+                let new_attr: f64 = f.call1(py, (e.src, e.dst, e.attr))?.extract(py)?;
+                Ok(Edge {
+                    src: e.src,
+                    dst: e.dst,
+                    attr: new_attr,
+                })
+            })
+            .collect::<PyResult<_>>()?;
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        Ok(PyGraph::rebuild(self.ctx.clone(), inner))
+    }
+
+    /// Return a new graph with all edges reversed.
+    pub fn reverse(&self) -> PyGraph {
+        let verts = self.inner.collect_vertices();
+        let edges: Vec<Edge<f64>> = self
+            .inner
+            .collect_edges()
+            .into_iter()
+            .map(|e| Edge {
+                src: e.dst,
+                dst: e.src,
+                attr: e.attr,
+            })
+            .collect();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        PyGraph::rebuild(self.ctx.clone(), inner)
+    }
+
+    /// Return `(in_degree, out_degree)` for each vertex as a dict `{vid: (in, out)}`.
+    pub fn degrees(&self) -> std::collections::HashMap<VId, (usize, usize)> {
+        let mut deg: std::collections::HashMap<VId, (usize, usize)> =
+            std::collections::HashMap::new();
+        for (vid, _) in self.inner.collect_vertices() {
+            deg.entry(vid).or_insert((0, 0));
+        }
+        for e in self.inner.collect_edges() {
+            deg.entry(e.src).or_insert((0, 0)).1 += 1;
+            deg.entry(e.dst).or_insert((0, 0)).0 += 1;
+        }
+        deg
+    }
+
+    /// In-degree for each vertex.
+    pub fn in_degrees(&self) -> std::collections::HashMap<VId, usize> {
+        self.degrees()
+            .into_iter()
+            .map(|(vid, (ir, _))| (vid, ir))
+            .collect()
+    }
+
+    /// Out-degree for each vertex.
+    pub fn out_degrees(&self) -> std::collections::HashMap<VId, usize> {
+        self.degrees()
+            .into_iter()
+            .map(|(vid, (_, out))| (vid, out))
+            .collect()
+    }
+
+    /// Collect neighbor IDs for each vertex. `direction` = "in", "out", or "either".
+    #[pyo3(signature = (direction="either"))]
+    pub fn collect_neighbor_ids(
+        &self,
+        direction: &str,
+    ) -> std::collections::HashMap<VId, Vec<VId>> {
+        let mut neigh: std::collections::HashMap<VId, Vec<VId>> = std::collections::HashMap::new();
+        for (vid, _) in self.inner.collect_vertices() {
+            neigh.entry(vid).or_default();
+        }
+        for e in self.inner.collect_edges() {
+            match direction {
+                "in" => neigh.entry(e.dst).or_default().push(e.src),
+                "out" => neigh.entry(e.src).or_default().push(e.dst),
+                _ => {
+                    neigh.entry(e.src).or_default().push(e.dst);
+                    neigh.entry(e.dst).or_default().push(e.src);
+                }
+            }
+        }
+        neigh
+    }
+
+    /// Collect neighbor `(neighbor_id, edge_attr)` pairs for each vertex.
+    #[pyo3(signature = (direction="either"))]
+    pub fn collect_neighbors(
+        &self,
+        direction: &str,
+    ) -> std::collections::HashMap<VId, Vec<(VId, f64)>> {
+        let mut neigh: std::collections::HashMap<VId, Vec<(VId, f64)>> =
+            std::collections::HashMap::new();
+        for (vid, _) in self.inner.collect_vertices() {
+            neigh.entry(vid).or_default();
+        }
+        for e in self.inner.collect_edges() {
+            match direction {
+                "in" => neigh.entry(e.dst).or_default().push((e.src, e.attr)),
+                "out" => neigh.entry(e.src).or_default().push((e.dst, e.attr)),
+                _ => {
+                    neigh.entry(e.src).or_default().push((e.dst, e.attr));
+                    neigh.entry(e.dst).or_default().push((e.src, e.attr));
+                }
+            }
+        }
+        neigh
+    }
+
+    /// PageRank run until convergence (max mean-diff < `tol`) or `max_iter`.
+    #[pyo3(signature = (tol=0.001, reset_prob=0.15, max_iter=100))]
+    pub fn page_rank_until_convergence(
+        &self,
+        tol: f64,
+        reset_prob: f64,
+        max_iter: usize,
+    ) -> std::collections::HashMap<VId, f64> {
+        // Initialise all vertices to 1.0 / N
+        let n = self.inner.num_vertices() as f64;
+        let mut ranks: std::collections::HashMap<VId, f64> = self
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .map(|(vid, _)| (vid, 1.0 / n))
+            .collect();
+        let edges = self.inner.collect_edges();
+        // Build reverse adjacency: in-neighbor → (src, edge_weight)
+        let mut in_edges: std::collections::HashMap<VId, Vec<(VId, f64)>> =
+            std::collections::HashMap::new();
+        let mut out_deg: std::collections::HashMap<VId, usize> = std::collections::HashMap::new();
+        for e in &edges {
+            in_edges.entry(e.dst).or_default().push((e.src, e.attr));
+            *out_deg.entry(e.src).or_insert(0) += 1;
+        }
+        for _iter in 0..max_iter {
+            let mut new_ranks: std::collections::HashMap<VId, f64> =
+                std::collections::HashMap::new();
+            let mut max_diff = 0.0f64;
+            for &vid in ranks.keys() {
+                let sum: f64 = in_edges
+                    .get(&vid)
+                    .map(|ins| {
+                        ins.iter()
+                            .map(|(src, _w)| {
+                                let d = *out_deg.get(src).unwrap_or(&1) as f64;
+                                ranks.get(src).copied().unwrap_or(0.0) / d
+                            })
+                            .sum()
+                    })
+                    .unwrap_or(0.0);
+                let new_rank = reset_prob / n + (1.0 - reset_prob) * sum;
+                let diff = (new_rank - ranks[&vid]).abs();
+                if diff > max_diff {
+                    max_diff = diff;
+                }
+                new_ranks.insert(vid, new_rank);
+            }
+            ranks = new_ranks;
+            if max_diff < tol {
+                break;
+            }
+        }
+        ranks
+    }
+
+    /// Personalized PageRank from the given source vertices.
+    #[pyo3(signature = (sources, num_iter=20, reset_prob=0.15))]
+    pub fn personalized_page_rank(
+        &self,
+        sources: Vec<VId>,
+        num_iter: usize,
+        reset_prob: f64,
+    ) -> std::collections::HashMap<VId, f64> {
+        let _n = self.inner.num_vertices() as f64;
+        let source_set: std::collections::HashSet<VId> = sources.into_iter().collect();
+        let mut ranks: std::collections::HashMap<VId, f64> = self
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .map(|(vid, _)| {
+                if source_set.contains(&vid) {
+                    (vid, 1.0 / source_set.len() as f64)
+                } else {
+                    (vid, 0.0)
+                }
+            })
+            .collect();
+        let edges = self.inner.collect_edges();
+        let mut in_edges: std::collections::HashMap<VId, Vec<(VId, f64)>> =
+            std::collections::HashMap::new();
+        let mut out_deg: std::collections::HashMap<VId, usize> = std::collections::HashMap::new();
+        for e in &edges {
+            in_edges.entry(e.dst).or_default().push((e.src, e.attr));
+            *out_deg.entry(e.src).or_insert(0) += 1;
+        }
+        for _ in 0..num_iter {
+            let mut new_ranks: std::collections::HashMap<VId, f64> =
+                std::collections::HashMap::new();
+            for &vid in ranks.keys() {
+                let sum: f64 = in_edges
+                    .get(&vid)
+                    .map(|ins| {
+                        ins.iter()
+                            .map(|(src, _w)| {
+                                let d = *out_deg.get(src).unwrap_or(&1) as f64;
+                                ranks.get(src).copied().unwrap_or(0.0) / d
+                            })
+                            .sum()
+                    })
+                    .unwrap_or(0.0);
+                let teleport: f64 = if source_set.contains(&vid) {
+                    reset_prob / source_set.len() as f64
+                } else {
+                    0.0
+                };
+                new_ranks.insert(vid, teleport + (1.0 - reset_prob) * sum);
+            }
+            ranks = new_ranks;
+        }
+        ranks
+    }
+
     pub fn __repr__(&self) -> String {
         format!(
             "Graph(vertices={}, edges={})",

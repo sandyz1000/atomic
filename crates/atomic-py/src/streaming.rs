@@ -206,6 +206,39 @@ impl PyDStream {
             is_pair: self.is_pair,
         }
     }
+
+    /// Reduce elements per window with a user function.
+    pub fn reduce_by_window(
+        &self,
+        func: Py<PyAny>,
+        window_ms: u64,
+        slide_ms: u64,
+    ) -> PyResult<PyDStream> {
+        self.window(window_ms, slide_ms).map(func)
+    }
+
+    /// Reduce by key per window.
+    pub fn reduce_by_key_and_window(
+        &self,
+        func: Py<PyAny>,
+        window_ms: u64,
+        slide_ms: u64,
+    ) -> PyResult<PyDStream> {
+        let w = self.window(window_ms, slide_ms);
+        w.reduce_by_key(func)
+    }
+
+    /// Transform each batch through `func(batch) -> new_batch`.
+    pub fn transform(&self, func: Py<PyAny>) -> PyResult<PyDStream> {
+        self.map(func)
+    }
+
+    /// Transform with another DStream: `func(self_batch, other_batch) -> new_batch`.
+    /// Note: `func` must be a single-argument callable that receives a
+    /// `(self_batch, other_batch)` tuple.
+    pub fn transform_with(&self, other: &PyDStream, func: Py<PyAny>) -> PyResult<PyDStream> {
+        self.join(other)?.map(func)
+    }
 }
 
 #[pyclass(name = "BatchQueue")]
@@ -499,11 +532,15 @@ fn call_output_fn(py: Python<'_>, func: &Py<PyAny>, elements: Vec<Py<PyAny>>) ->
     Ok(())
 }
 
+/// Per-`updateStateByKey` operator state: each entry maps a serialized key to its serialized
+/// state, one map per stateful DStream.
+type StateStores = Arc<Mutex<Vec<HashMap<String, Vec<u8>>>>>;
+
 #[pyclass(name = "StreamingContext")]
 pub struct PyStreamingContext {
     batch_secs: f64,
     output_ops: Arc<Mutex<Vec<OutputOp>>>,
-    state_stores: Arc<Mutex<Vec<HashMap<String, Vec<u8>>>>>,
+    state_stores: StateStores,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
     thread_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     checkpoint_dir: Option<PathBuf>,
