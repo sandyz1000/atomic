@@ -163,7 +163,7 @@ fn arrow_scalar_to_py(py: Python<'_>, col: &dyn Array, row: usize) -> Py<PyAny> 
     }
 }
 
-fn batches_to_py_list(py: Python<'_>, batches: &[RecordBatch]) -> PyResult<Py<PyAny>> {
+pub(crate) fn batches_to_py_list(py: Python<'_>, batches: &[RecordBatch]) -> PyResult<Py<PyAny>> {
     let rows = PyList::empty(py);
     for batch in batches {
         let schema = batch.schema();
@@ -288,6 +288,71 @@ impl PyDataFrame {
             .clone()
             .join(other.inner.clone(), jt, &left, &right, None)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Group by `group_by` columns and compute `aggs` (SQL aggregate expressions such as
+    /// `"SUM(amount) AS total"`, `"AVG(price)"`). An empty `group_by` computes global aggregates.
+    ///
+    /// ```python
+    /// df.agg(["region"], ["SUM(amount) AS total", "COUNT(*) AS n"])
+    /// ```
+    pub fn agg(&self, group_by: Vec<String>, aggs: Vec<String>) -> PyResult<Self> {
+        if aggs.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "agg requires at least one aggregate expression",
+            ));
+        }
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        let select_list = if group_by.is_empty() {
+            aggs.join(", ")
+        } else {
+            format!("{}, {}", group_by.join(", "), aggs.join(", "))
+        };
+        let group_clause = if group_by.is_empty() {
+            String::new()
+        } else {
+            format!(" GROUP BY {}", group_by.join(", "))
+        };
+        let result_df = run_sql_async(async move {
+            session.register_table(&view, df.into_view())?;
+            let r = session
+                .sql(&format!("SELECT {select_list} FROM {view}{group_clause}"))
+                .await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e: datafusion::error::DataFusionError| {
+            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+        })?;
+        Ok(PyDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Rename all columns positionally to `names` (must match the column count).
+    /// Mirrors `DataFrame.toDF(cols)`.
+    pub fn to_df(&self, names: Vec<String>) -> PyResult<Self> {
+        let fields = self.inner.schema().fields();
+        if fields.len() != names.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "to_df: expected {} names, got {}",
+                fields.len(),
+                names.len()
+            )));
+        }
+        let mut df = self.inner.clone();
+        for (field, new_name) in fields.iter().zip(&names) {
+            df = df
+                .with_column_renamed(field.name(), new_name)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        }
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -1001,11 +1066,75 @@ impl PySqlContext {
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
+    // Raw #[cfg] rather than cfg_avro!: #[pymethods] rejects a macro invocation as an impl item.
+    /// Register an Avro file (or directory) as a named table. Requires building with the
+    /// `avro` feature.
+    #[cfg(feature = "avro")]
+    pub fn register_avro(&self, name: &str, path: &str) -> PyResult<()> {
+        let ctx = self.inner.clone();
+        let name = name.to_string();
+        let path = path.to_string();
+        run_sql_async(async move {
+            ctx.register_avro(
+                &name,
+                &path,
+                datafusion::prelude::AvroReadOptions::default(),
+            )
+            .await
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Remove a previously registered table from the catalog.
     pub fn deregister_table(&self, name: &str) -> PyResult<()> {
         self.inner
             .deregister_table(name)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Return a registered table as a lazy `DataFrame`.
+    pub fn table(&self, name: &str) -> PyResult<PyDataFrame> {
+        let session = self.session.clone();
+        let name = name.to_string();
+        let df = run_sql_async(async move { session.table(&name).await })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// List the names of all registered tables in the default catalog/schema.
+    pub fn table_names(&self) -> PyResult<Vec<String>> {
+        self.inner
+            .table_names()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Read a data source by path, returning a lazy `DataFrame`. `format` is one of
+    /// `csv`, `parquet`, `json`. Mirrors `spark.read.format(fmt).load(path)`.
+    pub fn read(&self, format: &str, path: &str) -> PyResult<PyDataFrame> {
+        use atomic_sql::context::DataFormat;
+        let fmt = match format.to_ascii_lowercase().as_str() {
+            "csv" => DataFormat::Csv,
+            "parquet" => DataFormat::Parquet,
+            "json" => DataFormat::Json,
+            #[cfg(feature = "avro")]
+            "avro" => DataFormat::Avro,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown format: {other}"
+                )));
+            }
+        };
+        let ctx = self.inner.clone();
+        let path = path.to_string();
+        let df = run_sql_async(async move { ctx.read(fmt, &path).await })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyDataFrame {
+            inner: df.into_inner(),
+            session: self.session.clone(),
+        })
     }
 
     /// Register a Python RDD as a SQL table.
@@ -1172,24 +1301,25 @@ impl PySqlContext {
 }
 
 /// Parse an Arrow type string to a `DataType`.
-fn parse_arrow_type(s: &str) -> PyResult<datafusion::arrow::datatypes::DataType> {
-    use datafusion::arrow::datatypes::DataType;
+pub(crate) fn parse_arrow_type(s: &str) -> PyResult<datafusion::arrow::datatypes::DataType> {
+    use datafusion::arrow::datatypes::{DataType, TimeUnit};
     Ok(match s.to_lowercase().as_str() {
         "int8" => DataType::Int8,
         "int16" => DataType::Int16,
         "int32" => DataType::Int32,
-        "int64" => DataType::Int64,
+        "int64" | "int" => DataType::Int64,
         "uint8" => DataType::UInt8,
         "uint16" => DataType::UInt16,
         "uint32" => DataType::UInt32,
         "uint64" => DataType::UInt64,
         "float32" => DataType::Float32,
-        "float64" | "double" => DataType::Float64,
+        "float64" | "double" | "float" => DataType::Float64,
         "bool" | "boolean" => DataType::Boolean,
         "utf8" | "string" | "str" => DataType::Utf8,
+        "timestamp_ms" | "timestamp" => DataType::Timestamp(TimeUnit::Millisecond, None),
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unsupported Arrow type: {other}. Supported: int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8"
+                "unsupported Arrow type: {other}. Supported: int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8, timestamp_ms"
             )));
         }
     })
@@ -1223,33 +1353,36 @@ fn python_dicts_to_batches(
         .collect();
     let arrow_schema = Arc::new(Schema::new(fields));
 
-    // Build one array per column.
+    // Build one array per column. Defined once here (not per iteration); the column name is a
+    // macro parameter since macro_rules resolves free identifiers at this definition site,
+    // where the loop variable is not in scope.
+    macro_rules! build_numeric {
+        ($builder_ty:ty, $col:expr, $extract_ty:ty) => {{
+            let mut b = <$builder_ty>::new();
+            for row in rows {
+                let dict = row.bind(py).cast::<pyo3::types::PyDict>()?;
+                match dict.get_item($col)? {
+                    Some(v) => b.append_option(v.extract::<$extract_ty>().ok()),
+                    None => b.append_null(),
+                }
+            }
+            Arc::new(b.finish()) as datafusion::arrow::array::ArrayRef
+        }};
+    }
+
     let mut col_arrays: Vec<datafusion::arrow::array::ArrayRef> = Vec::new();
     for (col_name, col_type) in &columns {
-        macro_rules! build_numeric {
-            ($builder_ty:ty, $extract_ty:ty) => {{
-                let mut b = <$builder_ty>::new();
-                for row in rows {
-                    let dict = row.bind(py).cast::<pyo3::types::PyDict>()?;
-                    match dict.get_item(col_name)? {
-                        Some(v) => b.append_option(v.extract::<$extract_ty>().ok()),
-                        None => b.append_null(),
-                    }
-                }
-                Arc::new(b.finish()) as datafusion::arrow::array::ArrayRef
-            }};
-        }
         let array: datafusion::arrow::array::ArrayRef = match col_type {
-            DataType::Int8 => build_numeric!(Int8Builder, i8),
-            DataType::Int16 => build_numeric!(Int16Builder, i16),
-            DataType::Int32 => build_numeric!(Int32Builder, i32),
-            DataType::Int64 => build_numeric!(Int64Builder, i64),
-            DataType::UInt8 => build_numeric!(UInt8Builder, u8),
-            DataType::UInt16 => build_numeric!(UInt16Builder, u16),
-            DataType::UInt32 => build_numeric!(UInt32Builder, u32),
-            DataType::UInt64 => build_numeric!(UInt64Builder, u64),
-            DataType::Float32 => build_numeric!(Float32Builder, f32),
-            DataType::Float64 => build_numeric!(Float64Builder, f64),
+            DataType::Int8 => build_numeric!(Int8Builder, col_name, i8),
+            DataType::Int16 => build_numeric!(Int16Builder, col_name, i16),
+            DataType::Int32 => build_numeric!(Int32Builder, col_name, i32),
+            DataType::Int64 => build_numeric!(Int64Builder, col_name, i64),
+            DataType::UInt8 => build_numeric!(UInt8Builder, col_name, u8),
+            DataType::UInt16 => build_numeric!(UInt16Builder, col_name, u16),
+            DataType::UInt32 => build_numeric!(UInt32Builder, col_name, u32),
+            DataType::UInt64 => build_numeric!(UInt64Builder, col_name, u64),
+            DataType::Float32 => build_numeric!(Float32Builder, col_name, f32),
+            DataType::Float64 => build_numeric!(Float64Builder, col_name, f64),
             DataType::Boolean => {
                 let mut b = BooleanBuilder::new();
                 for row in rows {

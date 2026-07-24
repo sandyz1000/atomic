@@ -3,6 +3,10 @@ name = "atomic-js"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Forward the Avro data source to atomic-sql / DataFusion.
+avro = ["atomic-sql/avro", "datafusion/avro"]
+
 [lib]
 name = "atomic_js"
 path = "src/lib.rs"
@@ -15,6 +19,8 @@ atomic-data = { workspace = true, features = ["js"] }
 atomic-compute = { workspace = true }
 atomic-graph = { workspace = true }
 atomic-sql = { workspace = true }
+atomic-streaming = { workspace = true }
+atomic-structured = { workspace = true }
 atomic-nlq = { workspace = true, features = ["js"] }
 datafusion = { workspace = true }
 parking_lot = { workspace = true }

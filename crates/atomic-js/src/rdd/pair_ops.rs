@@ -200,19 +200,19 @@ impl JsRdd {
         ))
     }
 
-    /// Sum the values for each key, returning `[key, sum]`. Driver-side numeric reduction.
+    /// Sum the values for each key, returning `[key, sum]`. In distributed mode a `(a,b)=>a+b`
+    /// combiner is shipped so workers pre-aggregate per partition; the driver merges the partials.
     #[napi]
-    pub fn sum_values(&self) -> Result<JsRdd> {
-        self.reduce_values(|acc, v| {
-            let sum = acc.as_f64().unwrap_or(0.0) + v.as_f64().unwrap_or(0.0);
-            number_json(sum)
+    pub fn sum_values(&mut self) -> Result<JsRdd> {
+        self.combine_values("(a, b) => a + b", |acc, v| {
+            number_json(acc.as_f64().unwrap_or(0.0) + v.as_f64().unwrap_or(0.0))
         })
     }
 
     /// Keep the maximum value for each key, returning `[key, max]`.
     #[napi]
-    pub fn max_values(&self) -> Result<JsRdd> {
-        self.reduce_values(|acc, v| {
+    pub fn max_values(&mut self) -> Result<JsRdd> {
+        self.combine_values("(a, b) => (a >= b ? a : b)", |acc, v| {
             if Self::json_compare(&v, &acc) == std::cmp::Ordering::Greater {
                 v
             } else {
@@ -223,8 +223,8 @@ impl JsRdd {
 
     /// Keep the minimum value for each key, returning `[key, min]`.
     #[napi]
-    pub fn min_values(&self) -> Result<JsRdd> {
-        self.reduce_values(|acc, v| {
+    pub fn min_values(&mut self) -> Result<JsRdd> {
+        self.combine_values("(a, b) => (a <= b ? a : b)", |acc, v| {
             if Self::json_compare(&v, &acc) == std::cmp::Ordering::Less {
                 v
             } else {
@@ -233,33 +233,20 @@ impl JsRdd {
         })
     }
 
-    /// Count the values per key, returning `[key, count]`.
+    /// Count the values per key, returning `[key, count]`. In distributed mode workers count per
+    /// partition (a shipped map-side combine) and the driver sums the partial counts.
     #[napi]
-    pub fn count_values(&self) -> Result<JsRdd> {
-        let source = self.collect_rows()?;
-        let mut counts: HashMap<String, (JsonValue, i64)> = HashMap::new();
-        let mut order: Vec<String> = Vec::new();
-        for pair in &source {
-            let (k, _) = Self::split_pair(pair)?;
-            let key_str = Self::key_to_string(&k)?;
-            counts
-                .entry(key_str.clone())
-                .and_modify(|(_, c)| *c += 1)
-                .or_insert_with(|| {
-                    order.push(key_str.clone());
-                    (k, 1)
-                });
-        }
-        let elements: Vec<JsonValue> = order
-            .into_iter()
-            .filter_map(|ks| counts.remove(&ks))
-            .map(|(k, c)| JsonValue::Array(vec![k, JsonValue::from(c)]))
-            .collect();
-        Ok(JsRdd::from_data(
-            elements,
-            self.num_partitions,
-            Arc::clone(&self.context),
-        ))
+    pub fn count_values(&mut self) -> Result<JsRdd> {
+        // Map each value to 1 on the workers, then sum. The wrapper counts per key per partition.
+        let wrapper = "(partition) => { const g = new Map(), o = []; \
+             for (const p of partition) { const k = JSON.stringify(p[0]); \
+             if (g.has(k)) { g.set(k, [p[0], g.get(k)[1] + 1]); } \
+             else { g.set(k, [p[0], 1]); o.push(k); } } \
+             return o.map(k => g.get(k)); }";
+        let partials = self.map_side_combine(wrapper)?;
+        self.merge_partials(partials, |acc, v| {
+            number_json(acc.as_f64().unwrap_or(0.0) + v.as_f64().unwrap_or(0.0))
+        })
     }
 
     /// Extract the key from each `[key, value]` pair.
@@ -934,12 +921,34 @@ impl JsRdd {
         Ok((arr[0].clone(), arr[1].clone()))
     }
 
-    /// Reduce the values of each key with `op`, preserving first-seen key order.
-    fn reduce_values(&self, op: impl Fn(JsonValue, JsonValue) -> JsonValue) -> Result<JsRdd> {
-        let source = self.collect_rows()?;
+    /// The `[key, value]` pairs after a per-partition key-wise combine. In distributed mode the
+    /// `wrapper` JS combiner is shipped and runs on workers, so only one partial per key per
+    /// partition crosses the wire; in local mode the source rows are returned for the driver merge.
+    fn map_side_combine(&mut self, wrapper: &str) -> Result<Vec<JsonValue>> {
+        if self.context.is_distributed() {
+            let saved_staged = self.staged.clone();
+            self.stage_js_task(
+                wrapper.to_string(),
+                atomic_data::distributed::TaskAction::Map,
+                None,
+            )?;
+            let partials = self.dispatch_and_collect();
+            self.staged = saved_staged;
+            partials
+        } else {
+            Ok(self.elements.clone())
+        }
+    }
+
+    /// Merge `[key, value]` partials key-wise with `op` (driver side), preserving first-seen order.
+    fn merge_partials(
+        &self,
+        partials: Vec<JsonValue>,
+        op: impl Fn(JsonValue, JsonValue) -> JsonValue,
+    ) -> Result<JsRdd> {
         let mut accum: HashMap<String, (JsonValue, JsonValue)> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
-        for pair in &source {
+        for pair in &partials {
             let (k, v) = Self::split_pair(pair)?;
             let key_str = Self::key_to_string(&k)?;
             match accum.get_mut(&key_str) {
@@ -960,6 +969,24 @@ impl JsRdd {
             self.num_partitions,
             Arc::clone(&self.context),
         ))
+    }
+
+    /// Ship `js_combiner` (`(a,b)=>…`) as a map-side per-key combine, then merge the partials on
+    /// the driver with the equivalent `rust_op`.
+    fn combine_values(
+        &mut self,
+        js_combiner: &str,
+        rust_op: impl Fn(JsonValue, JsonValue) -> JsonValue,
+    ) -> Result<JsRdd> {
+        let wrapper = format!(
+            "(partition) => {{ const g = new Map(), o = []; \
+             for (const p of partition) {{ const k = JSON.stringify(p[0]); \
+             if (g.has(k)) {{ g.set(k, [p[0], ({js_combiner})(g.get(k)[1], p[1])]); }} \
+             else {{ g.set(k, [p[0], p[1]]); o.push(k); }} }} \
+             return o.map(k => g.get(k)); }}"
+        );
+        let partials = self.map_side_combine(&wrapper)?;
+        self.merge_partials(partials, rust_op)
     }
 }
 

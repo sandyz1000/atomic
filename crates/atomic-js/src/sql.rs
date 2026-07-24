@@ -110,7 +110,7 @@ fn arrow_scalar_to_json(col: &dyn Array, row: usize) -> serde_json::Value {
     }
 }
 
-fn batches_to_json_rows(batches: &[RecordBatch]) -> Vec<serde_json::Value> {
+pub(crate) fn batches_to_json_rows(batches: &[RecordBatch]) -> Vec<serde_json::Value> {
     let mut rows = Vec::new();
     for batch in batches {
         let schema = batch.schema();
@@ -274,6 +274,70 @@ impl JsDataFrame {
             .clone()
             .join(other.inner.clone(), jt, &left, &right, None)
             .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Group by `groupBy` columns and compute `aggs` (SQL aggregate expressions like
+    /// `"SUM(amount) AS total"`). Empty `groupBy` computes global aggregates.
+    ///
+    /// ```typescript
+    /// df.agg(["region"], ["SUM(amount) AS total", "COUNT(*) AS n"])
+    /// ```
+    #[napi]
+    pub fn agg(&self, group_by: Vec<String>, aggs: Vec<String>) -> Result<JsDataFrame> {
+        if aggs.is_empty() {
+            return Err(Error::from_reason(
+                "agg requires at least one aggregate expression",
+            ));
+        }
+        let view = tmp_view_name();
+        let session = self.session.clone();
+        let df = self.inner.clone();
+        let select_list = if group_by.is_empty() {
+            aggs.join(", ")
+        } else {
+            format!("{}, {}", group_by.join(", "), aggs.join(", "))
+        };
+        let group_clause = if group_by.is_empty() {
+            String::new()
+        } else {
+            format!(" GROUP BY {}", group_by.join(", "))
+        };
+        let result_df = run_sql_async(async move {
+            session.register_table(&view, df.into_view())?;
+            let r = session
+                .sql(&format!("SELECT {select_list} FROM {view}{group_clause}"))
+                .await;
+            let _ = session.deregister_table(&view);
+            r
+        })
+        .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: result_df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// Rename all columns positionally to `names` (must match the column count).
+    #[napi]
+    pub fn to_df(&self, names: Vec<String>) -> Result<JsDataFrame> {
+        let fields = self.inner.schema().fields();
+        if fields.len() != names.len() {
+            return Err(Error::from_reason(format!(
+                "toDf: expected {} names, got {}",
+                fields.len(),
+                names.len()
+            )));
+        }
+        let mut df = self.inner.clone();
+        for (field, new_name) in fields.iter().zip(&names) {
+            df = df
+                .with_column_renamed(field.name(), new_name)
+                .map_err(|e| Error::from_reason(e.to_string()))?;
+        }
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -878,6 +942,33 @@ impl JsSqlContext {
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
+    /// Register an Avro file (or directory) as a named table. Requires the `avro` feature;
+    /// without it the call returns an error. The method stays napi-visible either way so the
+    /// generated registration table is not conditional.
+    #[napi]
+    pub fn register_avro(&self, name: String, path: String) -> Result<()> {
+        #[cfg(feature = "avro")]
+        {
+            let ctx = self.inner.clone();
+            run_sql_async(async move {
+                ctx.register_avro(
+                    &name,
+                    &path,
+                    datafusion::prelude::AvroReadOptions::default(),
+                )
+                .await
+            })
+            .map_err(|e| Error::from_reason(e.to_string()))
+        }
+        #[cfg(not(feature = "avro"))]
+        {
+            let _ = (name, path);
+            Err(Error::from_reason(
+                "atomic-js was built without the 'avro' feature",
+            ))
+        }
+    }
+
     /// Remove a previously registered table from the catalog.
     #[napi]
     pub fn deregister_table(&self, name: String) -> Result<()> {
@@ -885,26 +976,69 @@ impl JsSqlContext {
             .deregister_table(&name)
             .map_err(|e| Error::from_reason(e.to_string()))
     }
+
+    /// Return a registered table as a lazy DataFrame.
+    #[napi]
+    pub fn table(&self, name: String) -> Result<JsDataFrame> {
+        let session = self.session.clone();
+        let df = run_sql_async(async move { session.table(&name).await })
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: df,
+            session: self.session.clone(),
+        })
+    }
+
+    /// List the names of all registered tables.
+    #[napi]
+    pub fn table_names(&self) -> Result<Vec<String>> {
+        self.inner
+            .table_names()
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// Read a data source by path, returning a lazy DataFrame. `format` is `csv`/`parquet`/`json`.
+    #[napi]
+    pub fn read(&self, format: String, path: String) -> Result<JsDataFrame> {
+        use atomic_sql::context::DataFormat;
+        let fmt = match format.to_ascii_lowercase().as_str() {
+            "csv" => DataFormat::Csv,
+            "parquet" => DataFormat::Parquet,
+            "json" => DataFormat::Json,
+            #[cfg(feature = "avro")]
+            "avro" => DataFormat::Avro,
+            _ => return Err(Error::from_reason(format!("unknown format: {format}"))),
+        };
+        let ctx = self.inner.clone();
+        let df = run_sql_async(async move { ctx.read(fmt, &path).await })
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(JsDataFrame {
+            inner: df.into_inner(),
+            session: self.session.clone(),
+        })
+    }
 }
 
 /// Parse an Arrow type string into a DataFusion `DataType`.
-fn parse_arrow_type(s: &str) -> Result<DataType> {
+pub(crate) fn parse_arrow_type(s: &str) -> Result<DataType> {
+    use datafusion::arrow::datatypes::TimeUnit;
     Ok(match s.to_lowercase().as_str() {
         "int8" => DataType::Int8,
         "int16" => DataType::Int16,
         "int32" => DataType::Int32,
-        "int64" => DataType::Int64,
+        "int64" | "int" => DataType::Int64,
         "uint8" => DataType::UInt8,
         "uint16" => DataType::UInt16,
         "uint32" => DataType::UInt32,
         "uint64" => DataType::UInt64,
         "float32" => DataType::Float32,
-        "float64" | "double" => DataType::Float64,
+        "float64" | "double" | "float" => DataType::Float64,
         "bool" | "boolean" => DataType::Boolean,
         "utf8" | "string" | "str" => DataType::Utf8,
+        "timestamp_ms" | "timestamp" => DataType::Timestamp(TimeUnit::Millisecond, None),
         other => {
             return Err(Error::from_reason(format!(
-                "unsupported Arrow type: {other}. Supported: int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8"
+                "unsupported Arrow type: {other}. Supported: int8/16/32/64, uint8/16/32/64, float32/64, bool, utf8, timestamp_ms"
             )));
         }
     })
@@ -937,42 +1071,45 @@ fn json_rows_to_batches(
         .collect();
     let arrow_schema = Arc::new(Schema::new(fields));
 
+    // Each column reads `row[$col]` from every JSON object row. Defined once here (not per
+    // iteration); the column name is a macro parameter since macro_rules is hygienic and
+    // resolves free identifiers at this definition site, where the loop variable is not in scope.
+    macro_rules! build_int {
+        ($builder_ty:ty, $col:expr, $cast:expr) => {{
+            let mut b = <$builder_ty>::new();
+            for row in rows {
+                match row.get($col).and_then(serde_json::Value::as_i64) {
+                    Some(v) => b.append_value($cast(v)),
+                    None => b.append_null(),
+                }
+            }
+            Arc::new(b.finish()) as ArrayRef
+        }};
+    }
+    macro_rules! build_uint {
+        ($builder_ty:ty, $col:expr, $cast:expr) => {{
+            let mut b = <$builder_ty>::new();
+            for row in rows {
+                match row.get($col).and_then(serde_json::Value::as_u64) {
+                    Some(v) => b.append_value($cast(v)),
+                    None => b.append_null(),
+                }
+            }
+            Arc::new(b.finish()) as ArrayRef
+        }};
+    }
+
     let mut col_arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
     for (col_name, col_type) in &columns {
-        // Each column reads `row[col_name]` from every JSON object row.
-        macro_rules! build_int {
-            ($builder_ty:ty, $cast:expr) => {{
-                let mut b = <$builder_ty>::new();
-                for row in rows {
-                    match row.get(col_name).and_then(serde_json::Value::as_i64) {
-                        Some(v) => b.append_value($cast(v)),
-                        None => b.append_null(),
-                    }
-                }
-                Arc::new(b.finish()) as ArrayRef
-            }};
-        }
-        macro_rules! build_uint {
-            ($builder_ty:ty, $cast:expr) => {{
-                let mut b = <$builder_ty>::new();
-                for row in rows {
-                    match row.get(col_name).and_then(serde_json::Value::as_u64) {
-                        Some(v) => b.append_value($cast(v)),
-                        None => b.append_null(),
-                    }
-                }
-                Arc::new(b.finish()) as ArrayRef
-            }};
-        }
         let array: ArrayRef = match col_type {
-            DataType::Int8 => build_int!(Int8Builder, |v| v as i8),
-            DataType::Int16 => build_int!(Int16Builder, |v| v as i16),
-            DataType::Int32 => build_int!(Int32Builder, |v| v as i32),
-            DataType::Int64 => build_int!(Int64Builder, |v| v),
-            DataType::UInt8 => build_uint!(UInt8Builder, |v| v as u8),
-            DataType::UInt16 => build_uint!(UInt16Builder, |v| v as u16),
-            DataType::UInt32 => build_uint!(UInt32Builder, |v| v as u32),
-            DataType::UInt64 => build_uint!(UInt64Builder, |v| v),
+            DataType::Int8 => build_int!(Int8Builder, col_name, |v| v as i8),
+            DataType::Int16 => build_int!(Int16Builder, col_name, |v| v as i16),
+            DataType::Int32 => build_int!(Int32Builder, col_name, |v| v as i32),
+            DataType::Int64 => build_int!(Int64Builder, col_name, |v| v),
+            DataType::UInt8 => build_uint!(UInt8Builder, col_name, |v| v as u8),
+            DataType::UInt16 => build_uint!(UInt16Builder, col_name, |v| v as u16),
+            DataType::UInt32 => build_uint!(UInt32Builder, col_name, |v| v as u32),
+            DataType::UInt64 => build_uint!(UInt64Builder, col_name, |v| v),
             DataType::Float32 => {
                 let mut b = Float32Builder::new();
                 for row in rows {

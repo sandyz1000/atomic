@@ -275,6 +275,182 @@ impl PyGraph {
         Ok(PyGraph::rebuild(self.ctx.clone(), inner))
     }
 
+    /// Return the subgraph of vertices where `vpred(vid, weight)` is truthy and edges where
+    /// `epred(src, dst, attr)` is truthy; edges with a dropped endpoint are also removed.
+    pub fn subgraph(
+        &self,
+        py: Python<'_>,
+        vpred: Py<PyAny>,
+        epred: Py<PyAny>,
+    ) -> PyResult<PyGraph> {
+        let mut kept_verts: Vec<(VId, f64)> = Vec::new();
+        let mut live: std::collections::HashSet<VId> = std::collections::HashSet::new();
+        for (vid, vd) in self.inner.collect_vertices() {
+            if vpred.call1(py, (vid, vd))?.is_truthy(py)? {
+                kept_verts.push((vid, vd));
+                live.insert(vid);
+            }
+        }
+        let mut kept_edges: Vec<Edge<f64>> = Vec::new();
+        for e in self.inner.collect_edges() {
+            if live.contains(&e.src)
+                && live.contains(&e.dst)
+                && epred.call1(py, (e.src, e.dst, e.attr))?.is_truthy(py)?
+            {
+                kept_edges.push(e);
+            }
+        }
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), kept_verts, kept_edges);
+        Ok(PyGraph::rebuild(self.ctx.clone(), inner))
+    }
+
+    /// Restrict this graph to the vertices and edges present in `other` (attributes kept from
+    /// self). A vertex survives if its id is in `other`; an edge survives if its `(src, dst)` is.
+    pub fn mask(&self, other: &PyGraph) -> PyGraph {
+        let other_v: std::collections::HashSet<VId> = other
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .map(|(v, _)| v)
+            .collect();
+        let other_e: std::collections::HashSet<(VId, VId)> = other
+            .inner
+            .collect_edges()
+            .into_iter()
+            .map(|e| (e.src, e.dst))
+            .collect();
+        let verts: Vec<(VId, f64)> = self
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .filter(|(v, _)| other_v.contains(v))
+            .collect();
+        let edges: Vec<Edge<f64>> = self
+            .inner
+            .collect_edges()
+            .into_iter()
+            .filter(|e| other_e.contains(&(e.src, e.dst)))
+            .collect();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        PyGraph::rebuild(self.ctx.clone(), inner)
+    }
+
+    /// Map each edge's attribute using the full triplet: `f(src, src_weight, dst, dst_weight,
+    /// attr) -> new_attr`. Mirrors `mapTriplets`.
+    pub fn map_triplets(&self, py: Python<'_>, f: Py<PyAny>) -> PyResult<PyGraph> {
+        let vattr: std::collections::HashMap<VId, f64> =
+            self.inner.collect_vertices().into_iter().collect();
+        let verts = self.inner.collect_vertices();
+        let edges: Vec<Edge<f64>> = self
+            .inner
+            .collect_edges()
+            .into_iter()
+            .map(|e| {
+                let sv = vattr.get(&e.src).copied().unwrap_or(0.0);
+                let dv = vattr.get(&e.dst).copied().unwrap_or(0.0);
+                let new_attr: f64 = f.call1(py, (e.src, sv, e.dst, dv, e.attr))?.extract(py)?;
+                Ok(Edge {
+                    src: e.src,
+                    dst: e.dst,
+                    attr: new_attr,
+                })
+            })
+            .collect::<PyResult<_>>()?;
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        Ok(PyGraph::rebuild(self.ctx.clone(), inner))
+    }
+
+    /// Merge parallel edges (same `(src, dst)`) with `f(attr1, attr2) -> attr`. Mirrors
+    /// `groupEdges`.
+    pub fn group_edges(&self, py: Python<'_>, f: Py<PyAny>) -> PyResult<PyGraph> {
+        let verts = self.inner.collect_vertices();
+        let mut merged: std::collections::HashMap<(VId, VId), f64> =
+            std::collections::HashMap::new();
+        let mut order: Vec<(VId, VId)> = Vec::new();
+        for e in self.inner.collect_edges() {
+            match merged.get(&(e.src, e.dst)) {
+                Some(acc) => {
+                    let m: f64 = f.call1(py, (*acc, e.attr))?.extract(py)?;
+                    merged.insert((e.src, e.dst), m);
+                }
+                None => {
+                    order.push((e.src, e.dst));
+                    merged.insert((e.src, e.dst), e.attr);
+                }
+            }
+        }
+        let edges: Vec<Edge<f64>> = order
+            .into_iter()
+            .map(|(src, dst)| Edge {
+                src,
+                dst,
+                attr: merged[&(src, dst)],
+            })
+            .collect();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        Ok(PyGraph::rebuild(self.ctx.clone(), inner))
+    }
+
+    /// Left-outer-join vertices with `table` (a list of `(vid, value)`), deriving new weights via
+    /// `f(vid, weight, value_or_None) -> new_weight`. Edges are unchanged. Mirrors
+    /// `outerJoinVertices`.
+    pub fn outer_join_vertices(
+        &self,
+        py: Python<'_>,
+        table: Vec<(VId, Py<PyAny>)>,
+        f: Py<PyAny>,
+    ) -> PyResult<PyGraph> {
+        let map: std::collections::HashMap<VId, Py<PyAny>> = table
+            .into_iter()
+            .map(|(vid, v)| (vid, v.clone_ref(py)))
+            .collect();
+        let verts: Vec<(VId, f64)> = self
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .map(|(vid, vd)| {
+                let value = match map.get(&vid) {
+                    Some(v) => v.clone_ref(py),
+                    None => py.None(),
+                };
+                let new_vd: f64 = f.call1(py, (vid, vd, value))?.extract(py)?;
+                Ok((vid, new_vd))
+            })
+            .collect::<PyResult<_>>()?;
+        let edges = self.inner.collect_edges();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        Ok(PyGraph::rebuild(self.ctx.clone(), inner))
+    }
+
+    /// Inner-join vertices with `table`: only vertices present in `table` are updated via
+    /// `f(vid, weight, value) -> new_weight`; others keep their weight. Mirrors `joinVertices`.
+    pub fn join_vertices(
+        &self,
+        py: Python<'_>,
+        table: Vec<(VId, Py<PyAny>)>,
+        f: Py<PyAny>,
+    ) -> PyResult<PyGraph> {
+        let map: std::collections::HashMap<VId, Py<PyAny>> = table
+            .into_iter()
+            .map(|(vid, v)| (vid, v.clone_ref(py)))
+            .collect();
+        let verts: Vec<(VId, f64)> = self
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .map(|(vid, vd)| match map.get(&vid) {
+                Some(v) => {
+                    let new_vd: f64 = f.call1(py, (vid, vd, v.clone_ref(py)))?.extract(py)?;
+                    Ok((vid, new_vd))
+                }
+                None => Ok((vid, vd)),
+            })
+            .collect::<PyResult<_>>()?;
+        let edges = self.inner.collect_edges();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        Ok(PyGraph::rebuild(self.ctx.clone(), inner))
+    }
+
     /// Return a new graph with all edges reversed.
     pub fn reverse(&self) -> PyGraph {
         let verts = self.inner.collect_vertices();

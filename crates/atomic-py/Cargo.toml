@@ -3,6 +3,10 @@ name = "atomic-py"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Forward the Avro data source to atomic-sql / DataFusion.
+avro = ["atomic-sql/avro", "datafusion/avro"]
+
 [lib]
 name = "atomic_compute"
 crate-type = ["cdylib", "rlib"]
@@ -17,6 +21,8 @@ pyo3 = { workspace = true, features = ["extension-module", "abi3-py311", "multip
 atomic-compute = { workspace = true }
 atomic-data = { workspace = true, features = ["python"] }
 atomic-sql = { workspace = true }
+atomic-streaming = { workspace = true }
+atomic-structured = { workspace = true }
 atomic-graph = { workspace = true }
 atomic-nlq = { workspace = true, features = ["python"] }
 datafusion = { workspace = true }

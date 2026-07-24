@@ -9,7 +9,7 @@ use atomic_graph::{
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 // VertexId in atomic-graph is i64.
@@ -18,6 +18,10 @@ type VertexId = i64;
 /// JS `send_msg` callback for Pregel: `(srcId, dstId, edgeAttr, srcRank, dstRank)`
 /// returns a list of `[targetId, message]` pairs.
 type PregelSendFn<'a> = Function<'a, FnArgs<(f64, f64, f64, f64, f64)>, Vec<Vec<f64>>>;
+
+/// JS `map_triplets` callback: `(srcId, srcAttr, dstId, dstAttr, edgeAttr)` returns the new
+/// edge attribute.
+type TripletMapFn<'a> = Function<'a, FnArgs<(f64, f64, f64, f64, f64)>, f64>;
 
 #[napi(js_name = "Graph")]
 pub struct JsGraph {
@@ -340,6 +344,192 @@ impl JsGraph {
                 })
             })
             .collect::<Result<_>>()?;
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        Ok(JsGraph {
+            ctx: self.ctx.clone(),
+            inner,
+        })
+    }
+
+    /// Return the subgraph of vertices where `vpred(vertexId, attr)` is true and edges where
+    /// `epred(srcId, dstId, attr)` is true; edges with a dropped endpoint are also removed.
+    #[napi]
+    pub fn subgraph(
+        &self,
+        vpred: Function<FnArgs<(f64, f64)>, bool>,
+        epred: Function<FnArgs<(f64, f64, f64)>, bool>,
+    ) -> Result<JsGraph> {
+        let mut kept_verts: Vec<(VertexId, f64)> = Vec::new();
+        let mut live: HashSet<VertexId> = HashSet::new();
+        for (vid, vd) in self.inner.collect_vertices() {
+            if vpred.call(FnArgs::from((vid as f64, vd)))? {
+                kept_verts.push((vid, vd));
+                live.insert(vid);
+            }
+        }
+        let mut kept_edges: Vec<Edge<f64>> = Vec::new();
+        for e in self.inner.collect_edges() {
+            if live.contains(&e.src)
+                && live.contains(&e.dst)
+                && epred.call(FnArgs::from((e.src as f64, e.dst as f64, e.attr)))?
+            {
+                kept_edges.push(e);
+            }
+        }
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), kept_verts, kept_edges);
+        Ok(JsGraph {
+            ctx: self.ctx.clone(),
+            inner,
+        })
+    }
+
+    /// Restrict this graph to the vertices and edges present in `other` (attributes kept from
+    /// self). A vertex survives if its id is in `other`; an edge survives if its `(src, dst)` is.
+    #[napi]
+    pub fn mask(&self, other: &JsGraph) -> JsGraph {
+        let other_v: HashSet<VertexId> = other
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .map(|(v, _)| v)
+            .collect();
+        let other_e: HashSet<(VertexId, VertexId)> = other
+            .inner
+            .collect_edges()
+            .into_iter()
+            .map(|e| (e.src, e.dst))
+            .collect();
+        let verts: Vec<(VertexId, f64)> = self
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .filter(|(v, _)| other_v.contains(v))
+            .collect();
+        let edges: Vec<Edge<f64>> = self
+            .inner
+            .collect_edges()
+            .into_iter()
+            .filter(|e| other_e.contains(&(e.src, e.dst)))
+            .collect();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        JsGraph {
+            ctx: self.ctx.clone(),
+            inner,
+        }
+    }
+
+    /// Map each edge's attribute using the full triplet:
+    /// `f(srcId, srcAttr, dstId, dstAttr, edgeAttr) => newAttr`.
+    #[napi]
+    pub fn map_triplets(&self, f: TripletMapFn) -> Result<JsGraph> {
+        let vattr: HashMap<VertexId, f64> = self.inner.collect_vertices().into_iter().collect();
+        let verts = self.inner.collect_vertices();
+        let edges: Vec<Edge<f64>> = self
+            .inner
+            .collect_edges()
+            .into_iter()
+            .map(|e| {
+                let sv = vattr.get(&e.src).copied().unwrap_or(0.0);
+                let dv = vattr.get(&e.dst).copied().unwrap_or(0.0);
+                let new_attr =
+                    f.call(FnArgs::from((e.src as f64, sv, e.dst as f64, dv, e.attr)))?;
+                Ok(Edge {
+                    src: e.src,
+                    dst: e.dst,
+                    attr: new_attr,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        Ok(JsGraph {
+            ctx: self.ctx.clone(),
+            inner,
+        })
+    }
+
+    /// Merge parallel edges (same `(src, dst)`) with `f(attr1, attr2) => attr`.
+    #[napi]
+    pub fn group_edges(&self, f: Function<FnArgs<(f64, f64)>, f64>) -> Result<JsGraph> {
+        let verts = self.inner.collect_vertices();
+        let mut merged: HashMap<(VertexId, VertexId), f64> = HashMap::new();
+        let mut order: Vec<(VertexId, VertexId)> = Vec::new();
+        for e in self.inner.collect_edges() {
+            match merged.get(&(e.src, e.dst)) {
+                Some(acc) => {
+                    let m = f.call(FnArgs::from((*acc, e.attr)))?;
+                    merged.insert((e.src, e.dst), m);
+                }
+                None => {
+                    order.push((e.src, e.dst));
+                    merged.insert((e.src, e.dst), e.attr);
+                }
+            }
+        }
+        let edges: Vec<Edge<f64>> = order
+            .into_iter()
+            .map(|(src, dst)| Edge {
+                src,
+                dst,
+                attr: merged[&(src, dst)],
+            })
+            .collect();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        Ok(JsGraph {
+            ctx: self.ctx.clone(),
+            inner,
+        })
+    }
+
+    /// Left-outer-join vertices with `table` (`[vertexId, value]` pairs), deriving new attributes
+    /// via `f(vertexId, attr, valueOrNull) => newAttr`. Edges are unchanged.
+    #[napi]
+    pub fn outer_join_vertices(
+        &self,
+        table: Vec<(f64, f64)>,
+        f: Function<FnArgs<(f64, f64, Option<f64>)>, f64>,
+    ) -> Result<JsGraph> {
+        let map: HashMap<VertexId, f64> =
+            table.into_iter().map(|(vid, v)| (vid as i64, v)).collect();
+        let verts: Vec<(VertexId, f64)> = self
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .map(|(vid, vd)| {
+                let new_vd = f.call(FnArgs::from((vid as f64, vd, map.get(&vid).copied())))?;
+                Ok((vid, new_vd))
+            })
+            .collect::<Result<_>>()?;
+        let edges = self.inner.collect_edges();
+        let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
+        Ok(JsGraph {
+            ctx: self.ctx.clone(),
+            inner,
+        })
+    }
+
+    /// Inner-join vertices with `table`: only vertices present in `table` are updated via
+    /// `f(vertexId, attr, value) => newAttr`; others keep their attribute.
+    #[napi]
+    pub fn join_vertices(
+        &self,
+        table: Vec<(f64, f64)>,
+        f: Function<FnArgs<(f64, f64, f64)>, f64>,
+    ) -> Result<JsGraph> {
+        let map: HashMap<VertexId, f64> =
+            table.into_iter().map(|(vid, v)| (vid as i64, v)).collect();
+        let verts: Vec<(VertexId, f64)> = self
+            .inner
+            .collect_vertices()
+            .into_iter()
+            .map(|(vid, vd)| match map.get(&vid) {
+                Some(v) => {
+                    let new_vd = f.call(FnArgs::from((vid as f64, vd, *v)))?;
+                    Ok((vid, new_vd))
+                }
+                None => Ok((vid, vd)),
+            })
+            .collect::<Result<_>>()?;
+        let edges = self.inner.collect_edges();
         let inner = Graph::from_vertices_edges(self.ctx.clone(), verts, edges);
         Ok(JsGraph {
             ctx: self.ctx.clone(),

@@ -5,6 +5,7 @@ pub(crate) mod parallel;
 mod rdd;
 mod sql;
 mod streaming;
+mod structured;
 
 use pyo3::prelude::*;
 
@@ -15,6 +16,10 @@ use parallel::run_partition;
 use rdd::{PyRdd, verify_picklable};
 use sql::{PyDataFrame, PySqlContext};
 use streaming::{PyBatchQueue, PyDStream, PyStreamingContext};
+use structured::{
+    PyAgg, PySessionBuilder, PySink, PyStreamWriter, PyStreamingDataFrame, PyStreamingQuery,
+    PyStructuredContext, PyWindowedBuilder,
+};
 
 /// Atomic Python client — RDD-style distributed computing and SQL for Python.
 ///
@@ -65,6 +70,14 @@ fn atomic(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStreamingContext>()?;
     m.add_class::<PyDStream>()?;
     m.add_class::<PyBatchQueue>()?;
+    m.add_class::<PyStructuredContext>()?;
+    m.add_class::<PyStreamingDataFrame>()?;
+    m.add_class::<PyWindowedBuilder>()?;
+    m.add_class::<PySessionBuilder>()?;
+    m.add_class::<PyStreamWriter>()?;
+    m.add_class::<PyStreamingQuery>()?;
+    m.add_class::<PyAgg>()?;
+    m.add_class::<PySink>()?;
     m.add_function(wrap_pyfunction!(verify_picklable, m)?)?;
     m.add_function(wrap_pyfunction!(run_partition, m)?)?;
     Ok(())
