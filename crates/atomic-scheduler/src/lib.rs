@@ -29,7 +29,7 @@ pub mod planner;
 pub mod stage;
 
 use atomic_data::partial::{ApproximateEvaluator, result::PartialResult};
-use atomic_data::{data::Data, rdd::Rdd, task_context::TaskContext};
+use atomic_data::{data::Data, rdd::Rdd, task_context::PartitionTask};
 use std::sync::Arc;
 
 pub use crate::distributed::{
@@ -68,7 +68,7 @@ impl Schedulers {
         timeout: std::time::Duration,
     ) -> LibResult<PartialResult<R>>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        F: PartitionTask<T, U>,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + std::fmt::Debug + Send + Sync + 'static,
     {

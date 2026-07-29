@@ -7,4 +7,6 @@ pub mod result;
 
 pub use approx_action_listener::*;
 pub use approx_eval::*;
+pub use count_eval::*;
 pub use error::*;
+pub use group_count_eval::*;

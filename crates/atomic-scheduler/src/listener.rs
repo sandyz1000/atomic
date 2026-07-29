@@ -1,6 +1,7 @@
 use crate::error::{LibResult, SchedulerError};
 use atomic_data::data::Data;
 use parking_lot::{Mutex, RwLock};
+use std::any::Any;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -30,6 +31,8 @@ pub trait ListenerEvent: Send + Sync {
     fn log_event(&self) -> bool {
         true
     }
+    /// Downcast support for `BusListener`s that need the concrete event type.
+    fn as_any(&self) -> &dyn Any;
 }
 
 #[derive(Clone, Copy)]
@@ -40,19 +43,46 @@ pub struct JobStartListener {
     pub time: Instant,
     pub stage_infos: Vec<StageInfo>,
 }
-impl ListenerEvent for JobStartListener {}
+impl ListenerEvent for JobStartListener {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 pub struct JobEndListener {
     pub job_id: usize,
     pub time: Instant,
     pub job_result: bool,
 }
-impl ListenerEvent for JobEndListener {}
+impl ListenerEvent for JobEndListener {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Receives every event posted to a `LiveListenerBus` after registration via
+/// [`LiveListenerBus::add_listener`].
+pub trait BusListener: Send + Sync {
+    fn on_event(&self, event: &dyn ListenerEvent);
+}
 
 trait AsyncEventQueue: Send + Sync {
     fn post(&mut self, event: Arc<dyn ListenerEvent>);
     fn start(&mut self);
     fn stop(&mut self);
+}
+
+/// Bridges a `BusListener` into the bus's internal `AsyncEventQueue` slots.
+struct ListenerQueue {
+    listener: Arc<dyn BusListener>,
+}
+
+impl AsyncEventQueue for ListenerQueue {
+    fn post(&mut self, event: Arc<dyn ListenerEvent>) {
+        self.listener.on_event(event.as_ref());
+    }
+    fn start(&mut self) {}
+    fn stop(&mut self) {}
 }
 
 type QueueBuffer = Option<Arc<Mutex<Vec<Arc<dyn ListenerEvent>>>>>;
@@ -116,6 +146,20 @@ impl LiveListenerBus {
         }
     }
 
+    /// Register a listener to receive every event posted to this bus from now on.
+    ///
+    /// A listener added before `start()` also receives every event buffered before
+    /// start (replayed in post order, once `start()` runs). A listener added after
+    /// `start()` only sees events posted from that point forward — already-delivered
+    /// pre-start events are gone from the buffer by then.
+    pub fn add_listener(&self, listener: Arc<dyn BusListener>) {
+        let mut queue: Box<dyn AsyncEventQueue> = Box::new(ListenerQueue { listener });
+        if self.started.load(Ordering::SeqCst) {
+            queue.start();
+        }
+        self.queues.write().push(queue);
+    }
+
     fn post_to_queues(&self, event: Box<dyn ListenerEvent>) {
         let event: Arc<dyn ListenerEvent> = Arc::from(event);
         for queue in &mut *self.queues.write() {
@@ -177,5 +221,71 @@ impl LiveListenerBus {
         }
         queues.clear();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct RecordingListener {
+        job_ids: Mutex<Vec<usize>>,
+    }
+
+    impl BusListener for RecordingListener {
+        fn on_event(&self, event: &dyn ListenerEvent) {
+            if let Some(e) = event.as_any().downcast_ref::<JobStartListener>() {
+                self.job_ids.lock().push(e.job_id);
+            } else if let Some(e) = event.as_any().downcast_ref::<JobEndListener>() {
+                self.job_ids.lock().push(e.job_id);
+            }
+        }
+    }
+
+    #[test]
+    fn add_listener_receives_events_posted_after_start() {
+        let mut bus = LiveListenerBus::new();
+        bus.start().unwrap();
+
+        let listener = Arc::new(RecordingListener {
+            job_ids: Mutex::new(vec![]),
+        });
+        bus.add_listener(listener.clone());
+
+        bus.post(Box::new(JobStartListener {
+            job_id: 7,
+            time: Instant::now(),
+            stage_infos: vec![],
+        }));
+        bus.post(Box::new(JobEndListener {
+            job_id: 7,
+            time: Instant::now(),
+            job_result: true,
+        }));
+
+        assert_eq!(*listener.job_ids.lock(), vec![7, 7]);
+    }
+
+    #[test]
+    fn add_listener_before_start_replays_buffered_events() {
+        let mut bus = LiveListenerBus::new();
+
+        // Posted before start(): buffered on the bus, not yet delivered anywhere.
+        bus.post(Box::new(JobStartListener {
+            job_id: 3,
+            time: Instant::now(),
+            stage_infos: vec![],
+        }));
+
+        let listener = Arc::new(RecordingListener {
+            job_ids: Mutex::new(vec![]),
+        });
+        bus.add_listener(listener.clone());
+
+        assert!(listener.job_ids.lock().is_empty(), "not delivered yet");
+
+        bus.start().unwrap();
+
+        assert_eq!(*listener.job_ids.lock(), vec![3]);
     }
 }

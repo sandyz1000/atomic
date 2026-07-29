@@ -150,7 +150,7 @@ impl<T: Data + Clone> RddBase for UnionRdd<T> {
     fn preferred_locations(&self, split: Box<dyn Split>) -> Vec<Ipv4Addr> {
         match &self.0 {
             NonUniquePartitioner { .. } => Vec::new(),
-            PartitionerAware { rdds: _, .. } => {
+            PartitionerAware { .. } => {
                 log::debug!(
                     "finding preferred location for PartitionerAwareUnionRdd, partition {}",
                     split.get_index()

@@ -4,7 +4,7 @@ use atomic_data::partial::result::PartialResult;
 use atomic_data::partial::{ApproxListener, ApproximateEvaluator};
 use atomic_data::rdd::Rdd;
 use atomic_data::task::{TaskOption, TaskResult};
-use atomic_data::task_context::TaskContext;
+use atomic_data::task_context::{PartitionFn, PartitionTask};
 use std::clone::Clone;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
@@ -24,7 +24,7 @@ use crate::dag::{CompletionEvent, FetchFailedVals, TaskEndReason};
 use crate::error::{LibResult, SchedulerError};
 use crate::job::JobTracker;
 use crate::listener::{
-    JobEndListener, JobListener, JobStartListener, LiveListenerBus, NoOpListener,
+    BusListener, JobEndListener, JobListener, JobStartListener, LiveListenerBus, NoOpListener,
 };
 use crate::planner::StagePlanner;
 use crate::stage::Stage;
@@ -87,6 +87,12 @@ impl LocalScheduler {
         let _ = self.map_output_recovery.set(hook);
     }
 
+    /// Register a listener to observe `JobStartListener`/`JobEndListener` events
+    /// posted around every job this scheduler runs.
+    pub fn add_listener(&self, listener: Arc<dyn BusListener>) {
+        self.live_listener_bus.add_listener(listener);
+    }
+
     /// Run an approximate job on the given RDD and pass all the results to an ApproximateEvaluator
     /// as they arrive. Returns a partial result object from the evaluator.
     pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
@@ -97,7 +103,7 @@ impl LocalScheduler {
         timeout: Duration,
     ) -> LibResult<PartialResult<R>>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        F: PartitionTask<T, U>,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + Debug + Send + Sync + 'static,
     {
@@ -143,7 +149,7 @@ impl LocalScheduler {
         allow_local: bool,
     ) -> LibResult<Vec<U>>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        F: PartitionTask<T, U>,
     {
         // acquiring lock so that only one job can run at same time this lock is just
         // a temporary patch for preventing multiple jobs to update cache locks which affects
@@ -161,7 +167,21 @@ impl LocalScheduler {
                 NoOpListener,
             )
             .await?;
-            self.event_process_loop(allow_local, jt).await
+            self.live_listener_bus.post(Box::new(JobStartListener {
+                job_id: jt.run_id,
+                time: Instant::now(),
+                stage_infos: vec![],
+            }));
+            let result = self
+                .clone()
+                .event_process_loop(allow_local, jt.clone())
+                .await;
+            self.live_listener_bus.post(Box::new(JobEndListener {
+                job_id: jt.run_id,
+                time: Instant::now(),
+                job_result: result.is_ok(),
+            }));
+            result
         })
     }
 
@@ -172,7 +192,7 @@ impl LocalScheduler {
         jt: Arc<JobTracker<F, U, T, L>>,
     ) -> LibResult<Vec<U>>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        F: PartitionTask<T, U>,
         L: JobListener,
     {
         // TODO: update cache
@@ -385,7 +405,7 @@ impl NativeScheduler for LocalScheduler {
         failed_vals: FetchFailedVals,
         stage_id: usize,
     ) where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync,
+        F: PartitionTask<T, U>,
         L: JobListener,
     {
         let FetchFailedVals {
@@ -445,7 +465,7 @@ impl NativeScheduler for LocalScheduler {
     /// Every single task is run in the local thread pool
     fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, _server_address: SocketAddrV4)
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: PartitionFn<T, U>,
     {
         log::debug!("inside submit task");
         let my_attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
@@ -554,6 +574,7 @@ where
             let mut eval = self.evaluator.lock().await;
             eval.merge(_index, typed_result);
         }
+        self.mark_task_finished();
         Ok(())
     }
 }

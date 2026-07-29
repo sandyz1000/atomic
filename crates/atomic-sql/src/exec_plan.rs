@@ -55,10 +55,6 @@ impl DisplayAs for AtomicScanExec {
 }
 
 impl ExecutionPlan for AtomicScanExec {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "AtomicScanExec"
     }

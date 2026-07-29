@@ -210,10 +210,6 @@ impl DisplayAs for LlmMapExec {
 }
 
 impl ExecutionPlan for LlmMapExec {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "LlmMapExec"
     }

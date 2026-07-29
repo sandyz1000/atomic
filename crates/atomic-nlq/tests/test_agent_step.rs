@@ -3,12 +3,16 @@ use atomic_compute::task_registry::AGENT_RUNNER_REGISTRY;
 use atomic_data::distributed::{AgentFindings, AgentStepPayload, WireDecode as _, WireEncode as _};
 use atomic_nlq::agent_runner;
 
+/// Every test in this file runs against `MockLlmClient` — no live network call, no API
+/// key required. The mock is activated once, process-wide, via `ATOMIC_NLQ_MOCK_LLM`
+/// (checked by `PartitionAgentRunner::build_client`) before any test body runs.
 fn register_once() {
+    static MOCK_LLM_ENV: std::sync::Once = std::sync::Once::new();
+    MOCK_LLM_ENV.call_once(|| {
+        // SAFETY: runs exactly once, before any test spawns work that reads env vars.
+        unsafe { std::env::set_var("ATOMIC_NLQ_MOCK_LLM", "1") };
+    });
     agent_runner::register();
-}
-
-fn has_api_key() -> bool {
-    std::env::var("OPENAI_API_KEY").is_ok() || std::env::var("ANTHROPIC_API_KEY").is_ok()
 }
 
 /// Build a tokio single-threaded runtime and enter its scope so that
@@ -36,28 +40,15 @@ fn agent_step_runner_registered() {
     );
 }
 
-/// Exercises the full dispatch path (decode -> LLM call -> encode). Requires a
-/// real API key since `PartitionAgentRunner` always builds a live LLM client
-/// (no provider-mock seam exists yet — see CLAUDE.md atomic-nlq guardrails).
+/// Exercises the full dispatch path (decode -> LLM call -> encode) against the mock client.
 #[test]
 fn agent_step_dispatch_via_runner() {
-    if !has_api_key() {
-        eprintln!("agent_step_dispatch_via_runner: skipped (no API key)");
-        return;
-    }
     register_once();
     let runner = AGENT_RUNNER_REGISTRY.get().unwrap();
 
-    let provider = if std::env::var("OPENAI_API_KEY").is_ok() {
-        "openai"
-    } else {
-        "anthropic"
-    };
-    let model = if provider == "anthropic" {
-        "claude-haiku-4-5-20251001"
-    } else {
-        "gpt-4o-mini"
-    };
+    // Provider/model are irrelevant under the mock client — any value round-trips.
+    let provider = "openai";
+    let model = "gpt-4o-mini";
 
     let payload = AgentStepPayload {
         model: model.to_string(),
@@ -86,26 +77,15 @@ fn agent_step_dispatch_via_runner() {
 }
 
 /// JSON-encoded inputs (Python/JS PyRdd format) — exercises the fallback decode
-/// path through the real dispatch; requires an API key for the same reason as above.
+/// path through the real dispatch, against the mock client.
 #[test]
 fn agent_step_json_partition_decode() {
-    if !has_api_key() {
-        eprintln!("agent_step_json_partition_decode: skipped (no API key)");
-        return;
-    }
     register_once();
     let runner = AGENT_RUNNER_REGISTRY.get().expect("runner registered");
 
-    let provider = if std::env::var("OPENAI_API_KEY").is_ok() {
-        "openai"
-    } else {
-        "anthropic"
-    };
-    let model = if provider == "anthropic" {
-        "claude-haiku-4-5-20251001"
-    } else {
-        "gpt-4o-mini"
-    };
+    // Provider/model are irrelevant under the mock client — any value round-trips.
+    let provider = "openai";
+    let model = "gpt-4o-mini";
 
     let payload = AgentStepPayload {
         model: model.to_string(),
@@ -126,26 +106,15 @@ fn agent_step_json_partition_decode() {
     assert_eq!(findings.len(), 2);
 }
 
-/// Output-schema validation requires a real model response to validate against.
+/// Output-schema validation against a mock model response.
 #[test]
 fn agent_step_output_schema_validation() {
-    if !has_api_key() {
-        eprintln!("agent_step_output_schema_validation: skipped (no API key)");
-        return;
-    }
     register_once();
     let runner = AGENT_RUNNER_REGISTRY.get().expect("runner registered");
 
-    let provider = if std::env::var("OPENAI_API_KEY").is_ok() {
-        "openai"
-    } else {
-        "anthropic"
-    };
-    let model = if provider == "anthropic" {
-        "claude-haiku-4-5-20251001"
-    } else {
-        "gpt-4o-mini"
-    };
+    // Provider/model are irrelevant under the mock client — any value round-trips.
+    let provider = "openai";
+    let model = "gpt-4o-mini";
 
     let payload = AgentStepPayload {
         model: model.to_string(),
@@ -168,25 +137,14 @@ fn agent_step_output_schema_validation() {
     assert!(!findings[0].answer.is_empty());
 }
 
-/// Full local-mode pipeline test (requires an API key; auto-skips when absent).
+/// Full local-mode pipeline test against the mock client.
 #[test]
 fn agent_step_local_mode_e2e() {
-    if !has_api_key() {
-        eprintln!("agent_step_local_mode_e2e: skipped (no API key)");
-        return;
-    }
     register_once();
 
-    let provider = if std::env::var("OPENAI_API_KEY").is_ok() {
-        "openai"
-    } else {
-        "anthropic"
-    };
-    let model = if provider == "anthropic" {
-        "claude-haiku-4-5-20251001"
-    } else {
-        "gpt-4o-mini"
-    };
+    // Provider/model are irrelevant under the mock client — any value round-trips.
+    let provider = "openai";
+    let model = "gpt-4o-mini";
 
     let ctx = Context::local().expect("failed to build local context");
     let docs = vec![

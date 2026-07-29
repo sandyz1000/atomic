@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use crate::errors::Result;
 
 pub mod anthropic;
+pub mod mock;
 
 /// Abstraction over LLM providers used for planning, evaluation, and SQL extension nodes.
 ///

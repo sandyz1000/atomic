@@ -13,7 +13,7 @@ use crate::stage::Stage;
 
 use atomic_data::data::Data;
 use atomic_data::task::TaskOption;
-use atomic_data::task_context::TaskContext;
+use atomic_data::task_context::PartitionTask;
 use parking_lot::Mutex;
 
 #[derive(Clone, Debug)]
@@ -52,7 +52,7 @@ type PendingTasks = BTreeMap<Stage, BTreeSet<TaskOption>>;
 
 pub struct JobTracker<F, U: Data, T: Data, L>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync,
+    F: PartitionTask<T, U>,
     L: JobListener,
 {
     pub output_parts: Vec<usize>,
@@ -73,7 +73,7 @@ where
 
 impl<F, U: Data, T: Data, L> JobTracker<F, U, T, L>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync,
+    F: PartitionTask<T, U>,
     L: JobListener,
 {
     pub async fn from_scheduler<S>(

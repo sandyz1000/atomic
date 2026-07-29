@@ -12,7 +12,7 @@ use atomic_data::shuffle::MapOutputTracker;
 use atomic_data::task::TaskOption;
 use atomic_data::task::result::ResultTask;
 use atomic_data::task::shuffle_map::ShuffleMapTask;
-use atomic_data::task_context::TaskContext;
+use atomic_data::task_context::{PartitionFn, PartitionTask, TaskContext};
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -23,28 +23,25 @@ use std::time::{Duration, Instant};
 
 pub type EventQueue = Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
 
-// pub type RddFunc<T, U> =
-//     Arc<dyn Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static>;
-
 /// Functionality of the library built-in schedulers
 #[async_trait::async_trait]
 pub trait NativeScheduler: StagePlanner {
     /// Fast path for execution. Runs the DD in the driver main thread if possible.
     fn local_execution<T: Data, U: Data, F, L>(
-        jt: Arc<JobTracker<F, U, T, L>>,
+        tracker: Arc<JobTracker<F, U, T, L>>,
     ) -> LibResult<Option<Vec<U>>>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync,
+        F: PartitionTask<T, U>,
         L: JobListener,
     {
-        if jt.final_stage.parents.is_empty() && (jt.num_output_parts == 1) {
-            let split = (jt.final_rdd.splits()[jt.output_parts[0]]).clone();
-            let task_context = TaskContext::new(jt.final_stage.id, jt.output_parts[0], 0);
-            let iter = jt
+        if tracker.final_stage.parents.is_empty() && (tracker.num_output_parts == 1) {
+            let split = (tracker.final_rdd.splits()[tracker.output_parts[0]]).clone();
+            let task_context = TaskContext::new(tracker.final_stage.id, tracker.output_parts[0], 0);
+            let iter = tracker
                 .final_rdd
                 .iterator(split)
                 .map_err(|_| SchedulerError::Other)?;
-            Ok(Some(vec![(jt.func)((task_context, iter))]))
+            Ok(Some(vec![(tracker.func)((task_context, iter))]))
         } else {
             Ok(None)
         }
@@ -56,7 +53,7 @@ pub trait NativeScheduler: StagePlanner {
         failed_vals: FetchFailedVals,
         stage_id: usize,
     ) where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync,
+        F: PartitionTask<T, U>,
         L: JobListener,
     {
         let FetchFailedVals {
@@ -94,7 +91,7 @@ pub trait NativeScheduler: StagePlanner {
         jt: Arc<JobTracker<F, U, T, L>>,
     ) -> LibResult<()>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        F: PartitionTask<T, U>,
         L: JobListener,
     {
         match &completed_event.task {
@@ -130,14 +127,14 @@ pub trait NativeScheduler: StagePlanner {
                     "completed shuffle task server uri: {:?}",
                     shuffle_server_uri
                 );
-                let m = self.state();
-                m.add_output_loc_to_stage(
+                let state = self.state();
+                state.add_output_loc_to_stage(
                     smt.meta.stage_id,
                     smt.meta.partition,
                     shuffle_server_uri,
                 );
 
-                let stage = m.fetch_from_stage_cache(smt.meta.stage_id);
+                let stage = state.fetch_from_stage_cache(smt.meta.stage_id);
                 log::debug!(
                     "pending stages: {:?}",
                     jt.pending_tasks
@@ -188,13 +185,13 @@ pub trait NativeScheduler: StagePlanner {
                             .collect();
                         let shuffle_id = dep.get_shuffle_id();
                         log::debug!("locs for shuffle id #{}: {:?}", shuffle_id, locs);
-                        m.register_map_outputs(shuffle_id, locs);
+                        state.register_map_outputs(shuffle_id, locs);
                         log::debug!("finished registering map outputs");
 
                         // After the map stage completes, compute the optimal number
                         // of reduce partitions based on actual bucket byte sizes.
-                        if m.coalesce_threshold_bytes > 0 {
-                            m.compute_coalescing(shuffle_id, stage.num_partitions);
+                        if state.coalesce_threshold_bytes > 0 {
+                            state.compute_coalescing(shuffle_id, stage.num_partitions);
                         }
                     }
                     // TODO: Cache
@@ -233,7 +230,7 @@ pub trait NativeScheduler: StagePlanner {
         jt: Arc<JobTracker<F, U, T, L>>,
     ) -> LibResult<()>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        F: PartitionTask<T, U>,
         L: JobListener,
     {
         log::debug!("submitting stage #{}", stage.id);
@@ -263,7 +260,7 @@ pub trait NativeScheduler: StagePlanner {
         jt: Arc<JobTracker<F, U, T, L>>,
     ) -> LibResult<()>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        F: PartitionTask<T, U>,
         L: JobListener,
     {
         let m = self.state();
@@ -331,7 +328,6 @@ pub trait NativeScheduler: StagePlanner {
     }
 
     fn wait_for_event(&self, run_id: usize, timeout: u64) -> Option<CompletionEvent> {
-        // TODO: make use of async to wait for events
         let end = Instant::now() + Duration::from_millis(timeout);
         let state = self.state();
         let event_queue = state.get_event_queue();
@@ -346,7 +342,7 @@ pub trait NativeScheduler: StagePlanner {
 
     fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, target_executor: SocketAddrV4)
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U;
+        F: PartitionFn<T, U>;
 
     /// Whether this scheduler can execute closure-backed `ResultTask`s.
     ///
@@ -356,24 +352,8 @@ pub trait NativeScheduler: StagePlanner {
         true
     }
 
-    // state:
-    // fn add_output_loc_to_stage(&self, stage_id: usize, partition: usize, host: String);
-    // fn insert_into_stage_cache(&self, id: usize, stage: Stage);
-    // /// refreshes cache locations
-    // fn register_shuffle(&self, shuffle_id: usize, num_maps: usize);
-    // fn register_map_outputs(&self, shuffle_id: usize, locs: Vec<Option<String>>);
-    // fn remove_output_loc_from_stage(&self, shuffle_id: usize, map_id: usize, server_uri: &str);
     async fn update_cache_locs(&self) -> LibResult<()>;
-    // fn unregister_map_output(&self, shuffle_id: usize, map_id: usize, server_uri: String);
 
-    // // getters:
-    // fn fetch_from_stage_cache(&self, id: usize) -> Stage;
-    // fn fetch_from_shuffle_to_cache(&self, id: usize) -> Stage;
-    // fn get_cache_locs(&self, rdd: Arc<dyn RddBase>) -> Option<Vec<Vec<Ipv4Addr>>>;
-    // fn get_event_queue(&self) -> &Arc<DashMap<usize, VecDeque<CompletionEvent>>>;
-    // fn get_next_job_id(&self) -> usize;
-    // fn get_next_stage_id(&self) -> usize;
-    // fn get_next_task_id(&self) -> usize;
     fn next_executor_server(&self, task: &TaskOption) -> SocketAddrV4;
 }
 

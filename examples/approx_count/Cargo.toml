@@ -1,0 +1,13 @@
+[package]
+name = "approx_count"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "approx_count"
+path = "src/main.rs"
+
+[dependencies]
+atomic-compute.workspace = true
+atomic-data.workspace = true
+tokio.workspace = true

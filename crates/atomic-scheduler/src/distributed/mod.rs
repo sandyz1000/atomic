@@ -16,7 +16,7 @@ use atomic_data::{
     partial::{ApproximateEvaluator, result::PartialResult},
     rdd::Rdd,
     task::{ShuffleMapTask, TaskOption},
-    task_context::TaskContext,
+    task_context::{PartitionFn, PartitionTask},
 };
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -158,6 +158,12 @@ impl DistributedScheduler {
     /// Install the driver-side accumulator-delta merge. First call wins.
     pub fn set_accumulator_sink(&self, sink: AccumulatorSink) {
         let _ = self.accumulator_sink.set(sink);
+    }
+
+    /// Register a listener to observe `JobStartListener`/`JobEndListener` events
+    /// posted around every job this scheduler dispatches.
+    pub fn add_listener(&self, listener: Arc<dyn crate::listener::BusListener>) {
+        self.live_listener_bus.add_listener(listener);
     }
 
     /// Forward non-empty accumulator deltas to the installed sink, if any.
@@ -395,7 +401,7 @@ impl DistributedScheduler {
         timeout: Duration,
     ) -> LibResult<PartialResult<R>>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        F: PartitionTask<T, U>,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + Debug + Send + Sync + 'static,
     {
@@ -410,7 +416,7 @@ impl DistributedScheduler {
 impl NativeScheduler for DistributedScheduler {
     fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, target_executor: SocketAddrV4)
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U,
+        F: PartitionFn<T, U>,
     {
         let run_id = task.get_run_id();
         let scheduler = self.clone();

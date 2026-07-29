@@ -6,21 +6,18 @@ use parking_lot::Mutex;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
-
+type BoxOnResult<R> = Box<dyn Fn(R) + Send + Sync>;
+type BoxOnError = Box<dyn Fn(&Error) + Send + Sync>;
 type OnComplete<R> = Arc<
-    dyn Fn(Arc<PartialResult<R>>, Box<dyn Fn(R) + Send + Sync>) -> Result<Arc<PartialResult<R>>>
-        + Send
-        + Sync,
+    dyn Fn(Arc<PartialResult<R>>, BoxOnResult<R>) -> Result<Arc<PartialResult<R>>> + Send + Sync,
 >;
 
-type OnFail<R> = Arc<
-    dyn Fn(Arc<PartialResult<R>>, Box<dyn Fn(&Error) + Send + Sync>) -> Result<()> + Send + Sync,
->;
+type OnFail<R> = Arc<dyn Fn(Arc<PartialResult<R>>, BoxOnError) -> Result<()> + Send + Sync>;
 
 /// Optional callback invoked with the final value when the partial result completes.
-type CompletionHandler<R> = Arc<Mutex<Option<Box<dyn Fn(R) + Send + Sync>>>>;
+type CompletionHandler<R> = Arc<Mutex<Option<BoxOnResult<R>>>>;
 /// Optional callback invoked with the failure when the partial result fails.
-type FailureHandler = Arc<Mutex<Option<Box<dyn Fn(&Error) + Send + Sync>>>>;
+type FailureHandler = Arc<Mutex<Option<BoxOnError>>>;
 
 #[derive(Clone)]
 pub struct PartialResult<R>
@@ -186,17 +183,15 @@ where
 
         let sc = self.clone();
         new_partial_res.on_fail = Arc::new(
-            move |_this: Arc<PartialResult<T>>,
-                  handler: Box<dyn Fn(&Error) + Send + Sync>|
-                  -> Result<()> {
+            move |_: Arc<PartialResult<T>>, handler: BoxOnError| -> Result<()> {
                 (sc.on_fail)(sc.clone(), handler)?;
                 Ok(())
             },
         );
 
         new_partial_res.on_complete = Arc::new(
-            move |_this: Arc<PartialResult<T>>,
-                  handler: Box<dyn Fn(T) + Send + Sync>|
+            move |_: Arc<PartialResult<T>>,
+                  handler: BoxOnResult<T>|
                   -> Result<Arc<PartialResult<T>>> {
                 let transformed_handler = Box::new(move |res: R| handler(res.into()));
                 let res: Arc<PartialResult<R>> =

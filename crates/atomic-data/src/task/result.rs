@@ -7,23 +7,23 @@ use crate::{
     data::Data,
     rdd::Rdd,
     task::{Task, TaskBase, TaskMeta},
-    task_context::TaskContext,
+    task_context::{PartitionTask, TaskContext},
 };
 
 pub struct ResultTask<T: Data, U: Data, F>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
+    F: PartitionTask<T, U>,
 {
     pub meta: TaskMeta,
     pub rdd: Arc<dyn Rdd<Item = T>>,
     pub func: Arc<F>,
     pub output_id: usize,
-    _marker: PhantomData<T>,
+    _marker: PhantomData<(T, U)>,
 }
 
 impl<T: Data, U: Data, F> Display for ResultTask<T, U, F>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
+    F: PartitionTask<T, U>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -36,7 +36,7 @@ where
 
 impl<T: Data, U: Data, F> Clone for ResultTask<T, U, F>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
+    F: PartitionTask<T, U>,
 {
     fn clone(&self) -> Self {
         // Re-derive `pinned` from the RDD (matches construction in `new`).
@@ -54,7 +54,7 @@ where
 
 impl<T: Data, U: Data, F> ResultTask<T, U, F>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
+    F: PartitionTask<T, U>,
 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -80,7 +80,7 @@ where
 
 impl<T: Data, U: Data, F> TaskBase for ResultTask<T, U, F>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
+    F: PartitionTask<T, U>,
 {
     fn meta(&self) -> &TaskMeta {
         &self.meta
@@ -89,7 +89,7 @@ where
 
 impl<T: Data, U: Data, F> Task for ResultTask<T, U, F>
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
+    F: PartitionTask<T, U>,
 {
     fn run(&self, id: usize) -> Result<Box<dyn Data>, Box<dyn std::error::Error>> {
         let split = self.rdd.splits()[self.meta.partition].clone();
@@ -117,7 +117,7 @@ type TaskRunner =
 
 impl<T: Data, U: Data, F> From<ResultTask<T, U, F>> for ResultTaskBox
 where
-    F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + 'static + Send + Sync,
+    F: PartitionTask<T, U>,
 {
     fn from(task: ResultTask<T, U, F>) -> Self {
         let task = Arc::new(task);

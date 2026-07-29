@@ -37,6 +37,14 @@ where
     E: ApproximateEvaluator<U, R>,
     R: Clone + Debug + Send + Sync + 'static,
 {
+    /// Record that one more partition's task has succeeded and been merged into the
+    /// evaluator. Callers (the scheduler's `JobListener::task_succeeded`) call this
+    /// once per completed partition so [`get_result`](Self::get_result) can detect
+    /// full completion and return early instead of always waiting out the timeout.
+    pub fn mark_task_finished(&self) {
+        self.finished_tasks.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub fn new(evaluator: E, timeout: Duration, num_partitions: usize) -> Self {
         ApproxListener {
             evaluator: Mutex::new(evaluator),

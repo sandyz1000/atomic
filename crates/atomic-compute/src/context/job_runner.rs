@@ -8,7 +8,7 @@ use atomic_data::distributed::{
 };
 use atomic_data::partial::{ApproximateEvaluator, result::PartialResult};
 use atomic_data::rdd::{Rdd, RddBase};
-use atomic_data::task_context::TaskContext;
+use atomic_data::task_context::PartitionTask;
 use atomic_scheduler::Schedulers;
 
 use crate::env;
@@ -299,7 +299,7 @@ impl Context {
         func: F,
     ) -> ComputeResult<Vec<U>>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        F: PartitionTask<T, U>,
     {
         let func = Arc::new(func);
         let sched = self.driver_scheduler.clone();
@@ -308,6 +308,17 @@ impl Context {
         Ok(res)
     }
 
+    /// Run `func` over every partition, merging each partition's result into `evaluator` as it
+    /// arrives, and return a [`PartialResult<R>`] once either every partition has reported or
+    /// `timeout` elapses — whichever comes first. `PartialResult::is_final` tells you which.
+    ///
+    /// Concrete evaluators: [`CountEvaluator`](atomic_data::partial::CountEvaluator) for a
+    /// scalar approximate count, [`GroupedCountEvaluator`](atomic_data::partial::GroupedCountEvaluator)
+    /// for counts by key. See `examples/approx_count` for a runnable end-to-end example.
+    ///
+    /// **Local scheduler only.** Under `Context::distributed(..)` this returns
+    /// `ComputeError`/`SchedulerError::UnsupportedOperation` — approximate jobs need the
+    /// local scheduler's polling event loop, which the distributed dispatch path doesn't have.
     pub fn run_approximate_job<T: Data, U: Data + Clone, R, F, E>(
         self: &Arc<Self>,
         func: F,
@@ -316,7 +327,7 @@ impl Context {
         timeout: Duration,
     ) -> ComputeResult<PartialResult<R>>
     where
-        F: Fn((TaskContext, Box<dyn Iterator<Item = T>>)) -> U + Send + Sync + 'static,
+        F: PartitionTask<T, U>,
         E: ApproximateEvaluator<U, R> + Send + Sync + 'static,
         R: Clone + Debug + Send + Sync + 'static,
     {

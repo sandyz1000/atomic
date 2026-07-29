@@ -37,3 +37,4 @@ parking_lot = { workspace = true }
 tokio = { workspace = true }
 atomic-compute = { workspace = true }
 atomic-data = { workspace = true }
+wiremock = "0.6"

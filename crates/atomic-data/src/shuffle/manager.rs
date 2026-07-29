@@ -345,7 +345,7 @@ impl ShuffleManager {
         for _ in 0..10 {
             let local_dir = local_dir_root.join(format!("ns-shuffle-{}", Uuid::new_v4()));
             if !local_dir.exists() {
-                log::debug!("creating directory at path: {:?}", &local_dir);
+                log::debug!("creating directory at path: {:?}", local_dir);
                 fs::create_dir_all(&local_dir)
                     .map_err(|_| ShuffleError::CouldNotCreateShuffleDir)?;
                 return Ok(local_dir);

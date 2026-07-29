@@ -16,6 +16,7 @@ use parking_lot::Mutex;
 use crate::{
     error::{LibResult, SchedulerError},
     job::Job,
+    listener::{JobEndListener, JobStartListener},
     planner::StagePlanner,
 };
 
@@ -633,16 +634,16 @@ impl DistributedScheduler {
             match jr {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    self.cleanup_job(run_id);
+                    self.cleanup_job(run_id, false);
                     return Err(e);
                 }
                 Err(e) => {
-                    self.cleanup_job(run_id);
+                    self.cleanup_job(run_id, false);
                     return Err(SchedulerError::TaskFailed(format!("task panicked: {e}")));
                 }
             }
         }
-        self.cleanup_job(run_id);
+        self.cleanup_job(run_id, true);
 
         let mut responses: Vec<TaskResultEnvelope> = slots
             .iter()
@@ -677,6 +678,11 @@ impl DistributedScheduler {
             self.active_job_queue.lock().push_back(job);
             (run_id, stage_id)
         };
+        self.live_listener_bus.post(Box::new(JobStartListener {
+            job_id: run_id,
+            time: Instant::now(),
+            stage_infos: vec![],
+        }));
 
         let num_partitions = partitions.len();
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -759,7 +765,7 @@ impl DistributedScheduler {
         self.collect_job_results(handles, slots, run_id).await
     }
 
-    fn cleanup_job(&self, run_id: usize) {
+    fn cleanup_job(&self, run_id: usize, success: bool) {
         self.active_jobs.remove(&run_id);
         self.active_job_queue.lock().retain(|j| j.run_id != run_id);
         if let Some((_, task_keys)) = self.job_tasks.remove(&run_id) {
@@ -769,5 +775,10 @@ impl DistributedScheduler {
             }
         }
         self.job_cancel_tokens.remove(&run_id);
+        self.live_listener_bus.post(Box::new(JobEndListener {
+            job_id: run_id,
+            time: Instant::now(),
+            job_result: success,
+        }));
     }
 }

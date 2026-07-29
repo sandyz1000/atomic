@@ -49,10 +49,6 @@ impl ScalarUDFImpl for MultiplyUdf {
         let result: Int32Array = arr.values().iter().map(|&v| v * factor).collect();
         Ok(ColumnarValue::Array(Arc::new(result) as ArrayRef))
     }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
 }
 
 fn register_double_udf(ctx: &AtomicSqlContext) {
@@ -130,9 +126,6 @@ async fn test_two_udfs_composed() {
     #[derive(Debug, PartialEq, Eq, Hash)]
     struct TripleUdf(Signature);
     impl ScalarUDFImpl for TripleUdf {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
         fn name(&self) -> &str {
             "triple"
         }

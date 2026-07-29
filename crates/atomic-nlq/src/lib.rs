@@ -27,7 +27,9 @@
 //! 4. [`nodes`] / [`physical`] / [`optimizer`] — DataFusion extension nodes for per-row LLM
 //!    operations (`LlmFilter`, `LlmMap`, `Embed`, `VectorSearch`) batched by [`optimizer::LlmBatchingRule`].
 //!
-//! Requires `OPENAI_API_KEY` in the environment; tests skip when it is absent.
+//! Requires `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY` with `LLM_PROVIDER=anthropic`) in
+//! the environment at runtime. Tests use [`llm::mock::MockLlmClient`] or a local
+//! `wiremock` server and never call a real provider.
 
 pub mod agent_runner;
 pub mod config;

@@ -96,7 +96,13 @@ pub struct PartitionAgentRunner;
 
 impl PartitionAgentRunner {
     /// Build an `LlmClient` for the given provider string and API key from env.
+    ///
+    /// `ATOMIC_NLQ_MOCK_LLM` (any value) short-circuits to [`crate::llm::mock::MockLlmClient`]
+    /// so tests never make a live network call — see `tests/test_agent_step.rs`.
     fn build_client(provider: &str) -> Arc<dyn LlmClient> {
+        if std::env::var("ATOMIC_NLQ_MOCK_LLM").is_ok() {
+            return Arc::new(crate::llm::mock::MockLlmClient::default());
+        }
         let cfg = NlqConfig {
             provider: if provider == "anthropic" {
                 LlmProvider::Anthropic
