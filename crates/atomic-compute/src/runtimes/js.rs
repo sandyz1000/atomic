@@ -1,9 +1,10 @@
 use crate::error::{ComputeError, ComputeResult};
+use crate::runtimes::Dispatcher;
 use atomic_data::distributed::JsTaskPayload;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub(crate) enum JsTaskError {
+pub enum JsTaskError {
     #[error("payload decode: {0}")]
     PayloadDecode(#[from] serde_json::Error),
     #[error("partition data is not valid UTF-8: {0}")]
@@ -164,11 +165,17 @@ impl JsDispatcher {
 /// ordinary map/filter tasks); it receives the parsed `args_json` value as its single
 /// argument. Used by `agent_step` tool dispatch (`atomic-nlq`'s `TOOL_CALL:` handling) for
 /// tools resolved from `AgentStepPayload.resolved_tools`.
-pub fn run_tool_call(fn_source: &str, args_json: &str) -> Result<String, String> {
+pub fn run_tool_call(fn_source: &str, args_json: &str) -> Result<String, JsTaskError> {
     let bytes = JsDispatcher::new()
         .eval_partition(fn_source, None, args_json)
-        .map_err(|e| e.to_string())?;
-    String::from_utf8(bytes).map_err(|e| format!("JS tool result is not valid UTF-8: {e}"))
+        .inspect_err(|e| {
+            log::warn!("run_tool_call: JS eval failed for tool source {fn_source:?}: {e}")
+        })?;
+    String::from_utf8(bytes)
+        .map_err(|e| JsTaskError::Utf8(e.utf8_error()))
+        .inspect_err(|e| {
+            log::warn!("run_tool_call: JS tool result is not valid UTF-8: {e}");
+        })
 }
 
 impl JsDispatcher {
@@ -183,7 +190,7 @@ impl JsDispatcher {
     }
 }
 
-impl crate::runtimes::Dispatcher for JsDispatcher {
+impl Dispatcher for JsDispatcher {
     fn dispatch(
         &self,
         op: &atomic_data::distributed::Step,

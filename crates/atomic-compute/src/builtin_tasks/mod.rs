@@ -37,6 +37,23 @@
 //! Each task registers itself in the compile-time dispatch table.  Because these
 //! are in the `atomic-compute` crate (which is linked into every driver and worker
 //! binary), the handlers are always present — no user action required.
+//!
+//! # Adding a new builtin (or a user-defined task outside this crate)
+//!
+//! The four `register_*_task!` macros aren't restricted to this module — any crate can
+//! call them to hand-register a type that doesn't fit `#[task]`'s `fn(T) -> U` /
+//! `fn(T, T) -> T` shapes. Follow [`max`]'s pattern (the simplest builtin) as a template:
+//!
+//! 1. Define a zero-sized (or `PhantomData`-carrying, for a generic element type) struct.
+//! 2. Implement the trait matching your reduction's shape (table above) with a
+//!    `const NAME: &'static str` unique per instantiation.
+//! 3. Call the matching `register_*_task!(YourType, ElemType)` once, anywhere it's linked
+//!    into the binary — `inventory::submit!` does the rest at startup.
+//!
+//! `tests/test_custom_task_registration.rs` (workspace root) is a complete worked example
+//! of all three hand-registration macros (`register_binary_task!`, `register_aggregate_task!`,
+//! `register_partition_task!`) used from *outside* `atomic-compute`, each dispatched through
+//! [`crate::registry::TASK_REGISTRY`] exactly as a worker would.
 
 pub mod distinct;
 pub mod hll;

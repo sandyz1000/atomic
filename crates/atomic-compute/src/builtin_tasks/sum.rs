@@ -1,4 +1,4 @@
-use crate::task_registry::TaskEntry;
+use crate::registry::TaskEntry;
 use crate::task_traits::BinaryTask;
 
 /// Built-in: add two values.

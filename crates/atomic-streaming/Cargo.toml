@@ -31,8 +31,11 @@ rdkafka = { workspace = true, optional = true, features = ["cmake-build"] }
 [features]
 default = []
 # Enables `StreamingContext::kafka_stream` + `KafkaInputDStream` +
-# `StreamingContext::direct_kafka_stream` + `DirectKafkaInputDStream`.
-kafka = ["dep:rdkafka", "atomic-data/kafka"]
+# `StreamingContext::direct_kafka_stream` + `DirectKafkaInputDStream`. Also forwards
+# `atomic-compute/kafka` — the worker's `NativeDispatcher` needs its `KafkaConsume`
+# dispatch arm compiled in to handle the `EngineAction::KafkaConsume` ops this crate emits
+# (direct_kafka_stream), or the match becomes non-exhaustive.
+kafka = ["dep:rdkafka", "atomic-data/kafka", "atomic-compute/kafka"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

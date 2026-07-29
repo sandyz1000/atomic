@@ -112,7 +112,7 @@ pub enum TaskAction {
     Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum EngineStep {
+pub enum EngineAction {
     /// Shuffle map phase: repartition elements by key into `num_output_partitions` buckets.
     ShuffleMap {
         shuffle_id: usize,
@@ -152,7 +152,7 @@ pub enum EngineStep {
 }
 
 /// What a [`Step`] does: apply a registered task function with a combinator shape
-/// ([`TaskAction`]), or run a built-in engine step ([`EngineStep`]).
+/// ([`TaskAction`]), or run a built-in engine step ([`EngineAction`]).
 #[derive(
     Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
@@ -161,7 +161,7 @@ pub enum StepKind {
     /// Registered task function applied with a combinator shape. `task_name` names the function.
     Task(TaskAction),
     /// Built-in engine step. `task_name` is empty.
-    Engine(EngineStep),
+    Engine(EngineAction),
 }
 
 impl StepKind {
@@ -173,8 +173,8 @@ impl StepKind {
         }
     }
 
-    /// The engine step if this is an engine op, else `None`.
-    pub fn engine_step(&self) -> Option<&EngineStep> {
+    /// The engine action if this is an engine op, else `None`.
+    pub fn engine_action(&self) -> Option<&EngineAction> {
         match self {
             StepKind::Engine(s) => Some(s),
             StepKind::Task(_) => None,
@@ -182,7 +182,7 @@ impl StepKind {
     }
 }
 
-/// Config for a [`EngineStep::AgentStep`] op.
+/// Config for a [`EngineAction::AgentStep`] op.
 ///
 /// Serialized as JSON into `Step.payload` so it can be decoded by the
 /// worker's `NativeDispatcher` without a shared rkyv schema.
@@ -254,7 +254,7 @@ pub struct ResolvedTool {
 ///
 /// One `AgentFindings` is produced per input element in the partition.
 /// `Vec<AgentFindings>` is rkyv-encoded as the partition output of an
-/// [`EngineStep::AgentStep`] op.
+/// [`EngineAction::AgentStep`] op.
 #[derive(
     Debug, Clone, PartialEq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
 )]
@@ -350,7 +350,7 @@ pub struct FileSplitPayload {
     pub end_byte: Option<u64>,
 }
 
-/// Payload for one `EngineStep::ShuffleMap` pipeline op.
+/// Payload for one `EngineAction::ShuffleMap` pipeline op.
 ///
 /// Sent in `Step.payload` and decoded on the worker by the native runtime.
 #[derive(Debug, Clone, bincode::Encode, bincode::Decode)]

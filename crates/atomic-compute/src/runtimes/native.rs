@@ -2,22 +2,19 @@ use std::collections::HashMap;
 
 use atomic_data::accumulator;
 use atomic_data::broadcast;
+use atomic_data::cache::worker_partition_cache;
 use atomic_data::distributed::{
-    EngineStep, Step, StepKind, TaskEnvelope, TaskResultEnvelope, TaskRuntime, decode_payload,
+    EngineAction, FileSplitPayload, ShuffleMapPayload, StateMergePayload, Step, StepKind,
+    TaskEnvelope, TaskResultEnvelope, TaskRuntime, decode_payload,
 };
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 use crate::error::{ComputeError, ComputeResult};
-use crate::runtimes::{Backend, Dispatcher};
-use crate::task_registry::{
+use crate::registry::{
     AGENT_RUNNER_REGISTRY, SHUFFLE_MAP_REGISTRY, SORT_SHUFFLE_MAP_REGISTRY, STATE_MERGE_REGISTRY,
     TASK_REGISTRY,
 };
-
-/// Decode a bincode payload, tagging failures with `label` so the dispatch site
-/// that produced the bytes is named in the error.
-fn decode_or_invalid<T: bincode::Decode<()>>(bytes: &[u8], label: &str) -> ComputeResult<T> {
-    decode_payload(bytes).map_err(|e| ComputeError::InvalidPayload(format!("{label} decode: {e}")))
-}
+use crate::runtimes::{Backend, Dispatcher};
 
 /// Handles `TaskRuntime::Native` steps — both compile-time `#[task]` registry
 /// lookups and shuffle-map writes.
@@ -32,13 +29,14 @@ impl NativeDispatcher {
 impl Dispatcher for NativeDispatcher {
     fn dispatch(&self, op: &Step, partition_id: usize, data: &[u8]) -> ComputeResult<Vec<u8>> {
         match &op.kind {
-            StepKind::Engine(EngineStep::ShuffleMap {
+            StepKind::Engine(EngineAction::ShuffleMap {
                 shuffle_id,
                 num_output_partitions,
             }) => {
                 // Payload carries the dispatch key + the shipped partitioner spec.
-                let payload: atomic_data::distributed::ShuffleMapPayload =
-                    decode_or_invalid(&op.payload, "shuffle-map payload")?;
+                let payload: ShuffleMapPayload = decode_payload(&op.payload).map_err(|e| {
+                    ComputeError::InvalidPayload(format!("shuffle-map payload decode: {e}"))
+                })?;
                 let type_id = payload.type_id.as_str();
                 let spec = &payload.partitioner_spec;
                 // Range (sort) shuffles use the sorted handler when one is registered for the type
@@ -65,36 +63,36 @@ impl Dispatcher for NativeDispatcher {
                     }
                 }
             }
-            StepKind::Engine(EngineStep::Cache { rdd_id }) => {
+            StepKind::Engine(EngineAction::Cache { rdd_id }) => {
                 // Terminal identity op: store this partition's bytes for later reuse.
-                atomic_data::cache::worker_partition_cache().put(
-                    *rdd_id,
-                    partition_id,
-                    data.to_vec(),
-                );
+                worker_partition_cache().put(*rdd_id, partition_id, data.to_vec());
                 Ok(data.to_vec())
             }
             #[cfg(feature = "kafka")]
-            StepKind::Engine(EngineStep::KafkaConsume) => {
+            StepKind::Engine(EngineAction::KafkaConsume) => {
                 // The per-partition consume config is shipped in `source_partitions[i]`
                 // (i.e. `data`), not in `op.payload` (which is empty for KafkaConsume).
-                let payload: atomic_data::distributed::KafkaConsumePayload =
-                    decode_or_invalid(data, "KafkaConsume data")?;
+                let payload: atomic_data::distributed::KafkaConsumePayload = decode_payload(data)
+                    .map_err(|e| {
+                    ComputeError::InvalidPayload(format!("KafkaConsume data decode: {e}"))
+                })?;
                 kafka_consume_handler(&payload)
             }
-            StepKind::Engine(EngineStep::ReadFileSplit) => {
+            StepKind::Engine(EngineAction::ReadFileSplit) => {
                 // Per-partition config shipped in `data` (bincode-encoded FileSplitPayload);
                 // `op.payload` is empty.
-                let payload: atomic_data::distributed::FileSplitPayload =
-                    decode_or_invalid(data, "ReadFileSplit data")?;
+                let payload: FileSplitPayload = decode_payload(data).map_err(|e| {
+                    ComputeError::InvalidPayload(format!("ReadFileSplit data decode: {e}"))
+                })?;
                 file_split_handler(&payload)
             }
-            StepKind::Engine(EngineStep::MergeState { merge_fn }) => {
+            StepKind::Engine(EngineAction::MergeState { merge_fn }) => {
                 // Per-shard input shipped in `data` (bincode-encoded StateMergePayload).
                 // The merge fn is content-agnostic; the shard's state persists across
                 // batches in the worker-global WORKER_STATE_STORE.
-                let payload: atomic_data::distributed::StateMergePayload =
-                    decode_or_invalid(data, "MergeState data")?;
+                let payload: StateMergePayload = decode_payload(data).map_err(|e| {
+                    ComputeError::InvalidPayload(format!("MergeState data decode: {e}"))
+                })?;
                 let merge = STATE_MERGE_REGISTRY.get(merge_fn.as_str()).ok_or_else(|| {
                     ComputeError::UnknownOperation(format!(
                         "no state-merge fn '{merge_fn}' registered; \
@@ -147,7 +145,7 @@ impl Dispatcher for NativeDispatcher {
                 store.put(payload.state_id, new_state);
                 Ok(emitted)
             }
-            StepKind::Engine(EngineStep::AgentStep) => {
+            StepKind::Engine(EngineAction::AgentStep) => {
                 let payload: atomic_data::distributed::AgentStepPayload =
                     serde_json::from_slice(&op.payload).map_err(|e| {
                         ComputeError::InvalidPayload(format!("AgentStep payload decode: {e}"))
@@ -339,7 +337,7 @@ fn build_result_envelope(
     let shuffle_server_uri = task
         .steps
         .iter()
-        .any(|op| matches!(op.kind, StepKind::Engine(EngineStep::ShuffleMap { .. })))
+        .any(|op| matches!(op.kind, StepKind::Engine(EngineAction::ShuffleMap { .. })))
         .then(atomic_data::env::get_shuffle_server_uri)
         .flatten();
 
@@ -347,7 +345,7 @@ fn build_result_envelope(
         .steps
         .iter()
         .filter_map(|op| match op.kind {
-            StepKind::Engine(EngineStep::Cache { rdd_id }) => Some((rdd_id, task.partition_id)),
+            StepKind::Engine(EngineAction::Cache { rdd_id }) => Some((rdd_id, task.partition_id)),
             _ => None,
         })
         .collect();
@@ -357,7 +355,7 @@ fn build_result_envelope(
     let held_state_ids: Vec<u64> = task
         .steps
         .iter()
-        .filter(|op| matches!(op.kind, StepKind::Engine(EngineStep::MergeState { .. })))
+        .filter(|op| matches!(op.kind, StepKind::Engine(EngineAction::MergeState { .. })))
         .filter_map(|_| {
             decode_payload::<atomic_data::distributed::StateMergePayload>(&task.data)
                 .ok()
@@ -484,8 +482,6 @@ pub(crate) fn kafka_consume_handler(
 pub(crate) fn file_split_handler(
     payload: &atomic_data::distributed::FileSplitPayload,
 ) -> ComputeResult<Vec<u8>> {
-    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-
     let file = std::fs::File::open(&payload.path).map_err(|e| {
         ComputeError::InvalidPayload(format!("ReadFileSplit open {:?}: {e}", payload.path))
     })?;
@@ -548,7 +544,7 @@ fn write_shard_checkpoint(dir: &str, state_id: u64, bytes: &[u8]) -> ComputeResu
 mod tests {
     use super::*;
     use atomic_data::distributed::{
-        EngineStep, ResultStatus, Step, StepKind, TaskAction, TaskRuntime,
+        EngineAction, ResultStatus, Step, StepKind, TaskAction, TaskRuntime,
     };
 
     fn make_task(
@@ -632,7 +628,7 @@ mod tests {
         // reports (rdd_id, partition_id) for driver-side locality registration.
         let task = make_task(
             "",
-            StepKind::Engine(EngineStep::Cache { rdd_id: 9001 }),
+            StepKind::Engine(EngineAction::Cache { rdd_id: 9001 }),
             TaskRuntime::Native,
             data.clone(),
         );

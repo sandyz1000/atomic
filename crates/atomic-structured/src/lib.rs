@@ -32,10 +32,12 @@ pub mod map_groups_engine;
 pub mod map_groups_state;
 pub mod query;
 pub mod session_window;
+pub(crate) mod session_window_distributed;
 pub mod sink;
 pub mod source;
 pub mod state;
 pub mod stream_join;
+pub(crate) mod stream_join_distributed;
 pub mod watermark;
 pub mod windowed;
 

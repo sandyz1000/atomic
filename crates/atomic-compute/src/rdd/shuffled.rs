@@ -1,6 +1,6 @@
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
-use crate::task_registry::SHUFFLE_KEY_REGISTRY;
+use crate::registry::SHUFFLE_KEY_REGISTRY;
 use atomic_data::aggregator::{Aggregator, MergeCombinersFn};
 use atomic_data::data::Data;
 use atomic_data::dependency::{Dependency, KeyComparator, ShuffleDependency, TypedShuffle};

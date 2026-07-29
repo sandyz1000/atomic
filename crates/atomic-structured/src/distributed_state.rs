@@ -4,13 +4,13 @@
 //! `Mutex<StateStore>`, which grows unbounded as windows accumulate.
 //! [`DistributedStateEngine`] instead shards the state by `StateKey` across the
 //! cluster: each micro-batch's partials are routed by a stable hash to one of
-//! `num_shards` shards, and a [`EngineStep::MergeState`] task merges them into that
+//! `num_shards` shards, and a [`EngineAction::MergeState`] task merges them into that
 //! shard's persistent state on the owning worker (`WORKER_STATE_STORE`), returning
 //! only the cells to emit. The driver computes the partials and assembles the
 //! output, but never holds the full cross-batch state.
 //!
 //! The merge itself is a registered, content-agnostic
-//! [`StateMergeFn`](atomic_compute::task_registry::StateMergeFn): the data/compute
+//! [`StateMergeFn`](atomic_compute::registry::StateMergeFn): the data/compute
 //! layers carry no streaming types. The same `dispatch_pipeline` path runs the
 //! merge in-process in local mode (shards share the process-global store) and on
 //! workers in distributed mode.
@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use atomic_compute::context::Context;
 use atomic_data::distributed::{
-    EngineStep, StateMergePayload, Step, StepKind, TaskRuntime, decode_payload,
+    EngineAction, StateMergePayload, Step, StepKind, TaskRuntime, decode_payload,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 
@@ -66,6 +66,71 @@ pub(crate) fn shard_of<T: bincode::Encode>(key: &T, num_shards: u32) -> u32 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     (h % num_shards as u64) as u32
+}
+
+/// Shared dispatch skeleton for every sharded `Distributed*Engine::process()`:
+/// bincode-encode `params` once, wrap each shard's already-routed `bucket` into a
+/// `StateMergePayload` (state id = `state_id_base + shard index`), dispatch one
+/// `MergeState` task per shard via `merge_fn`, then decode and concatenate each
+/// shard's emitted items in shard order.
+///
+/// Callers own the engine-specific parts: building `Params`, routing this batch's
+/// items into per-shard `Bucket`s (a windowed engine buckets one list per shard, a
+/// join buckets a `(left, right)` pair — that shape genuinely differs), and turning
+/// the flat `Vec<Emitted>` back into output `RecordBatch`es.
+pub(crate) fn dispatch_merge_state<Bucket, Params, Emitted>(
+    sc: &Context,
+    merge_fn: &str,
+    state_id_base: u64,
+    checkpoint_dir: &Option<String>,
+    params: &Params,
+    buckets: Vec<Bucket>,
+) -> StructuredResult<Vec<Emitted>>
+where
+    Bucket: bincode::Encode,
+    Params: bincode::Encode,
+    Emitted: bincode::Decode<()>,
+{
+    let cfg = bincode::config::standard();
+    let params_bytes =
+        bincode::encode_to_vec(params, cfg).map_err(|e| StructuredError::Sql(e.to_string()))?;
+
+    let mut source_partitions: Vec<Vec<u8>> = Vec::with_capacity(buckets.len());
+    for (shard, bucket) in buckets.into_iter().enumerate() {
+        let partials = bincode::encode_to_vec(&bucket, cfg)
+            .map_err(|e| StructuredError::Sql(e.to_string()))?;
+        let payload = StateMergePayload {
+            state_id: state_id_base + shard as u64,
+            params: params_bytes.clone(),
+            partials,
+            checkpoint_dir: checkpoint_dir.clone(),
+        };
+        source_partitions.push(
+            bincode::encode_to_vec(&payload, cfg)
+                .map_err(|e| StructuredError::Sql(e.to_string()))?,
+        );
+    }
+
+    let steps = vec![Step {
+        task_name: String::new(),
+        kind: StepKind::Engine(EngineAction::MergeState {
+            merge_fn: merge_fn.to_string(),
+        }),
+        runtime: TaskRuntime::Native,
+        payload: vec![],
+    }];
+
+    let results = sc
+        .dispatch_pipeline(source_partitions, steps)
+        .map_err(|e| StructuredError::Sql(format!("distributed state merge ({merge_fn}): {e}")))?;
+
+    let mut emitted: Vec<Emitted> = Vec::new();
+    for bytes in results {
+        let items: Vec<Emitted> = decode_payload(&bytes)
+            .map_err(|e| StructuredError::Sql(format!("emitted decode ({merge_fn}): {e}")))?;
+        emitted.extend(items);
+    }
+    Ok(emitted)
 }
 
 /// The registered windowed state-merge: merge this batch's partials into the
@@ -168,54 +233,22 @@ impl BatchEngine for DistributedStateEngine {
             by_shard[shard].push((k, v));
         }
 
-        let cfg = bincode::config::standard();
         let params = WindowedMergeParams {
             watermark_ms: bp.wm_after,
             window_size_ms,
             mode: mode_code(mode),
         };
-        let params_bytes = bincode::encode_to_vec(&params, cfg)
-            .map_err(|e| StructuredError::Sql(e.to_string()))?;
 
         // One MergeState task per shard. Empty shards still run so Append eviction
         // and Complete re-emission cover state with no new partials this batch.
-        let mut source_partitions: Vec<Vec<u8>> = Vec::with_capacity(self.num_shards as usize);
-        for (shard, cells) in by_shard.into_iter().enumerate() {
-            let partials = bincode::encode_to_vec(&cells, cfg)
-                .map_err(|e| StructuredError::Sql(e.to_string()))?;
-            let payload = StateMergePayload {
-                state_id: self.state_id_base + shard as u64,
-                params: params_bytes.clone(),
-                partials,
-                checkpoint_dir: self.checkpoint_dir.clone(),
-            };
-            source_partitions.push(
-                bincode::encode_to_vec(&payload, cfg)
-                    .map_err(|e| StructuredError::Sql(e.to_string()))?,
-            );
-        }
-
-        let steps = vec![Step {
-            task_name: String::new(),
-            kind: StepKind::Engine(EngineStep::MergeState {
-                merge_fn: WINDOWED_MERGE_FN.to_string(),
-            }),
-            runtime: TaskRuntime::Native,
-            payload: vec![],
-        }];
-
-        let results = self
-            .sc
-            .dispatch_pipeline(source_partitions, steps)
-            .map_err(|e| StructuredError::Sql(format!("distributed state merge: {e}")))?;
-
-        // Reassemble emitted cells from every shard into the output batch.
-        let mut emitted: Vec<(StateKey, Vec<AggState>)> = Vec::new();
-        for bytes in results {
-            let cells: Vec<(StateKey, Vec<AggState>)> = decode_payload(&bytes)
-                .map_err(|e| StructuredError::Sql(format!("emitted decode: {e}")))?;
-            emitted.extend(cells);
-        }
+        let emitted: Vec<(StateKey, Vec<AggState>)> = dispatch_merge_state(
+            &self.sc,
+            WINDOWED_MERGE_FN,
+            self.state_id_base,
+            &self.checkpoint_dir,
+            &params,
+            by_shard,
+        )?;
 
         self.inner.emit_batch(&emitted)
     }

@@ -40,6 +40,11 @@
 //!   [`TaskEnvelope`](atomic_data::distributed::TaskEnvelope)s over TCP to remote workers.
 //!   Workers run the same binary with `--worker --port N`.
 
+// `atomic-runtime-macros`' proc-macros generate hardcoded `::atomic_compute::...` paths (see
+// `__macro_support` below). `builtin_tasks/*.rs` calls those macros from inside this crate
+// itself, where the crate has no external name — this alias gives it one.
+extern crate self as atomic_compute;
+
 pub mod app;
 pub mod builtin_tasks;
 pub mod context;
@@ -49,9 +54,8 @@ pub mod executor;
 pub mod hosts;
 pub mod io;
 pub mod rdd;
+pub mod registry;
 pub mod runtimes;
-pub mod shuffle_map;
-pub mod task_registry;
 pub mod task_traits;
 pub mod tls;
 
@@ -63,10 +67,15 @@ pub use atomic_data::{
     cfg_js, cfg_k8s, cfg_kafka, cfg_not_js, cfg_not_k8s, cfg_not_python, cfg_python,
 };
 
+/// Re-export shim giving `atomic-runtime-macros`' generated code one stable, absolute
+/// path (`::atomic_compute::__macro_support::...`) to reference. All 9 macros in
+/// `atomic_runtime_macros` are `#[proc_macro]`/`#[proc_macro_attribute]` functions, so
+/// they hardcode this path rather than relying on `$crate` (a `macro_rules!`-only
+/// mechanism); this module is what makes that path resolve.
 pub mod __macro_support {
-    pub use crate::task_registry::{
+    pub use crate::registry::{
         PartitionerEntry, ShuffleKeyEntry, ShuffleMapEntry, SortShuffleMapEntry, StateMergeEntry,
-        TaskEntry,
+        TaskEntry, shuffle_map_handler, sort_shuffle_map_handler,
     };
     pub use crate::task_traits::{AggregateTask, BinaryTask, PartitionTask, UnaryTask};
     pub use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
@@ -74,219 +83,11 @@ pub mod __macro_support {
     pub use inventory;
 }
 
-/// Register a shuffle-write handler for the `(K, V)` key-value type pair.
-///
-/// Place this once in the binary that calls `reduce_by_key` or `group_by_key`
-/// on a `TypedRdd<(K, V)>`. Both the driver and worker binary must contain the
-/// same call (they are the same binary in Atomic's model, so one call suffices).
-///
-/// The dispatch key is generated at compile time from the source-level token text
-/// of `K` and `V` using `stringify!` (e.g. `"String::u32"`). This is stable across
-/// compiler versions, unlike `std::any::type_name`.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// // In main.rs, before any shuffle operations:
-/// atomic_compute::register_shuffle_map!(String, u32);
-/// ```
-#[macro_export]
-macro_rules! register_shuffle_map {
-    ($K:ty, $V:ty) => {
-        $crate::__macro_support::inventory::submit!($crate::__macro_support::ShuffleMapEntry {
-            type_id: || concat!(stringify!($K), "::", stringify!($V)),
-            handler: $crate::shuffle_map::shuffle_map_handler::<$K, $V>,
-        });
-        $crate::__macro_support::inventory::submit!($crate::__macro_support::ShuffleKeyEntry {
-            type_id: || std::any::TypeId::of::<($K, $V)>(),
-            key: concat!(stringify!($K), "::", stringify!($V)),
-        });
-    };
-}
-
-/// Register a **sorted** shuffle-write handler for `(K, V)` where `K: Ord`.
-///
-/// Use this (instead of / in addition to [`register_shuffle_map!`]) for key types that are
-/// `Ord` and may be shuffled with a range partitioner (e.g. via `sort_by_key`). It registers
-/// the base hash handler **and** a sorted handler: in distributed mode the worker then
-/// partitions with the RDD's real partitioner and writes sorted runs, so the driver-side reduce
-/// produces globally-ordered output. For non-`Ord` keys, use [`register_shuffle_map!`].
-///
-/// ```rust,ignore
-/// atomic_compute::register_sort_shuffle_map!(i64, f64);
-/// ```
-#[macro_export]
-macro_rules! register_sort_shuffle_map {
-    ($K:ty, $V:ty) => {
-        $crate::register_shuffle_map!($K, $V);
-        $crate::__macro_support::inventory::submit!($crate::__macro_support::SortShuffleMapEntry {
-            type_id: || concat!(stringify!($K), "::", stringify!($V)),
-            handler: $crate::shuffle_map::sort_shuffle_map_handler::<$K, $V>,
-        });
-    };
-}
-
-/// Register a [`NamedPartitioner`](atomic_data::partitioner::NamedPartitioner) so
-/// distributed `partition_by_named` can ship it to workers by name (no closure
-/// serialization). Place this once in the binary, like `register_shuffle_map!`.
-///
-/// ```rust,ignore
-/// atomic_compute::register_partitioner!(ModPartitioner);
-/// ```
-#[macro_export]
-macro_rules! register_partitioner {
-    ($P:ty) => {
-        $crate::__macro_support::inventory::submit!($crate::__macro_support::PartitionerEntry {
-            name: || <$P as $crate::__macro_support::NamedPartitioner>::NAME,
-            factory: |n| $crate::__macro_support::Partitioner::from_named::<$P>(n),
-        });
-    };
-}
-
-/// Register a state-merge function for distributed stateful streaming under a
-/// stable `name`. Place this once in the binary (driver and workers run the same
-/// binary). The worker looks up `name` in `STATE_MERGE_REGISTRY` when it handles a
-/// [`StepKind::MergeState`](atomic_data::distributed::StepKind::MergeState).
-///
-/// ```rust,ignore
-/// atomic_compute::register_state_merge!("atomic_structured::windowed_v1", windowed_state_merge);
-/// ```
-#[macro_export]
-macro_rules! register_state_merge {
-    ($name:expr, $handler:path) => {
-        $crate::__macro_support::inventory::submit!($crate::__macro_support::StateMergeEntry {
-            name: $name,
-            handler: $handler,
-        });
-    };
-}
-
-/// Register a worker dispatch handler for a type implementing
-/// [`AggregateTask<Acc, Elem>`](task_traits::AggregateTask).
-///
-/// The `#[task]` macro only covers unary (`fn(T) -> U`) and binary (`fn(T, T) -> T`) shapes;
-/// an aggregate has two functions with a distinct accumulator type, so it registers through
-/// this macro instead (the same hand-registration path the numeric builtins use). The handler
-/// folds a partition into one `Acc` via [`seq`](task_traits::AggregateTask::seq) on the worker;
-/// the driver merges the per-partition accumulators with [`comb`](task_traits::AggregateTask::comb)
-/// (see [`TypedRdd::aggregate_task`](rdd::typed::TypedRdd::aggregate_task)).
-///
-/// `Acc` (decoded from `Step.payload`) is the zero accumulator; the task type must be `Default`.
-///
-/// ```rust,ignore
-/// atomic_compute::register_aggregate_task!(MyAgg, (f64, u64), f64);
-/// ```
-#[macro_export]
-macro_rules! register_aggregate_task {
-    ($task:ty, $acc:ty, $elem:ty) => {
-        $crate::__macro_support::inventory::submit! {
-            $crate::__macro_support::TaskEntry {
-                task_name:
-                    <$task as $crate::__macro_support::AggregateTask<$acc, $elem>>::NAME,
-                body_hash: 0,
-                handler: |action, payload, data| {
-                    use $crate::__macro_support::{
-                        AggregateTask, TaskAction, WireDecode, WireEncode,
-                    };
-                    match action {
-                        TaskAction::Aggregate | TaskAction::Fold => {
-                            let zero = <$acc>::decode_wire(payload).map_err(|e| e.to_string())?;
-                            let items = Vec::<$elem>::decode_wire(data)
-                                .map_err(|e| e.to_string())?;
-                            let task = <$task>::default();
-                            let acc = items.into_iter().fold(zero, |a, x| task.seq(a, x));
-                            acc.encode_wire().map_err(|e| e.to_string())
-                        }
-                        other => ::std::result::Result::Err(::std::format!(
-                            "aggregate task '{}' does not support action {:?}",
-                            <$task as AggregateTask<$acc, $elem>>::NAME,
-                            other
-                        )),
-                    }
-                },
-            }
-        }
-    };
-}
-
-/// Register a [`BinaryTask`](crate::task_traits::BinaryTask) as a dispatchable builtin, keyed by
-/// its `NAME`. Handles the `Fold` / `Aggregate` / `Reduce` actions by folding the partition
-/// through `BinaryTask::call`, seeded by the first element — so an empty partition returns empty
-/// bytes (the driver skips it) rather than needing an identity value. Use this for monoid-shaped
-/// reductions with no identity element (`max`, `min`); reductions that fold from a zero payload
-/// (`sum`) register their own handler.
-#[macro_export]
-macro_rules! register_binary_task {
-    ($task:ty, $elem:ty) => {
-        $crate::__macro_support::inventory::submit! {
-            $crate::__macro_support::TaskEntry {
-                task_name: <$task as $crate::__macro_support::BinaryTask<$elem>>::NAME,
-                body_hash: 0,
-                handler: |action, payload, data| {
-                    use $crate::__macro_support::{BinaryTask, TaskAction, WireDecode, WireEncode};
-                    let _ = payload;
-                    match action {
-                        TaskAction::Fold | TaskAction::Aggregate | TaskAction::Reduce => {
-                            let items = Vec::<$elem>::decode_wire(data).map_err(|e| e.to_string())?;
-                            let mut iter = items.into_iter();
-                            let ::std::option::Option::Some(first) = iter.next() else {
-                                return ::std::result::Result::Ok(Vec::new());
-                            };
-                            let task = <$task>::default();
-                            let result = iter.fold(first, |a, b| task.call(a, b));
-                            result.encode_wire().map_err(|e| e.to_string())
-                        }
-                        other => ::std::result::Result::Err(::std::format!(
-                            "binary task '{}' does not support action {:?}",
-                            <$task as BinaryTask<$elem>>::NAME,
-                            other
-                        )),
-                    }
-                },
-            }
-        }
-    };
-}
-
-/// Register a [`PartitionTask`](crate::task_traits::PartitionTask) as a dispatchable builtin,
-/// keyed by its `NAME`. Handles the `Map` / `Collect` actions by decoding the partition into a
-/// `Vec`, running [`PartitionTask::transform`](crate::task_traits::PartitionTask::transform)
-/// (which reads the op `payload`), and re-encoding. Use this for whole-partition reductions with
-/// no element-level combine (`top_k`, `take_ordered`, `distinct`, `sort`).
-#[macro_export]
-macro_rules! register_partition_task {
-    ($task:ty, $elem:ty) => {
-        $crate::__macro_support::inventory::submit! {
-            $crate::__macro_support::TaskEntry {
-                task_name: <$task as $crate::__macro_support::PartitionTask<$elem>>::NAME,
-                body_hash: 0,
-                handler: |action, payload, data| {
-                    use $crate::__macro_support::{
-                        PartitionTask, TaskAction, WireDecode, WireEncode,
-                    };
-                    match action {
-                        TaskAction::Map | TaskAction::Collect => {
-                            let items = Vec::<$elem>::decode_wire(data).map_err(|e| e.to_string())?;
-                            let out = <$task>::default()
-                                .transform(items, payload)
-                                .map_err(|e| e.to_string())?;
-                            out.encode_wire().map_err(|e| e.to_string())
-                        }
-                        other => ::std::result::Result::Err(::std::format!(
-                            "partition task '{}' does not support action {:?}",
-                            <$task as PartitionTask<$elem>>::NAME,
-                            other
-                        )),
-                    }
-                },
-            }
-        }
-    };
-}
-
-pub use atomic_runtime_macros::task;
-pub use atomic_runtime_macros::task_fn;
+pub use atomic_runtime_macros::{
+    register_aggregate_task, register_binary_task, register_partition_task, register_partitioner,
+    register_shuffle_map, register_sort_shuffle_map, register_state_merge, task, task_fn,
+};
 
 pub use atomic_scheduler::{ResourceProfile, WorkerAllocator};
 pub use env::{Config, WorkerConfig};
-pub use task_registry::{AgentRunner, register_agent_runner};
+pub use registry::{AgentRunner, register_agent_runner};

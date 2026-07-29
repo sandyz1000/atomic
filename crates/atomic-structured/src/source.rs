@@ -35,17 +35,17 @@ pub trait StreamSource: Send + Sync {
     fn post_batch_commit(&self, _epoch: u64) {}
 
     crate::cfg_kafka! {
-    /// Consumed offsets for the last batch, suitable for committing inside a Kafka
-    /// producer transaction (exactly-once). Returns `None` for all non-Kafka sources
-    /// and for Kafka sources before any batch has been consumed.
-    ///
-    /// When the engine detects both a transactional [`Sink`] and a source that returns
-    /// `Some` here, it routes the batch through `add_batch_with_offsets` instead of
-    /// `add_batch + post_batch_commit`, ensuring source offsets and output records are
-    /// committed atomically.
-    fn pending_offsets(&self) -> Option<crate::kafka::OffsetCommit> {
-        None
-    }
+        /// Consumed offsets for the last batch, suitable for committing inside a Kafka
+        /// producer transaction (exactly-once). Returns `None` for all non-Kafka sources
+        /// and for Kafka sources before any batch has been consumed.
+        ///
+        /// When the engine detects both a transactional [`Sink`] and a source that returns
+        /// `Some` here, it routes the batch through `add_batch_with_offsets` instead of
+        /// `add_batch + post_batch_commit`, ensuring source offsets and output records are
+        /// committed atomically.
+        fn pending_offsets(&self) -> Option<crate::kafka::OffsetCommit> {
+            None
+        }
     } // cfg_kafka!
 }
 

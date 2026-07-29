@@ -1,6 +1,6 @@
 use std::net::SocketAddrV4;
 
-use atomic_data::distributed::{EngineStep, Step, StepKind};
+use atomic_data::distributed::{EngineAction, Step, StepKind};
 
 use super::DistributedScheduler;
 
@@ -27,11 +27,11 @@ impl DistributedScheduler {
     pub fn plan_cache_dispatch(&self, steps: &[Step], num_partitions: usize) -> CacheDispatch {
         let Some(idx) = steps
             .iter()
-            .rposition(|o| matches!(o.kind, StepKind::Engine(EngineStep::Cache { .. })))
+            .rposition(|o| matches!(o.kind, StepKind::Engine(EngineAction::Cache { .. })))
         else {
             return CacheDispatch::Recompute;
         };
-        let StepKind::Engine(EngineStep::Cache { rdd_id }) = steps[idx].kind else {
+        let StepKind::Engine(EngineAction::Cache { rdd_id }) = steps[idx].kind else {
             return CacheDispatch::Recompute;
         };
         let Some(entry) = self.cache_endpoints.get(&rdd_id) else {

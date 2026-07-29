@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::env;
 use crate::error::{ComputeError, ComputeResult};
+use crate::registry::{SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
 use crate::runtimes::{Backend, ComputeEngine};
 use atomic_data::distributed::{
     TRANSPORT_HEADER_LEN, TaskEnvelope, TransportFrameKind, WireDecode, WireEncode,
@@ -60,20 +61,15 @@ impl Executor {
     }
 
     pub fn worker_capabilities(&self) -> WorkerCapabilities {
-        let mut registered_ops: Vec<String> = crate::task_registry::TASK_REGISTRY
-            .keys()
-            .map(|k| k.to_string())
-            .collect();
+        let mut registered: Vec<String> = vec![];
+
+        registered.extend(TASK_REGISTRY.keys().map(|k| k.to_string()));
         // Shuffle map types use a "shuffle:<key>" prefix to avoid colliding with
         // regular task_names. After Fix 2, SHUFFLE_MAP_REGISTRY is keyed by the stable
         // stringify!-based string (e.g. "String::u32") instead of type_name.
-        registered_ops.extend(
-            crate::task_registry::SHUFFLE_MAP_REGISTRY
-                .keys()
-                .map(|k| format!("shuffle:{k}")),
-        );
+        registered.extend(SHUFFLE_MAP_REGISTRY.keys().map(|k| format!("shuffle:{k}")));
         // Advertise dynamic task runtimes so the scheduler can route Python/JS ops.
-        registered_ops.extend(
+        registered.extend(
             [python_op(), js_op()]
                 .into_iter()
                 .flatten()
@@ -82,15 +78,15 @@ impl Executor {
         log::debug!(
             "worker {} advertising {} registered ops ({} shuffle types)",
             self.worker_id,
-            registered_ops.len(),
-            crate::task_registry::SHUFFLE_MAP_REGISTRY.len(),
+            registered.len(),
+            SHUFFLE_MAP_REGISTRY.len(),
         );
         WorkerCapabilities::new(
             self.worker_id.to_string(),
             self.max_concurrent_tasks,
-            registered_ops,
+            registered,
         )
-        .with_registry_fingerprint(*crate::task_registry::REGISTRY_FINGERPRINT)
+        .with_registry_fingerprint(*crate::registry::REGISTRY_FINGERPRINT)
     }
 
     /// Worker loop: binds TCP port, reads transport frames, dispatches via ComputeEngine.

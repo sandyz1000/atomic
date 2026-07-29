@@ -1,5 +1,5 @@
 use atomic_data::distributed::{
-    AgentFindings, AgentStepPayload, EngineStep, ResolvedTool, ScriptRuntime, Step, StepKind,
+    AgentFindings, AgentStepPayload, EngineAction, ResolvedTool, ScriptRuntime, Step, StepKind,
     TaskRuntime, WireDecode,
 };
 use pyo3::prelude::*;
@@ -43,7 +43,7 @@ impl PyRdd {
 
         let op = Step {
             task_name: String::new(),
-            kind: StepKind::Engine(EngineStep::AgentStep),
+            kind: StepKind::Engine(EngineAction::AgentStep),
             runtime: TaskRuntime::Native,
             payload: payload_bytes,
         };

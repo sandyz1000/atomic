@@ -9,6 +9,16 @@ export declare class Accumulator {
   reset(): void
 }
 
+/** Static constructors for `AggSpec` objects, mirroring the Python `Agg` factory. */
+export declare class Agg {
+  static count(output: string): AggSpec
+  static sum(col: string, output: string): AggSpec
+  static min(col: string, output: string): AggSpec
+  static max(col: string, output: string): AggSpec
+  static avg(col: string, output: string): AggSpec
+}
+export type JsAgg = Agg
+
 /** Queue handle for injecting test batches into a `testQueueStream`. */
 export declare class BatchQueue {
   /** Enqueue a JavaScript array as the next batch. */
@@ -57,9 +67,9 @@ export declare class Context {
   /**
    * Create an RDD of lines from a text file or S3 object.
    *
-   * Accepts local paths (`/path/to/file`, `file:///path`) and, when built
-   * with the `s3` feature, S3 URIs (`s3://bucket/key`).  A directory path
-   * or S3 prefix produces one partition per file/object.
+   * Accepts local paths (`/path/to/file`, `file:///path`) and S3 URIs
+   * (`s3://bucket/key`).  A directory path or S3 prefix produces one
+   * partition per file/object.
    *
    * @param path - Local path or `s3://bucket/key` URI.
    */
@@ -155,6 +165,27 @@ export declare class DataFrame {
    * @param columns - Array of column name strings.
    *
    * @example
+   * Equi-join with another DataFrame on `leftOn` = `rightOn`.
+   *
+   * `how` is one of `inner`, `left`, `right`, `full`/`outer`, `semi`, `anti`.
+   *
+   * ```typescript
+   * const joined = orders.join(customers, "inner", ["customer_id"], ["id"]);
+   * ```
+   */
+  join(other: DataFrame, how: string, leftOn: Array<string>, rightOn: Array<string>): DataFrame
+  /**
+   * Group by `groupBy` columns and compute `aggs` (SQL aggregate expressions like
+   * `"SUM(amount) AS total"`). Empty `groupBy` computes global aggregates.
+   *
+   * ```typescript
+   * df.agg(["region"], ["SUM(amount) AS total", "COUNT(*) AS n"])
+   * ```
+   */
+  agg(groupBy: Array<string>, aggs: Array<string>): DataFrame
+  /** Rename all columns positionally to `names` (must match the column count). */
+  toDf(names: Array<string>): DataFrame
+  /**
    * ```typescript
    * const slim = df.select(["id", "name"]);
    * ```
@@ -200,6 +231,42 @@ export declare class DataFrame {
    * ```
    */
   writeCsv(path: string): void
+  /** Return the first `n` rows as an array of objects. */
+  head(n: number): Array<any>
+  /** Alias for `filter(expr)`. */
+  where(expr: string): DataFrame
+  /** Return a new DataFrame without the named columns. */
+  drop(cols: Array<string>): DataFrame
+  /** Remove duplicate rows. */
+  distinct(): DataFrame
+  /** Union with another DataFrame (same schema required). */
+  union(other: DataFrame): DataFrame
+  /** Descriptive statistics via SQL DESCRIBE. */
+  describe(): DataFrame
+  /** Remove duplicate rows, optionally within the given columns. */
+  dropDuplicates(cols?: Array<string> | undefined | null): DataFrame
+  /** List of column names. */
+  columns(): Array<string>
+  /** List of `[column_name, dtype_string]` pairs. */
+  dtypes(): Array<Array<string>>
+  /** Intersect with another DataFrame (same schema), deduplicated (Spark `intersect`). */
+  intersect(other: DataFrame): DataFrame
+  /** Set difference — distinct rows in self not in other (Spark `except`). */
+  except(other: DataFrame): DataFrame
+  /** Random sample at the given fraction (0.0 to 1.0). */
+  sample(fraction: number): DataFrame
+  /** Fill null values in a column with a numeric value. */
+  fillNull(col: string, value: number): DataFrame
+  /** Drop rows with nulls in any of the given columns. */
+  dropNull(cols: Array<string>): DataFrame
+  /** Pearson correlation between two numeric columns. */
+  corr(col1: string, col2: string): number
+  /** Population covariance between two numeric columns. */
+  cov(col1: string, col2: string): number
+  /** Cross-tabulation of two columns via SQL. */
+  crosstab(col1: string, col2: string): DataFrame
+  /** Return the last `n` rows. */
+  tail(n: number): Array<any>
 }
 export type JsDataFrame = DataFrame
 
@@ -222,6 +289,14 @@ export declare class DStream {
    *               advances the window by one tick in this in-process model.
    */
   window(windowMs: number, slideMs: number): DStream
+  /** Reduce elements per window. */
+  reduceByWindow(f: (arg: JV) => JV, windowMs: number, slideMs: number): DStream
+  /** Reduce by key per window. */
+  reduceByKeyAndWindow(f: (arg: [JV, JV]) => JV, windowMs: number, slideMs: number): DStream
+  /** Transform each batch through `func(batch) => newBatch`. */
+  transform(f: (arg: JV) => JV): DStream
+  /** Transform with another DStream: `func(selfBatch, otherBatch) => newBatch`. */
+  transformWith(other: DStream, f: (arg: JV) => JV): DStream
 }
 export type JsDStream = DStream
 
@@ -285,6 +360,57 @@ export declare class Graph {
    * ```
    */
   runPregelF64(initialMsg: number, maxIterations: number, vprog: (arg0: number, arg1: number, arg2: number) => number, sendMsg: PregelSendFn, mergeMsg: (arg0: number, arg1: number) => number): Graph
+  /** Randomly chosen vertex id, or `null` if the graph is empty. */
+  pickRandomVertex(): number | null
+  /** Edge attribute for `(src, dst)` if the edge exists. */
+  find(src: number, dst: number): number | null
+  /** Map vertex attributes: `f(vertexId, currentAttr) => newAttr`. */
+  mapVertices(f: (arg0: number, arg1: number) => number): Graph
+  /** Map edge attributes: `f(srcId, dstId, currentAttr) => newAttr`. */
+  mapEdges(f: (arg0: number, arg1: number, arg2: number) => number): Graph
+  /**
+   * Return the subgraph of vertices where `vpred(vertexId, attr)` is true and edges where
+   * `epred(srcId, dstId, attr)` is true; edges with a dropped endpoint are also removed.
+   */
+  subgraph(vpred: (arg0: number, arg1: number) => boolean, epred: (arg0: number, arg1: number, arg2: number) => boolean): Graph
+  /**
+   * Restrict this graph to the vertices and edges present in `other` (attributes kept from
+   * self). A vertex survives if its id is in `other`; an edge survives if its `(src, dst)` is.
+   */
+  mask(other: Graph): Graph
+  /**
+   * Map each edge's attribute using the full triplet:
+   * `f(srcId, srcAttr, dstId, dstAttr, edgeAttr) => newAttr`.
+   */
+  mapTriplets(f: TripletMapFn): Graph
+  /** Merge parallel edges (same `(src, dst)`) with `f(attr1, attr2) => attr`. */
+  groupEdges(f: (arg0: number, arg1: number) => number): Graph
+  /**
+   * Left-outer-join vertices with `table` (`[vertexId, value]` pairs), deriving new attributes
+   * via `f(vertexId, attr, valueOrNull) => newAttr`. Edges are unchanged.
+   */
+  outerJoinVertices(table: Array<[number, number]>, f: (arg0: number, arg1: number, arg2?: number | undefined | null) => number): Graph
+  /**
+   * Inner-join vertices with `table`: only vertices present in `table` are updated via
+   * `f(vertexId, attr, value) => newAttr`; others keep their attribute.
+   */
+  joinVertices(table: Array<[number, number]>, f: (arg0: number, arg1: number, arg2: number) => number): Graph
+  /** Return a new graph with all edges reversed. */
+  reverse(): Graph
+  /** `(inDegree, outDegree)` per vertex as `Record<string, [number, number]>`. */
+  degrees(): Record<string, [number, number]>
+  /** In-degree per vertex. */
+  inDegrees(): Record<string, number>
+  /** Out-degree per vertex. */
+  outDegrees(): Record<string, number>
+  /** Neighbor IDs per vertex. `direction` = "in", "out", or "either" (default). */
+  collectNeighborIds(direction?: string | undefined | null): Record<string, number[]>
+  /** Neighbor `(neighborId, edgeAttr)` pairs per vertex. */
+  collectNeighbors(direction?: string | undefined | null): Record<string, [number, number][]>
+  /** PageRank until mean-diff < `tol` or `maxIter`. */
+  pageRankUntilConvergence(tol: number, resetProb: number, maxIter: number): Record<string, number>
+  /** Personalized PageRank from source vertices. */
+  personalizedPageRank(sources: Array<number>, numIter: number, resetProb: number): Record<string, number>
 }
 export type JsGraph = Graph
 
@@ -334,8 +460,7 @@ export declare class JsRdd {
   /**
    * Write each element as a line to `path`.
    *
-   * Accepts a local file path or, when built with the `s3` feature, an
-   * S3 URI (`s3://bucket/prefix`).
+   * Accepts a local file path or an S3 URI (`s3://bucket/prefix`).
    */
   saveAsTextFile(path: string): void
   /**
@@ -363,6 +488,52 @@ export declare class JsRdd {
   get numPartitions(): number
   length(): number
   /**
+   * Balanced tree-reduce. `f(a, b)` merges two partial results.
+   * `depth` (default 2) controls the number of tree merge levels.
+   */
+  treeReduce(f: (arg0: JsonValue, arg1: JsonValue) => JsonValue, depth?: number | undefined | null): JsonValue
+  /**
+   * Balanced tree-aggregate. `seqFn(acc, elem)` within partitions,
+   * `combFn(acc, acc)` in a balanced tree across partitions.
+   */
+  treeAggregate(zero: JsonValue, seqFn: (arg0: JsonValue, arg1: JsonValue) => JsonValue, combFn: (arg0: JsonValue, arg1: JsonValue) => JsonValue, depth?: number | undefined | null): JsonValue
+  /**
+   * Single-pass summary statistics over numeric elements.
+   * Returns `{count, mean, sum, min, max, variance, stdev}`.
+   * All values are `NaN` for an empty RDD.
+   */
+  stats(): any
+  /** Arithmetic mean. Returns `NaN` if empty. */
+  mean(): number
+  /** Population variance. Returns `NaN` if empty. */
+  variance(): number
+  /** Population standard deviation — `sqrt(variance())`. */
+  stdev(): number
+  /**
+   * Bucketed counts over ascending `bounds`. `bounds` has `n + 1` edges defining
+   * `n` buckets. Returns `Array<number>` of length `n` counting elements in each
+   * half-open interval `[bounds[i], bounds[i+1])`, with the final bucket
+   * right-inclusive.
+   */
+  histogram(bounds: Array<number>): Array<number>
+  /**
+   * Return a sampled subset of this RDD (lazy transform).
+   *
+   * `withReplacement = true` — Poisson sampling (elements may repeat).
+   * `withReplacement = false` — Bernoulli sampling (each element at most once).
+   * Optional `seed` makes the sample reproducible.
+   */
+  sample(withReplacement: boolean, fraction: number, seed?: number | undefined | null): JsRdd
+  /**
+   * Return a fixed-size random sample (action).
+   *
+   * `withReplacement = true` draws with replacement; `false` draws distinct
+   * elements. `seed` makes the sample reproducible.
+   */
+  takeSample(withReplacement: boolean, num: number, seed?: number | undefined | null): Array<JsonValue>
+  /** Approximate distinct count via hash-set cardinality (driver-side). */
+  countApproxDistinct(): number
+  /**
    * Run a framework-native, multi-round LLM agent loop over each partition.
    *
    * `config` is an object describing the agent:
@@ -370,7 +541,10 @@ export declare class JsRdd {
    *   - `systemPrompt` (string, required)      — the agent's task description
    *   - `maxRounds` (number, default 2)        — plan→execute→evaluate rounds per input
    *   - `provider` (string, default "openai")  — `"openai"` or `"anthropic"`
-   *   - `toolRefs` (string[], default [])      — tool names the agent may reference
+   *   - `toolRefs` (string[], default [])      — names of Rust `#[task]` tools the agent may call
+   *   - `tools` (object[], default [])         — inline JS tools shipped with the job (no rebuild).
+   *     Each: `{ name: string, source: string }` where `source` is a function expression
+   *     `(args) => result`. The model calls them via `TOOL_CALL: <name> <json>`.
    *   - `outputSchema` (string, optional)      — JSON schema for best-effort output validation
    *   - `maxTokensTotal` (number, optional)    — token budget across all inputs in a partition
    *
@@ -385,6 +559,20 @@ export declare class JsRdd {
   groupByKey(): JsRdd
   /** Aggregate values with the same key using `f(acc, value) => acc`. */
   reduceByKey(f: (arg0: JsonValue, arg1: JsonValue) => JsonValue): JsRdd
+  /**
+   * Sum the values for each key, returning `[key, sum]`. In distributed mode a `(a,b)=>a+b`
+   * combiner is shipped so workers pre-aggregate per partition; the driver merges the partials.
+   */
+  sumValues(): JsRdd
+  /** Keep the maximum value for each key, returning `[key, max]`. */
+  maxValues(): JsRdd
+  /** Keep the minimum value for each key, returning `[key, min]`. */
+  minValues(): JsRdd
+  /**
+   * Count the values per key, returning `[key, count]`. In distributed mode workers count per
+   * partition (a shipped map-side combine) and the driver sums the partial counts.
+   */
+  countValues(): JsRdd
   /** Extract the key from each `[key, value]` pair. */
   keys(): JsRdd
   /** Extract the value from each `[key, value]` pair. */
@@ -411,6 +599,31 @@ export declare class JsRdd {
    * In distributed mode the right side is embedded in the worker closure as JSON.
    */
   leftOuterJoin(other: JsRdd): JsRdd
+  /**
+   * Right outer join: every right key is preserved.
+   * Emits `[key, [left_value, right_value]]` for matched keys and
+   * `[key, [null, right_value]]` for unmatched right keys.
+   */
+  rightOuterJoin(other: JsRdd): JsRdd
+  /** Full outer join: all keys from both sides preserved. */
+  fullOuterJoin(other: JsRdd): JsRdd
+  /** Co-group: `[key, [left_values], [right_values]]` for every key on either side. */
+  cogroup(other: JsRdd): JsRdd
+  /** Fold values by key: `f(acc, value) => acc`, seeded by `zero`. */
+  foldByKey(zero: JsonValue, f: (arg0: JsonValue, arg1: JsonValue) => JsonValue): JsRdd
+  /** Aggregate values by key with separate seq and comb functions. */
+  aggregateByKey(zero: JsonValue, seqFn: (arg0: JsonValue, arg1: JsonValue) => JsonValue, combFn: (arg0: JsonValue, arg1: JsonValue) => JsonValue): JsRdd
+  /**
+   * Generalised `combine_by_key`: `create(val) => C`, `mergeVal(C, val) => C`,
+   * `mergeCombiners(C, C) => C`.
+   */
+  combineByKey(createCombiner: (arg: JsonValue) => JsonValue, mergeValue: (arg0: JsonValue, arg1: JsonValue) => JsonValue, mergeCombiners: (arg0: JsonValue, arg1: JsonValue) => JsonValue): JsRdd
+  /** Driver-side `reduce_by_key` returning a JS object `{key: reducedValue}`. */
+  reduceByKeyLocally(f: (arg0: JsonValue, arg1: JsonValue) => JsonValue): any
+  /** Collect pair RDD into a JS object `{key: value}`. Last value wins on duplicate keys. */
+  collectAsMap(): any
+  /** Remove pairs whose key exists in `other`. */
+  subtractByKey(other: JsRdd): JsRdd
   /** Return the top `n` elements (largest first). Optional comparator `f(a, b) => number`. */
   top(n: number, comparator?: ((arg0: JsonValue, arg1: JsonValue) => number) | undefined | null): Array<JsonValue>
   /** Return the `n` smallest elements. Optional comparator `f(a, b) => number`. */
@@ -467,6 +680,26 @@ export declare class JsRdd {
   /** Return elements present in both `self` and `other` (no duplicates). */
   intersection(other: JsRdd): JsRdd
   /**
+   * Pipe each partition through `sh -c command`, feeding each element as a
+   * stdin line and collecting stdout lines as the new elements.
+   */
+  pipe(command: string): JsRdd
+  /** Zip elements with their 0-based index, producing `[element, index]` pairs. */
+  zipWithIndex(): JsRdd
+  /**
+   * Zip elements with unique IDs (not contiguous, but gap-free per partition).
+   *
+   * Element `i` of partition `p` gets id `p + i * numPartitions`.
+   */
+  zipWithUniqueId(): JsRdd
+  /**
+   * Split the RDD into several RDDs by `weights`, returning an array of RDDs.
+   *
+   * Weights are normalised to sum to 1; each element is placed into exactly
+   * one output by a deterministic `seed`-seeded random draw.
+   */
+  randomSplit(weights: Array<number>, seed?: number | undefined | null): Array<JsRdd>
+  /**
    * Apply `f(element, ctx)` to each element.
    *
    * `ctx` is serialized as JSON and injected as `globalThis.__ctx` on the worker.
@@ -511,6 +744,34 @@ export declare class JsRdd {
    */
   foldWithContext(ctx: JsonValue, zero: JsonValue, f: (arg0: JsonValue, arg1: JsonValue, arg2: JsonValue) => JsonValue): JsonValue
 }
+
+/** Builds a session-window aggregation query. */
+export declare class SessionBuilder {
+  /** Group each session by `cols` before aggregating. */
+  groupBy(cols: Array<string>): SessionBuilder
+  /** Set the aggregates emitted per session. */
+  aggregate(aggs: Array<AggSpec>): SessionBuilder
+  /** Shard session state across `numShards` distributed tasks. */
+  distributed(numShards: number): SessionBuilder
+  /** Finish the builder, returning a writer. */
+  writeStream(): JsStreamWriter
+}
+export type JsSessionBuilder = SessionBuilder
+
+/** A streaming output sink. */
+export declare class Sink {
+  /** In-memory sink; read collected rows with `rows()`. */
+  static memory(): Sink
+  /** Print each batch to stdout under `name`. */
+  static console(name: string): Sink
+  /** Write each batch as a file under `dir`. */
+  static file(dir: string): Sink
+  /** Rows collected so far (memory sink only), as an array of objects. */
+  rows(): Array<any>
+  /** Total rows collected so far (memory sink only). */
+  rowCount(): number
+}
+export type JsSink = Sink
 
 /**
  * SQL execution context backed by DataFusion.
@@ -577,8 +838,20 @@ export declare class SqlContext {
    * ```
    */
   registerRdd(name: string, rdd: JsRdd, schema: Record<string, string>): void
+  /**
+   * Register an Avro file (or directory) as a named table. Requires the `avro` feature;
+   * without it the call returns an error. The method stays napi-visible either way so the
+   * generated registration table is not conditional.
+   */
+  registerAvro(name: string, path: string): void
   /** Remove a previously registered table from the catalog. */
   deregisterTable(name: string): void
+  /** Return a registered table as a lazy DataFrame. */
+  table(name: string): DataFrame
+  /** List the names of all registered tables. */
+  tableNames(): Array<string>
+  /** Read a data source by path, returning a lazy DataFrame. `format` is `csv`/`parquet`/`json`. */
+  read(format: string, path: string): DataFrame
 }
 export type JsSqlContext = SqlContext
 
@@ -600,11 +873,11 @@ export declare class StreamingContext {
   /** Enable checkpointing to `dir`. State is written after each `runOneBatch()`. */
   checkpoint(dir: string): void
   /** Create a queue-backed stream for testing. Returns `[DStream, BatchQueue]`. */
-  testQueueStream(): [DStream, BatchQueue]
+  testQueueStream(): [JsDStream, BatchQueue]
   /** Create a pair queue-backed stream. Returns `[DStream, BatchQueue]`. */
-  testPairQueueStream(): [DStream, BatchQueue]
+  testPairQueueStream(): [JsDStream, BatchQueue]
   /** Register an output operation: `callback(batchArray)` called once per batch. */
-  foreachRdd(stream: DStream, callback: (arg: Array<JV>) => void): void
+  foreachRdd(stream: JsDStream, callback: (arg: Array<JV>) => void): void
   /** Run exactly one batch tick synchronously. */
   runOneBatch(): void
   /** No-op — use `runOneBatch()` for testing. */
@@ -613,6 +886,93 @@ export declare class StreamingContext {
   stop(): void
 }
 export type JsStreamingContext = StreamingContext
+
+/** A continuous query under construction (before an aggregation or SQL step). */
+export declare class StreamingDataFrame {
+  /** Declare an event-time watermark on `col` (epoch-ms), tolerating `delayMs` of lateness. */
+  withWatermark(col: string, delayMs: number): StreamingDataFrame
+  /** Stateless per-batch SQL over the `input` table. */
+  sql(query: string): JsStreamWriter
+  /** Tumbling event-time window of `sizeMs` on the epoch-ms `timeCol`. */
+  window(timeCol: string, sizeMs: number): JsWindowedBuilder
+  /** Session window on `timeCol` with an inactivity `gapMs`. */
+  sessionWindow(timeCol: string, gapMs: number): JsSessionBuilder
+  /** Drop duplicate rows keyed by `keyCols`, bounded by the declared watermark. */
+  dropDuplicatesWithinWatermark(keyCols: Array<string>): JsStreamWriter
+}
+export type JsStreamingDataFrame = StreamingDataFrame
+
+/** A running structured streaming query — control handle. */
+export declare class StreamingQuery {
+  /** The user-assigned query name, if any. */
+  name(): string | null
+  /** Block until the query is stopped. */
+  awaitTermination(): void
+  /** Stop the query and release the source. */
+  stop(): void
+  /** The number of micro-batches processed so far. */
+  epoch(): number
+  /** A snapshot of the most recent progress: `{ epoch, lastBatchMs }`. */
+  lastProgress(): any
+}
+export type JsStreamingQuery = StreamingQuery
+
+/** Configures and starts a streaming query. */
+export declare class StreamWriter {
+  /** Output mode: `append`, `update`, or `complete`. */
+  outputMode(mode: string): StreamWriter
+  /** Name this query. */
+  queryName(name: string): StreamWriter
+  /** Trigger: `processing_time` (needs `intervalMs`), `once`, or `available_now`. */
+  trigger(kind: string, intervalMs?: number | undefined | null): StreamWriter
+  /** Route output to `sink`. */
+  format(sink: Sink): StreamWriter
+  /** Directory where windowed state + watermark are checkpointed. */
+  checkpoint(dir: string): StreamWriter
+  /** Shard a stream-stream join's buffer state across `numShards`. */
+  distributed(numShards: number): StreamWriter
+  /** Start the query on `ctx`, returning a control handle. */
+  start(ctx: StructuredStreamingContext): JsStreamingQuery
+}
+export type JsStreamWriter = StreamWriter
+
+/** Entry point for structured (continuous) streaming queries. */
+export declare class StructuredStreamingContext {
+  constructor(batchSecs?: number | undefined | null)
+  /** A source that emits `rowsPerBatch` synthetic rows (`timestamp`, `value`) each tick. */
+  rateStream(rowsPerBatch: number): JsStreamingDataFrame
+  /**
+   * A source reading new CSV files under `dir`. `schema` is an ordered array of
+   * `[columnName, arrowType]` pairs; `hasHeader` skips each file's first line.
+   */
+  csvStream(dir: string, schema: Array<[string, string]>, hasHeader: boolean): JsStreamingDataFrame
+}
+export type JsStructuredContext = StructuredStreamingContext
+
+/** Builds a windowed aggregation query. */
+export declare class WindowedBuilder {
+  /** Convert the tumbling window into a sliding window advancing by `stepMs`. */
+  slide(stepMs: number): WindowedBuilder
+  /** Group each window by `cols` before aggregating. */
+  groupBy(cols: Array<string>): WindowedBuilder
+  /** Set the aggregates emitted per window. */
+  aggregate(aggs: Array<AggSpec>): WindowedBuilder
+  /** Shard window state across `numShards` distributed tasks. */
+  distributed(numShards: number): WindowedBuilder
+  /** Finish the builder, returning a writer. */
+  writeStream(): JsStreamWriter
+}
+export type JsWindowedBuilder = WindowedBuilder
+
+/**
+ * One aggregate as a plain object: `{ kind, col?, output }`. `kind` is
+ * `count`/`sum`/`min`/`max`/`avg`; `col` is omitted for `count`.
+ */
+export interface AggSpec {
+  kind: string
+  col?: string
+  output: string
+}
 
 /**
  * Restore a `StreamingContext` from the latest checkpoint written to `dir`.

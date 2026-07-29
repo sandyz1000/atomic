@@ -193,7 +193,7 @@ impl ToolRegistry {
     pub fn resolve_agent_step(&self, mut config: AgentStepPayload) -> Result<AgentStepPayload> {
         let mut resolved = Vec::with_capacity(config.tool_refs.len());
         for name in &config.tool_refs {
-            if atomic_compute::task_registry::TASK_REGISTRY.contains_key(name.as_str()) {
+            if atomic_compute::registry::TASK_REGISTRY.contains_key(name.as_str()) {
                 continue;
             }
             match self.get_tool(name) {

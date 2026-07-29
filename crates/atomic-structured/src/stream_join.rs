@@ -11,8 +11,8 @@
 //! for matching keys (and vice versa). Outer-unmatched rows are emitted once the
 //! watermark passes `row_time + time_bound`.
 //!
-//! This is driver-local (no distributed state), consistent with the rest of the
-//! structured streaming engine.
+//! [`StreamJoinEngine`] itself is driver-local; its cluster-sharded counterpart
+//! lives in [`stream_join_distributed`](crate::stream_join_distributed).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,12 +23,6 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
 
-use atomic_compute::context::Context;
-use atomic_data::distributed::{
-    EngineStep, StateMergePayload, Step, StepKind, TaskRuntime, decode_payload,
-};
-
-use crate::distributed_state::shard_of;
 use crate::errors::{StructuredError, StructuredResult};
 use crate::query::BatchEngine;
 use crate::source::StreamSource;
@@ -132,7 +126,7 @@ pub(crate) struct StreamJoinSpec {
 pub(crate) struct StreamJoinEngine {
     left: Arc<dyn StreamSource>,
     right: Arc<dyn StreamSource>,
-    spec: StreamJoinSpec,
+    pub(crate) spec: StreamJoinSpec,
     left_buf: Mutex<JoinStateStore>,
     right_buf: Mutex<JoinStateStore>,
     watermark: Mutex<WatermarkTracker>,
@@ -213,7 +207,7 @@ impl StreamJoinEngine {
     }
 
     /// Build Arrow RecordBatch rows from matched (left_row, right_row) pairs.
-    fn build_joined_batch(
+    pub(crate) fn build_joined_batch(
         &self,
         pairs: &[(JoinRow, Option<JoinRow>)],
     ) -> StructuredResult<Vec<RecordBatch>> {
@@ -232,7 +226,7 @@ impl StreamJoinEngine {
     /// pull both sides, advance the watermark, and extract keyed rows. The caller
     /// runs the probe against a buffer pair (local for [`StreamJoinEngine`], sharded
     /// for `DistributedJoinEngine`) via [`probe_and_buffer`].
-    fn compute_rows(&self, epoch: u64) -> JoinRows {
+    pub(crate) fn compute_rows(&self, epoch: u64) -> JoinRows {
         let left_batches = self.left.next_batch(epoch);
         let right_batches = self.right.next_batch(epoch);
         let wm = {
@@ -338,10 +332,10 @@ fn scalar_columns_to_arrays(col_data: &[Vec<GroupVal>], schema: &Schema) -> Vec<
 
 /// Result of [`StreamJoinEngine::compute_rows`]: this batch's keyed rows per side
 /// and the post-batch watermark.
-struct JoinRows {
-    new_left: Vec<(Vec<GroupVal>, JoinRow)>,
-    new_right: Vec<(Vec<GroupVal>, JoinRow)>,
-    wm: Option<u64>,
+pub(crate) struct JoinRows {
+    pub(crate) new_left: Vec<(Vec<GroupVal>, JoinRow)>,
+    pub(crate) new_right: Vec<(Vec<GroupVal>, JoinRow)>,
+    pub(crate) wm: Option<u64>,
 }
 
 /// Probe `new_left`/`new_right` against the buffer pair, append matches (and outer
@@ -350,7 +344,7 @@ struct JoinRows {
 /// join semantics are identical regardless of sharding. `left_ncols` is the left
 /// schema width, used to null-pad right-outer unmatched rows.
 #[allow(clippy::too_many_arguments)]
-fn probe_and_buffer(
+pub(crate) fn probe_and_buffer(
     left_buf: &mut JoinStateStore,
     right_buf: &mut JoinStateStore,
     new_left: Vec<(Vec<GroupVal>, JoinRow)>,
@@ -471,168 +465,4 @@ fn batch_max_time(batches: &[RecordBatch], col: &str) -> Option<u64> {
         }
     }
     max
-}
-
-// ── Distributed stream-stream join state (Part 3 / D4) ───────────────────────────
-
-/// Registered name of the stream-join state-merge function.
-pub(crate) const JOIN_MERGE_FN: &str = "atomic_structured::stream_join_v1";
-
-/// A shard's two-sided buffer state (both join inputs for the keys in the shard).
-#[derive(bincode::Encode, bincode::Decode)]
-struct JoinShardState {
-    left: JoinStateStore,
-    right: JoinStateStore,
-}
-
-/// Per-shard merge config for a stream-stream join.
-#[derive(bincode::Encode, bincode::Decode)]
-struct JoinMergeParams {
-    watermark_ms: Option<u64>,
-    time_bound_ms: u64,
-    join_type: JoinType,
-    left_ncols: u32,
-}
-
-type KeyedRows = Vec<(Vec<GroupVal>, JoinRow)>;
-
-/// Registered join state-merge: probe this batch's rows against the shard's buffer
-/// pair, then buffer + evict — identical semantics to the local engine because both
-/// call [`probe_and_buffer`]. An equi-join's two matching rows share the key, so they
-/// route to the same shard and all matches are found within it.
-fn join_state_merge(
-    prev: Option<&[u8]>,
-    partials: &[u8],
-    params: &[u8],
-) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let cfg = bincode::config::standard();
-    let mut state = match prev {
-        Some(b) => decode_payload::<JoinShardState>(b).map_err(|e| e.to_string())?,
-        None => JoinShardState {
-            left: JoinStateStore::new(),
-            right: JoinStateStore::new(),
-        },
-    };
-    let (new_left, new_right): (KeyedRows, KeyedRows) =
-        decode_payload(partials).map_err(|e| e.to_string())?;
-    let params: JoinMergeParams = decode_payload(params).map_err(|e| e.to_string())?;
-    let matched = probe_and_buffer(
-        &mut state.left,
-        &mut state.right,
-        new_left,
-        new_right,
-        params.time_bound_ms as i64,
-        params.join_type,
-        params.watermark_ms,
-        params.left_ncols as usize,
-    );
-    let new_state = bincode::encode_to_vec(&state, cfg).map_err(|e| e.to_string())?;
-    let matched_bytes = bincode::encode_to_vec(&matched, cfg).map_err(|e| e.to_string())?;
-    Ok((new_state, matched_bytes))
-}
-
-atomic_compute::register_state_merge!(JOIN_MERGE_FN, join_state_merge);
-
-/// Stream-stream join whose two-sided buffer state is sharded across the cluster.
-///
-/// Wraps a [`StreamJoinEngine`] for driver-side row extraction and output assembly,
-/// but routes each batch's rows (by stable join-key hash, so both sides of a match
-/// land together) into worker-resident buffer shards via `MergeState` tasks.
-pub(crate) struct DistributedJoinEngine {
-    inner: StreamJoinEngine,
-    sc: Arc<Context>,
-    num_shards: u32,
-    state_id_base: u64,
-    checkpoint_dir: Option<String>,
-}
-
-impl DistributedJoinEngine {
-    pub(crate) fn new(
-        inner: StreamJoinEngine,
-        sc: Arc<Context>,
-        num_shards: u32,
-        query_id: u64,
-        checkpoint_dir: Option<String>,
-    ) -> Self {
-        DistributedJoinEngine {
-            inner,
-            sc,
-            num_shards: num_shards.max(1),
-            state_id_base: query_id << 16,
-            checkpoint_dir,
-        }
-    }
-}
-
-impl BatchEngine for DistributedJoinEngine {
-    fn post_commit(&self, epoch: u64) {
-        self.inner.post_commit(epoch);
-    }
-
-    fn process(&self, epoch: u64) -> StructuredResult<Vec<RecordBatch>> {
-        let n = self.num_shards as usize;
-        let time_bound_ms = self.inner.spec.time_bound_ms;
-        let join_type = self.inner.spec.join_type;
-        let left_ncols = self.inner.spec.left_schema.fields().len() as u32;
-        let r = self.inner.compute_rows(epoch);
-
-        // Route both sides by join key; the same key lands in the same shard.
-        let mut left_by_shard: Vec<KeyedRows> = vec![Vec::new(); n];
-        for (key, row) in r.new_left {
-            left_by_shard[shard_of(&key, self.num_shards) as usize].push((key, row));
-        }
-        let mut right_by_shard: Vec<KeyedRows> = vec![Vec::new(); n];
-        for (key, row) in r.new_right {
-            right_by_shard[shard_of(&key, self.num_shards) as usize].push((key, row));
-        }
-
-        let cfg = bincode::config::standard();
-        let params = JoinMergeParams {
-            watermark_ms: r.wm,
-            time_bound_ms,
-            join_type,
-            left_ncols,
-        };
-        let params_bytes = bincode::encode_to_vec(&params, cfg)
-            .map_err(|e| StructuredError::Sql(e.to_string()))?;
-
-        let mut source_partitions: Vec<Vec<u8>> = Vec::with_capacity(n);
-        for (shard, (lefts, rights)) in left_by_shard.into_iter().zip(right_by_shard).enumerate() {
-            let partials = bincode::encode_to_vec(&(lefts, rights), cfg)
-                .map_err(|e| StructuredError::Sql(e.to_string()))?;
-            let payload = StateMergePayload {
-                state_id: self.state_id_base + shard as u64,
-                params: params_bytes.clone(),
-                partials,
-                checkpoint_dir: self.checkpoint_dir.clone(),
-            };
-            source_partitions.push(
-                bincode::encode_to_vec(&payload, cfg)
-                    .map_err(|e| StructuredError::Sql(e.to_string()))?,
-            );
-        }
-
-        let steps = vec![Step {
-            task_name: String::new(),
-            kind: StepKind::Engine(EngineStep::MergeState {
-                merge_fn: JOIN_MERGE_FN.to_string(),
-            }),
-            runtime: TaskRuntime::Native,
-            payload: vec![],
-        }];
-
-        let results = self
-            .sc
-            .dispatch_pipeline(source_partitions, steps)
-            .map_err(|e| StructuredError::Sql(format!("distributed join merge: {e}")))?;
-
-        let mut matched: Vec<(JoinRow, Option<JoinRow>)> = Vec::new();
-        for bytes in results {
-            let pairs: Vec<(JoinRow, Option<JoinRow>)> = decode_payload(&bytes)
-                .map_err(|e| StructuredError::Sql(format!("join matched decode: {e}")))?;
-            matched.extend(pairs);
-        }
-
-        self.inner.build_joined_batch(&matched)
-    }
 }

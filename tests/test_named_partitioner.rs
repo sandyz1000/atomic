@@ -61,7 +61,7 @@ atomic_compute::register_partitioner!(TypedMod);
 #[test]
 fn registry_rebuilds_partitioner() {
     // The factory linked by `register_partitioner!` rebuilds the partitioner by name.
-    let p = atomic_compute::task_registry::lookup_partitioner("test_mod", 3)
+    let p = atomic_compute::registry::lookup_partitioner("test_mod", 3)
         .expect("named partitioner not found in registry");
     assert_eq!(p.num_partitions(), 3);
     assert_eq!(p.get_partition(&7i64 as &dyn Any), 1); // 7 mod 3

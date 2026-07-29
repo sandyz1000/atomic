@@ -4,7 +4,7 @@
 //! Keyed by an opaque `state_id` (a query-shard identifier); the value is the
 //! serialized state bytes for that shard, persisted across micro-batches. The
 //! merge semantics live in the registered state-merge function
-//! (`atomic_compute::task_registry::STATE_MERGE_REGISTRY`) — this store only holds
+//! (`atomic_compute::registry::STATE_MERGE_REGISTRY`) — this store only holds
 //! the bytes, so it carries no streaming-layer types and stays at the data layer.
 //!
 //! In local mode the process-global store is shared by the in-process worker

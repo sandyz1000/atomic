@@ -17,6 +17,15 @@ use pyo3::types::{PyDict, PyList};
 
 use atomic_sql::context::AtomicSqlContext;
 
+/// Convert any DataFusion/Arrow error into the `PyRuntimeError` this module returns
+/// almost everywhere — the one piece of near-identical boilerplate repeated across
+/// every `DataFrame`/`SqlContext` method (~50 call sites); collapsing it here keeps
+/// each method's own SQL-construction logic front and center instead of buried
+/// under a repeated closure.
+fn to_py_err<E: std::fmt::Display>(e: E) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
+}
+
 fn run_sql_async<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T>,
@@ -205,27 +214,23 @@ impl PyDataFrame {
     ///
     /// Each dict maps column name → Python value (int, float, str, bool, or None).
     pub fn collect(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let batches = run_sql_async(self.inner.clone().collect())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let batches = run_sql_async(self.inner.clone().collect()).map_err(to_py_err)?;
         batches_to_py_list(py, &batches)
     }
 
     /// Execute and print a formatted table to stdout (default: 20 rows).
     pub fn show(&self) -> PyResult<()> {
-        run_sql_async(self.inner.clone().show())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        run_sql_async(self.inner.clone().show()).map_err(to_py_err)
     }
 
     /// Execute and print the first `n` rows to stdout.
     pub fn show_limit(&self, n: usize) -> PyResult<()> {
-        run_sql_async(self.inner.clone().show_limit(n))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        run_sql_async(self.inner.clone().show_limit(n)).map_err(to_py_err)
     }
 
     /// Return the total number of rows.
     pub fn count(&self) -> PyResult<usize> {
-        run_sql_async(self.inner.clone().count())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        run_sql_async(self.inner.clone().count()).map_err(to_py_err)
     }
 
     /// Filter rows using a SQL WHERE-clause expression (e.g. `"amount > 100"`).
@@ -244,9 +249,7 @@ impl PyDataFrame {
             let _ = session.deregister_table(&view);
             result
         })
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -287,7 +290,7 @@ impl PyDataFrame {
             .inner
             .clone()
             .join(other.inner.clone(), jt, &left, &right, None)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -327,9 +330,7 @@ impl PyDataFrame {
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -351,7 +352,7 @@ impl PyDataFrame {
         for (field, new_name) in fields.iter().zip(&names) {
             df = df
                 .with_column_renamed(field.name(), new_name)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                .map_err(to_py_err)?;
         }
         Ok(PyDataFrame {
             inner: df,
@@ -370,7 +371,7 @@ impl PyDataFrame {
             .inner
             .clone()
             .select_columns(&refs)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -379,11 +380,7 @@ impl PyDataFrame {
 
     /// Limit the result to the first `n` rows.
     pub fn limit(&self, n: usize) -> PyResult<Self> {
-        let df = self
-            .inner
-            .clone()
-            .limit(0, Some(n))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let df = self.inner.clone().limit(0, Some(n)).map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -398,7 +395,7 @@ impl PyDataFrame {
             .inner
             .clone()
             .sort(vec![df_col(col).sort(asc, true)])
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -428,9 +425,7 @@ impl PyDataFrame {
         let path = path.to_string();
         run_sql_async(async move { df.write_parquet(&path, Default::default(), None).await })
             .map(|_| ())
-            .map_err(|e: datafusion::error::DataFusionError| {
-                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-            })
+            .map_err(to_py_err)
     }
 
     /// Write all rows to CSV files in a directory.
@@ -443,9 +438,7 @@ impl PyDataFrame {
         let path = path.to_string();
         run_sql_async(async move { df.write_csv(&path, Default::default(), None).await })
             .map(|_| ())
-            .map_err(|e: datafusion::error::DataFusionError| {
-                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-            })
+            .map_err(to_py_err)
     }
 
     /// Convert the DataFrame to a PyArrow `Table`.
@@ -462,11 +455,8 @@ impl PyDataFrame {
         use std::io::Cursor;
 
         let df = self.inner.clone();
-        let batches: Vec<RecordBatch> = run_sql_async(async move { df.collect().await }).map_err(
-            |e: datafusion::error::DataFusionError| {
-                pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-            },
-        )?;
+        let batches: Vec<RecordBatch> =
+            run_sql_async(async move { df.collect().await }).map_err(to_py_err)?;
 
         if batches.is_empty() {
             let pa = py.import("pyarrow")?;
@@ -479,16 +469,11 @@ impl PyDataFrame {
         // Serialize to Arrow IPC format and deserialize via pyarrow
         let schema = batches[0].schema();
         let mut buf = Cursor::new(Vec::<u8>::new());
-        let mut writer = FileWriter::try_new(&mut buf, &schema)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let mut writer = FileWriter::try_new(&mut buf, &schema).map_err(to_py_err)?;
         for batch in &batches {
-            writer
-                .write(batch)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            writer.write(batch).map_err(to_py_err)?;
         }
-        writer
-            .finish()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        writer.finish().map_err(to_py_err)?;
 
         let ipc_bytes = buf.into_inner();
         let pa_ipc = py.import("pyarrow.ipc")?;
@@ -499,13 +484,8 @@ impl PyDataFrame {
 
     /// Return the first `n` rows as a list of dicts (action).
     pub fn head(&self, py: Python<'_>, n: usize) -> PyResult<Py<PyAny>> {
-        let df = self
-            .inner
-            .clone()
-            .limit(0, Some(n))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        let batches = run_sql_async(df.collect())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let df = self.inner.clone().limit(0, Some(n)).map_err(to_py_err)?;
+        let batches = run_sql_async(df.collect()).map_err(to_py_err)?;
         batches_to_py_list(py, &batches)
     }
 
@@ -529,11 +509,7 @@ impl PyDataFrame {
 
     /// Return distinct rows (de-duplicate).
     pub fn distinct(&self) -> PyResult<Self> {
-        let df = self
-            .inner
-            .clone()
-            .distinct()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let df = self.inner.clone().distinct().map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -546,7 +522,7 @@ impl PyDataFrame {
             .inner
             .clone()
             .union(other.inner.clone())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -561,15 +537,13 @@ impl PyDataFrame {
         let df = self.inner.clone();
         session
             .register_table(&view, df.into_view())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(to_py_err)?;
         let result_df = run_sql_async(async move {
             let r = session.sql(&format!("DESCRIBE {view}")).await;
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -587,7 +561,7 @@ impl PyDataFrame {
                 let df = self.inner.clone();
                 session
                     .register_table(&view, df.into_view())
-                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                    .map_err(to_py_err)?;
                 run_sql_async(async move {
                     let result = session
                         .sql(&format!("SELECT DISTINCT ON ({cols_str}) * FROM {view}"))
@@ -595,15 +569,9 @@ impl PyDataFrame {
                     let _ = session.deregister_table(&view);
                     result
                 })
-                .map_err(|e: datafusion::error::DataFusionError| {
-                    pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-                })?
+                .map_err(to_py_err)?
             }
-            _ => self
-                .inner
-                .clone()
-                .distinct()
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?,
+            _ => self.inner.clone().distinct().map_err(to_py_err)?,
         };
         Ok(PyDataFrame {
             inner: result_df,
@@ -641,7 +609,7 @@ impl PyDataFrame {
             .inner
             .clone()
             .intersect_distinct(other.inner.clone())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -655,7 +623,7 @@ impl PyDataFrame {
             .inner
             .clone()
             .except_distinct(other.inner.clone())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -670,7 +638,7 @@ impl PyDataFrame {
         let session = self.session.clone();
         let df = self.inner.clone();
         if let Err(e) = session.register_table(&view, df.into_view()) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string()));
+            return Err(to_py_err(e));
         }
         let result_df = run_sql_async(async move {
             let r = session
@@ -679,9 +647,7 @@ impl PyDataFrame {
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -719,9 +685,7 @@ impl PyDataFrame {
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -752,9 +716,7 @@ impl PyDataFrame {
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -781,9 +743,7 @@ impl PyDataFrame {
             let _ = session.deregister_table(&view);
             Ok::<_, datafusion::error::DataFusionError>(batches)
         })
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(to_py_err)?;
         for batch in &result {
             if batch.num_rows() > 0 && batch.num_columns() > 0 {
                 let arr = batch
@@ -821,9 +781,7 @@ impl PyDataFrame {
             let _ = session.deregister_table(&view);
             Ok::<_, datafusion::error::DataFusionError>(batches)
         })
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(to_py_err)?;
         for batch in &result {
             if batch.num_rows() > 0 && batch.num_columns() > 0 {
                 let arr = batch
@@ -853,7 +811,7 @@ impl PyDataFrame {
         let session = self.session.clone();
         let df = self.inner.clone();
         if let Err(e) = session.register_table(&view, df.into_view()) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(e.to_string()));
+            return Err(to_py_err(e));
         }
         let result_df = run_sql_async(async move {
             let r = session
@@ -864,9 +822,7 @@ impl PyDataFrame {
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -878,8 +834,7 @@ impl PyDataFrame {
         let view = tmp_view_name();
         let session = self.session.clone();
         let df = self.inner.clone();
-        let total = run_sql_async(df.clone().count())
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let total = run_sql_async(df.clone().count()).map_err(to_py_err)?;
         let offset = total.saturating_sub(n);
         let result = run_sql_async(async move {
             session.register_table(&view, df.into_view())?;
@@ -891,9 +846,7 @@ impl PyDataFrame {
             let _ = session.deregister_table(&view);
             Ok::<_, datafusion::error::DataFusionError>(batches)
         })
-        .map_err(|e: datafusion::error::DataFusionError| {
-            pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
-        })?;
+        .map_err(to_py_err)?;
         batches_to_py_list(py, &result)
     }
 
@@ -904,7 +857,7 @@ impl PyDataFrame {
             .inner
             .clone()
             .repartition(Partitioning::RoundRobinBatch(n))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -918,7 +871,7 @@ impl PyDataFrame {
             .inner
             .clone()
             .repartition(Partitioning::RoundRobinBatch(n))
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -934,7 +887,7 @@ impl PyDataFrame {
             .inner
             .clone()
             .explain(verbose, analyze)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -998,8 +951,7 @@ impl PySqlContext {
     pub fn sql(&self, query: &str) -> PyResult<PyDataFrame> {
         let session = self.session.clone();
         let query = query.to_string();
-        let df = run_sql_async(async move { session.sql(&query).await })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let df = run_sql_async(async move { session.sql(&query).await }).map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -1023,7 +975,7 @@ impl PySqlContext {
             )
             .await
         })
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        .map_err(to_py_err)
     }
 
     /// Register a Parquet file (or directory) as a named table.
@@ -1043,7 +995,7 @@ impl PySqlContext {
             )
             .await
         })
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        .map_err(to_py_err)
     }
 
     /// Register a JSONL file (or directory) as a named table.
@@ -1063,7 +1015,7 @@ impl PySqlContext {
             )
             .await
         })
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        .map_err(to_py_err)
     }
 
     // Raw #[cfg] rather than cfg_avro!: #[pymethods] rejects a macro invocation as an impl item.
@@ -1082,22 +1034,19 @@ impl PySqlContext {
             )
             .await
         })
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        .map_err(to_py_err)
     }
 
     /// Remove a previously registered table from the catalog.
     pub fn deregister_table(&self, name: &str) -> PyResult<()> {
-        self.inner
-            .deregister_table(name)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        self.inner.deregister_table(name).map_err(to_py_err)
     }
 
     /// Return a registered table as a lazy `DataFrame`.
     pub fn table(&self, name: &str) -> PyResult<PyDataFrame> {
         let session = self.session.clone();
         let name = name.to_string();
-        let df = run_sql_async(async move { session.table(&name).await })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let df = run_sql_async(async move { session.table(&name).await }).map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -1106,9 +1055,7 @@ impl PySqlContext {
 
     /// List the names of all registered tables in the default catalog/schema.
     pub fn table_names(&self) -> PyResult<Vec<String>> {
-        self.inner
-            .table_names()
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        self.inner.table_names().map_err(to_py_err)
     }
 
     /// Read a data source by path, returning a lazy `DataFrame`. `format` is one of
@@ -1129,8 +1076,7 @@ impl PySqlContext {
         };
         let ctx = self.inner.clone();
         let path = path.to_string();
-        let df = run_sql_async(async move { ctx.read(fmt, &path).await })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        let df = run_sql_async(async move { ctx.read(fmt, &path).await }).map_err(to_py_err)?;
         Ok(PyDataFrame {
             inner: df.into_inner(),
             session: self.session.clone(),
@@ -1164,7 +1110,7 @@ impl PySqlContext {
         let batches = python_dicts_to_batches(py, &rows, &schema)?;
         self.inner
             .register_partitioned_batches(name, vec![batches])
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+            .map_err(to_py_err)
     }
 
     /// Register a Python callable as a SQL scalar UDF.
@@ -1259,12 +1205,9 @@ impl PySqlContext {
                                             .ok()?
                                             .into_any()
                                             .unbind()
-                                    } else if let Some(a) =
-                                        arr.as_any().downcast_ref::<Float64Array>()
-                                    {
-                                        a.value(i).into_pyobject(py).ok()?.into_any().unbind()
                                     } else {
-                                        return None;
+                                        let a = arr.as_any().downcast_ref::<Float64Array>()?;
+                                        a.value(i).into_pyobject(py).ok()?.into_any().unbind()
                                     }
                                 }
                                 ColumnarValue::Scalar(s) => {
@@ -1407,7 +1350,6 @@ fn python_dicts_to_batches(
         col_arrays.push(array);
     }
 
-    let batch = RecordBatch::try_new(arrow_schema, col_arrays)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let batch = RecordBatch::try_new(arrow_schema, col_arrays).map_err(to_py_err)?;
     Ok(vec![batch])
 }

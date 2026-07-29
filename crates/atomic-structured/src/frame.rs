@@ -14,11 +14,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::distributed_state::DistributedStateEngine;
 use crate::errors::{StructuredError, StructuredResult};
 use crate::query::{BatchEngine, QueryOutputOp, QueryRunner, StatelessEngine, StreamingQuery};
-use crate::session_window::{DistributedSessionEngine, SessionEngine, SessionSpec};
+use crate::session_window::{SessionEngine, SessionSpec};
+use crate::session_window_distributed::DistributedSessionEngine;
 use crate::sink::Sink;
 use crate::source::StreamSource;
 use crate::state::{Agg, ensure_mergeable};
-use crate::stream_join::{DistributedJoinEngine, JoinType, StreamJoinEngine, StreamJoinSpec};
+use crate::stream_join::{JoinType, StreamJoinEngine, StreamJoinSpec};
+use crate::stream_join_distributed::DistributedJoinEngine;
 use crate::windowed::{WindowedEngine, WindowedSpec};
 use crate::{OutputMode, Trigger};
 

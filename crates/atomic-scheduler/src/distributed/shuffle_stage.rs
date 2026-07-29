@@ -1,6 +1,6 @@
 use atomic_data::{
     dependency::Dependency,
-    distributed::{EngineStep, ShuffleMapPayload, Step, StepKind, TaskEnvelope, TaskRuntime},
+    distributed::{EngineAction, ShuffleMapPayload, Step, StepKind, TaskEnvelope, TaskRuntime},
     rdd::RddBase,
 };
 use futures::future::try_join_all;
@@ -46,7 +46,7 @@ impl DistributedScheduler {
         };
         steps.push(Step {
             task_name: format!("shuffle-map-{}", dep.get_shuffle_id()),
-            kind: StepKind::Engine(EngineStep::ShuffleMap {
+            kind: StepKind::Engine(EngineAction::ShuffleMap {
                 shuffle_id: dep.get_shuffle_id(),
                 num_output_partitions: dep.get_num_output_partitions(),
             }),

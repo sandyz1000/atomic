@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use atomic_compute::AgentRunner;
-use atomic_compute::task_registry;
+use atomic_compute::registry;
 use atomic_data::distributed::{
     AgentFindings, AgentStepPayload, ScriptRuntime, WireDecode as _, WireEncode as _,
 };
+use thiserror::Error;
 
 use crate::config::{LlmProvider, NlqConfig};
 use crate::llm::LlmClient;
@@ -34,27 +35,47 @@ fn parse_tool_call(response: &str) -> Option<(String, String)> {
 // shared workspace-wide — see that crate's `lib.rs`.
 use atomic_data::{cfg_js, cfg_not_js, cfg_not_python, cfg_python};
 
+/// Unifies `atomic_compute::runtimes::py::PythonTaskError` and
+/// `::js::JsTaskError` (each only compiled in under its own feature) so
+/// `dispatch_tool` can match `dispatch_python_tool`/`dispatch_js_tool` as one
+/// `Result<String, E>` regardless of which runtime handled the call, instead of
+/// pre-stringifying each at its own call site.
+#[derive(Debug, Error)]
+enum ToolRuntimeError {
+    #[cfg(feature = "python")]
+    #[error(transparent)]
+    Python(#[from] atomic_compute::runtimes::py::PythonTaskError),
+    #[cfg(feature = "js")]
+    #[error(transparent)]
+    Js(#[from] atomic_compute::runtimes::js::JsTaskError),
+    #[error("not built with '{feature}' feature; {runtime} tools unavailable")]
+    FeatureDisabled {
+        feature: &'static str,
+        runtime: &'static str,
+    },
+}
+
 cfg_python! {
-    fn dispatch_python_tool(source: &str, args_json: &str) -> Result<String, String> {
-        atomic_compute::runtimes::py::run_tool_call(source, args_json).map_err(|e| e.to_string())
+    fn dispatch_python_tool(source: &str, args_json: &str) -> Result<String, ToolRuntimeError> {
+        Ok(atomic_compute::runtimes::py::run_tool_call(source, args_json)?)
     }
 }
 
 cfg_not_python! {
-    fn dispatch_python_tool(_source: &str, _args_json: &str) -> Result<String, String> {
-        Err("not built with 'python' feature; Python tools unavailable".to_string())
+    fn dispatch_python_tool(_source: &str, _args_json: &str) -> Result<String, ToolRuntimeError> {
+        Err(ToolRuntimeError::FeatureDisabled { feature: "python", runtime: "Python" })
     }
 }
 
 cfg_js! {
-    fn dispatch_js_tool(source: &str, args_json: &str) -> Result<String, String> {
-        atomic_compute::runtimes::js::run_tool_call(source, args_json)
+    fn dispatch_js_tool(source: &str, args_json: &str) -> Result<String, ToolRuntimeError> {
+        Ok(atomic_compute::runtimes::js::run_tool_call(source, args_json)?)
     }
 }
 
 cfg_not_js! {
-    fn dispatch_js_tool(_source: &str, _args_json: &str) -> Result<String, String> {
-        Err("not built with 'js' feature; JavaScript tools unavailable".to_string())
+    fn dispatch_js_tool(_source: &str, _args_json: &str) -> Result<String, ToolRuntimeError> {
+        Err(ToolRuntimeError::FeatureDisabled { feature: "js", runtime: "JavaScript" })
     }
 }
 
@@ -64,9 +85,11 @@ cfg_not_js! {
 /// rather than aborting the partition (per the design: a model that mistypes a tool ref
 /// should get a chance to retry or give up, not crash the worker).
 fn dispatch_tool(payload: &AgentStepPayload, tool_ref: &str, json_args: &str) -> String {
-    if task_registry::TASK_REGISTRY.contains_key(tool_ref) {
-        return match task_registry::invoke_str_task(tool_ref, json_args.to_string()) {
+    if registry::TASK_REGISTRY.contains_key(tool_ref) {
+        return match registry::invoke_str_task(tool_ref, json_args.to_string()) {
             Ok(out) => out,
+            // invoke_str_task already logs the specific failure at `warn`; this is the
+            // text the LLM sees, which is not a substitute for operator visibility.
             Err(e) => format!("error: {e}"),
         };
     }
@@ -78,10 +101,19 @@ fn dispatch_tool(payload: &AgentStepPayload, tool_ref: &str, json_args: &str) ->
         };
         return match result {
             Ok(out) => out,
-            Err(e) => format!("error: {e}"),
+            Err(e) => {
+                log::warn!(
+                    "dispatch_tool: '{tool_ref}' ({:?}) failed: {e}",
+                    tool.runtime
+                );
+                format!("error: {e}")
+            }
         };
     }
 
+    log::warn!(
+        "dispatch_tool: '{tool_ref}' is not a TASK_REGISTRY task_name and not in resolved_tools"
+    );
     format!(
         "error: tool '{tool_ref}' is not registered (not a TASK_REGISTRY task_name and not in \
          resolved_tools) — check the tool name and retry, or proceed without it"

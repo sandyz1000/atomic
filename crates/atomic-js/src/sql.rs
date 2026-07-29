@@ -20,6 +20,15 @@ use napi_derive::napi;
 
 use atomic_sql::context::AtomicSqlContext;
 
+/// Convert any DataFusion/Arrow error into the napi `Error` this module returns
+/// almost everywhere — the one piece of near-identical boilerplate repeated across
+/// every `DataFrame`/`SqlContext` method (~55 call sites); collapsing it here keeps
+/// each method's own SQL-construction logic front and center instead of buried
+/// under a repeated closure.
+fn to_js_err<E: std::fmt::Display>(e: E) -> Error {
+    Error::from_reason(e.to_string())
+}
+
 fn run_sql_async<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T>,
@@ -149,8 +158,7 @@ impl JsDataFrame {
     /// Each object maps column name → value (number, string, boolean, or null).
     #[napi]
     pub fn collect(&self) -> Result<Vec<serde_json::Value>> {
-        let batches = run_sql_async(self.inner.clone().collect())
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let batches = run_sql_async(self.inner.clone().collect()).map_err(to_js_err)?;
         Ok(batches_to_json_rows(&batches))
     }
 
@@ -168,22 +176,16 @@ impl JsDataFrame {
     pub fn to_arrow(&self) -> Result<Buffer> {
         use datafusion::arrow::ipc::writer::StreamWriter;
 
-        let batches = run_sql_async(self.inner.clone().collect())
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let batches = run_sql_async(self.inner.clone().collect()).map_err(to_js_err)?;
 
         let mut buf: Vec<u8> = Vec::new();
         if let Some(first) = batches.first() {
             let schema = first.schema();
-            let mut writer = StreamWriter::try_new(&mut buf, &schema)
-                .map_err(|e| Error::from_reason(e.to_string()))?;
+            let mut writer = StreamWriter::try_new(&mut buf, &schema).map_err(to_js_err)?;
             for batch in &batches {
-                writer
-                    .write(batch)
-                    .map_err(|e| Error::from_reason(e.to_string()))?;
+                writer.write(batch).map_err(to_js_err)?;
             }
-            writer
-                .finish()
-                .map_err(|e| Error::from_reason(e.to_string()))?;
+            writer.finish().map_err(to_js_err)?;
         }
         Ok(Buffer::from(buf))
     }
@@ -191,21 +193,19 @@ impl JsDataFrame {
     /// Execute and print a formatted table to stdout (default: 20 rows).
     #[napi]
     pub fn show(&self) -> Result<()> {
-        run_sql_async(self.inner.clone().show()).map_err(|e| Error::from_reason(e.to_string()))
+        run_sql_async(self.inner.clone().show()).map_err(to_js_err)
     }
 
     /// Execute and print the first `n` rows to stdout.
     #[napi]
     pub fn show_limit(&self, n: u32) -> Result<()> {
-        run_sql_async(self.inner.clone().show_limit(n as usize))
-            .map_err(|e| Error::from_reason(e.to_string()))
+        run_sql_async(self.inner.clone().show_limit(n as usize)).map_err(to_js_err)
     }
 
     /// Return the total number of rows.
     #[napi]
     pub fn count(&self) -> Result<u32> {
-        let n = run_sql_async(self.inner.clone().count())
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let n = run_sql_async(self.inner.clone().count()).map_err(to_js_err)?;
         Ok(n as u32)
     }
 
@@ -230,7 +230,7 @@ impl JsDataFrame {
             let _ = session.deregister_table(&view);
             result
         })
-        .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))?;
+        .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -273,7 +273,7 @@ impl JsDataFrame {
             .inner
             .clone()
             .join(other.inner.clone(), jt, &left, &right, None)
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+            .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -314,7 +314,7 @@ impl JsDataFrame {
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))?;
+        .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -336,7 +336,7 @@ impl JsDataFrame {
         for (field, new_name) in fields.iter().zip(&names) {
             df = df
                 .with_column_renamed(field.name(), new_name)
-                .map_err(|e| Error::from_reason(e.to_string()))?;
+                .map_err(to_js_err)?;
         }
         Ok(JsDataFrame {
             inner: df,
@@ -354,7 +354,7 @@ impl JsDataFrame {
             .inner
             .clone()
             .select_columns(&refs)
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+            .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -368,7 +368,7 @@ impl JsDataFrame {
             .inner
             .clone()
             .limit(0, Some(n as usize))
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+            .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -386,7 +386,7 @@ impl JsDataFrame {
             .inner
             .clone()
             .sort(vec![df_col(&col).sort(asc, true)])
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+            .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -424,7 +424,7 @@ impl JsDataFrame {
         let df = self.inner.clone();
         run_sql_async(async move { df.write_parquet(&path, Default::default(), None).await })
             .map(|_| ())
-            .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))
+            .map_err(to_js_err)
     }
 
     /// Write all rows to CSV files in a directory.
@@ -440,7 +440,7 @@ impl JsDataFrame {
         let df = self.inner.clone();
         run_sql_async(async move { df.write_csv(&path, Default::default(), None).await })
             .map(|_| ())
-            .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))
+            .map_err(to_js_err)
     }
 
     /// Return the first `n` rows as an array of objects.
@@ -450,9 +450,8 @@ impl JsDataFrame {
             .inner
             .clone()
             .limit(0, Some(n as usize))
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        let batches = run_sql_async(df.collect())
-            .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))?;
+            .map_err(to_js_err)?;
+        let batches = run_sql_async(df.collect()).map_err(to_js_err)?;
         Ok(batches_to_json_rows(&batches))
     }
 
@@ -479,11 +478,7 @@ impl JsDataFrame {
     /// Remove duplicate rows.
     #[napi]
     pub fn distinct(&self) -> Result<JsDataFrame> {
-        let df = self
-            .inner
-            .clone()
-            .distinct()
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let df = self.inner.clone().distinct().map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -497,7 +492,7 @@ impl JsDataFrame {
             .inner
             .clone()
             .union(other.inner.clone())
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+            .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -512,13 +507,13 @@ impl JsDataFrame {
         let df = self.inner.clone();
         session
             .register_table(&view, df.into_view())
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+            .map_err(to_js_err)?;
         let result_df = run_sql_async(async move {
             let r = session.sql(&format!("DESCRIBE {view}")).await;
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))?;
+        .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -536,7 +531,7 @@ impl JsDataFrame {
                 let df = self.inner.clone();
                 session
                     .register_table(&view, df.into_view())
-                    .map_err(|e| Error::from_reason(e.to_string()))?;
+                    .map_err(to_js_err)?;
                 run_sql_async(async move {
                     let result = session
                         .sql(&format!("SELECT DISTINCT ON ({cols_str}) * FROM {view}"))
@@ -544,15 +539,9 @@ impl JsDataFrame {
                     let _ = session.deregister_table(&view);
                     result
                 })
-                .map_err(|e: datafusion::error::DataFusionError| {
-                    Error::from_reason(e.to_string())
-                })?
+                .map_err(to_js_err)?
             }
-            _ => self
-                .inner
-                .clone()
-                .distinct()
-                .map_err(|e| Error::from_reason(e.to_string()))?,
+            _ => self.inner.clone().distinct().map_err(to_js_err)?,
         };
         Ok(JsDataFrame {
             inner: result_df,
@@ -590,7 +579,7 @@ impl JsDataFrame {
             .inner
             .clone()
             .intersect_distinct(other.inner.clone())
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+            .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -605,7 +594,7 @@ impl JsDataFrame {
             .inner
             .clone()
             .except_distinct(other.inner.clone())
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+            .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -619,7 +608,7 @@ impl JsDataFrame {
         let session = self.session.clone();
         let df = self.inner.clone();
         if let Err(e) = session.register_table(&view, df.into_view()) {
-            return Err(Error::from_reason(e.to_string()));
+            return Err(to_js_err(e));
         }
         let result_df = run_sql_async(async move {
             let r = session
@@ -628,7 +617,7 @@ impl JsDataFrame {
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+        .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -660,14 +649,14 @@ impl JsDataFrame {
         let session = self.session.clone();
         let df = self.inner.clone();
         if let Err(e) = session.register_table(&view, df.into_view()) {
-            return Err(Error::from_reason(e.to_string()));
+            return Err(to_js_err(e));
         }
         let result_df = run_sql_async(async move {
             let r = session.sql(&format!("SELECT {cols_str} FROM {view}")).await;
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+        .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -692,7 +681,7 @@ impl JsDataFrame {
         let session = self.session.clone();
         let df = self.inner.clone();
         if let Err(e) = session.register_table(&view, df.into_view()) {
-            return Err(Error::from_reason(e.to_string()));
+            return Err(to_js_err(e));
         }
         let result_df = run_sql_async(async move {
             let r = session
@@ -701,7 +690,7 @@ impl JsDataFrame {
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+        .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -715,7 +704,7 @@ impl JsDataFrame {
         let session = self.session.clone();
         let df = self.inner.clone();
         if let Err(e) = session.register_table(&view, df.into_view()) {
-            return Err(Error::from_reason(e.to_string()));
+            return Err(to_js_err(e));
         }
         let batches = run_sql_async(async move {
             session
@@ -724,7 +713,7 @@ impl JsDataFrame {
                 .collect()
                 .await
         })
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+        .map_err(to_js_err)?;
         if let Some(batch) = batches.first()
             && batch.num_rows() > 0
             && batch.num_columns() > 0
@@ -743,7 +732,7 @@ impl JsDataFrame {
         let session = self.session.clone();
         let df = self.inner.clone();
         if let Err(e) = session.register_table(&view, df.into_view()) {
-            return Err(Error::from_reason(e.to_string()));
+            return Err(to_js_err(e));
         }
         let batches = run_sql_async(async move {
             session
@@ -752,7 +741,7 @@ impl JsDataFrame {
                 .collect()
                 .await
         })
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+        .map_err(to_js_err)?;
         if let Some(batch) = batches.first()
             && batch.num_rows() > 0
             && batch.num_columns() > 0
@@ -771,7 +760,7 @@ impl JsDataFrame {
         let session = self.session.clone();
         let df = self.inner.clone();
         if let Err(e) = session.register_table(&view, df.into_view()) {
-            return Err(Error::from_reason(e.to_string()));
+            return Err(to_js_err(e));
         }
         let result_df = run_sql_async(async move {
             let r = session
@@ -782,7 +771,7 @@ impl JsDataFrame {
             let _ = session.deregister_table(&view);
             r
         })
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+        .map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: result_df,
             session: self.session.clone(),
@@ -795,11 +784,10 @@ impl JsDataFrame {
         let view = tmp_view_name();
         let session = self.session.clone();
         let df = self.inner.clone();
-        let total =
-            run_sql_async(df.clone().count()).map_err(|e| Error::from_reason(e.to_string()))?;
+        let total = run_sql_async(df.clone().count()).map_err(to_js_err)?;
         let offset = total.saturating_sub(n as usize);
         if let Err(e) = session.register_table(&view, df.into_view()) {
-            return Err(Error::from_reason(e.to_string()));
+            return Err(to_js_err(e));
         }
         let result = run_sql_async(async move {
             let batches = session
@@ -809,7 +797,7 @@ impl JsDataFrame {
                 .await?;
             Ok::<_, datafusion::error::DataFusionError>(batches)
         })
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+        .map_err(to_js_err)?;
         Ok(batches_to_json_rows(&result))
     }
 }
@@ -851,8 +839,7 @@ impl JsSqlContext {
     #[napi]
     pub fn sql(&self, query: String) -> Result<JsDataFrame> {
         let session = self.session.clone();
-        let df = run_sql_async(async move { session.sql(&query).await })
-            .map_err(|e: datafusion::error::DataFusionError| Error::from_reason(e.to_string()))?;
+        let df = run_sql_async(async move { session.sql(&query).await }).map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -874,7 +861,7 @@ impl JsSqlContext {
             )
             .await
         })
-        .map_err(|e| Error::from_reason(e.to_string()))
+        .map_err(to_js_err)
     }
 
     /// Register a Parquet file or directory as a named table.
@@ -892,7 +879,7 @@ impl JsSqlContext {
             )
             .await
         })
-        .map_err(|e| Error::from_reason(e.to_string()))
+        .map_err(to_js_err)
     }
 
     /// Register a JSONL file or directory as a named table.
@@ -910,7 +897,7 @@ impl JsSqlContext {
             )
             .await
         })
-        .map_err(|e| Error::from_reason(e.to_string()))
+        .map_err(to_js_err)
     }
 
     /// Register an `Rdd` as a named SQL table (the RDD→SQL bridge).
@@ -939,7 +926,7 @@ impl JsSqlContext {
         let batches = json_rows_to_batches(&rows, &schema)?;
         self.inner
             .register_partitioned_batches(&name, vec![batches])
-            .map_err(|e| Error::from_reason(e.to_string()))
+            .map_err(to_js_err)
     }
 
     /// Register an Avro file (or directory) as a named table. Requires the `avro` feature;
@@ -958,7 +945,7 @@ impl JsSqlContext {
                 )
                 .await
             })
-            .map_err(|e| Error::from_reason(e.to_string()))
+            .map_err(to_js_err)
         }
         #[cfg(not(feature = "avro"))]
         {
@@ -972,17 +959,14 @@ impl JsSqlContext {
     /// Remove a previously registered table from the catalog.
     #[napi]
     pub fn deregister_table(&self, name: String) -> Result<()> {
-        self.inner
-            .deregister_table(&name)
-            .map_err(|e| Error::from_reason(e.to_string()))
+        self.inner.deregister_table(&name).map_err(to_js_err)
     }
 
     /// Return a registered table as a lazy DataFrame.
     #[napi]
     pub fn table(&self, name: String) -> Result<JsDataFrame> {
         let session = self.session.clone();
-        let df = run_sql_async(async move { session.table(&name).await })
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let df = run_sql_async(async move { session.table(&name).await }).map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df,
             session: self.session.clone(),
@@ -992,9 +976,7 @@ impl JsSqlContext {
     /// List the names of all registered tables.
     #[napi]
     pub fn table_names(&self) -> Result<Vec<String>> {
-        self.inner
-            .table_names()
-            .map_err(|e| Error::from_reason(e.to_string()))
+        self.inner.table_names().map_err(to_js_err)
     }
 
     /// Read a data source by path, returning a lazy DataFrame. `format` is `csv`/`parquet`/`json`.
@@ -1010,8 +992,7 @@ impl JsSqlContext {
             _ => return Err(Error::from_reason(format!("unknown format: {format}"))),
         };
         let ctx = self.inner.clone();
-        let df = run_sql_async(async move { ctx.read(fmt, &path).await })
-            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let df = run_sql_async(async move { ctx.read(fmt, &path).await }).map_err(to_js_err)?;
         Ok(JsDataFrame {
             inner: df.into_inner(),
             session: self.session.clone(),
@@ -1154,7 +1135,6 @@ fn json_rows_to_batches(
         col_arrays.push(array);
     }
 
-    let batch = RecordBatch::try_new(arrow_schema, col_arrays)
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+    let batch = RecordBatch::try_new(arrow_schema, col_arrays).map_err(to_js_err)?;
     Ok(vec![batch])
 }

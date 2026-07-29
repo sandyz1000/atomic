@@ -1,5 +1,5 @@
 use atomic_compute::context::Context;
-use atomic_compute::task_registry::AGENT_RUNNER_REGISTRY;
+use atomic_compute::registry::AGENT_RUNNER_REGISTRY;
 use atomic_data::distributed::{AgentFindings, AgentStepPayload, WireDecode as _, WireEncode as _};
 use atomic_nlq::agent_runner;
 

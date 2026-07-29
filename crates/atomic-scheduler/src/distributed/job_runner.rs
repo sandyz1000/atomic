@@ -9,7 +9,8 @@ use std::{
 };
 
 use atomic_data::distributed::{
-    EngineStep, StateMergePayload, Step, StepKind, TaskEnvelope, TaskResultEnvelope, decode_payload,
+    EngineAction, StateMergePayload, Step, StepKind, TaskEnvelope, TaskResultEnvelope,
+    decode_payload,
 };
 use parking_lot::Mutex;
 
@@ -149,7 +150,7 @@ impl DistributedScheduler {
         let is_agent_step = task
             .steps
             .iter()
-            .any(|o| matches!(o.kind, StepKind::Engine(EngineStep::AgentStep)));
+            .any(|o| matches!(o.kind, StepKind::Engine(EngineAction::AgentStep)));
         if is_agent_step {
             Some(
                 self.agent_step_timeout
@@ -291,7 +292,7 @@ impl DistributedScheduler {
                         && task
                             .steps
                             .iter()
-                            .any(|o| matches!(o.kind, StepKind::Engine(EngineStep::AgentStep)))
+                            .any(|o| matches!(o.kind, StepKind::Engine(EngineAction::AgentStep)))
                     {
                         // No per-input checkpointing within a partition (by design — see
                         // notes/agentic-task-future-design.md): retrying re-runs every input
@@ -693,7 +694,7 @@ impl DistributedScheduler {
         // partitions vec is consumed, so `pin_state_shard` can look up registered locs.
         let is_merge_state = steps
             .iter()
-            .any(|o| matches!(o.kind, StepKind::Engine(EngineStep::MergeState { .. })));
+            .any(|o| matches!(o.kind, StepKind::Engine(EngineAction::MergeState { .. })));
         let state_ids: Vec<Option<u64>> = if is_merge_state {
             partitions
                 .iter()
@@ -746,7 +747,7 @@ impl DistributedScheduler {
         // avoid duplicate LLM cost and non-deterministic "first winner" results.
         let has_agent_step = steps
             .iter()
-            .any(|o| matches!(o.kind, StepKind::Engine(EngineStep::AgentStep)));
+            .any(|o| matches!(o.kind, StepKind::Engine(EngineAction::AgentStep)));
         if let Some(multiplier) = self.speculation_multiplier {
             if !has_agent_step {
                 self.run_speculation_monitor(

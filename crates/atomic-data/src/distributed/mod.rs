@@ -78,7 +78,7 @@ mod tests {
     fn shuffle_map_carries_ids() {
         let steps = vec![Step {
             task_name: "sys.shuffle_map".to_string(),
-            kind: StepKind::Engine(EngineStep::ShuffleMap {
+            kind: StepKind::Engine(EngineAction::ShuffleMap {
                 shuffle_id: 7,
                 num_output_partitions: 4,
             }),
@@ -90,7 +90,7 @@ mod tests {
         let decoded = TaskEnvelope::decode_wire(&bytes).expect("deserialize");
         assert!(matches!(
             decoded.steps[0].kind,
-            StepKind::Engine(EngineStep::ShuffleMap {
+            StepKind::Engine(EngineAction::ShuffleMap {
                 shuffle_id: 7,
                 num_output_partitions: 4
             })
@@ -171,15 +171,15 @@ mod tests {
 
     #[test]
     fn step_kind_variants_exhaustive() {
-        let step = EngineStep::ReadFileSplit;
+        let step = EngineAction::ReadFileSplit;
         let _ = match step {
-            EngineStep::ShuffleMap { .. }
-            | EngineStep::Cache { .. }
-            | EngineStep::ReadFileSplit
-            | EngineStep::MergeState { .. }
-            | EngineStep::AgentStep => true,
+            EngineAction::ShuffleMap { .. }
+            | EngineAction::Cache { .. }
+            | EngineAction::ReadFileSplit
+            | EngineAction::MergeState { .. }
+            | EngineAction::AgentStep => true,
             #[cfg(feature = "kafka")]
-            EngineStep::KafkaConsume => true,
+            EngineAction::KafkaConsume => true,
         };
     }
 

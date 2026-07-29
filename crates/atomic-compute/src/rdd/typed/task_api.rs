@@ -543,7 +543,7 @@ where
 impl TypedRdd<String> {
     /// Dispatch a framework-native sub-agent over each partition of string inputs.
     ///
-    /// The registered [`AgentRunner`][crate::task_registry::AgentRunner] (installed
+    /// The registered [`AgentRunner`][crate::registry::AgentRunner] (installed
     /// by `atomic-nlq` at startup via [`register_agent_runner`][crate::register_agent_runner])
     /// executes a multi-round plan→execute→evaluate loop per partition, returning one
     /// [`AgentFindings`][atomic_data::distributed::AgentFindings] per input string.
@@ -565,7 +565,7 @@ impl TypedRdd<String> {
             serde_json::to_vec(&config).expect("AgentStepPayload serialization failed");
 
         if !context.is_distributed() {
-            let runner = crate::task_registry::AGENT_RUNNER_REGISTRY.get().expect(
+            let runner = crate::registry::AGENT_RUNNER_REGISTRY.get().expect(
                 "agent_step: no agent runner registered; \
                      call `atomic_compute::register_agent_runner(...)` at startup",
             );
@@ -587,7 +587,7 @@ impl TypedRdd<String> {
 
         let op = Step {
             task_name: String::new(),
-            kind: StepKind::Engine(EngineStep::AgentStep),
+            kind: StepKind::Engine(EngineAction::AgentStep),
             runtime: TaskRuntime::Native,
             payload: payload_bytes,
         };

@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::env::Config;
 use crate::error::{ComputeError, ComputeResult};
 use crate::executor::{Executor, Signal};
-use crate::{env, task_registry};
+use crate::{env, registry};
 use atomic_scheduler::LocalScheduler;
 use atomic_utils::clean_up_work_dir;
 
@@ -94,7 +94,7 @@ impl Context {
         }
 
         let mut dist_sched = DistributedScheduler::new(20, true)
-            .with_driver_fingerprint(*task_registry::REGISTRY_FINGERPRINT);
+            .with_driver_fingerprint(*registry::REGISTRY_FINGERPRINT);
         if let Some(m) = config.speculation_multiplier {
             dist_sched = dist_sched.with_speculation(m);
         }
