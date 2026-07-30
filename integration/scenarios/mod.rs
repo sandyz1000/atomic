@@ -12,12 +12,15 @@ use std::error::Error;
 use std::sync::Arc;
 
 mod cache_locality;
+mod combine_aggregate_by_key;
+mod combine_reduce_by_key;
 mod fault_tolerance;
 mod map_fold;
 mod multi_stage;
 mod named_partitioner;
 mod shuffle_wordcount;
 mod sort_by_task;
+mod staged_shuffle_terminal_action;
 mod unstaged_shuffle;
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -31,6 +34,9 @@ pub enum Scenario {
     NamedPartitioner,
     SortByTask,
     UnstagedShuffle,
+    StagedShuffleTerminalAction,
+    CombineReduceByKey,
+    CombineAggregateByKey,
 }
 
 pub fn run(scenario: Scenario, ctx: &Arc<Context>) -> Result<(), Box<dyn Error>> {
@@ -43,5 +49,8 @@ pub fn run(scenario: Scenario, ctx: &Arc<Context>) -> Result<(), Box<dyn Error>>
         Scenario::NamedPartitioner => named_partitioner::run_driver(ctx),
         Scenario::SortByTask => sort_by_task::run_driver(ctx),
         Scenario::UnstagedShuffle => unstaged_shuffle::run_driver(ctx),
+        Scenario::StagedShuffleTerminalAction => staged_shuffle_terminal_action::run_driver(ctx),
+        Scenario::CombineReduceByKey => combine_reduce_by_key::run_driver(ctx),
+        Scenario::CombineAggregateByKey => combine_aggregate_by_key::run_driver(ctx),
     }
 }

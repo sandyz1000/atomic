@@ -591,10 +591,29 @@ impl StagePlanner for DistributedScheduler {
                 let stage = self
                     .new_stage(shuf.get_rdd_base(), Some(shuf.clone()))
                     .await?;
+                let shuffle_id = shuf.get_shuffle_id();
+                // A staged pipeline's own shuffle-map dispatch (`run_pending_shuffle_stages`)
+                // runs outside the Stage/StagePlanner machinery entirely, so the map phase may
+                // already be complete by the time a later job first discovers this dependency
+                // (e.g. a terminal `_task` action after `reduce_by_key_task`). Pre-populate
+                // `output_locs` from the tracker and mark the stage available so it's never
+                // resubmitted — for a staged shuffle, `ShuffleMapTask::run` would recompute over
+                // the 1-partition placeholder RDD instead of the real staged data (see
+                // `ShuffleDependency::num_map_partitions`'s doc), corrupting the already-correct
+                // output. Mirrors `LocalScheduler::get_shuffle_map_stage`'s identical handling.
+                if self.state.is_shuffle_complete(shuffle_id) {
+                    let uris = self.state.get_shuffle_server_uris(shuffle_id);
+                    for (partition, uri) in uris.into_iter().enumerate().take(stage.num_partitions)
+                    {
+                        self.state.add_output_loc_to_stage(stage.id, partition, uri);
+                    }
+                }
+                // Re-fetch from stage_cache so output_locs mutations are reflected.
+                let updated = self.state.stage_cache.get(&stage.id).unwrap().clone();
                 self.state
                     .shuffle_to_map_stage
-                    .insert(shuf.get_shuffle_id(), stage.clone());
-                Ok(stage)
+                    .insert(shuffle_id, updated.clone());
+                Ok(updated)
             }
         }
     }

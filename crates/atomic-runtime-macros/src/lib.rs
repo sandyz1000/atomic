@@ -16,7 +16,7 @@
 
 use proc_macro::TokenStream;
 
-mod common;
+mod body_hash;
 mod register;
 mod task;
 mod task_fn;
@@ -39,6 +39,16 @@ pub fn register_shuffle_map(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn register_sort_shuffle_map(input: TokenStream) -> TokenStream {
     register::shuffle_map::expand_sort(input)
+}
+
+#[proc_macro]
+pub fn register_combine(input: TokenStream) -> TokenStream {
+    register::combine_by_key::expand(input)
+}
+
+#[proc_macro]
+pub fn register_combine_lift(input: TokenStream) -> TokenStream {
+    register::combine_by_key::expand_lift(input)
 }
 
 #[proc_macro]

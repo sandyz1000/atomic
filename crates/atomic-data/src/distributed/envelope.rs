@@ -143,6 +143,22 @@ pub enum EngineAction {
     /// input bytes are rkyv-encoded `Vec<String>` (or JSON fallback for Python/JS).
     /// Returns rkyv-encoded `Vec<AgentFindings>`.
     AgentStep,
+    /// Map-side pre-combine that runs on the worker immediately before `ShuffleMap`,
+    /// grouping same-key values within a map partition into fewer pre-combined pairs so
+    /// less data crosses the network. Opt-in: only inserted when a combine handler was
+    /// registered for the `(K, V[, C])` type (`register_combine!` /
+    /// `register_combine_lift!`) and a `_task` pipeline precedes the shuffle in
+    /// distributed mode.
+    ///
+    /// `combine_key` selects the generic worker handler in `TASK_REGISTRY`. `merge_task_name`
+    /// is the registered reduction folded over each key's group; `lift_task_name` is `Some`
+    /// only for the `C != V` case (`aggregate_by_key_task`), where each value is first lifted
+    /// `V -> C` and the shuffle then carries `(K, C)` pairs.
+    CombineByKey {
+        combine_key: String,
+        lift_task_name: Option<String>,
+        merge_task_name: String,
+    },
     /// Kafka Direct source op (requires `kafka` feature). The worker `assign`+`seek`s to
     /// the given offset range and polls until `end_offset`, returning the messages as
     /// `rkyv`-encoded `Vec<String>`. `data` in the TaskEnvelope is ignored; all config

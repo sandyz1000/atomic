@@ -52,20 +52,22 @@ impl Stage {
         shuffle_dependency: Option<Arc<ShuffleDependency>>,
         parents: Vec<Stage>,
     ) -> Self {
+        // A staged shuffle's `rdd` (`get_rdd_base()`) is a 1-partition placeholder — the real
+        // map-side partition count lives on the dependency itself. See
+        // `ShuffleDependency::num_map_partitions`'s doc for why this can't just be
+        // `rdd.number_of_splits()` unconditionally.
+        let num_partitions = shuffle_dependency
+            .as_ref()
+            .map(|dep| dep.num_map_partitions())
+            .unwrap_or_else(|| rdd.number_of_splits());
         Stage {
             id,
-            num_partitions: rdd.number_of_splits(),
-            is_shuffle_map: shuffle_dependency.clone().is_some(),
+            num_partitions,
+            is_shuffle_map: shuffle_dependency.is_some(),
             shuffle_dependency,
             parents,
-            rdd: rdd.clone(),
-            output_locs: {
-                let mut v = Vec::new();
-                for _ in 0..rdd.number_of_splits() {
-                    v.push(Vec::new());
-                }
-                v
-            },
+            rdd,
+            output_locs: vec![Vec::new(); num_partitions],
             num_available_outputs: 0,
         }
     }

@@ -203,6 +203,117 @@ fn distributed_unstaged_shuffle_take() {
     );
 }
 
+// ── Test 2c: staged shuffle followed by a terminal task-action (not `.collect()`) ─
+
+/// Regression test: a terminal `_task` action (here `.fold_task`) after
+/// `reduce_by_key_task`, where the shuffle was preceded by a staged `_task` pipeline
+/// (`.flat_map_task`), used to create a second, wrongly-sized shuffle-map `Stage` — sized
+/// from the shuffle dependency's 1-partition placeholder RDD instead of the real staged
+/// partition count — and resubmit it, corrupting the already-correct `MapOutputTracker`
+/// registration the real shuffle-map run had already produced. `.collect()` right after
+/// `reduce_by_key_task` never reached this (an empty step pipeline short-circuits
+/// `dispatch_pipeline` before any `Stage` is touched), which is why it went uncaught.
+#[test]
+#[ignore = "requires pre-built integration binary and free TCP ports"]
+fn distributed_staged_shuffle_terminal_action() {
+    let port = free_port();
+    let mut worker = spawn_worker(port);
+    wait_for_port(port, Duration::from_secs(10));
+
+    let driver_out = run_driver("staged_shuffle_terminal_action", &[port]);
+    worker.kill().ok();
+    worker.wait().ok();
+
+    assert!(
+        driver_out.status.success(),
+        "staged shuffle terminal-action driver failed:\nstderr: {}",
+        String::from_utf8_lossy(&driver_out.stderr)
+    );
+
+    let out: serde_json::Value = serde_json::from_slice(&driver_out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from staged_shuffle_terminal_action: {e}\nstdout: {}",
+            String::from_utf8_lossy(&driver_out.stdout)
+        )
+    });
+
+    assert_eq!(
+        out["total"],
+        serde_json::json!(7),
+        "total word count mismatch"
+    );
+}
+
+// ── Test 2d: opt-in map-side pre-combine, C == V (reduce_by_key_task) ──────────
+
+/// Validates that `register_combine!(String, i64)` + a staged `_task` pipeline
+/// inserts a `CombineByKey` step before the shuffle write and still produces correct word
+/// counts (map-side pre-combine is transparent for `C == V`). Uses `(String, i64)` so it can
+/// never affect the `(String, i32)` fallback-path wordcount scenarios in the same binary.
+#[test]
+#[ignore = "requires pre-built integration binary and free TCP ports"]
+fn distributed_combine_reduce_by_key() {
+    let port = free_port();
+    let mut worker = spawn_worker(port);
+    wait_for_port(port, Duration::from_secs(10));
+
+    let driver_out = run_driver("combine_reduce_by_key", &[port]);
+    worker.kill().ok();
+    worker.wait().ok();
+
+    assert!(
+        driver_out.status.success(),
+        "combine reduce_by_key driver failed:\nstderr: {}",
+        String::from_utf8_lossy(&driver_out.stderr)
+    );
+
+    let out: serde_json::Value = serde_json::from_slice(&driver_out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from combine_reduce_by_key: {e}\nstdout: {}",
+            String::from_utf8_lossy(&driver_out.stdout)
+        )
+    });
+
+    assert_eq!(out["hello"], serde_json::json!(2), "hello count mismatch");
+    assert_eq!(out["world"], serde_json::json!(2), "world count mismatch");
+    assert_eq!(out["rust"], serde_json::json!(2), "rust count mismatch");
+    assert_eq!(out["of"], serde_json::json!(1), "of count mismatch");
+}
+
+// ── Test 2e: opt-in map-side pre-combine, C != V (aggregate_by_key_task) ───────
+
+/// Validates the `map_side_combined` reduce-side-branching path: a staged pipeline feeds
+/// `aggregate_by_key_task`, `register_combine_lift!(String, f64, (f64, u64))` inserts a
+/// `CombineByKey`-lift step, so the shuffle carries pre-combined `(K, C)` pairs and the reduce
+/// side merges them via `merge_combiners`. Asserts the correct mean rating per movie.
+#[test]
+#[ignore = "requires pre-built integration binary and free TCP ports"]
+fn distributed_combine_aggregate_by_key() {
+    let port = free_port();
+    let mut worker = spawn_worker(port);
+    wait_for_port(port, Duration::from_secs(10));
+
+    let driver_out = run_driver("combine_aggregate_by_key", &[port]);
+    worker.kill().ok();
+    worker.wait().ok();
+
+    assert!(
+        driver_out.status.success(),
+        "combine aggregate_by_key driver failed:\nstderr: {}",
+        String::from_utf8_lossy(&driver_out.stderr)
+    );
+
+    let out: serde_json::Value = serde_json::from_slice(&driver_out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from combine_aggregate_by_key: {e}\nstdout: {}",
+            String::from_utf8_lossy(&driver_out.stdout)
+        )
+    });
+
+    assert_eq!(out["a"], serde_json::json!(5.0), "movie 'a' mean mismatch");
+    assert_eq!(out["b"], serde_json::json!(2.0), "movie 'b' mean mismatch");
+}
+
 // ── Test 3: multi-stage pipeline ──────────────────────────────────────────────
 
 /// Validates a multi-stage pipeline: tokenize → reduce_by_key → sort-by-count.

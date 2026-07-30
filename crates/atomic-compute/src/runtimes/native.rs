@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use crate::error::{ComputeError, ComputeResult};
 use crate::registry::{
     AGENT_RUNNER_REGISTRY, STATE_MERGE_REGISTRY, ShuffleWriteCtx, TASK_REGISTRY,
-    resolve_shuffle_handler,
+    combine::CombineCtx, resolve_shuffle_handler,
 };
 use crate::runtimes::{Backend, Dispatcher};
 
@@ -64,6 +64,31 @@ impl Dispatcher for NativeDispatcher {
                         Ok(entry.call(&TaskAction::Map, &ctx_bytes, data)?)
                     }
                 }
+            }
+            StepKind::Engine(EngineAction::CombineByKey {
+                combine_key,
+                lift_task_name,
+                merge_task_name,
+            }) => {
+                // Map-side pre-combine: the `combine_key` selects the generic handler in
+                // TASK_REGISTRY; the per-call lift/merge task names travel in a repacked
+                // ctx `payload` (the same pattern ShuffleMap uses for ShuffleWriteCtx).
+                let entry = TASK_REGISTRY.get(combine_key.as_str()).ok_or_else(|| {
+                    ComputeError::UnknownOperation(format!(
+                        "no combine handler for combine_key='{combine_key}'; \
+                         add `register_combine!` / `register_combine_lift!` \
+                         to your binary"
+                    ))
+                })?;
+                let ctx = CombineCtx {
+                    lift_task_name: lift_task_name.clone(),
+                    merge_task_name: merge_task_name.clone(),
+                };
+                let ctx_bytes =
+                    bincode::encode_to_vec(&ctx, bincode::config::standard()).map_err(|e| {
+                        ComputeError::InvalidPayload(format!("combine ctx encode: {e}"))
+                    })?;
+                Ok(entry.call(&TaskAction::Map, &ctx_bytes, data)?)
             }
             StepKind::Engine(EngineAction::Cache { rdd_id }) => {
                 // Terminal identity op: store this partition's bytes for later reuse.

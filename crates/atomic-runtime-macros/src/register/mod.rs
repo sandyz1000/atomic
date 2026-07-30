@@ -4,6 +4,7 @@
 
 pub(crate) mod aggregate_task;
 pub(crate) mod binary_task;
+pub(crate) mod combine_by_key;
 pub(crate) mod partition_task;
 pub(crate) mod partitioner;
 pub(crate) mod shuffle_map;

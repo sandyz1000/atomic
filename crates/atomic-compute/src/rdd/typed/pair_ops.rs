@@ -1,8 +1,32 @@
+use std::any::TypeId;
+
 use atomic_data::partitioner::{CustomPartitioner, NamedPartitioner};
 
 use crate::builtin_tasks::{max::MaxTask, min::MinTask, sum::SumTask};
 
 use super::*;
+
+/// Wiring for a map-side `CombineByKey` pre-combine step: the step to append to the staged
+/// pipeline, plus whether it pre-combines the shuffle input into `(K, C)` pairs (`C != V`).
+struct CombineWiring {
+    step: Step,
+    map_side_combined: bool,
+}
+
+/// Build the `CombineByKey` engine step. `task_name` is empty — the op is framework-handled
+/// and requires no worker capability lookup; `combine_key` selects the worker handler.
+fn combine_step(combine_key: &str, lift_task_name: Option<&str>, merge_task_name: &str) -> Step {
+    Step {
+        task_name: String::new(),
+        kind: StepKind::Engine(EngineAction::CombineByKey {
+            combine_key: combine_key.to_string(),
+            lift_task_name: lift_task_name.map(str::to_string),
+            merge_task_name: merge_task_name.to_string(),
+        }),
+        runtime: TaskRuntime::Native,
+        payload: vec![],
+    }
+}
 
 impl<K, V> TypedRdd<(K, V)>
 where
@@ -188,11 +212,125 @@ where
         self.combine_by_key(move |v| f1(z1.clone(), v), f2, f3, num_partitions)
     }
 
+    /// Wiring for an opt-in map-side `CombineByKey` step: the step appended to the staged
+    /// pipeline, plus whether it pre-combines into `(K, C)` (`map_side_combined`, `C != V`).
+    fn combine_wiring_cv(&self, merge_task_name: &str) -> Option<CombineWiring>
+    where
+        K: 'static,
+        V: 'static,
+    {
+        if !self.context.is_distributed() || self.staged.is_none() {
+            return None;
+        }
+        let key = crate::registry::combine_handler_registered(TypeId::of::<(K, V)>())?;
+        Some(CombineWiring {
+            step: combine_step(key, None, merge_task_name),
+            map_side_combined: false,
+        })
+    }
+
+    /// Wiring for the `C != V` lift case (`aggregate_by_key_task`): the pre-combine ships
+    /// `(K, C)` pairs, so `map_side_combined` is set and the reduce side fetches `(K, C)`.
+    fn combine_wiring_lift<C>(
+        &self,
+        lift_task_name: &str,
+        merge_task_name: &str,
+    ) -> Option<CombineWiring>
+    where
+        K: 'static,
+        V: 'static,
+        C: 'static,
+    {
+        if !self.context.is_distributed() || self.staged.is_none() {
+            return None;
+        }
+        let key = crate::registry::combine_handler_registered(TypeId::of::<(K, V, C)>())?;
+        Some(CombineWiring {
+            step: combine_step(key, Some(lift_task_name), merge_task_name),
+            map_side_combined: true,
+        })
+    }
+
+    /// Shared combine-shuffle builder for the `_task` reductions, used only when the gate
+    /// held (distributed, a staged pipeline precedes the shuffle, and a combine handler is
+    /// registered). Builds the same `Aggregator`/`ShuffledRdd` the closure substrate does,
+    /// then appends `combine.step` to the staged pipeline so the workers pre-combine before
+    /// the shuffle write.
+    fn build_shuffle_combine<C, CC, MV, MC>(
+        self,
+        create_combiner: CC,
+        merge_value: MV,
+        merge_combiners: MC,
+        partitioner: Partitioner,
+        combine: CombineWiring,
+    ) -> TypedRdd<(K, C)>
+    where
+        C: Data + Clone + bincode::Encode + bincode::Decode<()>,
+        CC: Fn(V) -> C + Clone + Send + Sync + 'static,
+        MV: Fn(C, V) -> C + Clone + Send + Sync + 'static,
+        MC: Fn(C, C) -> C + Clone + Send + Sync + 'static,
+        K: bincode::Encode + bincode::Decode<()>,
+        V: bincode::Encode + bincode::Decode<()>,
+        Vec<(K, V)>: WireEncode,
+    {
+        use crate::rdd::shuffled::ShuffledRdd;
+        use atomic_data::aggregator::Aggregator;
+        use atomic_data::shuffle::fetcher::ShuffleFetcher;
+
+        let mv2 = merge_value.clone();
+        let mc2 = merge_combiners.clone();
+        let aggregator = Arc::new(Aggregator::<K, V, C>::new(
+            Arc::new(move |v: V| create_combiner(v)),
+            Arc::new(move |c: &mut C, v: V| *c = mv2(c.clone(), v)),
+            Arc::new(move |c1: &mut C, c2: C| *c1 = mc2(c1.clone(), c2)),
+        ));
+
+        let shuffle_id = self.context.new_shuffle_id();
+        let rdd_id = self.context.new_rdd_id();
+        let tracker = atomic_data::env::get_map_output_tracker()
+            .unwrap_or_else(|| Arc::new(atomic_data::shuffle::MapOutputTracker::default()));
+        let fetcher = Arc::new(ShuffleFetcher::new(tracker));
+
+        let map_side_combined = combine.map_side_combined;
+        // The gate guarantees a staged pipeline exists; append the combine step to it.
+        let staged_info = self.staged.as_ref().map(|s| {
+            let mut steps = s.steps.clone();
+            steps.push(combine.step.clone());
+            (s.source_partitions.clone(), steps)
+        });
+
+        let shuffled = if map_side_combined {
+            ShuffledRdd::<K, V, C>::new_with_staged_combined(
+                rdd_id,
+                shuffle_id,
+                self.rdd,
+                aggregator,
+                partitioner,
+                fetcher,
+                staged_info,
+            )
+        } else {
+            ShuffledRdd::<K, V, C>::new_with_staged(
+                rdd_id,
+                shuffle_id,
+                self.rdd,
+                aggregator,
+                partitioner,
+                fetcher,
+                staged_info,
+                None,
+            )
+        };
+        TypedRdd::new(Arc::new(shuffled), self.context)
+    }
+
     /// Reduce values per key using a registered binary task — the content-addressed
     /// form of [`reduce_by_key`](Self::reduce_by_key).
     ///
     /// Runs the same shuffle; the merge is a `#[task]`, so it is part of the registry
     /// fingerprint and the job uses one task-based API for local and distributed runs.
+    /// When `register_combine!(K, V)` is present and a `_task` pipeline precedes
+    /// this op in distributed mode, values are pre-combined per key on the map side.
     ///
     /// # Example
     /// ```ignore
@@ -206,11 +344,28 @@ where
         V: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
     {
-        self.reduce_by_key(move |a, b| task.call(a, b))
+        // No combine handler registered (or no staged pipeline / local mode): fall back to the
+        // unchanged closure substrate — byte-identical to today's behaviour.
+        match self.combine_wiring_cv(B::NAME) {
+            None => self.reduce_by_key(move |a, b| task.call(a, b)),
+            Some(combine) => {
+                let partitioner = Partitioner::hash::<K>(self.context.default_parallelism().max(1));
+                let f = move |a: V, b: V| task.call(a, b);
+                let f2 = f.clone();
+                self.build_shuffle_combine(
+                    |v| v,
+                    move |c: V, v: V| f(c, v),
+                    move |c1: V, c2: V| f2(c1, c2),
+                    partitioner,
+                    combine,
+                )
+            }
+        }
     }
 
     /// Fold values per key from `zero` using a registered binary task — the
-    /// content-addressed form of [`fold_by_key`](Self::fold_by_key).
+    /// content-addressed form of [`fold_by_key`](Self::fold_by_key). Supports the same
+    /// opt-in map-side pre-combine as [`reduce_by_key_task`](Self::reduce_by_key_task).
     pub fn fold_by_key_task<B>(self, zero: V, task: B, num_partitions: usize) -> TypedRdd<(K, V)>
     where
         B: BinaryTask<V>,
@@ -218,7 +373,23 @@ where
         K: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
     {
-        self.fold_by_key(zero, move |a, b| task.call(a, b), num_partitions)
+        match self.combine_wiring_cv(B::NAME) {
+            None => self.fold_by_key(zero, move |a, b| task.call(a, b), num_partitions),
+            Some(combine) => {
+                let partitioner = Partitioner::hash::<K>(num_partitions.max(1));
+                let f = move |a: V, b: V| task.call(a, b);
+                let f1 = f.clone();
+                let f2 = f.clone();
+                let z1 = zero.clone();
+                self.build_shuffle_combine(
+                    move |v: V| f1(z1.clone(), v),
+                    move |c: V, v: V| f(c, v),
+                    move |c1: V, c2: V| f2(c1, c2),
+                    partitioner,
+                    combine,
+                )
+            }
+        }
     }
 
     /// Aggregate values per key into a different accumulator type `C`, using two
@@ -266,14 +437,33 @@ where
         V: bincode::Encode + bincode::Decode<()>,
         Vec<(K, V)>: WireEncode,
     {
-        let lift_mv = lift.clone();
-        let merge_mv = merge.clone();
-        self.combine_by_key(
-            move |v| lift.call(v),
-            move |c, v| merge_mv.call(c, lift_mv.call(v)),
-            move |c1, c2| merge.call(c1, c2),
-            num_partitions,
-        )
+        match self.combine_wiring_lift::<C>(L::NAME, M::NAME) {
+            None => {
+                // No lift-combine handler registered: unchanged closure substrate.
+                let lift_mv = lift.clone();
+                let merge_mv = merge.clone();
+                self.combine_by_key(
+                    move |v| lift.call(v),
+                    move |c, v| merge_mv.call(c, lift_mv.call(v)),
+                    move |c1, c2| merge.call(c1, c2),
+                    num_partitions,
+                )
+            }
+            Some(combine) => {
+                let partitioner = Partitioner::hash::<K>(num_partitions.max(1));
+                let lift_cc = lift.clone();
+                let lift_mv = lift;
+                let merge_mv = merge.clone();
+                let merge_mc = merge;
+                self.build_shuffle_combine(
+                    move |v| lift_cc.call(v),
+                    move |c, v| merge_mv.call(c, lift_mv.call(v)),
+                    move |c1, c2| merge_mc.call(c1, c2),
+                    partitioner,
+                    combine,
+                )
+            }
+        }
     }
 
     /// Transform each value with a registered unary task, keeping the key — the

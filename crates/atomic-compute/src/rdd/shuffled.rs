@@ -121,6 +121,12 @@ where
     /// When `Some`, the map side wrote sorted runs and `compute` k-way merges them
     /// instead of building a `HashMap` (sort-shuffle). `None` keeps the HashMap reduce.
     comparator: Option<atomic_data::dependency::KeyComparator<K>>,
+    /// Set when an opt-in map-side `CombineByKey`-lift step pre-combined the shuffle input
+    /// into `(K, C)` pairs (`aggregate_by_key_task`, `C != V`). The reduce side then fetches
+    /// `(K, C)` and merges same-key entries via `merge_combiners` alone, skipping
+    /// `create_combiner`/`merge_value` (which expect a raw `V`). Always `false` for the
+    /// `C == V` path, where the wire type is unchanged and the reduce side is untouched.
+    map_side_combined: bool,
 }
 
 impl<K, V, C> Clone for ShuffledRdd<K, V, C>
@@ -138,6 +144,7 @@ where
             shuffle_id: self.shuffle_id,
             fetcher: self.fetcher.clone(),
             comparator: self.comparator.clone(),
+            map_side_combined: self.map_side_combined,
         }
     }
 }
@@ -165,6 +172,8 @@ where
     /// Variant used when a staged pipeline (from `_task` steps) precedes the shuffle.
     /// `staged` carries `(source_partitions, preceding_steps)` so workers run the steps
     /// before writing shuffle buckets.
+    ///
+    /// The shuffle wire type is `(K, V)` and the dispatch key is looked up for `(K, V)`.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_staged(
         id: usize,
@@ -175,6 +184,64 @@ where
         fetcher: Arc<ShuffleFetcher>,
         staged: Option<(Vec<Vec<u8>>, Vec<atomic_data::distributed::Step>)>,
         comparator: Option<atomic_data::dependency::KeyComparator<K>>,
+    ) -> Self {
+        Self::build(
+            id,
+            shuffle_id,
+            parent,
+            aggregator,
+            part,
+            fetcher,
+            staged,
+            comparator,
+            TypeId::of::<(K, V)>(),
+            false,
+        )
+    }
+
+    /// Variant for an opt-in map-side `CombineByKey`-lift shuffle (`aggregate_by_key_task`,
+    /// `C != V`): the staged pipeline's trailing `CombineByKey` step ships `(K, C)` pairs, so
+    /// the dispatch key is looked up for `(K, C)` and `map_side_combined` is set so the reduce
+    /// side fetches `(K, C)` and merges via `merge_combiners`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_staged_combined(
+        id: usize,
+        shuffle_id: usize,
+        parent: Arc<dyn Rdd<Item = (K, V)>>,
+        aggregator: Arc<Aggregator<K, V, C>>,
+        part: Partitioner,
+        fetcher: Arc<ShuffleFetcher>,
+        staged: Option<(Vec<Vec<u8>>, Vec<atomic_data::distributed::Step>)>,
+    ) -> Self {
+        Self::build(
+            id,
+            shuffle_id,
+            parent,
+            aggregator,
+            part,
+            fetcher,
+            staged,
+            None,
+            TypeId::of::<(K, C)>(),
+            true,
+        )
+    }
+
+    /// Shared constructor: builds the `ShuffleDependency` (embedding the dispatch key resolved
+    /// for `shuffle_value_type_id`), attaches any staged pipeline, and records whether the map
+    /// side pre-combined into `(K, C)` (`map_side_combined`).
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        id: usize,
+        shuffle_id: usize,
+        parent: Arc<dyn Rdd<Item = (K, V)>>,
+        aggregator: Arc<Aggregator<K, V, C>>,
+        part: Partitioner,
+        fetcher: Arc<ShuffleFetcher>,
+        staged: Option<(Vec<Vec<u8>>, Vec<atomic_data::distributed::Step>)>,
+        comparator: Option<atomic_data::dependency::KeyComparator<K>>,
+        shuffle_value_type_id: TypeId,
+        map_side_combined: bool,
     ) -> Self {
         let mut vals = RddVals::new(id);
 
@@ -191,13 +258,14 @@ where
             None => TypedShuffle::<K, V, C>::new(shuffle_id, false, parent.clone(), part.clone()),
         };
         let shuffle_key = SHUFFLE_KEY_REGISTRY
-            .get(&TypeId::of::<(K, V)>())
+            .get(&shuffle_value_type_id)
             .copied()
             .unwrap_or_else(|| {
                 panic!(
-                    "register_shuffle_map! not called for ({}, {}); \
-                     add `atomic_compute::register_shuffle_map!(K, V)` to your binary before \
-                     calling reduce_by_key or group_by_key",
+                    "register_shuffle_map! not called for the shuffle value type of ({}, {}) \
+                     [combined={map_side_combined}]; add the matching \
+                     `atomic_compute::register_shuffle_map!` / `register_combine_lift!` \
+                     to your binary before triggering the shuffle",
                     std::any::type_name::<K>(),
                     std::any::type_name::<V>(),
                 )
@@ -219,6 +287,7 @@ where
             shuffle_id,
             fetcher,
             comparator,
+            map_side_combined,
         }
     }
 }
@@ -321,6 +390,38 @@ where
             let start_id = coalesced_id * per_coalesced;
             let end_id = ((coalesced_id + 1) * per_coalesced).min(original_num_partitions);
             original_ids = (start_id..end_id).collect();
+        }
+
+        // Map-side pre-combined reduce (`aggregate_by_key_task`, `C != V`): the shuffle input
+        // was lifted `V -> C` and combined per key on the map side, so the fetched pairs are
+        // already `(K, C)`. Merge same-key combiners via `merge_combiners` alone —
+        // `create_combiner`/`merge_value` expect a raw `V` and must not run here. This path is
+        // never sort-shuffled (`aggregate_by_key_task` always builds `comparator: None`), so it
+        // short-circuits ahead of the comparator branch below.
+        if self.map_side_combined {
+            let mut combiners: HashMap<K, C> = HashMap::new();
+            for orig_id in original_ids {
+                let fetcher = self.fetcher.clone();
+                let shuffle_id = self.shuffle_id;
+                let result =
+                    block_on_local(async move { fetcher.fetch::<K, C>(shuffle_id, orig_id).await })
+                        .map_err(DataError::from)?;
+                for (k, c) in result {
+                    match combiners.entry(k) {
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            (self.aggregator.merge_combiners)(e.get_mut(), c);
+                        }
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(c);
+                        }
+                    }
+                }
+            }
+            log::debug!(
+                "map-side-combined reduce fetched in {}",
+                start.elapsed().as_millis()
+            );
+            return Ok(Box::new(combiners.into_iter()));
         }
 
         // Sort-shuffle reduce: the map side wrote sorted runs (in `comparator` order),

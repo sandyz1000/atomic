@@ -63,10 +63,21 @@ impl Executor {
     pub fn worker_capabilities(&self) -> WorkerCapabilities {
         let mut registered: Vec<String> = vec![];
 
-        // Shuffle-map handlers are TaskEntry's in TASK_REGISTRY too (keyed by "K::V" /
-        // "K::V::sorted"), so this one extend already advertises them alongside every other
-        // registered task — no separate shuffle registry to merge in.
         registered.extend(TASK_REGISTRY.keys().map(|k| k.to_string()));
+        // Shuffle-map handlers are TaskEntry's in TASK_REGISTRY too (keyed by "K::V" /
+        // "K::V::sorted"), but the scheduler's capability check for a ShuffleMap step looks
+        // up "shuffle:<key>" (`worker_pool.rs::required_capability`), not the bare key — the
+        // prefix disambiguates a shuffle capability from a same-named regular task. Advertise
+        // it separately from `SHUFFLE_KEY_REGISTRY` (the TypeId→key reflection table driven by
+        // `register_shuffle_map!`/`register_sort_shuffle_map!`), which holds exactly the base
+        // "K::V" keys the driver embeds in a shuffle op's payload — never the "::sorted"
+        // variant, since the driver always requests the base key regardless of hash-vs-sort
+        // (the worker's `resolve_shuffle_handler` picks sorted-vs-hash internally).
+        registered.extend(
+            crate::registry::SHUFFLE_KEY_REGISTRY
+                .values()
+                .map(|k| format!("shuffle:{k}")),
+        );
         // Advertise dynamic task runtimes so the scheduler can route Python/JS ops.
         registered.extend(
             [python_op(), js_op()]

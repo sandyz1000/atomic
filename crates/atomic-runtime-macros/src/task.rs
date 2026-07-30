@@ -4,7 +4,7 @@ use proc_macro2::Span;
 use quote::quote;
 use syn::{ItemFn, LitStr, ReturnType, Type, parse_macro_input};
 
-use crate::common::fnv1a_hash;
+use crate::body_hash::fnv1a_hash;
 
 /// Attribute macro for defining a distributed Atomic task function.
 ///

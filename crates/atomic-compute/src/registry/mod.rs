@@ -15,10 +15,15 @@
 //! (`TypeId` reflection, not dispatch); [`state_merge`] and [`partitioner`] each own one
 //! other subsystem's registry end to end.
 
+pub mod combine;
 pub mod partitioner;
 pub mod shuffle;
 pub mod state_merge;
 
+pub use combine::{
+    COMBINE_KEY_REGISTRY, CombineKeyEntry, combine_handler, combine_lift_handler,
+    combine_handler_registered,
+};
 pub use partitioner::{
     PARTITIONER_REGISTRY, PartitionerEntry, PartitionerFactoryFn, lookup_partitioner,
 };

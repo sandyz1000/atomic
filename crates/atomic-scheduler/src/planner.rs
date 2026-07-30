@@ -42,7 +42,7 @@ pub trait StagePlanner: Send + Sync {
         let m = self.state();
         if let Some(dep) = shuffle_dependency.clone() {
             log::debug!("shuffle dependency exists, registering to map output tracker");
-            m.register_shuffle(dep.get_shuffle_id(), rdd_base.number_of_splits());
+            m.register_shuffle(dep.get_shuffle_id(), dep.num_map_partitions());
             log::debug!("new stage tracker after");
         }
         let id = m.get_next_stage_id();
@@ -177,7 +177,15 @@ pub trait StagePlanner: Send + Sync {
         {
             return cached.clone();
         }
-        let rdd_prefs = rdd.preferred_locations(rdd.splits()[partition].clone());
+        // `partition` can exceed `rdd.splits().len()` for a staged pipeline job, whose
+        // `final_rdd` is a 1-split placeholder (`PipelineTask`'s real data lives in
+        // `source_partitions`, not in this RDD's splits) — treat that as "no split-level
+        // preference" rather than indexing out of bounds, same as the empty-`rdd_prefs` path
+        // below already handles.
+        let rdd_prefs = match rdd.splits().get(partition) {
+            Some(split) => rdd.preferred_locations(split.clone()),
+            None => Vec::new(),
+        };
         if !rdd.is_pinned() {
             if !rdd_prefs.is_empty() {
                 return rdd_prefs;

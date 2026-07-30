@@ -94,6 +94,20 @@ impl ShuffleDependency {
             None => self.exec.encode_parent_partitions(),
         }
     }
+
+    /// Number of map-side input partitions this shuffle actually reads: the staged pipeline's
+    /// real partition count when one is attached (`staged_partitions` is already-encoded — O(1)
+    /// to measure), otherwise the parent RDD's split count. `Stage::new` must size a shuffle-map
+    /// stage from this, not `rdd.number_of_splits()` alone — a staged shuffle's `get_rdd_base()`
+    /// is a 1-partition placeholder (`TypedRdd::map_task` et al. wrap the pipeline in
+    /// `ParallelCollection::new(id, Vec::new(), 1)`) that undercounts the real map-side
+    /// partitions.
+    pub fn num_map_partitions(&self) -> usize {
+        self.staged_partitions
+            .as_ref()
+            .map(|p| p.len())
+            .unwrap_or_else(|| self.exec.rdd_base().number_of_splits())
+    }
 }
 
 impl PartialOrd for ShuffleDependency {

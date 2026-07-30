@@ -63,7 +63,8 @@ fn main() {
             "usage:\n  integration --worker --port N\n  \
              integration <scenario> --driver --workers host:port[,...]\n\n\
              scenarios: map_fold, shuffle_wordcount, multi_stage, fault_tolerance, \
-             cache_locality, named_partitioner, sort_by_task"
+             cache_locality, named_partitioner, sort_by_task, unstaged_shuffle, \
+             staged_shuffle_terminal_action"
         );
         std::process::exit(1);
     }

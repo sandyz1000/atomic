@@ -4,7 +4,7 @@ use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{ExprClosure, Ident, ReturnType, Token, Type, bracketed, parse_macro_input};
 
-use crate::common::fnv1a_hash;
+use crate::body_hash::fnv1a_hash;
 
 /// A single `name: Type` entry in a `task_fn!` capture list.
 struct CaptureItem {
