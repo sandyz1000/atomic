@@ -3,6 +3,7 @@ use crate::context::StreamingContext;
 use crate::dstream::{DStream, DStreamBase};
 use atomic_compute::rdd::TypedRdd;
 use atomic_data::data::Data;
+use atomic_data::distributed::{WireDecode, WireEncode};
 use atomic_data::rdd::Rdd;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -467,8 +468,10 @@ where
     K: Data + Clone + Hash + Eq + std::fmt::Debug + 'static,
     V: Data + Clone + std::fmt::Debug + 'static,
     W: Data + Clone + std::fmt::Debug + 'static,
-    Vec<(K, V)>: Data + Clone,
-    Vec<(K, W)>: Data + Clone,
+    Vec<(K, V)>: Data + Clone + WireEncode + WireDecode,
+    Vec<(K, W)>: Data + Clone + WireEncode + WireDecode,
+    (K, V): WireEncode,
+    (K, W): WireEncode,
 {
     fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, (V, W))>>> {
         let left_rdd = self.left.get_or_compute(valid_time_ms)?;
@@ -552,8 +555,10 @@ where
     K: Data + Clone + Hash + Eq + std::fmt::Debug + 'static,
     V: Data + Clone + std::fmt::Debug + 'static,
     W: Data + Clone + std::fmt::Debug + 'static,
-    Vec<(K, V)>: Data + Clone,
-    Vec<(K, W)>: Data + Clone,
+    Vec<(K, V)>: Data + Clone + WireEncode + WireDecode,
+    Vec<(K, W)>: Data + Clone + WireEncode + WireDecode,
+    (K, V): WireEncode,
+    (K, W): WireEncode,
 {
     fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, (V, Option<W>))>>> {
         let left_rdd = self.left.get_or_compute(valid_time_ms)?;

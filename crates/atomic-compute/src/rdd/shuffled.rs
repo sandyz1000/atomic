@@ -1,7 +1,7 @@
 use crate::rdd::rdd_val::RddVals;
 use crate::rdd::{Rdd, RddBase};
 use crate::registry::SHUFFLE_KEY_REGISTRY;
-use atomic_data::aggregator::{Aggregator, MergeCombinersFn};
+use atomic_data::aggregator::{Aggregator, CreateCombinerFn, MergeValueFn};
 use atomic_data::data::Data;
 use atomic_data::dependency::{Dependency, KeyComparator, ShuffleDependency, TypedShuffle};
 use atomic_data::distributed::WireEncode;
@@ -29,33 +29,81 @@ static REDUCE_SPILL_THRESHOLD_RUNS: LazyLock<usize> = LazyLock::new(|| {
         .unwrap_or(64)
 });
 
-/// Lazy k-way sort-merge of pre-sorted `runs` (any run iterator type), combining
-/// equal-key neighbours with `merge_combiners`. The merged output is never
-/// materialized: `kmerge_by` keeps an O(#runs) heap and `coalesce` looks one
-/// element ahead, so a streaming consumer holds only that working set.
-fn lazy_sort_merge<K, C, I>(
+/// Folds a `kmerge_by`'d stream of raw `(K, V)` pairs into `(K, C)` by key, one key's full
+/// neighbourhood at a time: the first value under a key seeds `C` via `create_combiner`, each
+/// later value under the same key folds in via `merge_value`. Peeks at most one element ahead
+/// (like the `coalesce` it replaces), so it stays as lazy as the merge it wraps.
+struct KeyFold<K, M: Iterator<Item = (K, V)>, V, C> {
+    merged: std::iter::Peekable<M>,
+    cmp: KeyComparator<K>,
+    create_combiner: CreateCombinerFn<V, C>,
+    merge_value: MergeValueFn<V, C>,
+}
+
+impl<K, M: Iterator<Item = (K, V)>, V, C> Iterator for KeyFold<K, M, V, C> {
+    type Item = (K, C);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (key, first) = self.merged.next()?;
+        let mut acc = (self.create_combiner)(first);
+        while let Some((next_key, _)) = self.merged.peek()
+            && (self.cmp)(&key, next_key) == Ordering::Equal
+        {
+            let (_, next_val) = self.merged.next().expect("peeked Some");
+            (self.merge_value)(&mut acc, next_val);
+        }
+        Some((key, acc))
+    }
+}
+
+/// Run a shuffle-fetch future to completion without risking Tokio's nested-`block_on`
+/// panic. `compute()` can be called from a thread that is itself a Tokio runtime worker
+/// (e.g. a `#[tokio::test(flavor = "multi_thread")]` test body, or a task driving the
+/// shared `event_process_loop`), where a bare `Handle::block_on` aborts with "Cannot
+/// start a runtime from within a runtime." Spawning onto the ambient runtime and
+/// blocking this thread on a channel sidesteps that check entirely — the same fix
+/// already used in `Context::install_map_output_recovery` for the identical hazard.
+fn block_on_local<F>(fut: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    Handle::current().spawn(async move {
+        let _ = tx.send(fut.await);
+    });
+    rx.recv()
+        .expect("shuffle fetch task dropped without producing a result")
+}
+
+/// Lazy k-way sort-merge of pre-sorted `runs` of raw `(K, V)` pairs (each run internally
+/// sorted by key — the map side writes raw pairs regardless of executor, see
+/// `registry::shuffle`/`ShuffleDependency::do_shuffle_task`), aggregating same-key
+/// neighbours into `C` via [`KeyFold`] as the merge streams past them. The merged output is
+/// never materialized: `kmerge_by` keeps an O(#runs) heap and `KeyFold` looks one element
+/// ahead, so a streaming consumer holds only that working set.
+fn lazy_sort_merge<K, V, C, I>(
     runs: Vec<I>,
     cmp: KeyComparator<K>,
-    merge_combiners: MergeCombinersFn<C>,
+    create_combiner: CreateCombinerFn<V, C>,
+    merge_value: MergeValueFn<V, C>,
 ) -> Box<dyn Iterator<Item = (K, C)>>
 where
     K: 'static,
+    V: 'static,
     C: 'static,
-    I: Iterator<Item = (K, C)> + 'static,
+    I: Iterator<Item = (K, V)> + 'static,
 {
     let cmp_merge = cmp.clone();
     let merged = runs
         .into_iter()
-        .kmerge_by(move |a: &(K, C), b: &(K, C)| cmp_merge(&a.0, &b.0) == Ordering::Less)
-        .coalesce(move |mut acc: (K, C), next: (K, C)| {
-            if cmp(&acc.0, &next.0) == Ordering::Equal {
-                merge_combiners(&mut acc.1, next.1);
-                Ok(acc)
-            } else {
-                Err((acc, next))
-            }
-        });
-    Box::new(merged)
+        .kmerge_by(move |a: &(K, V), b: &(K, V)| cmp_merge(&a.0, &b.0) == Ordering::Less);
+    Box::new(KeyFold {
+        merged: merged.peekable(),
+        cmp,
+        create_combiner,
+        merge_value,
+    })
 }
 
 pub struct ShuffledRdd<K, V, C>
@@ -97,7 +145,7 @@ where
 impl<K, V, C> ShuffledRdd<K, V, C>
 where
     K: Data + Eq + Hash + Clone + Encode + Decode<()>,
-    V: Data + Clone,
+    V: Data + Clone + Encode,
     C: Data + Clone + Encode + Decode<()>,
     Vec<(K, V)>: WireEncode,
 {
@@ -133,21 +181,14 @@ where
         // Sort-shuffle when a comparator is supplied: the dependency sorts each bucket so the
         // reduce side can k-way merge sorted runs. Otherwise the legacy unsorted layout.
         let shuffle_dep = match &comparator {
-            Some(cmp) => TypedShuffle::new_sorted(
+            Some(cmp) => TypedShuffle::<K, V, C>::new_sorted(
                 shuffle_id,
                 false,
                 parent.clone(),
-                aggregator.clone(),
                 part.clone(),
                 cmp.clone(),
             ),
-            None => TypedShuffle::new(
-                shuffle_id,
-                false,
-                parent.clone(),
-                aggregator.clone(),
-                part.clone(),
-            ),
+            None => TypedShuffle::<K, V, C>::new(shuffle_id, false, parent.clone(), part.clone()),
         };
         let shuffle_key = SHUFFLE_KEY_REGISTRY
             .get(&TypeId::of::<(K, V)>())
@@ -185,7 +226,7 @@ where
 impl<K, V, C> RddBase for ShuffledRdd<K, V, C>
 where
     K: Data + Eq + Hash + Clone + Encode + Decode<()>,
-    V: Data + Clone,
+    V: Data + Clone + Decode<()>,
     C: Data + Clone + Encode + Decode<()>,
 {
     fn get_rdd_id(&self) -> usize {
@@ -242,7 +283,7 @@ where
 impl<K, V, C> Rdd for ShuffledRdd<K, V, C>
 where
     K: Data + Eq + Hash + Clone + Encode + Decode<()>,
-    V: Data + Clone,
+    V: Data + Clone + Decode<()>,
     C: Data + Clone + Encode + Decode<()>,
 {
     type Item = (K, C);
@@ -294,7 +335,8 @@ where
         // input + a second sorted copy + the sort's scratch). (K is only `Hash`-bound,
         // so ordering is driven by the stored comparator rather than `Ord`.)
         if let Some(cmp) = &self.comparator {
-            let merge_combiners = self.aggregator.merge_combiners.clone();
+            let create_combiner = self.aggregator.create_combiner.clone();
+            let merge_value = self.aggregator.merge_value.clone();
 
             // Wide shuffle: stream each run from a temp file so the full input is
             // never resident — only the k-way-merge working set. The run count is
@@ -307,14 +349,16 @@ where
                 })
                 .unwrap_or(0);
             if run_count > *REDUCE_SPILL_THRESHOLD_RUNS {
-                let mut runs: Vec<SpilledRunIter<K, C>> = Vec::new();
+                let mut runs: Vec<SpilledRunIter<K, V>> = Vec::new();
                 for orig_id in original_ids {
-                    let fetched = Handle::current()
-                        .block_on(
-                            self.fetcher
-                                .fetch_runs_spilled::<K, C>(self.shuffle_id, orig_id),
-                        )
-                        .map_err(DataError::from)?;
+                    let fetcher = self.fetcher.clone();
+                    let shuffle_id = self.shuffle_id;
+                    let fetched = block_on_local(async move {
+                        fetcher
+                            .fetch_runs_spilled::<K, V>(shuffle_id, orig_id)
+                            .await
+                    })
+                    .map_err(DataError::from)?;
                     runs.extend(fetched);
                 }
                 log::debug!(
@@ -322,13 +366,22 @@ where
                     runs.len(),
                     start.elapsed().as_millis()
                 );
-                return Ok(lazy_sort_merge(runs, cmp.clone(), merge_combiners));
+                return Ok(lazy_sort_merge(
+                    runs,
+                    cmp.clone(),
+                    create_combiner,
+                    merge_value,
+                ));
             }
 
-            let mut runs: Vec<std::vec::IntoIter<(K, C)>> = Vec::new();
+            let mut runs: Vec<std::vec::IntoIter<(K, V)>> = Vec::new();
             for orig_id in original_ids {
-                let fetched = Handle::current()
-                    .block_on(self.fetcher.fetch_runs::<K, C>(self.shuffle_id, orig_id))
+                let fetcher = self.fetcher.clone();
+                let shuffle_id = self.shuffle_id;
+                let fetched =
+                    block_on_local(
+                        async move { fetcher.fetch_runs::<K, V>(shuffle_id, orig_id).await },
+                    )
                     .map_err(DataError::from)?;
                 runs.extend(fetched.into_iter().map(IntoIterator::into_iter));
             }
@@ -336,18 +389,30 @@ where
                 "sort-merge (lazy k-way) prepared in {}",
                 start.elapsed().as_millis()
             );
-            return Ok(lazy_sort_merge(runs, cmp.clone(), merge_combiners));
+            return Ok(lazy_sort_merge(
+                runs,
+                cmp.clone(),
+                create_combiner,
+                merge_value,
+            ));
         }
 
         let mut combiners: HashMap<K, C> = HashMap::new();
         for orig_id in original_ids {
-            let fut = self.fetcher.fetch::<K, C>(self.shuffle_id, orig_id);
-            let result = Handle::current().block_on(fut).map_err(DataError::from)?;
-            for (k, c) in result {
-                combiners
-                    .entry(k)
-                    .and_modify(|old| (self.aggregator.merge_combiners)(old, c.clone()))
-                    .or_insert(c);
+            let fetcher = self.fetcher.clone();
+            let shuffle_id = self.shuffle_id;
+            let result =
+                block_on_local(async move { fetcher.fetch::<K, V>(shuffle_id, orig_id).await })
+                    .map_err(DataError::from)?;
+            for (k, v) in result {
+                match combiners.entry(k) {
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        (self.aggregator.merge_value)(e.get_mut(), v);
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert((self.aggregator.create_combiner)(v));
+                    }
+                }
             }
         }
 

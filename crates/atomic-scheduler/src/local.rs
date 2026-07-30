@@ -6,10 +6,9 @@ use atomic_data::rdd::Rdd;
 use atomic_data::task::{TaskOption, TaskResult};
 use atomic_data::task_context::{PartitionFn, PartitionTask};
 use std::clone::Clone;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::option::Option;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -21,7 +20,7 @@ use parking_lot::Mutex;
 
 use crate::base::{NativeScheduler, SchedulerState};
 use crate::dag::{CompletionEvent, FetchFailedVals, TaskEndReason};
-use crate::error::{LibResult, SchedulerError};
+use crate::error::LibResult;
 use crate::job::JobTracker;
 use crate::listener::{
     BusListener, JobEndListener, JobListener, JobStartListener, LiveListenerBus, NoOpListener,
@@ -54,6 +53,11 @@ pub struct LocalScheduler {
     live_listener_bus: LiveListenerBus,
     /// Distributed map-output recovery hook; `None` in pure local mode.
     map_output_recovery: Arc<std::sync::OnceLock<MapOutputRecovery>>,
+    /// Driver-side merge of accumulator deltas produced by `PipelineTask` runs — the local
+    /// counterpart to `DistributedScheduler::accumulator_sink`. `run_task` calls it directly
+    /// after unpacking a `PipelineTask`'s result; nothing routes through it for `ResultTask`/
+    /// `ShuffleMapTask` since those predate `#[task]`-level accumulator support.
+    accumulator_sink: Arc<std::sync::OnceLock<crate::distributed::AccumulatorSink>>,
 }
 
 impl LocalScheduler {
@@ -78,6 +82,7 @@ impl LocalScheduler {
             scheduler_lock: Arc::new(Mutex::new(())),
             live_listener_bus,
             map_output_recovery: Arc::new(std::sync::OnceLock::new()),
+            accumulator_sink: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -85,6 +90,11 @@ impl LocalScheduler {
     /// later calls are ignored (the hook is process-lifetime, like the tracker).
     pub fn set_map_output_recovery(&self, hook: MapOutputRecovery) {
         let _ = self.map_output_recovery.set(hook);
+    }
+
+    /// Install the driver-side accumulator-delta merge sink. First call wins.
+    pub fn set_accumulator_sink(&self, sink: crate::distributed::AccumulatorSink) {
+        let _ = self.accumulator_sink.set(sink);
     }
 
     /// Register a listener to observe `JobStartListener`/`JobEndListener` events
@@ -141,6 +151,9 @@ impl LocalScheduler {
         })
     }
 
+    /// Legacy closure-dispatch entry point — see [`NativeScheduler::supports_closure_tasks`]'s
+    /// doc comment. `atomic-compute`'s built-in RDD actions are the only caller; new
+    /// driver-facing ops should go through the `#[task]`/`task_fn!` op-envelope path instead.
     pub fn run_job<T: Data, U: Data + Clone, F>(
         self: Arc<Self>,
         func: Arc<F>,
@@ -185,151 +198,59 @@ impl LocalScheduler {
         })
     }
 
-    /// Start the event processing loop for a given job.
-    async fn event_process_loop<T: Data, U: Data + Clone, F, L>(
+    /// Entry point for a `Vec<Step>` pipeline job (`Context::dispatch_pipeline`) — the
+    /// `_task`-method counterpart to [`run_job`](Self::run_job)'s closure jobs. `final_rdd`
+    /// is only ever used for its `RddBase`/split shape (stage planning, preferred locations);
+    /// no closure is involved, so there's no `supports_closure_tasks()` question here.
+    pub fn run_pipeline_job<T: Data>(
         self: Arc<Self>,
-        allow_local: bool,
-        jt: Arc<JobTracker<F, U, T, L>>,
-    ) -> LibResult<Vec<U>>
-    where
-        F: PartitionTask<T, U>,
-        L: JobListener,
-    {
-        // TODO: update cache
+        final_rdd: Arc<dyn Rdd<Item = T>>,
+        pipeline_data: crate::job::PipelineJobData,
+        partitions: Vec<usize>,
+    ) -> LibResult<Vec<Vec<u8>>> {
+        let sched = self.clone();
+        let _lock = sched.scheduler_lock.lock();
 
-        if allow_local && let Some(result) = LocalScheduler::local_execution(jt.clone())? {
-            return Ok(result);
-        }
-
-        self.state.event_queues.insert(jt.run_id, VecDeque::new());
-
-        let mut results: Vec<Option<U>> = (0..jt.num_output_parts).map(|_| None).collect();
-        // Timestamp of the oldest unresubmitted failure; None when jt.failed is empty.
-        let mut fetch_failure_start: Option<Instant> = None;
-        let mut task_failure_counts: HashMap<(usize, usize), usize> = HashMap::new();
-
-        self.submit_stage(jt.final_stage.clone(), jt.clone())
+        futures::executor::block_on(async move {
+            // Never invoked — `JobTracker::pipeline` being `Some` routes final-stage task
+            // construction to `PipelineTask`, not this closure. Exists only so pipeline jobs
+            // can reuse `JobTracker`'s single generic shape instead of a second one.
+            let func = Arc::new(
+                |(_ctx, _iter): (
+                    atomic_data::task_context::TaskContext,
+                    Box<dyn Iterator<Item = T>>,
+                )|
+                 -> Vec<u8> { Vec::new() },
+            );
+            let jt = JobTracker::from_scheduler_pipeline(
+                &*self,
+                func,
+                final_rdd,
+                partitions,
+                NoOpListener,
+                pipeline_data,
+            )
             .await?;
-        log::debug!(
-            "pending stages and tasks: {:?}",
-            jt.pending_tasks
-                .lock()
-                .iter()
-                .map(|(k, v)| (k.id, v.iter().map(|x| x.get_task_id()).collect::<Vec<_>>()))
-                .collect::<Vec<_>>()
-        );
-
-        let mut num_finished = 0;
-        while num_finished != jt.num_output_parts {
-            if let Some(reason) = self.state.take_job_abort(jt.run_id) {
-                self.state.event_queues.remove(&jt.run_id);
-                return Err(SchedulerError::JobAborted(reason));
-            }
-            let event_option = self.wait_for_event(jt.run_id, self.poll_timeout);
-
-            if let Some(evt) = event_option {
-                log::debug!("event starting");
-                let stage = self
-                    .state
-                    .stage_cache
-                    .get(&evt.task.get_stage_id())
-                    .unwrap()
-                    .clone();
-                log::debug!(
-                    "removing stage #{} task from pending task #{}",
-                    stage.id,
-                    evt.task.get_task_id()
-                );
-                jt.pending_tasks
-                    .lock()
-                    .get_mut(&stage)
-                    .unwrap()
-                    .remove(&evt.task);
-                use super::dag::TaskEndReason::*;
-                match evt.reason {
-                    Success => {
-                        self.on_event_success(evt, &mut results, &mut num_finished, jt.clone())
-                            .await?;
-                    }
-                    FetchFailed(failed_vals) => {
-                        self.on_event_failure(jt.clone(), failed_vals, evt.task.get_stage_id())
-                            .await;
-                        fetch_failure_start.get_or_insert_with(Instant::now);
-                    }
-                    Error(error) => {
-                        let key = (evt.task.get_stage_id(), evt.task.get_task_id());
-                        let count = task_failure_counts.entry(key).or_insert(0);
-                        *count += 1;
-                        if *count >= self.max_failures {
-                            return Err(SchedulerError::MaxTaskFailures(error.to_string()));
-                        }
-                        log::warn!(
-                            "task {}/{} error (attempt {}/{}): retrying stage",
-                            evt.task.get_stage_id(),
-                            evt.task.get_task_id(),
-                            count,
-                            self.max_failures,
-                        );
-                        let m = self.state();
-                        let failed_stage = m.fetch_from_stage_cache(evt.task.get_stage_id());
-                        // submit_stage() no-ops for a stage still marked running.
-                        jt.running.lock().remove(&failed_stage);
-                        jt.failed.lock().insert(failed_stage);
-                        fetch_failure_start.get_or_insert_with(Instant::now);
-                    }
-                    OtherFailure(msg) => {
-                        let key = (evt.task.get_stage_id(), evt.task.get_task_id());
-                        let count = task_failure_counts.entry(key).or_insert(0);
-                        *count += 1;
-                        if *count >= self.max_failures {
-                            return Err(SchedulerError::MaxTaskFailures(msg));
-                        }
-                        log::warn!(
-                            "task {}/{} failure (attempt {}/{}): retrying stage",
-                            evt.task.get_stage_id(),
-                            evt.task.get_task_id(),
-                            count,
-                            self.max_failures,
-                        );
-                        let m = self.state();
-                        let failed_stage = m.fetch_from_stage_cache(evt.task.get_stage_id());
-                        jt.running.lock().remove(&failed_stage);
-                        jt.failed.lock().insert(failed_stage);
-                        fetch_failure_start.get_or_insert_with(Instant::now);
-                    }
-                }
-            }
-
-            // Checked every iteration, not just on fresh events, so a failure with no
-            // further events to wake the loop still gets resubmitted.
-            if let Some(since) = fetch_failure_start
-                && !jt.failed.lock().is_empty()
-                && since.elapsed().as_millis() > self.resubmit_timeout
-            {
-                self.update_cache_locs().await?;
-                let failed_stages: Vec<Stage> = jt.failed.lock().iter().cloned().collect();
-                for stage in failed_stages {
-                    self.submit_stage(stage, jt.clone()).await?;
-                }
-                jt.failed.lock().clear();
-                fetch_failure_start = None;
-            }
-        }
-
-        self.state.event_queues.remove(&jt.run_id);
-        Ok(results
-            .into_iter()
-            .map(|s| match s {
-                Some(v) => v,
-                None => panic!("some results still missing"),
-            })
-            .collect())
+            self.live_listener_bus.post(Box::new(JobStartListener {
+                job_id: jt.run_id,
+                time: Instant::now(),
+                stage_infos: vec![],
+            }));
+            let result = self.clone().event_process_loop(false, jt.clone()).await;
+            self.live_listener_bus.post(Box::new(JobEndListener {
+                job_id: jt.run_id,
+                time: Instant::now(),
+                job_result: result.is_ok(),
+            }));
+            result
+        })
     }
 
     fn run_task(
         event_queues: Arc<DashMap<usize, VecDeque<CompletionEvent>>>,
         task: TaskOption,
         attempt_id: usize,
+        accumulator_sink: &std::sync::OnceLock<crate::distributed::AccumulatorSink>,
     ) {
         let result = task.run(attempt_id);
         match result {
@@ -337,6 +258,21 @@ impl LocalScheduler {
                 let result_data = match task_result {
                     TaskResult::ResultTask(data) => data,
                     TaskResult::ShuffleTask(data) => data,
+                    TaskResult::PipelineTask(data) => {
+                        // Unpack `(bytes, accumulator_deltas)` — see `PipelineTask::run`'s
+                        // doc comment for why this wrapping exists only for the local path.
+                        let (bytes, deltas) = data
+                            .as_any()
+                            .downcast_ref::<(Vec<u8>, Vec<(usize, Vec<u8>)>)>()
+                            .cloned()
+                            .unwrap_or_default();
+                        if !deltas.is_empty()
+                            && let Some(sink) = accumulator_sink.get()
+                        {
+                            sink(&deltas);
+                        }
+                        Box::new(bytes) as Box<dyn Data>
+                    }
                 };
                 LocalScheduler::handle_completion_event(
                     event_queues,
@@ -462,6 +398,18 @@ impl NativeScheduler for LocalScheduler {
             .insert(m.fetch_from_shuffle_to_cache(shuffle_id));
     }
 
+    fn max_failures(&self) -> usize {
+        self.max_failures
+    }
+
+    fn resubmit_timeout(&self) -> u128 {
+        self.resubmit_timeout
+    }
+
+    fn poll_timeout(&self) -> u64 {
+        self.poll_timeout
+    }
+
     /// Every single task is run in the local thread pool
     fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, _server_address: SocketAddrV4)
     where
@@ -470,6 +418,7 @@ impl NativeScheduler for LocalScheduler {
         log::debug!("inside submit task");
         let my_attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
         let event_queues = self.state.event_queues.clone();
+        let accumulator_sink = self.accumulator_sink.clone();
 
         // No need to serialize for local execution — runs on a Tokio blocking thread
         let task_id = task.get_task_id();
@@ -484,7 +433,7 @@ impl NativeScheduler for LocalScheduler {
                 task_id,
                 std::thread::current().id(),
             );
-            LocalScheduler::run_task(event_queues, task, my_attempt_id)
+            LocalScheduler::run_task(event_queues, task, my_attempt_id, &accumulator_sink)
         });
     }
 

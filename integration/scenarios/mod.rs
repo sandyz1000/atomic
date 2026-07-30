@@ -18,6 +18,7 @@ mod multi_stage;
 mod named_partitioner;
 mod shuffle_wordcount;
 mod sort_by_task;
+mod unstaged_shuffle;
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
 #[value(rename_all = "snake_case")]
@@ -29,6 +30,7 @@ pub enum Scenario {
     CacheLocality,
     NamedPartitioner,
     SortByTask,
+    UnstagedShuffle,
 }
 
 pub fn run(scenario: Scenario, ctx: &Arc<Context>) -> Result<(), Box<dyn Error>> {
@@ -40,5 +42,6 @@ pub fn run(scenario: Scenario, ctx: &Arc<Context>) -> Result<(), Box<dyn Error>>
         Scenario::CacheLocality => cache_locality::run_driver(ctx),
         Scenario::NamedPartitioner => named_partitioner::run_driver(ctx),
         Scenario::SortByTask => sort_by_task::run_driver(ctx),
+        Scenario::UnstagedShuffle => unstaged_shuffle::run_driver(ctx),
     }
 }

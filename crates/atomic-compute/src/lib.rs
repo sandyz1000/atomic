@@ -74,8 +74,8 @@ pub use atomic_data::{
 /// mechanism); this module is what makes that path resolve.
 pub mod __macro_support {
     pub use crate::registry::{
-        PartitionerEntry, ShuffleKeyEntry, ShuffleMapEntry, SortShuffleMapEntry, StateMergeEntry,
-        TaskEntry, shuffle_map_handler, sort_shuffle_map_handler,
+        PartitionerEntry, ShuffleKeyEntry, StateMergeEntry, TaskEntry, shuffle_map_handler,
+        sort_shuffle_map_handler,
     };
     pub use crate::task_traits::{AggregateTask, BinaryTask, PartitionTask, UnaryTask};
     pub use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};

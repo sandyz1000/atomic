@@ -7,13 +7,11 @@
 //! any staged pipeline). See `notes/shuffle-dependency-lineage.md`.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
 
 use bincode::Encode;
 
-use crate::aggregator::Aggregator;
 use crate::data::Data;
 use crate::distributed::{Step, WireEncode};
 use crate::error::DataResult;
@@ -48,8 +46,9 @@ pub trait ShuffleExecutor: Send + Sync {
 /// can't provide. Built from a [`TypedShuffle`] whose `K`/`V`/`C` are erased behind the `dyn`.
 #[derive(Clone)]
 pub struct ShuffleDependency {
-    /// Identifies the registered `SHUFFLE_MAP_REGISTRY` handler for the `(K, V)` type pair —
-    /// the `register_shuffle_map!` key the worker looks up. Required for distributed shuffle.
+    /// Identifies the registered shuffle-map `TaskEntry` for the `(K, V)` type pair — the
+    /// `register_shuffle_map!` key the worker looks up in `TASK_REGISTRY`. Required for
+    /// distributed shuffle.
     pub type_id: &'static str,
     /// Steps that run on workers *before* the ShuffleMap op, non-empty when a `_task` pipeline
     /// precedes the shuffle. Paired with [`staged_partitions`](Self::staged_partitions).
@@ -122,14 +121,18 @@ impl Ord for ShuffleDependency {
 /// unsorted layout. Stored erased so `TypedShuffle`'s `K` bound stays `Hash`-only.
 pub type KeyComparator<K> = Arc<dyn Fn(&K, &K) -> Ordering + Send + Sync>;
 
-/// Generic shuffle dependency with full type information
+/// Generic shuffle dependency with full type information.
+///
+/// Carries no `Aggregator` — the shuffle-map write side (`do_shuffle_task_typed` below, and
+/// the generic distributed `EngineAction::ShuffleMap` path) only ever partitions raw `(K, V)`
+/// pairs; aggregation into `C` happens entirely on the reduce side
+/// (`ShuffledRdd::compute`, which owns its own `Arc<Aggregator<K,V,C>>`). `C` is still a type
+/// parameter here (via `_phantom`) so `ShuffleExecutor`'s erasure lines up with `ShuffledRdd`'s.
 pub struct TypedShuffle<K: Data, V: Data, C: Data> {
     shuffle_id: usize,
     is_cogroup_flag: bool,
     /// Typed RDD - we know it produces (K, V) tuples
     rdd: Arc<dyn crate::rdd::Rdd<Item = (K, V)>>,
-    /// Typed aggregator
-    aggregator: Arc<Aggregator<K, V, C>>,
     /// Partitioner for determining output partitions
     partitioner: Partitioner,
     /// When `Some`, each reduce-partition bucket is sorted by key before it is written,
@@ -143,7 +146,7 @@ where
     K: Eq + Hash + Encode + Clone,
     C: Encode + Clone,
     K: Data,
-    V: Data + Clone,
+    V: Data + Clone + Encode,
     C: Data,
 {
     /// Create a new shuffle dependency (legacy unsorted layout).
@@ -151,14 +154,12 @@ where
         shuffle_id: usize,
         is_cogroup: bool,
         rdd: Arc<dyn crate::rdd::Rdd<Item = (K, V)>>,
-        aggregator: Arc<Aggregator<K, V, C>>,
         partitioner: Partitioner,
     ) -> Arc<Self> {
         Arc::new(TypedShuffle {
             shuffle_id,
             is_cogroup_flag: is_cogroup,
             rdd,
-            aggregator,
             partitioner,
             comparator: None,
             _phantom: std::marker::PhantomData,
@@ -172,7 +173,6 @@ where
         shuffle_id: usize,
         is_cogroup: bool,
         rdd: Arc<dyn crate::rdd::Rdd<Item = (K, V)>>,
-        aggregator: Arc<Aggregator<K, V, C>>,
         partitioner: Partitioner,
         comparator: KeyComparator<K>,
     ) -> Arc<Self> {
@@ -180,14 +180,19 @@ where
             shuffle_id,
             is_cogroup_flag: is_cogroup,
             rdd,
-            aggregator,
             partitioner,
             comparator: Some(comparator),
             _phantom: std::marker::PhantomData,
         })
     }
 
-    /// Execute shuffle task with full type information
+    /// Execute shuffle task with full type information.
+    ///
+    /// Partitions raw `(K, V)` pairs only — no `create_combiner`/`merge_value` aggregation
+    /// here. Aggregation happens on the reduce side (`ShuffledRdd::compute`), matching the
+    /// generic distributed `EngineAction::ShuffleMap` write path exactly (both write plain
+    /// `Vec<(K, V)>` buckets), so the wire format is identical regardless of which path wrote
+    /// it — the fetcher/reduce side doesn't need to know or care.
     fn do_shuffle_task_typed(&self, partition: usize) -> String {
         log::debug!(
             "executing shuffle task #{} for partition #{}",
@@ -202,8 +207,7 @@ where
         log::debug!("is cogroup rdd: {}", self.is_cogroup_flag);
         log::debug!("number of output splits: {}", num_output_splits);
 
-        let mut buckets: Vec<HashMap<K, C>> =
-            (0..num_output_splits).map(|_| HashMap::new()).collect();
+        let mut buckets: Vec<Vec<(K, V)>> = (0..num_output_splits).map(|_| Vec::new()).collect();
 
         log::debug!(
             "before iterating while executing shuffle map task for partition #{}",
@@ -222,13 +226,7 @@ where
                     }
 
                     let bucket_id = self.partitioner.get_partition(&k);
-                    let bucket = &mut buckets[bucket_id];
-
-                    if let Some(old_v) = bucket.get_mut(&k) {
-                        (self.aggregator.merge_value)(old_v, v);
-                    } else {
-                        bucket.insert(k, (self.aggregator.create_combiner)(v));
-                    }
+                    buckets[bucket_id].push((k, v));
                 }
             }
             Err(e) => {
@@ -254,15 +252,14 @@ where
         let config = bincode::config::standard();
         let encoded: Vec<Vec<u8>> = buckets
             .into_iter()
-            .map(|bucket| {
-                let mut set: Vec<(K, C)> = bucket.into_iter().collect();
+            .map(|mut bucket| {
                 // Sort-shuffle: emit each bucket as a sorted run so the reduce side can k-way merge.
                 if let Some(cmp) = &self.comparator {
-                    set.sort_by(|a, b| cmp(&a.0, &b.0));
+                    bucket.sort_by(|a, b| cmp(&a.0, &b.0));
                 }
-                bincode::encode_to_vec(&set, config).unwrap_or_else(|e| {
+                bincode::encode_to_vec(&bucket, config).unwrap_or_else(|e| {
                     log::error!("Error serializing shuffle bucket: {:?}", e);
-                    bincode::encode_to_vec(Vec::<(K, C)>::new(), config).unwrap_or_default()
+                    bincode::encode_to_vec(Vec::<(K, V)>::new(), config).unwrap_or_default()
                 })
             })
             .collect();
@@ -299,7 +296,7 @@ where
 impl<K, V, C> From<Arc<TypedShuffle<K, V, C>>> for ShuffleDependency
 where
     K: Data + Eq + Hash + Encode + Clone,
-    V: Data + Clone,
+    V: Data + Clone + Encode,
     C: Data + Encode + Clone,
     Vec<(K, V)>: WireEncode,
 {
@@ -325,7 +322,7 @@ impl ShuffleDependency {
     ) -> Self
     where
         K: Data + Eq + Hash + Encode + Clone,
-        V: Data + Clone,
+        V: Data + Clone + Encode,
         C: Data + Encode + Clone,
         Vec<(K, V)>: WireEncode,
     {
@@ -354,7 +351,7 @@ impl ShuffleDependency {
 impl<K, V, C> ShuffleExecutor for TypedShuffle<K, V, C>
 where
     K: Data + Eq + Hash + Encode + Clone,
-    V: Data + Clone,
+    V: Data + Clone + Encode,
     C: Data + Encode + Clone,
     Vec<(K, V)>: WireEncode,
 {

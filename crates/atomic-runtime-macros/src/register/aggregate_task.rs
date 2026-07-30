@@ -36,7 +36,7 @@ impl Parse for AggregateTaskInput {
 /// ```rust,ignore
 /// atomic_compute::register_aggregate_task!(MyAgg, (f64, u64), f64);
 /// ```
-pub(crate) fn register_aggregate_task_impl(input: TokenStream) -> TokenStream {
+pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let AggregateTaskInput { task, acc, elem } = parse_macro_input!(input as AggregateTaskInput);
 
     TokenStream::from(quote! {

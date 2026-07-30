@@ -19,9 +19,16 @@ where
     pub fn sort_by_key(self, ascending: bool) -> Self
     where
         Vec<(K, V)>: WireDecode + WireEncode,
-        Vec<K>: WireDecode,
-        K: WireEncode + bincode::Encode + bincode::Decode<()> + Clone + std::hash::Hash + Eq,
+        Vec<K>: WireEncode + WireDecode,
+        K: WireEncode
+            + WireDecode
+            + bincode::Encode
+            + bincode::Decode<()>
+            + Clone
+            + std::hash::Hash
+            + Eq,
         V: WireEncode + bincode::Encode + bincode::Decode<()> + Clone,
+        (K, V): WireEncode + WireDecode,
         Vec<(K, Vec<V>)>: WireEncode,
     {
         let num_partitions = self.rdd.number_of_splits();
@@ -99,9 +106,10 @@ where
     /// partition covers a contiguous, non-overlapping key range.
     pub fn sort_by_key_range(self, num_partitions: usize, ascending: bool) -> Self
     where
-        Vec<(K, V)>: WireDecode,
+        Vec<(K, V)>: WireEncode + WireDecode,
         K: WireEncode + bincode::Encode,
         V: WireEncode,
+        (K, V): WireEncode + WireDecode,
     {
         use atomic_data::partitioner::Partitioner;
         let ctx = self.context.clone();
@@ -229,7 +237,7 @@ where
         T: bincode::Encode + bincode::Decode<()>,
         (K, T): Data + Clone + WireEncode + WireDecode,
         Vec<(K, T)>: WireEncode + WireDecode,
-        Vec<K>: WireDecode,
+        Vec<K>: WireEncode + WireDecode,
         Vec<(K, Vec<T>)>: WireEncode,
     {
         self.map_task(key_value_task)

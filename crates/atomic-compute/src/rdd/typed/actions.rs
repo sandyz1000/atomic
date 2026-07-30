@@ -3,51 +3,31 @@ use super::*;
 impl<T: Data + Clone> TypedRdd<T> {
     /// Collect all elements from all partitions into a Vec.
     ///
-    /// In distributed mode, if a lazy pipeline has been staged by `map_task` /
-    /// `filter_task` / `flat_map_task`, this dispatches the full pipeline in one
-    /// round-trip per partition. Otherwise falls back to the driver scheduler path.
+    /// Dispatches via `Context::dispatch_pipeline`, so the same call runs in-process
+    /// (local mode) or ships to workers (distributed mode) — the driver code is identical
+    /// either way. If a lazy pipeline was staged by `map_task`/`filter_task`/`flat_map_task`,
+    /// dispatches it directly; otherwise encodes the raw RDD partitions first (running any
+    /// pending shuffle-map stage so `ShuffledRdd::compute` can fetch its input).
     ///
     /// **Warning**: This brings all data to the driver. Only use on small datasets.
     pub fn collect(&self) -> Result<Vec<T>, DataError>
     where
-        Vec<T>: WireDecode,
+        T: WireEncode,
+        Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            if let Some(ref staged) = self.staged {
-                let result_bytes = self
-                    .context
-                    .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                return result_bytes
-                    .into_iter()
-                    .map(|bytes| {
-                        Vec::<T>::decode_wire(&bytes)
-                            .map_err(|e| DataError::DowncastFailure(e.to_string()))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map(|vecs| vecs.into_iter().flatten().collect());
-            }
+        let (source, steps) = self.resolve_pipeline()?;
+        let result_bytes = self
+            .context
+            .dispatch_pipeline(self.rdd.clone(), source, steps)
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
 
-            // If the RDD has shuffle dependencies, run the shuffle map stage on
-            // workers first. ShuffledRdd::compute will then fetch via HTTP.
-            let rdd_base = self.rdd.get_rdd_base();
-            let has_shuffle = rdd_base.get_dependencies().iter().any(|d| d.is_shuffle());
-            if has_shuffle {
-                self.context
-                    .run_pending_shuffle_stages(&rdd_base, vec![])
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                // Fall through to run_job — ShuffledRdd::compute calls ShuffleFetcher::fetch.
-            }
-        }
-        let cl = |iter: Box<dyn Iterator<Item = T>>| iter.collect::<Vec<T>>();
-        let results = self.context.run_job(self.rdd.clone(), cl)?;
-        let size = results.iter().fold(0, |a, b: &Vec<T>| a + b.len());
-        Ok(results
+        result_bytes
             .into_iter()
-            .fold(Vec::with_capacity(size), |mut acc, v| {
-                acc.extend(v);
-                acc
-            }))
+            .map(|b| {
+                Vec::<T>::decode_wire(&b).map_err(|e| DataError::DowncastFailure(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|vecs| vecs.into_iter().flatten().collect())
     }
 
     /// Collect each partition as a separate `Vec<T>`, preserving partition boundaries.
@@ -59,36 +39,17 @@ impl<T: Data + Clone> TypedRdd<T> {
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            if let Some(ref staged) = self.staged {
-                let result_bytes = self
-                    .context
-                    .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                return result_bytes
-                    .into_iter()
-                    .map(|bytes| {
-                        Vec::<T>::decode_wire(&bytes)
-                            .map_err(|e| DataError::DowncastFailure(e.to_string()))
-                    })
-                    .collect();
-            }
-
-            // No staged op pipeline: encode each partition directly and decode back,
-            // preserving partition boundaries without closure-backed scheduler tasks.
-            let source = Context::encode_rdd_partitions(self.rdd.clone())
-                .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-            return source
-                .into_iter()
-                .map(|bytes| {
-                    Vec::<T>::decode_wire(&bytes)
-                        .map_err(|e| DataError::DowncastFailure(e.to_string()))
-                })
-                .collect();
-        }
-
-        let cl = |iter: Box<dyn Iterator<Item = T>>| iter.collect::<Vec<T>>();
-        Ok(self.context.run_job(self.rdd.clone(), cl)?)
+        let (source, steps) = self.resolve_pipeline()?;
+        let result_bytes = self
+            .context
+            .dispatch_pipeline(self.rdd.clone(), source, steps)
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+        result_bytes
+            .into_iter()
+            .map(|bytes| {
+                Vec::<T>::decode_wire(&bytes).map_err(|e| DataError::DowncastFailure(e.to_string()))
+            })
+            .collect()
     }
 
     /// Stream elements partition-by-partition to the driver without holding all partitions
@@ -103,48 +64,42 @@ impl<T: Data + Clone> TypedRdd<T> {
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            return Ok(self.collect_distributed()?.into_iter());
-        }
-        let n = self.num_partitions();
+        let (source, steps) = self.resolve_pipeline()?;
         let mut result: Vec<T> = Vec::new();
-        for i in 0..n {
-            let partition_data = self.context.run_job_with_partitions(
-                self.rdd.clone(),
-                |iter| iter.collect::<Vec<T>>(),
-                [i],
-            )?;
-            result.extend(partition_data.into_iter().flatten());
+        for partition in source {
+            let parts = self
+                .context
+                .dispatch_pipeline(self.rdd.clone(), vec![partition], steps.clone())
+                .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+            for b in parts {
+                result.extend(
+                    Vec::<T>::decode_wire(&b)
+                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?,
+                );
+            }
         }
         Ok(result.into_iter())
     }
 
     /// Count the number of elements in the RDD.
     ///
-    /// In distributed mode, if a lazy pipeline is staged, it dispatches to workers
-    /// and counts the returned elements on the driver. In local mode runs on driver.
+    /// Sums per-partition lengths incrementally — never concatenates all elements on
+    /// the driver.
     pub fn count(&self) -> Result<u64, DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() && self.staged.is_some() {
-            // Sum per-partition lengths incrementally — never concatenate all elements.
-            return self.reduce_partitions(0u64, |acc, part| acc + part.len() as u64);
-        }
-        let counting_func = |iter: Box<dyn Iterator<Item = T>>| iter.count() as u64;
-        Ok(self
-            .context
-            .run_job(self.rdd.clone(), counting_func)?
-            .into_iter()
-            .sum())
+        self.reduce_partitions(0u64, |acc, part| acc + part.len() as u64)
     }
 
     /// Take the first n elements from the RDD.
     ///
-    /// In distributed mode, dispatches any staged pipeline to workers and takes
-    /// the first `n` elements from the collected results. In local mode uses a
-    /// partition-scanning strategy to minimise data read.
+    /// Uses a partition-scanning strategy in both modes: starts with one partition and
+    /// scales up geometrically until `num` elements are found, rather than dispatching
+    /// every partition up front — bounded by the pipeline dispatch granularity (a whole
+    /// partition per round-trip; unlike the old closure-driven local path, a partition
+    /// can no longer stop mid-iteration once `num` is reached).
     pub fn take(&self, num: usize) -> Result<Vec<T>, DataError>
     where
         T: WireEncode + WireDecode,
@@ -153,47 +108,41 @@ impl<T: Data + Clone> TypedRdd<T> {
         if num == 0 {
             return Ok(vec![]);
         }
-        if self.context.is_distributed() {
-            let elements = self.collect_distributed()?;
-            return Ok(elements.into_iter().take(num).collect());
-        }
-        // Local: partition-scanning strategy to minimise data read.
         const SCALE_UP_FACTOR: f64 = 2.0;
+        let (source, steps) = self.resolve_pipeline()?;
+        let total_parts = source.len() as u32;
         let mut buf = vec![];
-        let total_parts = self.num_partitions() as u32;
         let mut parts_scanned = 0_u32;
 
         while buf.len() < num && parts_scanned < total_parts {
             let mut num_parts_to_try = 1u32;
-            let left = num - buf.len();
             if parts_scanned > 0 {
                 let parts_scanned_f64 = f64::from(parts_scanned);
                 num_parts_to_try = if buf.is_empty() {
                     (parts_scanned_f64 * SCALE_UP_FACTOR).ceil() as u32
                 } else {
+                    let left = num - buf.len();
                     let num_parts =
                         (1.5 * left as f64 * parts_scanned_f64 / (buf.len() as f64)).ceil();
                     num_parts.min(parts_scanned_f64 * SCALE_UP_FACTOR) as u32
                 };
             }
 
-            let partitions: Vec<_> = (parts_scanned as usize
-                ..total_parts.min(parts_scanned + num_parts_to_try) as usize)
-                .collect();
-            let num_partitions = partitions.len() as u32;
-            let take_from_partition =
-                move |iter: Box<dyn Iterator<Item = T>>| iter.take(left).collect::<Vec<T>>();
+            let end = total_parts.min(parts_scanned + num_parts_to_try) as usize;
+            let subset = source[parts_scanned as usize..end].to_vec();
+            let num_partitions = subset.len() as u32;
 
-            let res = self.context.run_job_with_partitions(
-                self.rdd.clone(),
-                take_from_partition,
-                partitions,
-            )?;
+            let res = self
+                .context
+                .dispatch_pipeline(self.rdd.clone(), subset, steps.clone())
+                .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
 
-            res.into_iter().for_each(|r| {
+            for b in res {
+                let part = Vec::<T>::decode_wire(&b)
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
                 let take = num - buf.len();
-                buf.extend(r.into_iter().take(take));
-            });
+                buf.extend(part.into_iter().take(take));
+            }
 
             parts_scanned += num_partitions;
         }
@@ -222,10 +171,6 @@ impl<T: Data + Clone> TypedRdd<T> {
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            let elements = self.collect_distributed()?;
-            return Ok(elements.is_empty());
-        }
         Ok(self.take(1)?.is_empty())
     }
 
@@ -239,31 +184,30 @@ impl<T: Data + Clone> TypedRdd<T> {
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            // For op-only distributed execution we avoid closure-backed sampling jobs.
-            // This path computes an exact count from worker-produced output.
-            return Ok(self.collect_distributed()?.len() as u64);
-        }
-
-        let n = self.num_partitions();
+        let (source, steps) = self.resolve_pipeline()?;
+        let n = source.len();
         let sample_n = ((confidence.clamp(0.001, 1.0) * n as f64).ceil() as usize)
             .max(1)
             .min(n);
-        let sample_indices: Vec<usize> = (0..sample_n).collect();
-        let counts = self
+        let subset = source[..sample_n].to_vec();
+        let result_bytes = self
             .context
-            .run_job_with_partitions(self.rdd.clone(), |iter| iter.count() as u64, sample_indices)
-            .map_err(DataError::from)?;
-        let sampled_total: u64 = counts.iter().sum();
+            .dispatch_pipeline(self.rdd.clone(), subset, steps)
+            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+        let mut sampled_total = 0u64;
+        for b in result_bytes {
+            let part =
+                Vec::<T>::decode_wire(&b).map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+            sampled_total += part.len() as u64;
+        }
         let estimate = (sampled_total as f64 * n as f64 / sample_n as f64).round() as u64;
         Ok(estimate)
     }
 
     /// Aggregate elements with different accumulator and result types.
     ///
-    /// In distributed mode, collects all elements from workers then applies
-    /// `seq_fn` on the driver. `comb_fn` is unused in distributed mode since
-    /// all elements are aggregated in a single pass on the driver.
+    /// `seq_fn(acc, elem)` folds within each partition; `comb_fn(acc, acc)` merges the
+    /// per-partition accumulators on the driver.
     pub fn aggregate<U, SF, CF>(&self, init: U, seq_fn: SF, comb_fn: CF) -> Result<U, DataError>
     where
         U: Data + Clone,
@@ -272,15 +216,13 @@ impl<T: Data + Clone> TypedRdd<T> {
         SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
         CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
     {
-        if self.context.is_distributed() {
-            let elements = self.collect_distributed()?;
-            return Ok(elements.into_iter().fold(init, seq_fn));
-        }
-        let zero = init.clone();
-        let reduce_partition =
-            move |iter: Box<dyn Iterator<Item = T>>| iter.fold(zero.clone(), &seq_fn);
-        let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
-        Ok(results.into_iter().fold(init, comb_fn))
+        let z = init.clone();
+        let partials: Vec<U> =
+            self.reduce_partitions(Vec::new(), move |mut acc: Vec<U>, part| {
+                acc.push(part.into_iter().fold(z.clone(), &seq_fn));
+                acc
+            })?;
+        Ok(partials.into_iter().fold(init, comb_fn))
     }
 
     /// Reduce elements using a balanced binary tree of merge operations.
@@ -296,17 +238,12 @@ impl<T: Data + Clone> TypedRdd<T> {
         Vec<T>: WireEncode + WireDecode,
         F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
     {
-        let partials: Vec<Option<T>> = if self.context.is_distributed() {
-            // Per-partition reduce: each partition sends 0 or 1 element.
+        // Per-partition reduce: each partition sends 0 or 1 element.
+        let partials: Vec<Option<T>> =
             self.reduce_partitions(Vec::new(), |mut acc: Vec<Option<T>>, part| {
                 acc.push(part.into_iter().reduce(&f));
                 acc
-            })?
-        } else {
-            let f_job = f.clone();
-            let reduce_partition = move |iter: Box<dyn Iterator<Item = T>>| iter.reduce(&f_job);
-            self.context.run_job(self.rdd.clone(), reduce_partition)?
-        };
+            })?;
 
         tree_merge_opts(partials, f, depth)
     }
@@ -330,111 +267,74 @@ impl<T: Data + Clone> TypedRdd<T> {
         SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
         CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
     {
-        let partials: Vec<U> = if self.context.is_distributed() {
-            // Per-partition fold into accumulator, one U per partition.
-            let z = zero.clone();
-            let seq = seq_fn.clone();
+        // Per-partition fold into accumulator, one U per partition.
+        let z = zero.clone();
+        let seq = seq_fn.clone();
+        let partials: Vec<U> =
             self.reduce_partitions(Vec::new(), move |mut acc: Vec<U>, part| {
                 acc.push(part.into_iter().fold(z.clone(), &seq));
                 acc
-            })?
-        } else {
-            let z = zero.clone();
-            let reduce_partition =
-                move |iter: Box<dyn Iterator<Item = T>>| iter.fold(z.clone(), &seq_fn);
-            self.context.run_job(self.rdd.clone(), reduce_partition)?
-        };
+            })?;
 
         Ok(tree_merge(partials, comb_fn, depth).unwrap_or(zero))
     }
 
     /// Apply a function to each element (for side effects).
     ///
-    /// In distributed mode, collects all elements from workers and applies `f`
-    /// on the driver. The function runs on the driver, not on workers.
+    /// The function runs on the driver, not on workers — one partition's worth of
+    /// elements crosses the wire at a time (bounded memory), never the whole RDD at once.
     pub fn for_each<F>(&self, f: F) -> Result<(), DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
         F: Fn(&T) + Clone + Send + Sync + 'static,
     {
-        if self.context.is_distributed() {
-            let elements = self.collect_distributed()?;
-            elements.iter().for_each(&f);
-            return Ok(());
-        }
-        let for_each_partition = move |iter: Box<dyn Iterator<Item = T>>| {
-            iter.for_each(|x| f(&x));
-        };
-        self.context.run_job(self.rdd.clone(), for_each_partition)?;
-        Ok(())
+        self.reduce_partitions((), move |(), part| {
+            part.iter().for_each(&f);
+        })
     }
 
     /// Apply a function to each partition (for side effects).
     ///
-    /// In distributed mode, collects all elements from workers and passes them
-    /// as a single iterator to `f` on the driver (partition boundaries are not
-    /// preserved across the wire).
+    /// `f` is called once per partition, with that partition's elements as an iterator —
+    /// partition boundaries are preserved.
     pub fn for_each_partition<F>(&self, f: F) -> Result<(), DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
         F: Fn(Box<dyn Iterator<Item = T>>) + Clone + Send + Sync + 'static,
     {
-        if self.context.is_distributed() {
-            let elements = self.collect_distributed()?;
-            f(Box::new(elements.into_iter()));
-            return Ok(());
-        }
-        self.context.run_job(self.rdd.clone(), f)?;
-        Ok(())
+        self.reduce_partitions((), move |(), part| {
+            f(Box::new(part.into_iter()));
+        })
     }
 
     /// Apply a `#[task]`-registered side-effecting function (`UnaryTask<T, ()>`) to each
-    /// element. Unlike [`for_each`](Self::for_each), which collects to the driver and runs
-    /// the closure there, this runs the task **on the workers** in distributed mode.
+    /// element. Unlike [`for_each`](Self::for_each), which runs the closure on the driver,
+    /// this dispatches the task itself — it runs on the worker (or in-process thread) that
+    /// owns each partition.
     pub fn for_each_task<F>(&self, task: F) -> Result<(), DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
         F: UnaryTask<T, ()>,
     {
-        if !self.context.is_distributed() {
-            let task_c = task.clone();
-            let for_each_partition = move |iter: Box<dyn Iterator<Item = T>>| {
-                for x in iter {
-                    task_c.call(x);
-                }
-            };
-            self.context.run_job(self.rdd.clone(), for_each_partition)?;
-            return Ok(());
-        }
-
-        let op = Step {
+        let (source_partitions, mut steps) = self.resolve_pipeline()?;
+        steps.push(Step {
             task_name: F::NAME.to_string(),
             kind: StepKind::Task(TaskAction::Foreach),
             runtime: TaskRuntime::Native,
             payload: task.encode_params(),
-        };
-        let (source_partitions, mut steps) = match &self.staged {
-            None => {
-                let src = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                (src, vec![])
-            }
-            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
-        };
-        steps.push(op);
+        });
         self.context
-            .dispatch_pipeline(source_partitions, steps)
+            .dispatch_pipeline(self.rdd.clone(), source_partitions, steps)
             .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
         Ok(())
     }
 
     /// Count the number of occurrences of each unique value.
     ///
-    /// In distributed mode, collects all elements from workers then counts on
-    /// the driver.
+    /// Each partition's counts are folded in one at a time (bounded memory), then merged.
     pub fn count_by_value(&self) -> Result<std::collections::HashMap<T, u64>, DataError>
     where
         T: Eq + std::hash::Hash + Clone + WireEncode + WireDecode,
@@ -442,41 +342,20 @@ impl<T: Data + Clone> TypedRdd<T> {
     {
         use std::collections::HashMap;
 
-        if self.context.is_distributed() {
-            let elements = self.collect_distributed()?;
-            let mut counts = HashMap::new();
-            for item in elements {
-                *counts.entry(item).or_insert(0) += 1;
+        self.reduce_partitions(HashMap::new(), |mut acc: HashMap<T, u64>, part| {
+            for item in part {
+                *acc.entry(item).or_insert(0) += 1;
             }
-            return Ok(counts);
-        }
-
-        let count_partition = move |iter: Box<dyn Iterator<Item = T>>| {
-            let mut counts = HashMap::new();
-            for item in iter {
-                *counts.entry(item).or_insert(0) += 1;
-            }
-            counts
-        };
-
-        let partition_counts = self.context.run_job(self.rdd.clone(), count_partition)?;
-
-        let mut final_counts = HashMap::new();
-        for counts in partition_counts {
-            for (k, v) in counts {
-                *final_counts.entry(k).or_insert(0) += v;
-            }
-        }
-
-        Ok(final_counts)
+            acc
+        })
     }
 
     /// Fold all elements with a closure, seeded by `zero`.
     ///
-    /// The closure runs on the driver. In distributed mode each partition is dispatched and
-    /// folded one at a time (no full concatenation, bounded memory), but every element still
-    /// crosses the wire. For worker-side reduction use [`fold_task`](TypedRdd::fold_task) with
-    /// a registered `#[task]`.
+    /// The closure runs on the driver. Each partition is dispatched and folded one at a
+    /// time (no full concatenation, bounded memory), but every element still crosses the
+    /// wire. For worker-side reduction use [`fold_task`](TypedRdd::fold_task) with a
+    /// registered `#[task]`.
     pub fn fold(
         &self,
         zero: T,
@@ -486,36 +365,25 @@ impl<T: Data + Clone> TypedRdd<T> {
         T: Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            let z = zero.clone();
-            let o = op.clone();
-            let partials: Vec<T> =
-                self.reduce_partitions(Vec::new(), move |mut acc: Vec<T>, part| {
-                    acc.push(part.into_iter().fold(z.clone(), &o));
-                    acc
-                })?;
-            let mut acc = zero;
-            for p in partials {
-                acc = op(acc, p);
-            }
-            return Ok(acc);
-        }
         let z = zero.clone();
         let o = op.clone();
-        let part = move |iter: Box<dyn Iterator<Item = T>>| iter.fold(z.clone(), &o);
-        Ok(self
-            .context
-            .run_job(self.rdd.clone(), part)?
-            .into_iter()
-            .fold(zero, op))
+        let partials: Vec<T> =
+            self.reduce_partitions(Vec::new(), move |mut acc: Vec<T>, part| {
+                acc.push(part.into_iter().fold(z.clone(), &o));
+                acc
+            })?;
+        let mut acc = zero;
+        for p in partials {
+            acc = op(acc, p);
+        }
+        Ok(acc)
     }
 
     /// Reduce all elements with a closure. Returns `None` if the RDD is empty.
     ///
-    /// The closure runs on the driver. In distributed mode each partition is dispatched and
-    /// reduced one at a time (bounded memory), but every element still crosses the wire. For
-    /// worker-side reduction use [`reduce_task`](TypedRdd::reduce_task) with a registered
-    /// `#[task]`.
+    /// The closure runs on the driver. Each partition is dispatched and reduced one at a
+    /// time (bounded memory), but every element still crosses the wire. For worker-side
+    /// reduction use [`reduce_task`](TypedRdd::reduce_task) with a registered `#[task]`.
     pub fn reduce(
         &self,
         op: impl Fn(T, T) -> T + Clone + Send + Sync + 'static,
@@ -524,35 +392,21 @@ impl<T: Data + Clone> TypedRdd<T> {
         T: Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            let o = op.clone();
-            return self.reduce_partitions(None, move |acc: Option<T>, part| {
-                let best = part.into_iter().reduce(&o);
-                match (acc, best) {
-                    (Some(a), Some(b)) => Some(o(a, b)),
-                    (a, None) => a,
-                    (None, b) => b,
-                }
-            });
-        }
-        let o_local = op.clone();
-        let part = move |iter: Box<dyn Iterator<Item = T>>| iter.reduce(&o_local);
-        let results: Vec<Option<T>> = self.context.run_job(self.rdd.clone(), part)?;
-        let mut merged: Option<T> = None;
-        for val in results.into_iter().flatten() {
-            merged = match merged {
-                Some(m) => Some(op(m, val)),
-                None => Some(val),
-            };
-        }
-        Ok(merged)
+        let o = op.clone();
+        self.reduce_partitions(None, move |acc: Option<T>, part| {
+            let best = part.into_iter().reduce(&o);
+            match (acc, best) {
+                (Some(a), Some(b)) => Some(o(a, b)),
+                (a, None) => a,
+                (None, b) => b,
+            }
+        })
     }
 
     /// Return the maximum element.
     ///
-    /// In distributed mode, if a lazy pipeline is staged (from `map_task` etc.),
-    /// workers execute it and return partition results; the driver picks the global max.
-    /// In local mode uses driver-local `iter.max()`.
+    /// If a lazy pipeline is staged (from `map_task` etc.), dispatches it and picks the
+    /// global max from the partition results.
     ///
     /// # Example
     /// ```ignore
@@ -563,40 +417,34 @@ impl<T: Data + Clone> TypedRdd<T> {
         T: Ord + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            // Primitive types reduce on the worker via the builtin `MaxTask` (one value per
-            // partition crosses the wire); other types reduce per-partition on the driver.
-            if let Some(name) = crate::builtin_tasks::max_task_name::<T>() {
-                let parts = self.dispatch_with_step(name, TaskAction::Reduce, vec![])?;
-                let mut best: Option<T> = None;
-                for b in parts {
-                    if b.is_empty() {
-                        continue; // empty partition — no value
-                    }
-                    let v = T::decode_wire(&b)
-                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                    best = Some(best.map_or(v.clone(), |c| c.max(v)));
+        // Primitive types reduce on the worker via the builtin `MaxTask` (one value per
+        // partition crosses the wire); other types reduce per-partition on the driver.
+        if let Some(name) = crate::builtin_tasks::max_task_name::<T>() {
+            let parts = self.dispatch_with_step(name, TaskAction::Reduce, vec![])?;
+            let mut best: Option<T> = None;
+            for b in parts {
+                if b.is_empty() {
+                    continue; // empty partition — no value
                 }
-                return Ok(best);
+                let v =
+                    T::decode_wire(&b).map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                best = Some(best.map_or(v.clone(), |c| c.max(v)));
             }
-            return self.reduce_partitions(None, |acc: Option<T>, part| {
-                match (acc, part.into_iter().max()) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    (a, None) => a,
-                    (None, b) => b,
-                }
-            });
+            return Ok(best);
         }
-        let max_partition = move |iter: Box<dyn Iterator<Item = T>>| iter.max();
-        let partition_maxes = self.context.run_job(self.rdd.clone(), max_partition)?;
-        Ok(partition_maxes.into_iter().flatten().max())
+        self.reduce_partitions(None, |acc: Option<T>, part| {
+            match (acc, part.into_iter().max()) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, None) => a,
+                (None, b) => b,
+            }
+        })
     }
 
     /// Return the minimum element.
     ///
-    /// In distributed mode dispatches the staged pipeline to workers (if any),
-    /// then picks the global minimum on the driver.
-    /// In local mode uses driver-local `iter.min()`.
+    /// Dispatches the staged pipeline (if any), then picks the global minimum from the
+    /// partition results.
     ///
     /// # Example
     /// ```ignore
@@ -607,31 +455,26 @@ impl<T: Data + Clone> TypedRdd<T> {
         T: Ord + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            if let Some(name) = crate::builtin_tasks::min_task_name::<T>() {
-                let parts = self.dispatch_with_step(name, TaskAction::Reduce, vec![])?;
-                let mut best: Option<T> = None;
-                for b in parts {
-                    if b.is_empty() {
-                        continue;
-                    }
-                    let v = T::decode_wire(&b)
-                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                    best = Some(best.map_or(v.clone(), |c| c.min(v)));
+        if let Some(name) = crate::builtin_tasks::min_task_name::<T>() {
+            let parts = self.dispatch_with_step(name, TaskAction::Reduce, vec![])?;
+            let mut best: Option<T> = None;
+            for b in parts {
+                if b.is_empty() {
+                    continue;
                 }
-                return Ok(best);
+                let v =
+                    T::decode_wire(&b).map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                best = Some(best.map_or(v.clone(), |c| c.min(v)));
             }
-            return self.reduce_partitions(None, |acc: Option<T>, part| {
-                match (acc, part.into_iter().min()) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, None) => a,
-                    (None, b) => b,
-                }
-            });
+            return Ok(best);
         }
-        let min_partition = move |iter: Box<dyn Iterator<Item = T>>| iter.min();
-        let partition_mins = self.context.run_job(self.rdd.clone(), min_partition)?;
-        Ok(partition_mins.into_iter().flatten().min())
+        self.reduce_partitions(None, |acc: Option<T>, part| {
+            match (acc, part.into_iter().min()) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, None) => a,
+                (None, b) => b,
+            }
+        })
     }
 
     /// Bucketed counts of the elements over ascending `bucket_bounds`.
@@ -640,9 +483,9 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// of length `n` where index `i` counts elements in `[bounds[i], bounds[i+1])`, with the
     /// final bucket right-inclusive. Elements outside `[bounds[0], bounds[n]]` are dropped.
     ///
-    /// In distributed mode, each partition produces its own bucket counts; the driver
-    /// sums them.  The bucket edges are a runtime parameter, so this is not a
-    /// compile-time-registered task — but per-partition work keeps memory bounded.
+    /// Each partition produces its own bucket counts; the driver sums them. The bucket
+    /// edges are a runtime parameter, so this is not a compile-time-registered task — but
+    /// per-partition work keeps memory bounded.
     pub fn histogram(&self, bucket_bounds: &[f64]) -> Result<Vec<u64>, DataError>
     where
         T: crate::builtin_tasks::NumericValue + WireEncode + WireDecode,
@@ -656,42 +499,60 @@ impl<T: Data + Clone> TypedRdd<T> {
         let hi = bucket_bounds[n];
         let bounds = bucket_bounds.to_vec(); // Arc-able copy
 
-        if self.context.is_distributed() {
-            return self.reduce_partitions(vec![0u64; n], move |mut counts, part| {
-                for x in part {
-                    let v = x.to_f64();
-                    if v < lo || v > hi {
-                        continue;
-                    }
-                    let idx = bounds
-                        .partition_point(|&b| b <= v)
-                        .saturating_sub(1)
-                        .min(n - 1);
-                    counts[idx] += 1;
+        self.reduce_partitions(vec![0u64; n], move |mut counts, part| {
+            for x in part {
+                let v = x.to_f64();
+                if v < lo || v > hi {
+                    continue;
                 }
-                counts
-            });
-        }
-
-        let mut counts = vec![0u64; n];
-        for x in self.collect()? {
-            let v = x.to_f64();
-            if v < lo || v > hi {
-                continue;
+                let idx = bounds
+                    .partition_point(|&b| b <= v)
+                    .saturating_sub(1)
+                    .min(n - 1);
+                counts[idx] += 1;
             }
-            let idx = bucket_bounds
-                .partition_point(|&b| b <= v)
-                .saturating_sub(1)
-                .min(n - 1);
-            counts[idx] += 1;
+            counts
+        })
+    }
+
+    /// Resolve `(source_partitions, steps)` for dispatching this RDD's pipeline: the staged
+    /// pipeline's own source+steps if one was built by `_task` methods, or the raw RDD
+    /// partitions (freshly encoded) with no steps otherwise. The un-staged case first runs
+    /// any pending shuffle-map stage (in either mode) so a `ShuffledRdd` node in the lineage
+    /// has output registered with `MapOutputTracker` before `encode_rdd_partitions`'
+    /// `.compute()` tries to fetch it — shared by every un-staged dispatcher
+    /// (`dispatch_with_step`, `reduce_partitions`, `collect`) so each gets it once instead
+    /// of missing it independently.
+    pub(super) fn resolve_pipeline(&self) -> Result<(Vec<Vec<u8>>, Vec<Step>), DataError>
+    where
+        T: WireEncode,
+        Vec<T>: WireEncode,
+    {
+        match &self.staged {
+            Some(s) => Ok((s.source_partitions.clone(), s.steps.clone())),
+            None => {
+                let rdd_base = self.rdd.get_rdd_base();
+                let has_shuffle = rdd_base.get_dependencies().iter().any(|d| d.is_shuffle());
+                if has_shuffle {
+                    self.context
+                        .run_pending_shuffle_stages(&rdd_base, vec![])
+                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                }
+                // A shuffle-crossing `.compute()` below needs a Tokio reactor for the
+                // `ShuffleFetcher` HTTP pull — enter one the same way `run_pending_shuffle_stages`
+                // does, since that call's own guard is already dropped by the time we get here.
+                let rdd = self.rdd.clone();
+                let src = crate::env::Env::run_in_async_rt(|| Context::encode_rdd_partitions(rdd))
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                Ok((src, vec![]))
+            }
         }
-        Ok(counts)
     }
 
     /// Dispatch the staged pipeline (or raw partitions) with one extra builtin step appended,
     /// returning the raw per-partition result bytes. Empty blobs (e.g. a per-partition reducer
     /// that produced no value) are preserved for the caller to skip.
-    fn dispatch_with_step(
+    pub(super) fn dispatch_with_step(
         &self,
         task_name: &str,
         action: TaskAction,
@@ -701,14 +562,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         T: WireEncode,
         Vec<T>: WireEncode,
     {
-        let (source, mut steps) = match &self.staged {
-            None => {
-                let src = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                (src, vec![])
-            }
-            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
-        };
+        let (source, mut steps) = self.resolve_pipeline()?;
         steps.push(Step {
             task_name: task_name.to_string(),
             kind: StepKind::Task(action),
@@ -716,31 +570,28 @@ impl<T: Data + Clone> TypedRdd<T> {
             payload,
         });
         self.context
-            .dispatch_pipeline(source, steps)
+            .dispatch_pipeline(self.rdd.clone(), source, steps)
             .map_err(|e| DataError::DowncastFailure(e.to_string()))
     }
 
     /// Dispatch the staged pipeline (or raw partitions) and fold the per-partition `Vec<T>`
-    /// outputs into `acc` one partition at a time. Unlike [`collect_distributed`], this never
-    /// concatenates all partitions on the driver — it holds one partition's `Vec<T>` plus the
-    /// accumulator at a time.
-    fn reduce_partitions<A, F>(&self, zero: A, mut per_partition: F) -> Result<A, DataError>
+    /// outputs into `acc` one partition at a time. Unlike [`collect`](TypedRdd::collect), this
+    /// never concatenates all partitions on the driver — it holds one partition's `Vec<T>`
+    /// plus the accumulator at a time.
+    pub(super) fn reduce_partitions<A, F>(
+        &self,
+        zero: A,
+        mut per_partition: F,
+    ) -> Result<A, DataError>
     where
         T: WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
         F: FnMut(A, Vec<T>) -> A,
     {
-        let (source, steps) = match &self.staged {
-            None => {
-                let src = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                (src, vec![])
-            }
-            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
-        };
+        let (source, steps) = self.resolve_pipeline()?;
         let parts = self
             .context
-            .dispatch_pipeline(source, steps)
+            .dispatch_pipeline(self.rdd.clone(), source, steps)
             .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
         let mut acc = zero;
         for b in parts {
@@ -751,128 +602,69 @@ impl<T: Data + Clone> TypedRdd<T> {
         Ok(acc)
     }
 
-    /// Internal helper: dispatch the staged pipeline (or raw partitions) to workers
-    /// and return all elements as a flat `Vec<T>`. Used by `first`, `take`, `is_empty`.
-    pub(crate) fn collect_distributed(&self) -> Result<Vec<T>, DataError>
-    where
-        T: WireEncode,
-        Vec<T>: WireEncode + WireDecode,
-    {
-        let (source, steps) = match &self.staged {
-            None => {
-                let src = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                (src, vec![])
-            }
-            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
-        };
-        let result_bytes = self
-            .context
-            .dispatch_pipeline(source, steps)
-            .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-
-        result_bytes
-            .into_iter()
-            .map(|b| {
-                Vec::<T>::decode_wire(&b).map_err(|e| DataError::DowncastFailure(e.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(|vecs| vecs.into_iter().flatten().collect())
-    }
-
     /// Return the top k elements in descending order.
-    ///
-    /// In distributed mode, collects all elements from workers then sorts on the driver.
     pub fn top(&self, k: usize) -> Result<Vec<T>, DataError>
     where
         T: Ord + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            // Primitives: each worker emits its local top-k via the builtin `TopKTask`
-            // (≤ k per partition); other types truncate per-partition on the driver.
-            let mut all_items: Vec<T> =
-                if let Some(name) = crate::builtin_tasks::top_k_task_name::<T>() {
-                    let payload = (k as u64)
-                        .encode_wire()
-                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                    let parts = self.dispatch_with_step(name, TaskAction::Collect, payload)?;
-                    let mut all = Vec::new();
-                    for b in parts {
-                        all.extend(
-                            Vec::<T>::decode_wire(&b)
-                                .map_err(|e| DataError::DowncastFailure(e.to_string()))?,
-                        );
-                    }
-                    all
-                } else {
-                    self.reduce_partitions(Vec::new(), |mut acc: Vec<T>, mut part| {
-                        part.sort_by(|a, b| b.cmp(a));
-                        part.truncate(k);
-                        acc.extend(part);
-                        acc
-                    })?
-                };
-            all_items.sort_by(|a, b| b.cmp(a));
-            all_items.truncate(k);
-            return Ok(all_items);
-        }
-        let top_partition = move |iter: Box<dyn Iterator<Item = T>>| {
-            let mut items: Vec<T> = iter.collect();
-            items.sort_by(|a, b| b.cmp(a));
-            items.truncate(k);
-            items
+        // Primitives: each worker emits its local top-k via the builtin `TopKTask`
+        // (≤ k per partition); other types truncate per-partition on the driver.
+        let mut all_items: Vec<T> = if let Some(name) = crate::builtin_tasks::top_k_task_name::<T>()
+        {
+            let payload = (k as u64)
+                .encode_wire()
+                .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+            let parts = self.dispatch_with_step(name, TaskAction::Collect, payload)?;
+            let mut all = Vec::new();
+            for b in parts {
+                all.extend(
+                    Vec::<T>::decode_wire(&b)
+                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?,
+                );
+            }
+            all
+        } else {
+            self.reduce_partitions(Vec::new(), |mut acc: Vec<T>, mut part| {
+                part.sort_by(|a, b| b.cmp(a));
+                part.truncate(k);
+                acc.extend(part);
+                acc
+            })?
         };
-        let partition_tops = self.context.run_job(self.rdd.clone(), top_partition)?;
-        let mut all_items: Vec<T> = partition_tops.into_iter().flatten().collect();
         all_items.sort_by(|a, b| b.cmp(a));
         all_items.truncate(k);
         Ok(all_items)
     }
 
     /// Return the first k elements in ascending order.
-    ///
-    /// In distributed mode, collects all elements from workers then sorts on the driver.
     pub fn take_ordered(&self, k: usize) -> Result<Vec<T>, DataError>
     where
         T: Ord + Clone + WireEncode + WireDecode,
         Vec<T>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            let mut all_items: Vec<T> =
-                if let Some(name) = crate::builtin_tasks::take_ordered_task_name::<T>() {
-                    let payload = (k as u64)
-                        .encode_wire()
-                        .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                    let parts = self.dispatch_with_step(name, TaskAction::Collect, payload)?;
-                    let mut all = Vec::new();
-                    for b in parts {
-                        all.extend(
-                            Vec::<T>::decode_wire(&b)
-                                .map_err(|e| DataError::DowncastFailure(e.to_string()))?,
-                        );
-                    }
-                    all
-                } else {
-                    self.reduce_partitions(Vec::new(), |mut acc: Vec<T>, mut part| {
-                        part.sort();
-                        part.truncate(k);
-                        acc.extend(part);
-                        acc
-                    })?
-                };
-            all_items.sort();
-            all_items.truncate(k);
-            return Ok(all_items);
-        }
-        let take_partition = move |iter: Box<dyn Iterator<Item = T>>| {
-            let mut items: Vec<T> = iter.collect();
-            items.sort();
-            items.truncate(k);
-            items
-        };
-        let partition_tops = self.context.run_job(self.rdd.clone(), take_partition)?;
-        let mut all_items: Vec<T> = partition_tops.into_iter().flatten().collect();
+        let mut all_items: Vec<T> =
+            if let Some(name) = crate::builtin_tasks::take_ordered_task_name::<T>() {
+                let payload = (k as u64)
+                    .encode_wire()
+                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
+                let parts = self.dispatch_with_step(name, TaskAction::Collect, payload)?;
+                let mut all = Vec::new();
+                for b in parts {
+                    all.extend(
+                        Vec::<T>::decode_wire(&b)
+                            .map_err(|e| DataError::DowncastFailure(e.to_string()))?,
+                    );
+                }
+                all
+            } else {
+                self.reduce_partitions(Vec::new(), |mut acc: Vec<T>, mut part| {
+                    part.sort();
+                    part.truncate(k);
+                    acc.extend(part);
+                    acc
+                })?
+            };
         all_items.sort();
         all_items.truncate(k);
         Ok(all_items)

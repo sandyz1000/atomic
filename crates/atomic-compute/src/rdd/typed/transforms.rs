@@ -103,8 +103,7 @@ impl<T: Data> TypedRdd<T> {
     }
 
     /// Return a new RDD containing elements only in this RDD but not in `other`.
-    /// Materialise the other side of a binary set operation into a hash set,
-    /// choosing the distributed op path or local run_job as appropriate.
+    /// Materialise the other side of a binary set operation into a hash set.
     fn materialize_other_set(
         &self,
         other: &TypedRdd<T>,
@@ -113,15 +112,7 @@ impl<T: Data> TypedRdd<T> {
         T: Eq + std::hash::Hash + Clone + WireEncode,
         Vec<T>: WireEncode + WireDecode,
     {
-        let ctx = self.context.clone();
-        let items: Vec<T> = if ctx.is_distributed() {
-            other.collect_distributed()?
-        } else {
-            ctx.run_job(other.rdd.clone(), |iter| iter.collect::<Vec<T>>())?
-                .into_iter()
-                .flatten()
-                .collect()
-        };
+        let items: Vec<T> = other.collect()?;
         Ok(Arc::new(items.into_iter().collect()))
     }
 

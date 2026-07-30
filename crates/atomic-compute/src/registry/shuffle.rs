@@ -1,7 +1,12 @@
-//! Shuffle-map dispatch: registries plus the handler logic they point at, owned
+//! Shuffle-map dispatch: registration plus the handler logic it points at, owned
 //! together in one file (the handler logic used to live in a separate
-//! `shuffle_map.rs`, three files away from the registries that reference it —
+//! `shuffle_map.rs`, three files away from the registration that references it —
 //! see the `registry` module doc for why they were merged).
+//!
+//! Shuffle-map handlers are `TaskEntry`s in the same [`crate::registry::TASK_REGISTRY`]
+//! every `#[task]`/`task_fn!`/`register_*_task!` handler dispatches through — one registry,
+//! one entry shape, one ABI (`TaskHandlerFn`) for every unit of distributed work dispatched
+//! by name. There is no shuffle-specific registry or ABI to keep in sync with it.
 //!
 //! # Registering a new `(K, V)` pair
 //!
@@ -14,272 +19,282 @@
 //! atomic_compute::register_sort_shuffle_map!(i64, f64);
 //! ```
 //!
-//! `NativeDispatcher` (`runtimes/native.rs`) looks up the shuffle's `(K, V)` dispatch
-//! key in [`SHUFFLE_MAP_REGISTRY`] (or [`SORT_SHUFFLE_MAP_REGISTRY`] first, if the
-//! shuffle was marked sorted) when it sees `StepKind::ShuffleMap`. The driver looks up
-//! [`SHUFFLE_KEY_REGISTRY`] by `TypeId` to embed the right dispatch key in the op.
+//! `NativeDispatcher` (`runtimes/native.rs`) looks up the shuffle's `(K, V)` dispatch key
+//! (the `"K::V"` string) in `TASK_REGISTRY` — trying the `"K::V::sorted"` key first when the
+//! shuffle was marked sorted, via [`resolve_shuffle_handler`] — when it sees
+//! `StepKind::Engine(EngineAction::ShuffleMap)`. The driver looks up [`SHUFFLE_KEY_REGISTRY`]
+//! by `TypeId` to embed the right dispatch key in the op; that lookup is unrelated to the
+//! handler-dispatch unification above (it's a driver-side `TypeId`→string reflection table,
+//! not a handler ABI).
+//!
+//! # Partitioning strategy vs. wire ABI
+//!
+//! [`HashShuffleWriter`] and [`SortShuffleWriter`] implement [`ShuffleWriter`]
+//! (`task_traits`) — the same "trait + one method" shape as `BinaryTask`/`PartitionTask` —
+//! and own *only* the bucketing decision. [`shuffle_map_handler`]/[`sort_shuffle_map_handler`]
+//! are the `TaskHandlerFn`s wrapping them, registered under the `"K::V"`/`"K::V::sorted"` keys.
+//! [`write_buckets`] is the shared, non-generic encode-and-cache tail both wrappers call into.
 
 use std::any::TypeId;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 
+use atomic_data::distributed::{TaskAction, WireDecode};
 use atomic_data::partitioner::PartitionerSchema;
-use atomic_data::{data::Data, distributed::WireDecode};
+use once_cell::sync::Lazy;
 use rustc_hash::FxHasher;
+use std::collections::HashMap;
 
-use super::declare_registry;
+use crate::error::{ComputeError, ComputeResult};
+use crate::registry::{TASK_REGISTRY, TaskEntry};
+use crate::task_traits::{OrdShuffleKey, ShuffleKey, ShuffleValue, ShuffleWriter};
 
-/// Shuffle-map write handler: `(data, shuffle_id, map_id, num_reduce, partitioner) -> ()`.
+/// Per-invocation shuffle-write coordinates, decoded from the `payload` a registered
+/// shuffle-map `TaskEntry` receives. `map_partition_id` travels here rather than as a
+/// separate typed argument because `TaskHandlerFn`'s signature (shared by every registered
+/// handler) is `fn(&TaskAction, payload, data)` — no dedicated slot for it — so
+/// `NativeDispatcher` packs it in fresh at each call, from the `partition_id` it already has
+/// in scope from its own `dispatch(&self, op, partition_id, data)` parameter.
+#[derive(bincode::Encode, bincode::Decode)]
+pub struct ShuffleWriteCtx {
+    pub shuffle_id: usize,
+    pub map_partition_id: usize,
+    pub num_reduce_partitions: usize,
+    pub partitioner_spec: PartitionerSchema,
+}
+
+/// Resolve the shuffle-write `TaskEntry` for `type_id` from `TASK_REGISTRY`, applying the
+/// sorted-vs-hash fallback policy in the one place that owns it. If `is_range` (the shuffle
+/// was marked as a range/sort shuffle), try the `"K::V::sorted"` key first; otherwise, or if
+/// no sorted handler was registered for this type, fall back to the plain `"K::V"` key.
+pub fn resolve_shuffle_handler(type_id: &str, is_range: bool) -> Option<&'static TaskEntry> {
+    if is_range && let Some(&entry) = TASK_REGISTRY.get(sorted_key(type_id).as_str()) {
+        return Some(entry);
+    }
+    TASK_REGISTRY.get(type_id).copied()
+}
+
+fn sorted_key(type_id: &str) -> String {
+    format!("{type_id}::sorted")
+}
+
+/// Maps a concrete `(K, V)` `TypeId` to its stable shuffle dispatch key.
 ///
-/// Same `String`-error rationale as [`TaskHandlerFn`](super::TaskHandlerFn): this is a
-/// `fn`-pointer ABI shared by every `register_shuffle_map!(K, V)` instantiation,
-/// converted to `ComputeError` on return.
-pub type ShuffleMapHandlerFn = fn(
-    &[u8],
-    usize,
-    usize,
-    usize,
-    &atomic_data::partitioner::PartitionerSchema,
-) -> Result<(), String>;
-
-declare_registry!(
-    /// A compile-time shuffle-write handler registered for a specific `(K, V)` type pair.
-    ///
-    /// Place `register_shuffle_map!(K, V)` in your binary once per pair used with
-    /// `reduce_by_key` or `group_by_key`. The worker binary collects all entries into
-    /// [`SHUFFLE_MAP_REGISTRY`] at startup.
-    ///
-    /// # Handler contract
-    ///
-    /// `handler(data, shuffle_id, map_partition_id, num_reduce_partitions)`:
-    /// - `data`: rkyv-encoded `Vec<(K, V)>` from the preceding pipeline ops
-    /// - Partitions elements by `FxHash(K) % num_reduce_partitions`
-    /// - Writes each bucket as bincode-encoded `Vec<(K, V)>` to `SHUFFLE_CACHE`
-    /// - Returns `Ok(())` on success or an error message
-    ShuffleMapEntry {
-        /// Function pointer that returns the stable dispatch key for this `(K, V)` pair.
-        ///
-        /// Generated by `register_shuffle_map!(K, V)` as
-        /// `concat!(stringify!(K), "::", stringify!(V))` — a compile-time string literal
-        /// that is stable across compiler versions (unlike `std::any::type_name`).
-        type_id: fn() -> &'static str,
-        /// The actual write handler.
-        handler: ShuffleMapHandlerFn,
-    },
-    /// Global compile-time shuffle-map registry — built once at startup from all
-    /// `register_shuffle_map!(K, V)` calls linked into the binary.
-    ///
-    /// Keyed by the stringify-based key (e.g. `"String::u32"`).
-    /// `NativeBackend` uses this when it sees `StepKind::ShuffleMap`.
-    SHUFFLE_MAP_REGISTRY: &'static str => ShuffleMapHandlerFn,
-
-    |entry: &ShuffleMapEntry| ((entry.type_id)(), entry.handler)
-);
-
-declare_registry!(
-    /// A compile-time **sorted** shuffle-write handler for `(K, V)` where `K: Ord`.
-    ///
-    /// Registered by `register_sort_shuffle_map!(K, V)` (opt-in for ordered keys). When the
-    /// driver marks a shuffle as a sort-shuffle, the worker uses this handler to sort each
-    /// reduce-partition bucket by key before writing, so the driver-side reduce can k-way merge
-    /// sorted runs instead of full-sorting.
-    SortShuffleMapEntry {
-        /// Stable dispatch key for the `(K, V)` pair (same `"K::V"` string as `ShuffleMapEntry`).
-        type_id: fn() -> &'static str,
-        /// The sorted write handler.
-        handler: ShuffleMapHandlerFn,
-    },
-    /// Global compile-time **sorted** shuffle-map registry. Keyed by the same `"K::V"` string as
-    /// [`SHUFFLE_MAP_REGISTRY`]; an entry exists only for key types where
-    /// `register_sort_shuffle_map!(K, V)` was called (i.e. `K: Ord`).
-    SORT_SHUFFLE_MAP_REGISTRY: &'static str => ShuffleMapHandlerFn,
-    |entry: &SortShuffleMapEntry| ((entry.type_id)(), entry.handler)
-);
-
-declare_registry!(
-    /// Maps a concrete `(K, V)` `TypeId` to its stable shuffle dispatch key.
-    ///
-    /// Used by the driver (in `rdd/typed.rs`) to look up the key when building a
-    /// `ShuffleMap` pipeline op. The key is the same `stringify!`-based string stored
-    /// in [`SHUFFLE_MAP_REGISTRY`], ensuring driver and worker use an identical lookup.
-    ///
-    /// Submitted by `register_shuffle_map!(K, V)` alongside [`ShuffleMapEntry`].
-    ShuffleKeyEntry {
-        /// Returns `TypeId::of::<(K, V)>()` — used as the lookup key by the driver.
-        type_id: fn() -> TypeId,
-        /// The stable dispatch key (e.g. `"String::u32"`).
-        key: &'static str,
-    },
-    /// Global map from `TypeId::of::<(K, V)>()` to the shuffle dispatch key string.
-    ///
-    /// The driver calls `SHUFFLE_KEY_REGISTRY.get(&TypeId::of::<(K, V)>())` to obtain
-    /// the key to embed in a `ShuffleMap` pipeline op payload.
-    SHUFFLE_KEY_REGISTRY: TypeId => &'static str,
-    |entry: &ShuffleKeyEntry| ((entry.type_id)(), entry.key)
-);
-
-/// Generic shuffle-write function for `(K, V)` pairs.
+/// Used by the driver (in `rdd/typed.rs`) to look up the key when building a
+/// `ShuffleMap` pipeline op. The key is the same `stringify!`-based string used as the
+/// `TASK_REGISTRY` key for that pair's shuffle-map `TaskEntry`, ensuring driver and worker
+/// use an identical lookup.
 ///
-/// Called by `NativeBackend` when it sees `StepKind::ShuffleMap`.
-/// Decodes the rkyv-encoded `Vec<(K, V)>` input, partitions elements by
-/// `FxHash(key) % num_reduce_partitions`, and writes each bucket as
-/// bincode-encoded `Vec<(K, V)>` to `SHUFFLE_CACHE`.
+/// Submitted by `register_shuffle_map!(K, V)` alongside the shuffle-map `TaskEntry`. Pure
+/// data (no behavior to wrap in a method), so unlike the handler entry, the registry stores
+/// the plain key string directly rather than the whole entry.
+pub struct ShuffleKeyEntry {
+    /// Returns `TypeId::of::<(K, V)>()` — used as the lookup key by the driver.
+    pub type_id: fn() -> TypeId,
+    /// The stable dispatch key (e.g. `"String::u32"`).
+    pub key: &'static str,
+}
+
+inventory::collect!(ShuffleKeyEntry);
+
+/// Global map from `TypeId::of::<(K, V)>()` to the shuffle dispatch key string.
 ///
-/// Register this for a specific `(K, V)` pair with `register_shuffle_map!`.
-///
-/// Returns `Result<(), String>`, not a typed error: this function is assigned to the
-/// [`ShuffleMapHandlerFn`] `fn`-pointer type, the dispatch ABI shared by every
-/// `register_shuffle_map!(K, V)` instantiation across the binary. `NativeDispatcher`
-/// converts the string into a proper `ComputeError` immediately on return (`runtimes/native.rs`).
-pub fn shuffle_map_handler<K, V>(
-    data: &[u8],
-    shuffle_id: usize,
-    map_partition_id: usize,
+/// The driver calls `SHUFFLE_KEY_REGISTRY.get(&TypeId::of::<(K, V)>())` to obtain
+/// the key to embed in a `ShuffleMap` pipeline op payload.
+pub static SHUFFLE_KEY_REGISTRY: Lazy<HashMap<TypeId, &'static str>> = Lazy::new(|| {
+    inventory::iter::<ShuffleKeyEntry>
+        .into_iter()
+        .map(|entry| ((entry.type_id)(), entry.key))
+        .collect()
+});
+
+/// Allocate `num_reduce_partitions` empty buckets and distribute `pairs` into them by
+/// `index_of(&k)`. Shared by both writer strategies below — they differ only in how the
+/// bucket index is computed, and, for [`SortShuffleWriter`], an extra post-bucketing sort
+/// pass that stays in its own `partition` body since [`HashShuffleWriter`] has no equivalent.
+fn bucket_pairs<K, V>(
+    pairs: Vec<(K, V)>,
     num_reduce_partitions: usize,
-    // Plain hashing ignores the spec; a named custom partitioner (from
-    // `partition_by_named`) is reconstructed from it and used instead.
-    spec: &PartitionerSchema,
-) -> Result<(), String>
-where
-    K: Data + Clone + Hash + bincode::Encode + bincode::Decode<()> + WireDecode,
-    V: Data + Clone + bincode::Encode + bincode::Decode<()> + WireDecode,
-    Vec<(K, V)>: WireDecode,
-{
-    let pairs: Vec<(K, V)> = Vec::<(K, V)>::decode_wire(data)
-        .map_err(|e| format!("shuffle_map_handler: decode input: {e}"))?;
-
-    // If the shuffle carried a registered named partitioner, rebuild and use it;
-    // otherwise partition by FxHash (deterministic across processes, no seed).
-    let custom = spec
-        .custom_name()
-        .and_then(|name| super::partitioner::lookup_partitioner(name, num_reduce_partitions));
-
+    mut index_of: impl FnMut(&K) -> usize,
+) -> Vec<Vec<(K, V)>> {
     let mut buckets: Vec<Vec<(K, V)>> = (0..num_reduce_partitions).map(|_| vec![]).collect();
-
     for (k, v) in pairs {
-        let bucket = match &custom {
+        let bucket = index_of(&k);
+        buckets[bucket].push((k, v));
+    }
+    buckets
+}
+
+/// Hash-partitioned shuffle-write strategy — the default for any `(K, V)` pair.
+///
+/// Uses a registered named partitioner rebuilt from `spec` if the shuffle carried one (from
+/// `partition_by_named`); otherwise partitions by `FxHash(K)` (deterministic across
+/// processes, no seed).
+#[derive(Default)]
+pub struct HashShuffleWriter;
+
+impl<K, V> ShuffleWriter<K, V> for HashShuffleWriter
+where
+    K: ShuffleKey,
+{
+    fn partition(
+        &self,
+        pairs: Vec<(K, V)>,
+        num_reduce_partitions: usize,
+        spec: &PartitionerSchema,
+    ) -> Vec<Vec<(K, V)>> {
+        let custom = spec
+            .custom_name()
+            .and_then(|name| super::partitioner::lookup_partitioner(name, num_reduce_partitions));
+
+        bucket_pairs(pairs, num_reduce_partitions, |k| match &custom {
             Some(p) => p
-                .get_partition(&k as &dyn std::any::Any)
+                .get_partition(k as &dyn std::any::Any)
                 .min(num_reduce_partitions.saturating_sub(1)),
             None => {
                 let mut hasher = FxHasher::default();
                 k.hash(&mut hasher);
                 (hasher.finish() as usize) % num_reduce_partitions
             }
-        };
-        buckets[bucket].push((k, v));
+        })
     }
+}
 
+/// Sorted shuffle-write strategy for `K: Ord`.
+///
+/// Partitions with the RDD's real partitioner (range bounds reconstructed from `spec` for
+/// `sort_by_key`; Hash/Custom specs degrade to hash partitioning) and sorts each bucket, so
+/// the driver-side reduce can k-way merge globally-ordered runs instead of full-sorting.
+#[derive(Default)]
+pub struct SortShuffleWriter;
+
+impl<K, V> ShuffleWriter<K, V> for SortShuffleWriter
+where
+    K: OrdShuffleKey,
+{
+    fn partition(
+        &self,
+        pairs: Vec<(K, V)>,
+        num_reduce_partitions: usize,
+        spec: &PartitionerSchema,
+    ) -> Vec<Vec<(K, V)>> {
+        let partitioner = spec.into_partitioner::<K>();
+        let descending = matches!(
+            spec,
+            PartitionerSchema::Range {
+                ascending: false,
+                ..
+            }
+        );
+
+        let mut buckets = bucket_pairs(pairs, num_reduce_partitions, |k| {
+            partitioner
+                .get_partition(k as &dyn std::any::Any)
+                .min(num_reduce_partitions.saturating_sub(1))
+        });
+
+        for bucket in &mut buckets {
+            if descending {
+                bucket.sort_by(|a, b| b.0.cmp(&a.0));
+            } else {
+                bucket.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+        }
+        buckets
+    }
+}
+
+/// Encode each bucket and write it to `SHUFFLE_CACHE` — the shared tail both writer
+/// strategies funnel through, so the consolidated-vs-per-bucket layout decision (and the
+/// completion log line) exists in exactly one place instead of being duplicated per strategy.
+fn write_buckets<K, V>(ctx: &ShuffleWriteCtx, buckets: Vec<Vec<(K, V)>>) -> ComputeResult<()>
+where
+    K: bincode::Encode,
+    V: bincode::Encode,
+{
     let cache = atomic_data::env::get_shuffle_cache()
-        .ok_or_else(|| "shuffle_map_handler: SHUFFLE_CACHE not initialized".to_string())?;
+        .ok_or_else(|| ComputeError::Other("shuffle cache not initialized".to_string()))?;
 
     // Encode each reduce-partition bucket once (per-partition framing is preserved in both layouts).
     let encoded: Vec<Vec<u8>> = buckets
         .into_iter()
         .map(|bucket| {
             bincode::encode_to_vec(&bucket, bincode::config::standard())
-                .map_err(|e| format!("shuffle_map_handler: encode bucket: {e}"))
+                .map_err(|e| ComputeError::InvalidPayload(format!("shuffle bucket encode: {e}")))
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<ComputeResult<_>>()?;
 
-    if num_reduce_partitions >= atomic_data::env::sort_shuffle_threshold() {
+    if ctx.num_reduce_partitions >= atomic_data::env::sort_shuffle_threshold() {
         // Consolidated (sort-shuffle) layout: one DATA blob + one INDEX for this map task.
         atomic_data::shuffle::cache::write_consolidated(
             cache.as_ref(),
-            shuffle_id,
-            map_partition_id,
+            ctx.shuffle_id,
+            ctx.map_partition_id,
             &encoded,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
     } else {
         // Legacy per-bucket layout: one entry per reduce partition.
         for (reduce_id, bytes) in encoded.into_iter().enumerate() {
-            cache.insert((shuffle_id, map_partition_id, reduce_id), bytes);
+            cache.insert((ctx.shuffle_id, ctx.map_partition_id, reduce_id), bytes);
         }
     }
 
     log::debug!(
-        "shuffle_map_handler: wrote {} buckets for shuffle_id={} partition={}",
-        num_reduce_partitions,
-        shuffle_id,
-        map_partition_id
+        "write_buckets: wrote {} buckets for shuffle_id={} partition={}",
+        ctx.num_reduce_partitions,
+        ctx.shuffle_id,
+        ctx.map_partition_id
     );
     Ok(())
 }
 
-/// Sorted shuffle-write handler for `K: Ord`. Unlike [`shuffle_map_handler`], it partitions using
-/// the **real** partitioner reconstructed from the shipped `spec` (range bounds for `sort_by_key`),
-/// then sorts each reduce-partition bucket by key — so the driver-side reduce can k-way merge
-/// globally-ordered sorted runs. Registered via `register_sort_shuffle_map!`.
-pub fn sort_shuffle_map_handler<K, V>(
+/// `TaskHandlerFn` wrapper for `(K, V)`: decode `payload` into a [`ShuffleWriteCtx`] and
+/// `data` into the wire pairs, delegate bucketing to [`HashShuffleWriter`], then write via
+/// [`write_buckets`]. Registered by `register_shuffle_map!(K, V)` under the `"K::V"` key.
+pub fn shuffle_map_handler<K, V>(
+    _action: &TaskAction,
+    payload: &[u8],
     data: &[u8],
-    shuffle_id: usize,
-    map_partition_id: usize,
-    num_reduce_partitions: usize,
-    spec: &PartitionerSchema,
-) -> Result<(), String>
+) -> Result<Vec<u8>, String>
 where
-    K: atomic_data::data::Data
-        + Clone
-        + Hash
-        + Ord
-        + Eq
-        + bincode::Encode
-        + bincode::Decode<()>
-        + WireDecode,
-    V: atomic_data::data::Data + Clone + bincode::Encode + bincode::Decode<()> + WireDecode,
+    K: ShuffleKey,
+    V: ShuffleValue,
     Vec<(K, V)>: WireDecode,
 {
+    let ctx: ShuffleWriteCtx = decode_ctx(payload)?;
+    let pairs: Vec<(K, V)> = Vec::<(K, V)>::decode_wire(data)
+        .map_err(|e| format!("shuffle_map_handler: decode input: {e}"))?;
+    let buckets =
+        HashShuffleWriter.partition(pairs, ctx.num_reduce_partitions, &ctx.partitioner_spec);
+    write_buckets(&ctx, buckets).map_err(|e| e.to_string())?;
+    Ok(data.to_vec())
+}
+
+/// `TaskHandlerFn` wrapper for `(K, V)`, `K: Ord`: same as [`shuffle_map_handler`] but
+/// delegates bucketing+sorting to [`SortShuffleWriter`]. Registered by
+/// `register_sort_shuffle_map!(K, V)` under the `"K::V::sorted"` key.
+pub fn sort_shuffle_map_handler<K, V>(
+    _action: &TaskAction,
+    payload: &[u8],
+    data: &[u8],
+) -> Result<Vec<u8>, String>
+where
+    K: OrdShuffleKey,
+    V: ShuffleValue,
+    Vec<(K, V)>: WireDecode,
+{
+    let ctx: ShuffleWriteCtx = decode_ctx(payload)?;
     let pairs: Vec<(K, V)> = Vec::<(K, V)>::decode_wire(data)
         .map_err(|e| format!("sort_shuffle_map_handler: decode input: {e}"))?;
+    let buckets =
+        SortShuffleWriter.partition(pairs, ctx.num_reduce_partitions, &ctx.partitioner_spec);
+    write_buckets(&ctx, buckets).map_err(|e| e.to_string())?;
+    Ok(data.to_vec())
+}
 
-    // Reconstruct the RDD's real partitioner from the shipped spec (range bounds → correct global
-    // ranges). Hash/Custom specs degrade to hash partitioning.
-    let partitioner = spec.into_partitioner::<K>();
-    let descending = matches!(
-        spec,
-        PartitionerSchema::Range {
-            ascending: false,
-            ..
-        }
-    );
-
-    let mut buckets: Vec<Vec<(K, V)>> = (0..num_reduce_partitions).map(|_| vec![]).collect();
-    for (k, v) in pairs {
-        let bucket = partitioner
-            .get_partition(&k as &dyn std::any::Any)
-            .min(num_reduce_partitions.saturating_sub(1));
-        buckets[bucket].push((k, v));
-    }
-
-    let cache = atomic_data::env::get_shuffle_cache()
-        .ok_or_else(|| "sort_shuffle_map_handler: SHUFFLE_CACHE not initialized".to_string())?;
-
-    // Sort each bucket by key (matching the range direction) → sorted runs for the reduce merge.
-    let encoded: Vec<Vec<u8>> = buckets
-        .into_iter()
-        .map(|mut bucket| {
-            if descending {
-                bucket.sort_by(|a, b| b.0.cmp(&a.0));
-            } else {
-                bucket.sort_by(|a, b| a.0.cmp(&b.0));
-            }
-            bincode::encode_to_vec(&bucket, bincode::config::standard())
-                .map_err(|e| format!("sort_shuffle_map_handler: encode bucket: {e}"))
-        })
-        .collect::<Result<_, _>>()?;
-
-    if num_reduce_partitions >= atomic_data::env::sort_shuffle_threshold() {
-        atomic_data::shuffle::cache::write_consolidated(
-            cache.as_ref(),
-            shuffle_id,
-            map_partition_id,
-            &encoded,
-        )
-        .map_err(|e| e.to_string())?;
-    } else {
-        for (reduce_id, bytes) in encoded.into_iter().enumerate() {
-            cache.insert((shuffle_id, map_partition_id, reduce_id), bytes);
-        }
-    }
-    Ok(())
+/// Decode the `ShuffleWriteCtx` `NativeDispatcher` packs into `payload` at each call —
+/// shared by both handlers above.
+fn decode_ctx(payload: &[u8]) -> Result<ShuffleWriteCtx, String> {
+    bincode::decode_from_slice(payload, bincode::config::standard())
+        .map(|(ctx, _)| ctx)
+        .map_err(|e| format!("shuffle write ctx decode: {e}"))
 }

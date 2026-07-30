@@ -266,7 +266,7 @@ impl ShuffleFetcher {
         &self,
         shuffle_id: usize,
         reduce_id: usize,
-    ) -> LibResult<impl Iterator<Item = (K, V)>>
+    ) -> LibResult<impl Iterator<Item = (K, V)> + use<K, V>>
     where
         K: Data + bincode::Decode<()>,
         V: Data + bincode::Decode<()>,

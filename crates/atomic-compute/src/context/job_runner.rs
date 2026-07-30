@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atomic_data::data::Data;
+use atomic_data::dependency::Dependency;
 use atomic_data::distributed::{
     ResultStatus, Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
@@ -16,7 +17,6 @@ use crate::error::{ComputeError, ComputeResult};
 use crate::runtimes::{Backend, ComputeEngine};
 
 use super::Context;
-use super::pipeline_executor::{DistributedExecutor, LocalExecutor, PipelineExecutor};
 
 impl Context {
     /// Dispatch a `#[task]`-registered Map/Filter/FlatMap over every partition,
@@ -40,8 +40,8 @@ impl Context {
             runtime: TaskRuntime::Native,
             payload,
         }];
-        let encoded = Self::encode_rdd_partitions(rdd)?;
-        let result_bytes = self.dispatch_pipeline(encoded, steps)?;
+        let encoded = Self::encode_rdd_partitions(rdd.clone())?;
+        let result_bytes = self.dispatch_pipeline(rdd, encoded, steps)?;
         result_bytes
             .into_iter()
             .map(|bytes| Vec::<U>::decode_wire(&bytes).map_err(ComputeError::from))
@@ -67,8 +67,8 @@ impl Context {
             runtime: TaskRuntime::Native,
             payload,
         }];
-        let encoded = Self::encode_rdd_partitions(rdd)?;
-        let partition_results_raw = self.dispatch_pipeline(encoded, steps.clone())?;
+        let encoded = Self::encode_rdd_partitions(rdd.clone())?;
+        let partition_results_raw = self.dispatch_pipeline(rdd, encoded, steps.clone())?;
 
         let mut partition_values: Vec<T> = partition_results_raw
             .into_iter()
@@ -109,34 +109,45 @@ impl Context {
         }
     }
 
-    /// Dispatch a full pipeline of steps over pre-encoded partition bytes.
+    /// Dispatch a full pipeline of steps over pre-encoded partition bytes, as one `Stage`
+    /// job through `Schedulers::run_pipeline_job` — the scheduler's own `submit_stage`/
+    /// `get_missing_parent_stages` recursion discovers and runs any shuffle-map parent stage
+    /// (walking `final_rdd`'s dependency DAG) before the result stage runs, via a real
+    /// tracked `Stage` wait, not call order. `Local` mode runs each task on a blocking
+    /// thread; `Distributed` mode ships it to a worker — that's the only difference.
     ///
-    /// - **Local mode**: runs all steps via `NativeBackend` in-process.
-    /// - **Distributed mode**: sends one `TaskEnvelope` per partition to a worker via TCP.
+    /// `final_rdd` supplies only the shape the planner walks (`RddBase`, dependencies, split
+    /// count) — its actual data is irrelevant here, since `source_partitions` (already
+    /// encoded) is what a `PipelineTask` actually runs `steps` over.
+    ///
+    /// An empty pipeline (no `steps`) is a no-op by definition — `source_partitions` is
+    /// returned unchanged without submitting a job at all.
     ///
     /// Returns raw result bytes per partition; callers decode into the concrete type.
-    pub fn dispatch_pipeline(
+    pub fn dispatch_pipeline<T: Data>(
         &self,
+        final_rdd: Arc<dyn Rdd<Item = T>>,
         source_partitions: Vec<Vec<u8>>,
         steps: Vec<Step>,
     ) -> ComputeResult<Vec<Vec<u8>>> {
-        let broadcasts = self.broadcast_snapshot();
-        self.pipeline_executor()
-            .run_pipeline(source_partitions, steps, broadcasts)
-    }
-
-    /// Build the [`PipelineExecutor`] for the active runtime — a local thread pool
-    /// ([`LocalExecutor`]) or remote workers ([`DistributedExecutor`]). Upstream calls
-    /// [`dispatch_pipeline`](Self::dispatch_pipeline) either way.
-    pub(crate) fn pipeline_executor(&self) -> Box<dyn PipelineExecutor> {
-        match &self.scheduler {
-            Schedulers::Local(_) => Box::new(LocalExecutor {
-                accumulator_store: self.accumulator_store.clone(),
-            }),
-            Schedulers::Distributed(s) => Box::new(DistributedExecutor {
-                scheduler: s.clone(),
-            }),
+        if steps.is_empty() {
+            return Ok(source_partitions);
         }
+        let broadcasts = self.broadcast_snapshot();
+        let partitions: Vec<usize> = (0..source_partitions.len()).collect();
+        let pipeline_data = atomic_scheduler::PipelineJobData {
+            result_steps: steps,
+            source_partitions,
+            broadcasts,
+        };
+        // `run_pipeline_job` dispatches tasks via `tokio::task::spawn_blocking` (local mode)
+        // or its own tokio-backed RPC path (distributed mode), both of which need an active
+        // Tokio runtime in scope — same requirement `run_job`/`run_job_with_partitions`
+        // already wrap for below.
+        Ok(env::Env::run_in_async_rt(|| {
+            self.scheduler
+                .run_pipeline_job(final_rdd, pipeline_data, partitions)
+        })?)
     }
 
     /// Encode every partition of an RDD into rkyv bytes.
@@ -156,8 +167,16 @@ impl Context {
             .collect()
     }
 
-    /// In distributed mode, run all pending `ShuffleDependency` map stages on workers
-    /// and register outputs with `MapOutputTracker` so the reduce phase can fetch them.
+    /// Run all pending `ShuffleDependency` map stages and register outputs with
+    /// `MapOutputTracker` so the reduce phase can fetch them — needed by any un-staged
+    /// (plain-closure) RDD chain whose lineage crosses a shuffle boundary, in either mode.
+    ///
+    /// - **Distributed**: dispatches one `TaskEnvelope` per map partition to workers.
+    /// - **Local**: runs each map partition in-process via
+    ///   [`ShuffleDependency::do_shuffle_task`](atomic_data::dependency::ShuffleDependency::do_shuffle_task)
+    ///   — the same call `LocalScheduler`'s own `ShuffleMapTask::run` makes — so the reduce
+    ///   side's HTTP fetch (same `ShuffleManager` server local mode already runs) finds a
+    ///   registered map output regardless of executor.
     pub fn run_pending_shuffle_stages(
         self: &Arc<Self>,
         rdd: &Arc<dyn RddBase>,
@@ -165,7 +184,7 @@ impl Context {
     ) -> ComputeResult<()> {
         let sched = match &self.scheduler {
             Schedulers::Distributed(s) => s.clone(),
-            Schedulers::Local(_) => return Ok(()),
+            Schedulers::Local(_) => return self.run_pending_shuffle_stages_local(rdd),
         };
 
         let dispatched = env::Env::run_in_async_rt(|| {
@@ -189,6 +208,28 @@ impl Context {
             );
         }
 
+        Ok(())
+    }
+
+    fn run_pending_shuffle_stages_local(&self, rdd: &Arc<dyn RddBase>) -> ComputeResult<()> {
+        let Some(tracker) = atomic_data::env::get_map_output_tracker() else {
+            return Ok(());
+        };
+        for dep in rdd.get_dependencies() {
+            if let Dependency::Shuffle(shuffle_dep) = dep {
+                let shuffle_id = shuffle_dep.get_shuffle_id();
+                let num_map_partitions = shuffle_dep.get_rdd_base().number_of_splits();
+                let uris: Vec<Option<String>> = (0..num_map_partitions)
+                    .map(|p| Some(shuffle_dep.do_shuffle_task(p)))
+                    .collect();
+                tracker.register_shuffle(shuffle_id, num_map_partitions);
+                tracker.register_map_outputs(shuffle_id, uris);
+                log::info!(
+                    "shuffle map stage complete (local): shuffle_id={shuffle_id} \
+                     num_map_partitions={num_map_partitions}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -259,6 +300,8 @@ impl Context {
         }));
     }
 
+    /// Legacy closure-dispatch path, not a pattern for new code — see
+    /// [`Context::driver_scheduler`]'s doc comment. Backs the built-in RDD actions only.
     pub fn run_job<T: Data, U: Data + Clone, F>(
         self: &Arc<Self>,
         rdd: Arc<dyn Rdd<Item = T>>,
@@ -275,6 +318,8 @@ impl Context {
         Ok(res)
     }
 
+    /// Legacy closure-dispatch path, not a pattern for new code — see
+    /// [`Context::driver_scheduler`]'s doc comment. Backs the built-in RDD actions only.
     pub fn run_job_with_partitions<T: Data, U: Data + Clone, F, P>(
         self: &Arc<Self>,
         rdd: Arc<dyn Rdd<Item = T>>,
@@ -293,6 +338,8 @@ impl Context {
         Ok(res)
     }
 
+    /// Legacy closure-dispatch path, not a pattern for new code — see
+    /// [`Context::driver_scheduler`]'s doc comment. Backs the built-in RDD actions only.
     pub fn run_job_with_context<T: Data, U: Data + Clone, F>(
         self: &Arc<Self>,
         rdd: Arc<dyn Rdd<Item = T>>,
@@ -340,14 +387,14 @@ impl Context {
     /// Collect all elements of an RDD into a `Vec`, distribution-aware.
     pub fn collect_rdd<T>(self: &Arc<Self>, rdd: Arc<dyn Rdd<Item = T>>) -> ComputeResult<Vec<T>>
     where
-        T: Data + Clone + WireDecode,
-        Vec<T>: WireDecode,
+        T: Data + Clone + WireEncode + WireDecode,
+        Vec<T>: WireEncode + WireDecode,
     {
         use crate::rdd::TypedRdd;
         if matches!(self.scheduler, Schedulers::Distributed(_))
             && let Some((partitions, steps)) = rdd.extract_staged_pipeline()
         {
-            let raw = self.dispatch_pipeline(partitions, steps)?;
+            let raw = self.dispatch_pipeline(rdd.clone(), partitions, steps)?;
             let mut out: Vec<T> = Vec::new();
             for bytes in raw {
                 let decoded = Vec::<T>::decode_wire(&bytes).map_err(|e| {

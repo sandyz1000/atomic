@@ -178,9 +178,8 @@ where
     /// Fold all elements using a `#[task]`-registered binary function.
     ///
     /// This is an **action** — it triggers computation and returns a single value.
-    /// In distributed mode it dispatches the full staged pipeline (if any) plus
-    /// the fold op as one round-trip, then combines per-partition fold results on
-    /// the driver via a Reduce step.
+    /// Dispatches the full staged pipeline (if any) plus the fold op as one round-trip,
+    /// then combines per-partition fold results on the driver via a Reduce step.
     ///
     /// # Example
     /// ```ignore
@@ -191,16 +190,6 @@ where
         F: BinaryTask<T>,
         Vec<T>: WireEncode + WireDecode,
     {
-        if !self.context.is_distributed() {
-            let task_c = task.clone();
-            let zero = init.clone();
-            let reduce_partition = move |iter: Box<dyn Iterator<Item = T>>| {
-                iter.fold(zero.clone(), |a, b| task_c.call(a, b))
-            };
-            let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
-            return Ok(results.into_iter().fold(init, |a, b| task.call(a, b)));
-        }
-
         // Build pipeline: existing staged steps (if any) + fold op.
         let fold_payload = init
             .encode_wire()
@@ -212,19 +201,12 @@ where
             payload: fold_payload,
         };
 
-        let (source_partitions, mut steps) = match &self.staged {
-            None => {
-                let encoded = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                (encoded, vec![])
-            }
-            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
-        };
+        let (source_partitions, mut steps) = self.resolve_pipeline()?;
         steps.push(fold_op);
 
         let raw_partition_outputs = self
             .context
-            .dispatch_pipeline(source_partitions, steps.clone())
+            .dispatch_pipeline(self.rdd.clone(), source_partitions, steps)
             .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
 
         let mut part_values: Vec<T> = raw_partition_outputs
@@ -249,33 +231,22 @@ where
 
     /// Reduce all elements using a `#[task]`-registered binary function.
     ///
-    /// Works identically in **local** and **distributed** mode. Returns `None`
-    /// if the RDD is empty. Prefer [`fold_task`] when a known identity value exists.
+    /// Returns `None` if the RDD is empty. Prefer [`fold_task`] when a known identity
+    /// value exists.
     ///
-    /// In distributed mode, dispatches the full staged pipeline (if any) plus a
-    /// `Reduce` op to workers; each partition is reduced to a single element.
-    /// The driver then combines the per-partition results with a second local Reduce.
+    /// Dispatches the full staged pipeline (if any) plus a `Reduce` op; each partition
+    /// is reduced to a single element. The driver then combines the per-partition
+    /// results with a second local Reduce.
     ///
     /// # Example
     /// ```ignore
     /// let total = ctx.parallelize_typed(data, 2).reduce_task(task_fn!(|a: i32, b: i32| a + b))?;
     /// ```
-    pub fn reduce_task<F>(&self, task: F) -> Result<Option<T>, DataError>
+    pub fn reduce_task<F>(&self, _task: F) -> Result<Option<T>, DataError>
     where
         F: BinaryTask<T>,
         Vec<T>: WireEncode + WireDecode,
     {
-        if !self.context.is_distributed() {
-            let task_c = task.clone();
-            let reduce_partition = move |iter: Box<dyn Iterator<Item = T>>| {
-                iter.reduce(|a, b| task_c.call(a, b))
-                    .into_iter()
-                    .collect::<Vec<_>>()
-            };
-            let results = self.context.run_job(self.rdd.clone(), reduce_partition)?;
-            return Ok(results.into_iter().flatten().reduce(|a, b| task.call(a, b)));
-        }
-
         let reduce_op = Step {
             task_name: F::NAME.to_string(),
             kind: StepKind::Task(TaskAction::Reduce),
@@ -283,19 +254,12 @@ where
             payload: vec![],
         };
 
-        let (source_partitions, mut steps) = match &self.staged {
-            None => {
-                let src = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                (src, vec![])
-            }
-            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
-        };
+        let (source_partitions, mut steps) = self.resolve_pipeline()?;
         steps.push(reduce_op);
 
         let partition_results_raw = self
             .context
-            .dispatch_pipeline(source_partitions, steps)
+            .dispatch_pipeline(self.rdd.clone(), source_partitions, steps)
             .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
 
         let mut values: Vec<T> = partition_results_raw
@@ -366,16 +330,6 @@ where
         F: AggregateTask<Acc, T>,
         Vec<T>: WireEncode + WireDecode,
     {
-        if !self.context.is_distributed() {
-            let task_c = task.clone();
-            let z = zero.clone();
-            let seq_partition = move |iter: Box<dyn Iterator<Item = T>>| {
-                iter.fold(z.clone(), |a, x| task_c.seq(a, x))
-            };
-            let partials = self.context.run_job(self.rdd.clone(), seq_partition)?;
-            return Ok(partials.into_iter().fold(zero, |a, b| task.comb(a, b)));
-        }
-
         let payload = zero
             .encode_wire()
             .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
@@ -386,19 +340,12 @@ where
             payload,
         };
 
-        let (source_partitions, mut steps) = match &self.staged {
-            None => {
-                let encoded = Context::encode_rdd_partitions(self.rdd.clone())
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                (encoded, vec![])
-            }
-            Some(s) => (s.source_partitions.clone(), s.steps.clone()),
-        };
+        let (source_partitions, mut steps) = self.resolve_pipeline()?;
         steps.push(agg_op);
 
         let raw = self
             .context
-            .dispatch_pipeline(source_partitions, steps)
+            .dispatch_pipeline(self.rdd.clone(), source_partitions, steps)
             .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
 
         let partials: Vec<Acc> = raw
@@ -519,7 +466,7 @@ where
     ///
     /// If a pipeline was already staged, appends `op` and returns it.
     /// Otherwise encodes the source `rdd` partitions once and starts a new pipeline.
-    fn stage_op(
+    pub(super) fn stage_op(
         staged: Option<StagedPipeline>,
         rdd: &RddRef<T>,
         op: Step,

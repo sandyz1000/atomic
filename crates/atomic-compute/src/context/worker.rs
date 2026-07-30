@@ -62,6 +62,12 @@ impl Context {
         ));
         let scheduler = atomic_scheduler::Schedulers::Local(local.clone());
 
+        let accumulator_store: super::AccumulatorStore = Arc::new(dashmap::DashMap::new());
+        let sink_store = Arc::clone(&accumulator_store);
+        local.set_accumulator_sink(Arc::new(move |deltas| {
+            super::broadcast::merge_deltas_into(&sink_store, deltas);
+        }));
+
         Ok(Arc::new(Context {
             config,
             scheduler,
@@ -71,7 +77,7 @@ impl Context {
             distributed_driver: false,
             work_dir: job_work_dir,
             broadcast_store: Arc::new(dashmap::DashMap::new()),
-            accumulator_store: Arc::new(dashmap::DashMap::new()),
+            accumulator_store,
             allocator: None,
             scoped: false,
             active_shuffle_stages: Arc::new(dashmap::DashMap::new()),

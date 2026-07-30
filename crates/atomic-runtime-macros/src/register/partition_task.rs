@@ -23,7 +23,7 @@ impl Parse for PartitionTaskInput {
 /// decoding the partition into a `Vec`, running `PartitionTask::transform` (which reads
 /// the op `payload`), and re-encoding. Use this for whole-partition reductions with no
 /// element-level combine (`top_k`, `take_ordered`, `distinct`, `sort`).
-pub(crate) fn register_partition_task_impl(input: TokenStream) -> TokenStream {
+pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let PartitionTaskInput { task, elem } = parse_macro_input!(input as PartitionTaskInput);
 
     TokenStream::from(quote! {

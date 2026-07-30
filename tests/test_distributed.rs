@@ -157,6 +157,52 @@ fn distributed_shuffle_wordcount() {
     assert_eq!(out["of"], serde_json::json!(1), "of count mismatch");
 }
 
+// ── Test 2b: un-staged shuffle (no `_task`) followed by a non-collect action ──
+
+/// Validates the local/distributed unification fix, in two layers: `.take()` (backed by
+/// `collect()`) on an un-staged `group_by_key()` RDD used to hard-error in
+/// distributed mode because the shuffle-map stage was never dispatched/registered before the
+/// fetch; after that was fixed, it surfaced a second, deeper pre-existing bug — the generic
+/// distributed shuffle-map write path writes raw `(K,V)` pairs but the reduce side assumed
+/// pre-aggregated `C` had arrived, so `group_by_key`'s groups came back wrong (or failed to
+/// deserialize). Both are fixed; this asserts actual group contents, not just a count, so a
+/// regression in either layer fails loudly.
+#[test]
+#[ignore = "requires pre-built integration binary and free TCP ports"]
+fn distributed_unstaged_shuffle_take() {
+    let port = free_port();
+    let mut worker = spawn_worker(port);
+    wait_for_port(port, Duration::from_secs(10));
+
+    let driver_out = run_driver("unstaged_shuffle", &[port]);
+    worker.kill().ok();
+    worker.wait().ok();
+
+    assert!(
+        driver_out.status.success(),
+        "unstaged shuffle driver failed:\nstderr: {}",
+        String::from_utf8_lossy(&driver_out.stderr)
+    );
+
+    let out: serde_json::Value = serde_json::from_slice(&driver_out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from unstaged_shuffle: {e}\nstdout: {}",
+            String::from_utf8_lossy(&driver_out.stdout)
+        )
+    });
+
+    assert_eq!(
+        out["a"],
+        serde_json::json!([1, 3]),
+        "group_by_key 'a' group mismatch"
+    );
+    assert_eq!(
+        out["b"],
+        serde_json::json!([2]),
+        "group_by_key 'b' group mismatch"
+    );
+}
+
 // ── Test 3: multi-stage pipeline ──────────────────────────────────────────────
 
 /// Validates a multi-stage pipeline: tokenize → reduce_by_key → sort-by-count.

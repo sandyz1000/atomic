@@ -550,7 +550,15 @@ impl KafkaDirectSource {
 
         let (source_partitions, ops) =
             build_staged_pipeline(&self.brokers, ranges, self.max_records_per_partition);
-        let raw = match ctx.dispatch_pipeline(source_partitions, ops) {
+        // No RDD lineage for a fresh Kafka read — see the identical note in
+        // `distributed_state.rs::dispatch_merge_state`.
+        let placeholder_rdd: Arc<dyn atomic_data::rdd::Rdd<Item = String>> =
+            Arc::new(atomic_compute::rdd::ParallelCollection::new(
+                ctx.new_rdd_id(),
+                Vec::new(),
+                1,
+            ));
+        let raw = match ctx.dispatch_pipeline(placeholder_rdd, source_partitions, ops) {
             Ok(r) => r,
             Err(e) => {
                 log::error!("KafkaDirectSource: dispatch_pipeline failed: {e}");

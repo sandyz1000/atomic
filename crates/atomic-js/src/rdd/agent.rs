@@ -53,7 +53,7 @@ impl JsRdd {
         // and distributed mode, so no separate local-mode fast path is needed here.
         let result_bytes = self
             .context
-            .dispatch_pipeline(source_partitions, vec![op])
+            .dispatch_pipeline(self.placeholder_rdd(), source_partitions, vec![op])
             .map_err(|e| Error::from_reason(format!("agentStep: {e}")))?;
 
         let mut out = Vec::new();

@@ -359,8 +359,12 @@ impl StreamingContext {
     /// `dispatch_pipeline` / `run_pending_shuffle_stages` as appropriate.
     pub fn print<T>(self: &Arc<Self>, stream: Arc<dyn DStream<T>>, num: usize)
     where
-        T: Data + Clone + std::fmt::Debug + atomic_data::distributed::WireDecode,
-        Vec<T>: atomic_data::distributed::WireDecode,
+        T: Data
+            + Clone
+            + std::fmt::Debug
+            + atomic_data::distributed::WireEncode
+            + atomic_data::distributed::WireDecode,
+        Vec<T>: atomic_data::distributed::WireEncode + atomic_data::distributed::WireDecode,
     {
         let sc = self.sc.clone();
         self.foreach_rdd(stream, move |rdd, time_ms| {
@@ -388,8 +392,12 @@ impl StreamingContext {
         prefix: impl Into<String>,
         suffix: impl Into<String>,
     ) where
-        T: Data + Clone + std::fmt::Debug + atomic_data::distributed::WireDecode,
-        Vec<T>: atomic_data::distributed::WireDecode,
+        T: Data
+            + Clone
+            + std::fmt::Debug
+            + atomic_data::distributed::WireEncode
+            + atomic_data::distributed::WireDecode,
+        Vec<T>: atomic_data::distributed::WireEncode + atomic_data::distributed::WireDecode,
     {
         let prefix = prefix.into();
         let suffix = suffix.into();

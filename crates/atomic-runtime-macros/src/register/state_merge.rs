@@ -26,7 +26,7 @@ impl Parse for StateMergeInput {
 /// ```rust,ignore
 /// atomic_compute::register_state_merge!("atomic_structured::windowed_v1", windowed_state_merge);
 /// ```
-pub(crate) fn register_state_merge_impl(input: TokenStream) -> TokenStream {
+pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let StateMergeInput { name, handler } = parse_macro_input!(input as StateMergeInput);
 
     TokenStream::from(quote! {

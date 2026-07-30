@@ -15,34 +15,27 @@ where
     where
         U: Data + Clone,
         K: std::hash::Hash + Eq,
-        Vec<(K, V)>: Data + Clone,
-        Vec<(K, U)>: Data + Clone,
+        (K, V): WireEncode,
+        (K, U): WireEncode,
+        Vec<(K, V)>: WireEncode + WireDecode,
+        Vec<(K, U)>: WireEncode + WireDecode,
     {
         use std::collections::HashMap;
         let ctx = self.context.clone();
         let num_partitions = self.rdd.number_of_splits();
 
-        let left_parts = ctx
-            .run_job(self.rdd, |iter| iter.collect::<Vec<(K, V)>>())
-            .unwrap_or_default();
+        let left_parts = self.collect().unwrap_or_default();
         let mut left_map: HashMap<K, Vec<V>> = HashMap::new();
-        for partition in left_parts {
-            for (k, v) in partition {
-                left_map.entry(k).or_default().push(v);
-            }
+        for (k, v) in left_parts {
+            left_map.entry(k).or_default().push(v);
         }
 
-        let right_parts = other
-            .context
-            .run_job(other.rdd, |iter| iter.collect::<Vec<(K, U)>>())
-            .unwrap_or_default();
+        let right_parts = other.collect().unwrap_or_default();
         let mut result: Vec<(K, (V, U))> = Vec::new();
-        for partition in right_parts {
-            for (k, u) in partition {
-                if let Some(vs) = left_map.get(&k) {
-                    for v in vs {
-                        result.push((k.clone(), (v.clone(), u.clone())));
-                    }
+        for (k, u) in right_parts {
+            if let Some(vs) = left_map.get(&k) {
+                for v in vs {
+                    result.push((k.clone(), (v.clone(), u.clone())));
                 }
             }
         }
@@ -54,38 +47,31 @@ where
     where
         U: Data + Clone,
         K: std::hash::Hash + Eq,
-        Vec<(K, V)>: Data + Clone,
-        Vec<(K, U)>: Data + Clone,
+        (K, V): WireEncode,
+        (K, U): WireEncode,
+        Vec<(K, V)>: WireEncode + WireDecode,
+        Vec<(K, U)>: WireEncode + WireDecode,
     {
         use std::collections::HashMap;
         let ctx = self.context.clone();
         let num_partitions = self.rdd.number_of_splits();
 
-        let right_parts = other
-            .context
-            .run_job(other.rdd, |iter| iter.collect::<Vec<(K, U)>>())
-            .unwrap_or_default();
+        let right_parts = other.collect().unwrap_or_default();
         let mut right_map: HashMap<K, Vec<U>> = HashMap::new();
-        for partition in right_parts {
-            for (k, u) in partition {
-                right_map.entry(k).or_default().push(u);
-            }
+        for (k, u) in right_parts {
+            right_map.entry(k).or_default().push(u);
         }
 
-        let left_parts = ctx
-            .run_job(self.rdd, |iter| iter.collect::<Vec<(K, V)>>())
-            .unwrap_or_default();
+        let left_parts = self.collect().unwrap_or_default();
         let mut result: Vec<(K, (V, Option<U>))> = Vec::new();
-        for partition in left_parts {
-            for (k, v) in partition {
-                match right_map.get(&k) {
-                    Some(us) => {
-                        for u in us {
-                            result.push((k.clone(), (v.clone(), Some(u.clone()))));
-                        }
+        for (k, v) in left_parts {
+            match right_map.get(&k) {
+                Some(us) => {
+                    for u in us {
+                        result.push((k.clone(), (v.clone(), Some(u.clone()))));
                     }
-                    None => result.push((k.clone(), (v.clone(), None))),
                 }
+                None => result.push((k.clone(), (v.clone(), None))),
             }
         }
         ctx.parallelize_typed(result, num_partitions)

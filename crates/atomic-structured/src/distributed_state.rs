@@ -120,8 +120,14 @@ where
         payload: vec![],
     }];
 
+    // No RDD lineage to walk here (a stateful merge has no shuffle boundary of its own) —
+    // `dispatch_pipeline`'s `final_rdd` param only matters for its `RddBase` shape, so an
+    // empty placeholder is exactly as valid as a real one.
+    let placeholder_rdd: Arc<dyn atomic_data::rdd::Rdd<Item = ()>> = Arc::new(
+        atomic_compute::rdd::ParallelCollection::new(sc.new_rdd_id(), Vec::new(), 1),
+    );
     let results = sc
-        .dispatch_pipeline(source_partitions, steps)
+        .dispatch_pipeline(placeholder_rdd, source_partitions, steps)
         .map_err(|e| StructuredError::Sql(format!("distributed state merge ({merge_fn}): {e}")))?;
 
     let mut emitted: Vec<Emitted> = Vec::new();

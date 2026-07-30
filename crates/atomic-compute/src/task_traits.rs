@@ -1,4 +1,9 @@
+use std::hash::Hash;
+
+use atomic_data::data::Data;
+use atomic_data::distributed::WireDecode;
 use atomic_data::error::DataResult;
+use atomic_data::partitioner::PartitionerSchema;
 
 /// Marker + dispatch trait for unary `#[task]` functions: `fn(T) -> U`.
 ///
@@ -61,6 +66,52 @@ pub trait BinaryTask<T>: Clone + Send + Sync + 'static {
     fn encode_params(&self) -> Vec<u8> {
         Vec::new()
     }
+}
+
+/// Marker bundling the bounds every shuffle-map value (and non-`Ord` key) type must satisfy:
+/// cloneable, `Data`-compatible, and wire-codable both ways (`bincode` for the on-disk shuffle
+/// cache, [`WireDecode`] for the rkyv-encoded partition coming off the pipeline). Blanket-
+/// implemented for anything satisfying the bound list — the same blanket-marker shape
+/// `atomic_data::data::Data` itself uses — so [`ShuffleWriter`] impls and the registered
+/// `fn`-pointer wrappers (`registry::shuffle::shuffle_map_handler`/`sort_shuffle_map_handler`)
+/// write `V: ShuffleValue` instead of repeating this five-trait list at each call site.
+pub trait ShuffleValue: Data + Clone + bincode::Encode + bincode::Decode<()> + WireDecode {}
+impl<T> ShuffleValue for T where T: Data + Clone + bincode::Encode + bincode::Decode<()> + WireDecode
+{}
+
+/// [`ShuffleValue`] plus [`Hash`] — the bound for a hash-partitioned shuffle key
+/// ([`HashShuffleWriter`](crate::registry::shuffle::HashShuffleWriter)).
+pub trait ShuffleKey: ShuffleValue + Hash {}
+impl<T> ShuffleKey for T where T: ShuffleValue + Hash {}
+
+/// [`ShuffleKey`] plus [`Ord`] + [`Eq`] — the bound for a sorted, range-partitioned shuffle key
+/// ([`SortShuffleWriter`](crate::registry::shuffle::SortShuffleWriter)), which must order keys
+/// within a bucket and reconstruct a range partitioner from the shipped spec.
+pub trait OrdShuffleKey: ShuffleKey + Ord + Eq {}
+impl<T> OrdShuffleKey for T where T: ShuffleKey + Ord + Eq {}
+
+/// Marker + partitioning-strategy trait for shuffle-map writes: `Vec<(K, V)> -> Vec<Vec<(K, V)>>`.
+///
+/// Buckets one map-side partition's pairs into `num_reduce_partitions` reduce-side buckets.
+/// The write path (bincode-encode each bucket, choose the consolidated-vs-per-bucket cache
+/// layout) is shared and non-generic — see `registry::shuffle::write_buckets` — so
+/// implementors decide only *how pairs are bucketed* (and, for a sorted strategy, sorted
+/// within each bucket). Implemented by the zero-sized `HashShuffleWriter`/`SortShuffleWriter`
+/// in `registry::shuffle`, mirroring this trait family's "trait + one method" shape.
+///
+/// Not stored in `TASK_REGISTRY` directly — the registry's entry type must be non-generic
+/// across every `(K, V)` instantiation and a `dyn ShuffleWriter<K, V>` trait object can't
+/// erase `K`/`V` either. The registered `TaskHandlerFn` wrappers (`shuffle_map_handler`/
+/// `sort_shuffle_map_handler`) decode the wire bytes and delegate to one of these.
+pub trait ShuffleWriter<K, V> {
+    /// Bucket `pairs` into `num_reduce_partitions` buckets per `spec` (the shipped
+    /// partitioner/range spec).
+    fn partition(
+        &self,
+        pairs: Vec<(K, V)>,
+        num_reduce_partitions: usize,
+        spec: &PartitionerSchema,
+    ) -> Vec<Vec<(K, V)>>;
 }
 
 /// Marker + dispatch trait for whole-partition transforms: `Vec<T> -> Vec<T>`.

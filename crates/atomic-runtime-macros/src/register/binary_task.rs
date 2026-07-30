@@ -24,7 +24,7 @@ impl Parse for BinaryTaskInput {
 /// empty partition returns empty bytes (the driver skips it) rather than needing an
 /// identity value. Use this for monoid-shaped reductions with no identity element (`max`,
 /// `min`); reductions that fold from a zero payload (`sum`) register their own handler.
-pub(crate) fn register_binary_task_impl(input: TokenStream) -> TokenStream {
+pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let BinaryTaskInput { task, elem } = parse_macro_input!(input as BinaryTaskInput);
 
     TokenStream::from(quote! {

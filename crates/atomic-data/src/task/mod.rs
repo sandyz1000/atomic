@@ -1,7 +1,9 @@
+pub mod pipeline;
 pub mod result;
 pub mod shuffle_map;
 
 use crate::data::Data;
+pub use pipeline::{PipelineExecutor, PipelineTask, PipelineTaskOutput};
 pub use result::{ResultTask, ResultTaskBox};
 pub use shuffle_map::ShuffleMapTask;
 use std::{error, net::Ipv4Addr};
@@ -87,6 +89,9 @@ pub enum TaskOption {
     ResultTask(ResultTaskBox),
     /// A shuffle map task that produces shuffle output
     ShuffleMapTask(ShuffleMapTask),
+    /// A `Vec<Step>` pipeline task — the `_task`-method counterpart to `ResultTask`/
+    /// `ShuffleMapTask`, dispatched through the installed `PipelineExecutor` hook.
+    PipelineTask(PipelineTask),
 }
 
 impl TaskOption {
@@ -96,6 +101,7 @@ impl TaskOption {
         match self {
             TaskOption::ResultTask(tsk) => tsk,
             TaskOption::ShuffleMapTask(tsk) => tsk,
+            TaskOption::PipelineTask(tsk) => tsk,
         }
     }
 
@@ -104,6 +110,7 @@ impl TaskOption {
         match self {
             TaskOption::ResultTask(tsk) => Ok(TaskResult::ResultTask(tsk.run(id)?)),
             TaskOption::ShuffleMapTask(tsk) => Ok(TaskResult::ShuffleTask(tsk.run(id)?)),
+            TaskOption::PipelineTask(tsk) => Ok(TaskResult::PipelineTask(tsk.run(id)?)),
         }
     }
 
@@ -132,6 +139,7 @@ impl TaskOption {
 pub enum TaskResult {
     ResultTask(Box<dyn Data>),
     ShuffleTask(Box<dyn Data>),
+    PipelineTask(Box<dyn Data>),
 }
 
 /// Implement PartialEq, Eq, PartialOrd, Ord for TaskOption based on task_id

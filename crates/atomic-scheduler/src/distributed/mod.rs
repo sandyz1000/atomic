@@ -25,7 +25,7 @@ use crate::{
     base::{NativeScheduler, SchedulerState},
     dag::{CompletionEvent, TaskEndReason},
     error::{LibResult, SchedulerError},
-    job::Job,
+    job::{Job, JobTracker},
     listener::LiveListenerBus,
     planner::StagePlanner,
     stage::Stage,
@@ -317,6 +317,62 @@ impl DistributedScheduler {
         ))
     }
 
+    /// Distributed counterpart to `execute_distributed_shuffle_task` for a `PipelineTask`
+    /// (a `Vec<Step>` `Stage`'s unit of work). Ships the same `TaskEnvelope`
+    /// `PipelineTask::to_envelope` builds for local dispatch — the only difference between
+    /// `LocalScheduler` and `DistributedScheduler` running this task is thread vs. worker.
+    async fn execute_distributed_pipeline_task(
+        &self,
+        task_option: TaskOption,
+        task: atomic_data::task::PipelineTask,
+        target_executor: SocketAddrV4,
+    ) -> CompletionEvent {
+        let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
+        let envelope = task.to_envelope(attempt_id);
+
+        match self
+            .submit_native_task(&envelope, Some(target_executor))
+            .await
+        {
+            Ok((result, _worker_addr)) => match result.status {
+                atomic_data::distributed::ResultStatus::Success => {
+                    self.merge_accumulator_deltas(&result.accumulator_deltas);
+                    // Same registration `PipelineTask::run` does for the local path — see
+                    // its doc comment. Here the worker's `shuffle_server_uri` arrives
+                    // directly on the RPC response instead of a `PipelineExecutor` return.
+                    if let Some(uri) = &result.shuffle_server_uri
+                        && let Some((shuffle_id, num_output_partitions)) = task.shuffle_dep()
+                    {
+                        let state = self.state();
+                        state.register_shuffle(shuffle_id, num_output_partitions);
+                        state.register_map_output(shuffle_id, task.meta.partition, uri.clone());
+                    }
+                    CompletionEvent {
+                        task: task_option,
+                        reason: TaskEndReason::Success,
+                        result: Some(Box::new(result.data) as Box<dyn Data>),
+                    }
+                }
+                atomic_data::distributed::ResultStatus::RetryableFailure
+                | atomic_data::distributed::ResultStatus::FatalFailure
+                | atomic_data::distributed::ResultStatus::CacheMiss => CompletionEvent {
+                    task: task_option,
+                    reason: TaskEndReason::OtherFailure(
+                        result
+                            .error
+                            .unwrap_or_else(|| "distributed pipeline task failed".to_string()),
+                    ),
+                    result: Some(Box::new(()) as Box<dyn Data>),
+                },
+            },
+            Err(e) => CompletionEvent {
+                task: task_option,
+                reason: TaskEndReason::OtherFailure(e.to_string()),
+                result: Some(Box::new(()) as Box<dyn Data>),
+            },
+        }
+    }
+
     async fn execute_distributed_shuffle_task(
         &self,
         task_option: TaskOption,
@@ -387,6 +443,10 @@ impl DistributedScheduler {
                 self.execute_distributed_shuffle_task(task, shuffle_task, target_executor)
                     .await
             }
+            TaskOption::PipelineTask(pipeline_task) => {
+                self.execute_distributed_pipeline_task(task, pipeline_task, target_executor)
+                    .await
+            }
             TaskOption::ResultTask(_) => CompletionEvent {
                 task,
                 reason: TaskEndReason::OtherFailure(
@@ -413,6 +473,36 @@ impl DistributedScheduler {
         Err(SchedulerError::UnsupportedOperation(
             "distributed approximate jobs require the local scheduler",
         ))
+    }
+
+    /// Entry point for a `Vec<Step>` pipeline job (`Context::dispatch_pipeline`) — the
+    /// distributed counterpart to `LocalScheduler::run_pipeline_job`. Drives the same
+    /// `NativeScheduler::event_process_loop`; `submit_task`'s worker-RPC dispatch (not this
+    /// function) is the only thing that differs from the local path.
+    pub async fn run_pipeline_job<T: Data>(
+        self: Arc<Self>,
+        final_rdd: Arc<dyn Rdd<Item = T>>,
+        pipeline_data: crate::job::PipelineJobData,
+        partitions: Vec<usize>,
+    ) -> LibResult<Vec<Vec<u8>>> {
+        // Never invoked — see the identical note on `LocalScheduler::run_pipeline_job`.
+        let func = Arc::new(
+            |(_ctx, _iter): (
+                atomic_data::task_context::TaskContext,
+                Box<dyn Iterator<Item = T>>,
+            )|
+             -> Vec<u8> { Vec::new() },
+        );
+        let jt = JobTracker::from_scheduler_pipeline(
+            &*self,
+            func,
+            final_rdd,
+            partitions,
+            crate::listener::NoOpListener,
+            pipeline_data,
+        )
+        .await?;
+        self.event_process_loop(false, jt).await
     }
 }
 

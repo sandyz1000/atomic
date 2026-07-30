@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use atomic_compute::context::Context;
+use atomic_compute::rdd::ParallelCollection;
 use atomic_data::distributed::{JsTaskPayload, Step, StepKind, TaskAction, TaskRuntime};
+use atomic_data::rdd::Rdd;
 use napi::JsValue as _;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -124,6 +126,18 @@ impl JsRdd {
         }
     }
 
+    /// Placeholder for `dispatch_pipeline`'s `final_rdd` param — JS RDDs are dynamically
+    /// typed (`JsonValue` throughout) with no static `Arc<dyn Rdd>` lineage of their own, so
+    /// there's no real RDD to pass. `final_rdd` is only ever used for its `RddBase` shape
+    /// (shuffle-boundary planning); an empty one is exactly as valid as a real one here.
+    fn placeholder_rdd(&self) -> Arc<dyn Rdd<Item = JsonValue>> {
+        Arc::new(ParallelCollection::new(
+            self.context.new_rdd_id(),
+            Vec::new(),
+            1,
+        ))
+    }
+
     /// Collect rows without `&mut` — used internally (e.g. SQL registration).
     pub(crate) fn collect_rows(&self) -> Result<Vec<JsonValue>> {
         if self.context.is_distributed() && self.staged.is_some() {
@@ -140,7 +154,11 @@ impl JsRdd {
             .ok_or_else(|| Error::from_reason("no staged pipeline to dispatch"))?;
         let result_bytes = self
             .context
-            .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
+            .dispatch_pipeline(
+                self.placeholder_rdd(),
+                staged.source_partitions.clone(),
+                staged.steps.clone(),
+            )
             .map_err(|e| Error::from_reason(format!("dispatch_pipeline: {e}")))?;
         let mut all = Vec::new();
         for bytes in result_bytes {
@@ -160,7 +178,11 @@ impl JsRdd {
             .ok_or_else(|| Error::from_reason("no staged pipeline to dispatch"))?;
         let result_bytes = self
             .context
-            .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
+            .dispatch_pipeline(
+                self.placeholder_rdd(),
+                staged.source_partitions.clone(),
+                staged.steps.clone(),
+            )
             .map_err(|e| Error::from_reason(format!("dispatch_pipeline: {e}")))?;
         result_bytes
             .into_iter()

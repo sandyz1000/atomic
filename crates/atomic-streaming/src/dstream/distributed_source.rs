@@ -147,7 +147,12 @@ impl<S: DistributedSource> DStream<S::Item> for DistributedInputDStream<S> {
         let source_partitions: Vec<Vec<u8>> =
             tasks.iter().map(|t| t.partition_bytes.clone()).collect();
 
-        match sc.dispatch_pipeline(source_partitions, steps) {
+        // No upstream RDD lineage to walk here (a fresh source read starts a new DAG), so
+        // `dispatch_pipeline`'s `final_rdd` param gets an empty placeholder — it's only ever
+        // used for its `RddBase` shape (shuffle-boundary planning), and a source read has none.
+        let placeholder_rdd: Arc<dyn Rdd<Item = S::Item>> =
+            Arc::new(ParallelCollection::new(sc.new_rdd_id(), Vec::new(), 1));
+        match sc.dispatch_pipeline(placeholder_rdd, source_partitions, steps) {
             Ok(raw_batches) => {
                 let all_items = self.source.decode_results(raw_batches);
                 // Commit only after successful dispatch so uncommitted splits are

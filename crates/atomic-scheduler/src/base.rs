@@ -10,11 +10,12 @@ use atomic_data::dependency::Dependency;
 use atomic_data::rdd::RddBase;
 use atomic_data::shuffle::MapOutputTracker;
 use atomic_data::task::TaskOption;
+use atomic_data::task::pipeline::PipelineTask;
 use atomic_data::task::result::ResultTask;
 use atomic_data::task::shuffle_map::ShuffleMapTask;
 use atomic_data::task_context::{PartitionFn, PartitionTask, TaskContext};
 use dashmap::DashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -112,6 +113,29 @@ pub trait NativeScheduler: StagePlanner {
 
                 results[rt.output_id] = Some(typed_result);
                 jt.finished.lock()[rt.output_id] = true;
+                *num_finished += 1;
+            }
+            TaskOption::PipelineTask(pt) => {
+                // Same shape as the `ResultTask` arm above — a `PipelineTask`'s result is
+                // `Box<dyn Data>` wrapping the raw `Vec<u8>` a Step-pipeline produced, and
+                // pipeline jobs always instantiate `JobTracker<F, U, T, L>` with `U = Vec<u8>`,
+                // so downcasting to `U` here is exactly as valid as it is for a closure result.
+                let result = completed_event.result.take().ok_or(SchedulerError::Other)?;
+
+                jt.listener.task_succeeded(pt.output_id, &*result).await?;
+
+                let typed_result = result
+                    .as_any()
+                    .downcast_ref::<U>()
+                    .ok_or_else(|| {
+                        SchedulerError::DowncastFailure(
+                            "Failed to downcast pipeline result to expected type U".to_string(),
+                        )
+                    })?
+                    .clone();
+
+                results[pt.output_id] = Some(typed_result);
+                jt.finished.lock()[pt.output_id] = true;
                 *num_finished += 1;
             }
             TaskOption::ShuffleMapTask(smt) => {
@@ -268,27 +292,61 @@ pub trait NativeScheduler: StagePlanner {
         let my_pending = pending_tasks.entry(stage.clone()).or_default();
         if stage == jt.final_stage {
             log::debug!("final stage #{}", stage.id);
-            if !self.supports_closure_tasks() {
-                return Err(SchedulerError::UnsupportedOperation(
-                    "final-stage closure ResultTask is unsupported on this scheduler; use task-op APIs (task_fn!/map_task/filter_task/flat_map_task/fold_task/reduce_task) for distributed execution",
-                ));
-            }
-            for (id, part) in jt.output_parts.iter().enumerate().take(jt.num_output_parts) {
-                let locs = self.get_preferred_locs(jt.final_rdd.get_rdd_base(), *part);
-                let result_task = ResultTask::new(
-                    m.get_next_task_id(),
-                    jt.run_id,
-                    jt.final_stage.id,
-                    jt.final_rdd.clone(),
-                    jt.func.clone(),
-                    *part,
-                    locs.clone(),
-                    id,
-                );
-                let task_option = TaskOption::ResultTask(result_task.into());
-                let executor = self.next_executor_server(&task_option);
-                my_pending.insert(task_option.clone());
-                self.submit_task::<T, U, F>(task_option, executor)
+            if let Some(pipeline) = &jt.pipeline {
+                // Pipeline job: no closure involved, so no supports_closure_tasks() gate —
+                // a PipelineTask dispatches through the same TaskEnvelope/ComputeEngine path
+                // regardless of which scheduler (thread vs. worker) runs it.
+                for (id, part) in jt.output_parts.iter().enumerate().take(jt.num_output_parts) {
+                    let locs = self.get_preferred_locs(jt.final_rdd.get_rdd_base(), *part);
+                    let source = pipeline
+                        .source_partitions
+                        .get(*part)
+                        .cloned()
+                        .ok_or_else(|| {
+                            SchedulerError::TaskFailed(format!(
+                                "pipeline job: source partition {part} out of bounds ({} partitions)",
+                                pipeline.source_partitions.len()
+                            ))
+                        })?;
+                    let pipeline_task = PipelineTask::new(
+                        m.get_next_task_id(),
+                        jt.run_id,
+                        jt.final_stage.id,
+                        *part,
+                        locs,
+                        source,
+                        pipeline.result_steps.clone(),
+                        pipeline.broadcasts.clone(),
+                        id,
+                    );
+                    let task_option = TaskOption::PipelineTask(pipeline_task);
+                    let executor = self.next_executor_server(&task_option);
+                    my_pending.insert(task_option.clone());
+                    self.submit_task::<T, U, F>(task_option, executor)
+                }
+            } else {
+                if !self.supports_closure_tasks() {
+                    return Err(SchedulerError::UnsupportedOperation(
+                        "final-stage closure ResultTask is unsupported on this scheduler; use task-op APIs (task_fn!/map_task/filter_task/flat_map_task/fold_task/reduce_task) for distributed execution",
+                    ));
+                }
+                for (id, part) in jt.output_parts.iter().enumerate().take(jt.num_output_parts) {
+                    let locs = self.get_preferred_locs(jt.final_rdd.get_rdd_base(), *part);
+                    let result_task = ResultTask::new(
+                        m.get_next_task_id(),
+                        jt.run_id,
+                        jt.final_stage.id,
+                        jt.final_rdd.clone(),
+                        jt.func.clone(),
+                        *part,
+                        locs.clone(),
+                        id,
+                    );
+                    let task_option = TaskOption::ResultTask(result_task.into());
+                    let executor = self.next_executor_server(&task_option);
+                    my_pending.insert(task_option.clone());
+                    self.submit_task::<T, U, F>(task_option, executor)
+                }
             }
         } else {
             for p in 0..stage.num_partitions {
@@ -340,6 +398,157 @@ pub trait NativeScheduler: StagePlanner {
         event_queue.get_mut(&run_id)?.pop_front()
     }
 
+    /// Failed-task retry cap before a job gives up (`SchedulerError::MaxTaskFailures`).
+    /// `LocalScheduler` returns its configured value; this default (matching
+    /// `LocalScheduler::new_with_coalesce`'s typical `20`) covers any scheduler that hasn't
+    /// overridden it.
+    fn max_failures(&self) -> usize {
+        20
+    }
+
+    /// Debounce window (ms) before a batch of failed stages is resubmitted — not a
+    /// per-task backoff, a single fixed wait so multiple failures in flight get resubmitted
+    /// together rather than one at a time.
+    fn resubmit_timeout(&self) -> u128 {
+        2000
+    }
+
+    /// Poll interval (ms) `wait_for_event` sleeps between empty-queue checks.
+    fn poll_timeout(&self) -> u64 {
+        50
+    }
+
+    /// Drive one job's `Stage` DAG to completion: submit the final stage (which recursively
+    /// submits any missing parent — e.g. shuffle-map — stages first), then loop processing
+    /// `CompletionEvent`s until every output partition is finished, retrying failed stages
+    /// after `resubmit_timeout()`. Shared by every scheduler — local (`submit_task` runs a
+    /// task on a blocking thread) and distributed (`submit_task` ships it to a worker) alike;
+    /// this loop itself has no notion of which.
+    async fn event_process_loop<T: Data, U: Data + Clone, F, L>(
+        self: Arc<Self>,
+        allow_local: bool,
+        jt: Arc<JobTracker<F, U, T, L>>,
+    ) -> LibResult<Vec<U>>
+    where
+        Self: Sized,
+        F: PartitionTask<T, U>,
+        L: JobListener,
+    {
+        if allow_local && let Some(result) = Self::local_execution(jt.clone())? {
+            return Ok(result);
+        }
+
+        self.state().event_queues.insert(jt.run_id, VecDeque::new());
+
+        let mut results: Vec<Option<U>> = (0..jt.num_output_parts).map(|_| None).collect();
+        // Timestamp of the oldest unresubmitted failure; None when jt.failed is empty.
+        let mut fetch_failure_start: Option<Instant> = None;
+        let mut task_failure_counts: HashMap<(usize, usize), usize> = HashMap::new();
+
+        self.submit_stage(jt.final_stage.clone(), jt.clone())
+            .await?;
+
+        let mut num_finished = 0;
+        while num_finished != jt.num_output_parts {
+            if let Some(reason) = self.state().take_job_abort(jt.run_id) {
+                self.state().event_queues.remove(&jt.run_id);
+                return Err(SchedulerError::JobAborted(reason));
+            }
+            let event_option = self.wait_for_event(jt.run_id, self.poll_timeout());
+
+            if let Some(evt) = event_option {
+                let stage = self
+                    .state()
+                    .stage_cache
+                    .get(&evt.task.get_stage_id())
+                    .unwrap()
+                    .clone();
+                jt.pending_tasks
+                    .lock()
+                    .get_mut(&stage)
+                    .unwrap()
+                    .remove(&evt.task);
+                use crate::dag::TaskEndReason::*;
+                match evt.reason {
+                    Success => {
+                        self.on_event_success(evt, &mut results, &mut num_finished, jt.clone())
+                            .await?;
+                    }
+                    FetchFailed(failed_vals) => {
+                        self.on_event_failure(jt.clone(), failed_vals, evt.task.get_stage_id())
+                            .await;
+                        fetch_failure_start.get_or_insert_with(Instant::now);
+                    }
+                    Error(error) => {
+                        let key = (evt.task.get_stage_id(), evt.task.get_task_id());
+                        let count = task_failure_counts.entry(key).or_insert(0);
+                        *count += 1;
+                        if *count >= self.max_failures() {
+                            return Err(SchedulerError::MaxTaskFailures(error.to_string()));
+                        }
+                        log::warn!(
+                            "task {}/{} error (attempt {}/{}): retrying stage",
+                            evt.task.get_stage_id(),
+                            evt.task.get_task_id(),
+                            count,
+                            self.max_failures(),
+                        );
+                        let m = self.state();
+                        let failed_stage = m.fetch_from_stage_cache(evt.task.get_stage_id());
+                        // submit_stage() no-ops for a stage still marked running.
+                        jt.running.lock().remove(&failed_stage);
+                        jt.failed.lock().insert(failed_stage);
+                        fetch_failure_start.get_or_insert_with(Instant::now);
+                    }
+                    OtherFailure(msg) => {
+                        let key = (evt.task.get_stage_id(), evt.task.get_task_id());
+                        let count = task_failure_counts.entry(key).or_insert(0);
+                        *count += 1;
+                        if *count >= self.max_failures() {
+                            return Err(SchedulerError::MaxTaskFailures(msg));
+                        }
+                        log::warn!(
+                            "task {}/{} failure (attempt {}/{}): retrying stage",
+                            evt.task.get_stage_id(),
+                            evt.task.get_task_id(),
+                            count,
+                            self.max_failures(),
+                        );
+                        let m = self.state();
+                        let failed_stage = m.fetch_from_stage_cache(evt.task.get_stage_id());
+                        jt.running.lock().remove(&failed_stage);
+                        jt.failed.lock().insert(failed_stage);
+                        fetch_failure_start.get_or_insert_with(Instant::now);
+                    }
+                }
+            }
+
+            // Checked every iteration, not just on fresh events, so a failure with no
+            // further events to wake the loop still gets resubmitted.
+            if let Some(since) = fetch_failure_start
+                && !jt.failed.lock().is_empty()
+                && since.elapsed().as_millis() > self.resubmit_timeout()
+            {
+                self.update_cache_locs().await?;
+                let failed_stages: Vec<Stage> = jt.failed.lock().iter().cloned().collect();
+                for stage in failed_stages {
+                    self.submit_stage(stage, jt.clone()).await?;
+                }
+                jt.failed.lock().clear();
+                fetch_failure_start = None;
+            }
+        }
+
+        self.state().event_queues.remove(&jt.run_id);
+        Ok(results
+            .into_iter()
+            .map(|s| match s {
+                Some(v) => v,
+                None => panic!("some results still missing"),
+            })
+            .collect())
+    }
+
     fn submit_task<T: Data, U: Data, F>(&self, task: TaskOption, target_executor: SocketAddrV4)
     where
         F: PartitionFn<T, U>;
@@ -347,7 +556,13 @@ pub trait NativeScheduler: StagePlanner {
     /// Whether this scheduler can execute closure-backed `ResultTask`s.
     ///
     /// Local scheduler returns `true` (default). Distributed scheduler returns `false` and
-    /// requires op-envelope task APIs.
+    /// requires op-envelope task APIs — the project's task model (`#[task]`/`task_fn!`,
+    /// `atomic_compute::task_traits`) dispatches by compile-time-registered name, not by
+    /// shipping a closure. `LocalScheduler` returning `true` is legacy, not a model to
+    /// extend: it exists only because the built-in RDD actions (`.collect()`, `.reduce()`,
+    /// ...) predate the task model and haven't been migrated off `PartitionFn`/
+    /// `PartitionTask` (`atomic_data::task_context`) yet. New driver-facing ops should be
+    /// `#[task]`/`task_fn!`-wrapped even when they only ever run in-process.
     fn supports_closure_tasks(&self) -> bool {
         true
     }

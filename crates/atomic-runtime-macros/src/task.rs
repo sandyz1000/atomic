@@ -66,7 +66,7 @@ use crate::common::fnv1a_hash;
 /// - `TaskAction::Fold`    — fold with rkyv-decoded zero from `payload`
 /// - `TaskAction::Reduce`  — reduce using fn as combiner (error on empty partition)
 /// - `TaskAction::Aggregate` — same as Fold
-pub(crate) fn task_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
 
     // Parse optional `name = "custom.op.id"` attribute argument.

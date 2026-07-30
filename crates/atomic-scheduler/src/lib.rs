@@ -36,6 +36,7 @@ pub use crate::distributed::{
     ActiveShuffleStage, AllocatorError, AllocatorResult, RegisterRequest, ResourceProfile,
     StaticAllocator, WorkerAllocator, start_register_server,
 };
+pub use crate::job::PipelineJobData;
 pub use crate::{base::NativeScheduler, error::LibResult, planner::StagePlanner};
 pub use crate::{
     distributed::DistributedScheduler,
@@ -89,5 +90,30 @@ impl Schedulers {
             start.elapsed().as_secs()
         );
         res
+    }
+
+    /// Dispatch a `Vec<Step>` pipeline job — `Context::dispatch_pipeline`'s one entry point
+    /// into the `Stage`-tracked scheduling layer, regardless of mode. `final_rdd` supplies
+    /// only the shape the planner walks for shuffle boundaries (its `RddBase`/split count);
+    /// no closure is involved. `Local`'s `submit_task` runs each task on a blocking thread;
+    /// `Distributed`'s ships it to a worker — that's the only difference between the two.
+    pub fn run_pipeline_job<T: Data>(
+        &self,
+        final_rdd: Arc<dyn Rdd<Item = T>>,
+        pipeline_data: crate::job::PipelineJobData,
+        partitions: Vec<usize>,
+    ) -> LibResult<Vec<Vec<u8>>> {
+        match self {
+            Schedulers::Local(local) => {
+                local
+                    .clone()
+                    .run_pipeline_job(final_rdd, pipeline_data, partitions)
+            }
+            Schedulers::Distributed(distributed) => futures::executor::block_on(
+                distributed
+                    .clone()
+                    .run_pipeline_job(final_rdd, pipeline_data, partitions),
+            ),
+        }
     }
 }

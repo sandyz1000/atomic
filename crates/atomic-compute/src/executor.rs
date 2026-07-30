@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::env;
 use crate::error::{ComputeError, ComputeResult};
-use crate::registry::{SHUFFLE_MAP_REGISTRY, TASK_REGISTRY};
+use crate::registry::TASK_REGISTRY;
 use crate::runtimes::{Backend, ComputeEngine};
 use atomic_data::distributed::{
     TRANSPORT_HEADER_LEN, TaskEnvelope, TransportFrameKind, WireDecode, WireEncode,
@@ -63,11 +63,10 @@ impl Executor {
     pub fn worker_capabilities(&self) -> WorkerCapabilities {
         let mut registered: Vec<String> = vec![];
 
+        // Shuffle-map handlers are TaskEntry's in TASK_REGISTRY too (keyed by "K::V" /
+        // "K::V::sorted"), so this one extend already advertises them alongside every other
+        // registered task — no separate shuffle registry to merge in.
         registered.extend(TASK_REGISTRY.keys().map(|k| k.to_string()));
-        // Shuffle map types use a "shuffle:<key>" prefix to avoid colliding with
-        // regular task_names. After Fix 2, SHUFFLE_MAP_REGISTRY is keyed by the stable
-        // stringify!-based string (e.g. "String::u32") instead of type_name.
-        registered.extend(SHUFFLE_MAP_REGISTRY.keys().map(|k| format!("shuffle:{k}")));
         // Advertise dynamic task runtimes so the scheduler can route Python/JS ops.
         registered.extend(
             [python_op(), js_op()]
@@ -76,10 +75,9 @@ impl Executor {
                 .map(str::to_string),
         );
         log::debug!(
-            "worker {} advertising {} registered ops ({} shuffle types)",
+            "worker {} advertising {} registered ops",
             self.worker_id,
             registered.len(),
-            SHUFFLE_MAP_REGISTRY.len(),
         );
         WorkerCapabilities::new(
             self.worker_id.to_string(),

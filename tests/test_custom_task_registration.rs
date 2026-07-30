@@ -25,8 +25,6 @@ fn decode<T: WireDecode>(data: &[u8]) -> T {
     T::decode_wire(data).expect("decode")
 }
 
-// ── BinaryTask: greatest common divisor, a monoid with no identity element ────
-
 #[derive(Clone, Copy, Default)]
 struct GcdTask;
 
@@ -44,19 +42,19 @@ impl BinaryTask<u64> for GcdTask {
 register_binary_task!(GcdTask, u64);
 
 #[test]
-fn custom_binary_task_dispatches_via_task_registry() {
-    let handler = *TASK_REGISTRY
+fn test_binary_task_dispatch() {
+    let entry = *TASK_REGISTRY
         .get(GcdTask::NAME)
         .expect("GcdTask not found in TASK_REGISTRY — register_binary_task! did not register it");
 
     let data = encode(vec![54u64, 24, 18]);
-    let out = handler(&TaskAction::Fold, &[], &data).expect("dispatch failed");
+    let out = entry
+        .call(&TaskAction::Fold, &[], &data)
+        .expect("dispatch failed");
     let result: u64 = decode(&out);
 
     assert_eq!(result, 6); // gcd(gcd(54, 24), 18) == 6
 }
-
-// ── AggregateTask: running (sum, count) with an accumulator type != element type ──
 
 #[derive(Clone, Copy, Default)]
 struct SumCountTask;
@@ -74,8 +72,8 @@ impl AggregateTask<(f64, u64), f64> for SumCountTask {
 atomic_compute::register_aggregate_task!(SumCountTask, (f64, u64), f64);
 
 #[test]
-fn custom_aggregate_task_dispatches_via_task_registry() {
-    let handler = *TASK_REGISTRY
+fn test_aggregate_task_dispatch() {
+    let entry = *TASK_REGISTRY
         .get(<SumCountTask as AggregateTask<(f64, u64), f64>>::NAME)
         .expect(
             "SumCountTask not found in TASK_REGISTRY — register_aggregate_task! did not register it",
@@ -83,13 +81,13 @@ fn custom_aggregate_task_dispatches_via_task_registry() {
 
     let zero = encode((0.0f64, 0u64));
     let data = encode(vec![1.0f64, 2.0, 3.0, 4.0]);
-    let out = handler(&TaskAction::Aggregate, &zero, &data).expect("dispatch failed");
+    let out = entry
+        .call(&TaskAction::Aggregate, &zero, &data)
+        .expect("dispatch failed");
     let (sum, n): (f64, u64) = decode(&out);
 
     assert_eq!((sum, n), (10.0, 4));
 }
-
-// ── PartitionTask: whole-partition transform, no element-level combine ────────
 
 #[derive(Default)]
 struct ReverseTask;
@@ -105,15 +103,17 @@ impl PartitionTask<i32> for ReverseTask {
 atomic_compute::register_partition_task!(ReverseTask, i32);
 
 #[test]
-fn custom_partition_task_dispatches_via_task_registry() {
-    let handler = *TASK_REGISTRY
+fn test_partition_task_dispatch() {
+    let entry = *TASK_REGISTRY
         .get(<ReverseTask as PartitionTask<i32>>::NAME)
         .expect(
             "ReverseTask not found in TASK_REGISTRY — register_partition_task! did not register it",
         );
 
     let data = encode(vec![1i32, 2, 3, 4]);
-    let out = handler(&TaskAction::Collect, &[], &data).expect("dispatch failed");
+    let out = entry
+        .call(&TaskAction::Collect, &[], &data)
+        .expect("dispatch failed");
     let result: Vec<i32> = decode(&out);
 
     assert_eq!(result, vec![4, 3, 2, 1]);

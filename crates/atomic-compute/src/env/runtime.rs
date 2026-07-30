@@ -84,6 +84,13 @@ pub fn init_shuffle(
         atomic_data::env::set_auth_token(token.clone());
     }
 
+    // Install the PipelineTask dispatch hook (see atomic_data::task::PipelineExecutor's doc
+    // comment for why this is a process-global rather than a direct dependency) — stateless,
+    // safe to set on every call, including the idempotent-return path below.
+    atomic_data::env::set_pipeline_executor(std::sync::Arc::new(
+        crate::runtimes::native::ComputeEnginePipelineExecutor::new(),
+    ));
+
     if atomic_data::env::get_shuffle_server_uri().is_some() {
         return Ok(());
     }

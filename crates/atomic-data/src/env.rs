@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::shuffle::MapOutputTracker;
 use crate::shuffle::cache::ShuffleCache;
+use crate::task::PipelineExecutor;
 
 /// Per-`Context` shuffle infrastructure, set at `init_shuffle` and reset on `Context::drop`
 /// (see [`clear_shuffle_infra`]) so the next `Context` starts clean.
@@ -52,6 +53,10 @@ struct Env {
     /// Base directory for `MemoryAndDisk` / `DiskOnly` partition spill files, set by `Context`
     /// during init. `None` means disk storage levels fall back to `MemoryOnly`.
     rdd_cache_spill_dir: Option<PathBuf>,
+    /// Runs a `PipelineTask`'s `TaskEnvelope` and returns its raw result bytes. Set once by
+    /// `atomic-compute` at `Context` init (wrapping `ComputeEngine`); process-lifetime, not
+    /// reset per `Context`, since the dispatch machinery itself carries no per-`Context` state.
+    pipeline_executor: Option<Arc<dyn PipelineExecutor>>,
 }
 
 impl Env {
@@ -60,6 +65,7 @@ impl Env {
             shuffle: ShuffleEnv::empty(),
             auth_token: None,
             rdd_cache_spill_dir: None,
+            pipeline_executor: None,
         }
     }
 }
@@ -161,4 +167,14 @@ pub fn set_rdd_cache_spill_dir(dir: PathBuf) {
 
 pub fn get_rdd_cache_spill_dir() -> Option<PathBuf> {
     ENV.read().unwrap().rdd_cache_spill_dir.clone()
+}
+
+// --- Pipeline task execution ---
+
+pub fn set_pipeline_executor(executor: Arc<dyn PipelineExecutor>) {
+    ENV.write().unwrap().pipeline_executor = Some(executor);
+}
+
+pub fn get_pipeline_executor() -> Option<Arc<dyn PipelineExecutor>> {
+    ENV.read().unwrap().pipeline_executor.clone()
 }

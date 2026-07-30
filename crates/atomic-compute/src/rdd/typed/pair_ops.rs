@@ -362,24 +362,15 @@ where
         let ctx = self.context.clone();
         let id = ctx.new_rdd_id();
 
-        // Materialise the other side's keys. Distributed uses the op path; the closure
-        // `run_job` would run over the empty driver placeholder RDD.
-        let excluded: Arc<HashSet<K>> = Arc::new(if other.context.is_distributed() {
+        // Materialise the other side's keys via the pipeline dispatch path.
+        let excluded: Arc<HashSet<K>> = Arc::new(
             other
-                .collect_distributed()
+                .collect()
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(k, _)| k)
-                .collect()
-        } else {
-            other
-                .context
-                .run_job(other.rdd, |iter| iter.map(|(k, _)| k).collect::<Vec<K>>())
-                .unwrap_or_default()
-                .into_iter()
-                .flatten()
-                .collect()
-        });
+                .collect(),
+        );
 
         let rdd = Arc::new(MapPartitionsRdd::new(id, self.rdd, move |_idx, iter| {
             let excl = excluded.clone();
@@ -510,35 +501,17 @@ where
 
     pub fn count_by_key(&self) -> Result<std::collections::HashMap<K, u64>, DataError>
     where
-        (K, V): WireEncode,
+        (K, V): WireEncode + WireDecode,
         Vec<(K, V)>: WireEncode + WireDecode,
     {
         use std::collections::HashMap;
 
-        let mut final_counts = HashMap::new();
-        // Distributed: count on the driver from op-path collected pairs — the closure
-        // `run_job` path below would run over the empty driver placeholder RDD.
-        if self.context.is_distributed() {
-            for (k, _v) in self.collect_distributed()? {
-                *final_counts.entry(k).or_insert(0) += 1;
+        self.reduce_partitions(HashMap::new(), |mut acc: HashMap<K, u64>, part| {
+            for (k, _v) in part {
+                *acc.entry(k).or_insert(0) += 1;
             }
-            return Ok(final_counts);
-        }
-
-        let count_partition = move |iter: Box<dyn Iterator<Item = (K, V)>>| {
-            let mut counts: HashMap<K, u64> = HashMap::new();
-            for (k, _v) in iter {
-                *counts.entry(k).or_insert(0) += 1;
-            }
-            counts
-        };
-        let partition_counts = self.context.run_job(self.rdd.clone(), count_partition)?;
-        for counts in partition_counts {
-            for (k, v) in counts {
-                *final_counts.entry(k).or_insert(0) += v;
-            }
-        }
-        Ok(final_counts)
+            acc
+        })
     }
 
     pub fn lookup(&self, key: &K) -> Result<Vec<V>, DataError>
@@ -547,22 +520,12 @@ where
         (K, V): WireEncode,
         Vec<(K, V)>: WireEncode + WireDecode,
     {
-        if self.context.is_distributed() {
-            return Ok(self
-                .collect_distributed()?
-                .into_iter()
-                .filter(|(k, _)| k == key)
-                .map(|(_, v)| v)
-                .collect());
-        }
-        let key_clone = key.clone();
-        let lookup_partition = move |iter: Box<dyn Iterator<Item = (K, V)>>| {
-            iter.filter(|(k, _)| k == &key_clone)
-                .map(|(_, v)| v)
-                .collect::<Vec<V>>()
-        };
-        let partition_values = self.context.run_job(self.rdd.clone(), lookup_partition)?;
-        Ok(partition_values.into_iter().flatten().collect())
+        Ok(self
+            .collect()?
+            .into_iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, v)| v)
+            .collect())
     }
 
     /// Collect a pair RDD into a `HashMap<K, V>`.
@@ -576,19 +539,8 @@ where
         Vec<(K, V)>: WireEncode + WireDecode,
     {
         let mut map = std::collections::HashMap::new();
-        if self.context.is_distributed() {
-            for (k, v) in self.collect_distributed()? {
-                map.insert(k, v);
-            }
-            return Ok(map);
-        }
-        let partitions = self
-            .context
-            .run_job(self.rdd.clone(), |iter| iter.collect::<Vec<(K, V)>>())?;
-        for pairs in partitions {
-            for (k, v) in pairs {
-                map.insert(k, v);
-            }
+        for (k, v) in self.collect()? {
+            map.insert(k, v);
         }
         Ok(map)
     }
@@ -617,52 +569,30 @@ where
     where
         B: BinaryTask<V>,
         K: std::hash::Hash + Eq,
-        (K, V): WireEncode,
+        (K, V): WireEncode + WireDecode,
         Vec<(K, V)>: WireEncode + WireDecode,
     {
         use std::collections::HashMap;
 
-        // Distributed: merge on the driver from op-path collected pairs — the closure
-        // `run_job` path below would run over the empty driver placeholder RDD.
-        if self.context.is_distributed() {
-            let mut result: HashMap<K, V> = HashMap::new();
-            for (k, v) in self.collect_distributed()? {
-                let merged = match result.remove(&k) {
-                    Some(existing) => merge.call(existing, v),
-                    None => v,
-                };
-                result.insert(k, merged);
-            }
-            return Ok(result);
-        }
-
-        // Map-side combine: each partition reduces its own keys independently.
-        let merge_c = merge.clone();
-        let combine_partition = move |iter: Box<dyn Iterator<Item = (K, V)>>| {
+        // Map-side combine: each partition reduces its own keys independently, then
+        // the per-partition maps are merged into the accumulator one at a time.
+        self.reduce_partitions(HashMap::<K, V>::new(), move |mut result, part| {
             let mut acc: HashMap<K, V> = HashMap::new();
-            for (k, v) in iter {
+            for (k, v) in part {
                 let merged = match acc.remove(&k) {
-                    Some(existing) => merge_c.call(existing, v),
+                    Some(existing) => merge.call(existing, v),
                     None => v,
                 };
                 acc.insert(k, merged);
             }
-            acc
-        };
-
-        let partials = self.context.run_job(self.rdd.clone(), combine_partition)?;
-
-        // Driver-side merge of the per-partition maps.
-        let mut result: HashMap<K, V> = HashMap::new();
-        for partial in partials {
-            for (k, v) in partial {
+            for (k, v) in acc {
                 let merged = match result.remove(&k) {
                     Some(existing) => merge.call(existing, v),
                     None => v,
                 };
                 result.insert(k, merged);
             }
-        }
-        Ok(result)
+            result
+        })
     }
 }

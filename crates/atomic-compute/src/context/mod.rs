@@ -15,7 +15,6 @@ use crate::error::{ComputeError, ComputeResult};
 mod broadcast;
 mod io;
 mod job_runner;
-mod pipeline_executor;
 mod scope;
 mod worker;
 
@@ -36,6 +35,14 @@ pub struct Context {
     /// Always-local scheduler used for closure-based driver operations.
     /// Closures cannot be sent to remote workers, so all `collect()`, `count()`,
     /// `fold()`, etc. execute here regardless of deployment mode.
+    ///
+    /// Legacy path, not a pattern to extend: the project's task model is
+    /// `#[task]`/`task_fn!` (`atomic_compute::task_traits`), dispatched by
+    /// compile-time-registered name, not raw closures. This field — and the
+    /// `Context::run_job*` methods that use it — predate that model and haven't been
+    /// migrated yet (tracked as the scheduler unification effort). Do not add new
+    /// closure-based call sites; wrap new driver-facing ops in `#[task]`/`task_fn!` even
+    /// when they only ever run in-process.
     pub(crate) driver_scheduler: Arc<LocalScheduler>,
     pub(crate) next_rdd_id: Arc<AtomicUsize>,
     pub(crate) address_map: Vec<SocketAddrV4>,

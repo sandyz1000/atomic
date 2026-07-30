@@ -4,15 +4,15 @@ use atomic_data::accumulator;
 use atomic_data::broadcast;
 use atomic_data::cache::worker_partition_cache;
 use atomic_data::distributed::{
-    EngineAction, FileSplitPayload, ShuffleMapPayload, StateMergePayload, Step, StepKind,
-    TaskEnvelope, TaskResultEnvelope, TaskRuntime, decode_payload,
+    EngineAction, FileSplitPayload, ResultStatus, ShuffleMapPayload, StateMergePayload, Step,
+    StepKind, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime, decode_payload,
 };
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 use crate::error::{ComputeError, ComputeResult};
 use crate::registry::{
-    AGENT_RUNNER_REGISTRY, SHUFFLE_MAP_REGISTRY, SORT_SHUFFLE_MAP_REGISTRY, STATE_MERGE_REGISTRY,
-    TASK_REGISTRY,
+    AGENT_RUNNER_REGISTRY, STATE_MERGE_REGISTRY, ShuffleWriteCtx, TASK_REGISTRY,
+    resolve_shuffle_handler,
 };
 use crate::runtimes::{Backend, Dispatcher};
 
@@ -41,25 +41,27 @@ impl Dispatcher for NativeDispatcher {
                 let spec = &payload.partitioner_spec;
                 // Range (sort) shuffles use the sorted handler when one is registered for the type
                 // (K: Ord, via register_sort_shuffle_map!); otherwise fall back to the hash handler.
-                let handler = spec
-                    .is_range()
-                    .then(|| SORT_SHUFFLE_MAP_REGISTRY.get(type_id))
-                    .flatten()
-                    .or_else(|| SHUFFLE_MAP_REGISTRY.get(type_id));
-                match handler {
+                match resolve_shuffle_handler(type_id, spec.is_range()) {
                     None => Err(ComputeError::UnknownOperation(format!(
                         "no shuffle handler for type_id='{type_id}'; \
                          add `register_shuffle_map!(K, V)` to your binary"
                     ))),
-                    Some(handler) => {
-                        handler(
-                            data,
-                            *shuffle_id,
-                            partition_id,
-                            *num_output_partitions,
-                            spec,
-                        )?;
-                        Ok(data.to_vec())
+                    Some(entry) => {
+                        // ShuffleWriteCtx travels in the handler's own `payload` arg (repacked
+                        // fresh here, since `partition_id` isn't part of TaskHandlerFn's
+                        // signature) rather than as a separate typed argument — the same ABI
+                        // every other registered task dispatches through.
+                        let ctx = ShuffleWriteCtx {
+                            shuffle_id: *shuffle_id,
+                            map_partition_id: partition_id,
+                            num_reduce_partitions: *num_output_partitions,
+                            partitioner_spec: spec.clone(),
+                        };
+                        let ctx_bytes = bincode::encode_to_vec(&ctx, bincode::config::standard())
+                            .map_err(|e| {
+                            ComputeError::InvalidPayload(format!("shuffle write ctx encode: {e}"))
+                        })?;
+                        Ok(entry.call(&TaskAction::Map, &ctx_bytes, data)?)
                     }
                 }
             }
@@ -136,9 +138,9 @@ impl Dispatcher for NativeDispatcher {
                         }
                     }
                 }
-                let (new_state, emitted) =
-                    merge(prev.as_deref(), &payload.partials, &payload.params)
-                        .map_err(ComputeError::InvalidPayload)?;
+                let (new_state, emitted) = merge
+                    .call(prev.as_deref(), &payload.partials, &payload.params)
+                    .map_err(ComputeError::InvalidPayload)?;
                 if let Some(dir) = &payload.checkpoint_dir {
                     write_shard_checkpoint(dir, payload.state_id, &new_state)?;
                 }
@@ -176,7 +178,7 @@ impl Dispatcher for NativeDispatcher {
                         registered.join(", ")
                     )))
                 }
-                Some(handler) => Ok(handler(action, &op.payload, data)?),
+                Some(entry) => Ok(entry.call(action, &op.payload, data)?),
             },
         }
     }
@@ -401,6 +403,46 @@ impl Backend for ComputeEngine {
         };
 
         Ok(build_result_envelope(task, worker_id, output))
+    }
+}
+
+/// [`atomic_data::task::PipelineExecutor`] adapter over [`ComputeEngine`] — installed once at
+/// `Context` init (`atomic_data::env::set_pipeline_executor`) so a `PipelineTask` (the
+/// `Stage`-scheduled unit of work for `_task` pipelines) can run through the same dispatch
+/// machinery every other `TaskEnvelope` already uses, whether it's driven in-process by
+/// `LocalScheduler`'s blocking-thread `submit_task` or shipped to a worker by
+/// `DistributedScheduler`'s.
+pub(crate) struct ComputeEnginePipelineExecutor {
+    engine: ComputeEngine,
+}
+
+impl ComputeEnginePipelineExecutor {
+    pub(crate) fn new() -> Self {
+        Self {
+            engine: ComputeEngine::default(),
+        }
+    }
+}
+
+impl atomic_data::task::PipelineExecutor for ComputeEnginePipelineExecutor {
+    fn execute(
+        &self,
+        envelope: &TaskEnvelope,
+    ) -> Result<atomic_data::task::PipelineTaskOutput, String> {
+        let result = self
+            .engine
+            .execute("local-driver", envelope)
+            .map_err(|e| e.to_string())?;
+        match result.status {
+            ResultStatus::Success => Ok(atomic_data::task::PipelineTaskOutput {
+                data: result.data,
+                accumulator_deltas: result.accumulator_deltas,
+                shuffle_server_uri: result.shuffle_server_uri,
+            }),
+            _ => Err(result
+                .error
+                .unwrap_or_else(|| "pipeline task failed".to_string())),
+        }
     }
 }
 

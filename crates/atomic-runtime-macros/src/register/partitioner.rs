@@ -9,7 +9,7 @@ use syn::{Type, parse_macro_input};
 /// ```rust,ignore
 /// atomic_compute::register_partitioner!(ModPartitioner);
 /// ```
-pub(crate) fn register_partitioner_impl(input: TokenStream) -> TokenStream {
+pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let p = parse_macro_input!(input as Type);
 
     TokenStream::from(quote! {

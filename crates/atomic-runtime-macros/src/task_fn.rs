@@ -77,7 +77,7 @@ impl Parse for TaskFnInput {
 /// #[task] fn double(x: i32) -> i32 { x * 2 }
 /// ```
 /// Both are dispatched identically on workers.
-pub(crate) fn task_fn_impl(input: TokenStream) -> TokenStream {
+pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let TaskFnInput { captures, closure } = parse_macro_input!(input as TaskFnInput);
     let cap_names: Vec<&Ident> = captures.iter().map(|c| &c.name).collect();
     let cap_types: Vec<&Type> = captures.iter().map(|c| &c.ty).collect();

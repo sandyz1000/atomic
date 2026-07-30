@@ -167,6 +167,18 @@ op_id, so a stale worker fails loudly at dispatch instead of running old code.
 - `#[task]` / `task_fn!` is the only way to register distributed work.
 - Prefer explicit backend routing and compile-time dispatch over runtime guessing.
 - Keep the Rust, Python, and JS RDD APIs in parity — they are co-equal surfaces over one engine.
+- No new raw-closure driver ops. `Context::run_job`/`run_job_with_partitions`/
+  `run_job_with_context` (backed by `atomic-scheduler::LocalScheduler`, which is what
+  `Context::driver_scheduler` always is, even in distributed mode) accept a bare Rust
+  closure instead of a `#[task]`/`task_fn!`-wrapped value. This predates the task model and
+  is legacy, kept only because the built-in RDD actions (`.collect()`, `.reduce()`,
+  `.count()`, `.max()`/`.min()`, `.top()`/`.take()`, `.for_each()`, the join helpers) still
+  use it and haven't been migrated (tracked as the scheduler unification effort). It works
+  today only because `LocalScheduler` never ships the closure off the driver process
+  (`NativeScheduler::supports_closure_tasks() == true`; `DistributedScheduler`'s is
+  `false` and refuses this path outright). Do not add new call sites through this path —
+  wrap new driver-facing ops in `#[task]`/`task_fn!` even when they only ever run
+  in-process.
 
 ## Two Execution Models
 

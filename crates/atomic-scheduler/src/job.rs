@@ -12,9 +12,21 @@ use crate::listener::JobListener;
 use crate::stage::Stage;
 
 use atomic_data::data::Data;
+use atomic_data::distributed::Step;
 use atomic_data::task::TaskOption;
 use atomic_data::task_context::PartitionTask;
 use parking_lot::Mutex;
+
+/// Per-partition data for a `Vec<Step>` pipeline job — set on `JobTracker::pipeline` instead
+/// of relying on `func`/`final_rdd` (the closure-job fields), which a pipeline job doesn't use.
+/// `submit_missing_tasks`'s final-stage branch checks this to build `PipelineTask`s instead of
+/// `ResultTask`s, without needing `supports_closure_tasks()` — a pipeline job has no closure to
+/// reject in the first place.
+pub struct PipelineJobData {
+    pub result_steps: Vec<Step>,
+    pub source_partitions: Vec<Vec<u8>>,
+    pub broadcasts: Vec<(usize, Vec<u8>)>,
+}
 
 #[derive(Clone, Debug)]
 pub struct Job {
@@ -67,6 +79,13 @@ where
     pub finished: Mutex<Vec<bool>>,
     pub pending_tasks: Mutex<PendingTasks>,
     pub listener: L,
+    /// `Some` for a `Vec<Step>` pipeline job (built by `Context::dispatch_pipeline`); `None`
+    /// for a closure job (`Context::run_job`/`run_job_with_partitions`). `final_rdd`/`func`
+    /// above stay populated either way — for a pipeline job `final_rdd` is the (possibly
+    /// placeholder) RDD `dispatch_pipeline` derived its shuffle-dependency DAG from, and
+    /// `func` is never called — only used so `JobTracker` doesn't need two full generic
+    /// shapes for what's otherwise identical stage-tracking machinery.
+    pub pipeline: Option<PipelineJobData>,
     _marker_t: PhantomData<T>,
     _marker_u: PhantomData<U>,
 }
@@ -97,9 +116,43 @@ where
             final_rdd,
             output_parts,
             listener,
+            None,
         ))
     }
 
+    /// Same as [`from_scheduler`](Self::from_scheduler), but for a `Vec<Step>` pipeline job:
+    /// `submit_missing_tasks`'s final stage builds `PipelineTask`s from `pipeline_data` instead
+    /// of `ResultTask`s from `func`/`final_rdd`. `func`/`final_rdd` are still required to keep
+    /// `JobTracker`'s single generic shape (see the `pipeline` field's doc comment) — callers
+    /// pass a placeholder (e.g. the pipeline's already-materialized source RDD) since neither
+    /// is ever invoked for a pipeline job.
+    pub async fn from_scheduler_pipeline<S>(
+        scheduler: &S,
+        func: Arc<F>,
+        final_rdd: Arc<dyn Rdd<Item = T>>,
+        output_parts: Vec<usize>,
+        listener: L,
+        pipeline_data: PipelineJobData,
+    ) -> LibResult<Arc<JobTracker<F, U, T, L>>>
+    where
+        S: NativeScheduler,
+    {
+        let run_id = scheduler.state().get_next_job_id();
+        let final_stage = scheduler
+            .new_stage(final_rdd.clone().get_rdd_base(), None)
+            .await?;
+        Ok(JobTracker::new(
+            run_id,
+            final_stage,
+            func,
+            final_rdd,
+            output_parts,
+            listener,
+            Some(pipeline_data),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn new(
         run_id: usize,
         final_stage: Stage,
@@ -107,6 +160,7 @@ where
         final_rdd: Arc<dyn Rdd<Item = T>>,
         output_parts: Vec<usize>,
         listener: L,
+        pipeline: Option<PipelineJobData>,
     ) -> Arc<JobTracker<F, U, T, L>> {
         let finished: Vec<bool> = (0..output_parts.len()).map(|_| false).collect();
         let pending_tasks: BTreeMap<Stage, BTreeSet<TaskOption>> = BTreeMap::new();
@@ -123,6 +177,7 @@ where
             finished: Mutex::new(finished),
             pending_tasks: Mutex::new(pending_tasks),
             listener,
+            pipeline,
             _marker_t: PhantomData,
             _marker_u: PhantomData,
         })
