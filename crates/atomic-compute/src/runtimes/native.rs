@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn native_runtime_unknown_op_returns_fatal_failure() {
+    fn unknown_op_fatal() {
         let backend = ComputeEngine::default();
         let task = make_task(
             "no.such.op",
@@ -652,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn default_backend_has_native_dispatcher() {
+    fn default_backend_native() {
         let backend = ComputeEngine::default();
         let task = make_task(
             "nonexistent",
@@ -666,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_pipeline_returns_err() {
+    fn empty_pipeline_err() {
         let backend = ComputeEngine::default();
         let task = TaskEnvelope::new(1, 2, 3, 0, 0, "t".into(), vec![], vec![]);
         assert!(
@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_runtime_returns_err() {
+    fn unregistered_runtime_err() {
         let backend = ComputeEngine::default();
         let task = make_task(
             "no.such.op",
@@ -688,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_op_stores_reports() {
+    fn cache_op_stores() {
         let backend = ComputeEngine::default();
         let data = vec![1u8, 2, 3, 4];
         // A Cache op is an identity pass-through that stores the partition bytes and
@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_source_serves_bytes() {
+    fn cache_serves_bytes() {
         let backend = ComputeEngine::default();
         let cached = vec![7u8, 8, 9];
         atomic_data::cache::worker_partition_cache().put(9100, 0, cached.clone());
@@ -725,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_source_miss_returns_cache_miss_status() {
+    fn cache_miss_status() {
         let backend = ComputeEngine::default();
         let task =
             TaskEnvelope::new(1, 2, 3, 0, 0, "t".into(), vec![], vec![]).with_cache_source(9199); // never populated

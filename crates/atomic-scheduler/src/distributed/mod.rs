@@ -328,15 +328,37 @@ impl DistributedScheduler {
         target_executor: SocketAddrV4,
     ) -> CompletionEvent {
         let attempt_id = self.attempt_id.fetch_add(1, Ordering::SeqCst);
-        let envelope = task.to_envelope(attempt_id);
+        let primary = self
+            .submit_native_task(&task.to_envelope(attempt_id), Some(target_executor))
+            .await;
 
-        match self
-            .submit_native_task(&envelope, Some(target_executor))
-            .await
-        {
-            Ok((result, _worker_addr)) => match result.status {
+        // A cache-serve primary can miss (holder gone / evicted) — either a `CacheMiss`
+        // status or a connection error to the pinned holder. Recompute the partition on any
+        // worker, the fallback the old `run_native_job` path provided. A non-cache-serve
+        // failure is a real task failure. `plan_cache_dispatch` is all-or-nothing, so a job
+        // whose holder died still serves its live partitions from cache and only recomputes
+        // the dead one through this fallback.
+        let recompute_fallback = task.cache_serve.is_some()
+            && match &primary {
+                Ok((r, _)) => r.status == atomic_data::distributed::ResultStatus::CacheMiss,
+                Err(_) => true,
+            };
+
+        let outcome = if recompute_fallback {
+            let fb_attempt = self.attempt_id.fetch_add(1, Ordering::SeqCst);
+            self.submit_native_task(&task.recompute_envelope(fb_attempt), None)
+                .await
+        } else {
+            primary
+        };
+
+        match outcome {
+            Ok((result, worker_addr)) => match result.status {
                 atomic_data::distributed::ResultStatus::Success => {
                     self.merge_accumulator_deltas(&result.accumulator_deltas);
+                    // Record which worker now holds each partition this task cached, so a
+                    // later job over the same RDD routes back to it (`plan_cache_dispatch`).
+                    self.register_cache_locs(&result.cached_partitions, worker_addr);
                     // Same registration `PipelineTask::run` does for the local path — see
                     // its doc comment. Here the worker's `shuffle_server_uri` arrives
                     // directly on the RPC response instead of a `PipelineExecutor` return.
@@ -353,9 +375,7 @@ impl DistributedScheduler {
                         result: Some(Box::new(result.data) as Box<dyn Data>),
                     }
                 }
-                atomic_data::distributed::ResultStatus::RetryableFailure
-                | atomic_data::distributed::ResultStatus::FatalFailure
-                | atomic_data::distributed::ResultStatus::CacheMiss => CompletionEvent {
+                _ => CompletionEvent {
                     task: task_option,
                     reason: TaskEndReason::OtherFailure(
                         result
@@ -579,6 +599,24 @@ impl NativeScheduler for DistributedScheduler {
     fn supports_closure_tasks(&self) -> bool {
         false
     }
+
+    /// Consult `plan_cache_dispatch`: when this partition's cache is available on a live
+    /// worker, pin the task there and serve it from cache; otherwise recompute anywhere.
+    fn pipeline_partition_plan(
+        &self,
+        steps: &[Step],
+        partition: usize,
+        num_partitions: usize,
+    ) -> (Option<SocketAddrV4>, Option<(usize, Vec<Step>)>) {
+        match self.plan_cache_dispatch(steps, num_partitions) {
+            crate::distributed::CacheDispatch::Serve {
+                rdd_id,
+                post_ops,
+                locs,
+            } => (locs.get(partition).copied(), Some((rdd_id, post_ops))),
+            crate::distributed::CacheDispatch::Recompute => (None, None),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -605,7 +643,7 @@ impl StagePlanner for DistributedScheduler {
                     let uris = self.state.get_shuffle_server_uris(shuffle_id);
                     for (partition, uri) in uris.into_iter().enumerate().take(stage.num_partitions)
                     {
-                        self.state.add_output_loc_to_stage(stage.id, partition, uri);
+                        self.state.add_stage_output_loc(stage.id, partition, uri);
                     }
                 }
                 // Re-fetch from stage_cache so output_locs mutations are reflected.

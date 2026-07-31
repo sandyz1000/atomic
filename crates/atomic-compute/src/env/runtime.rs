@@ -46,6 +46,29 @@ impl Env {
         }
     }
 
+    /// Drive a shuffle-fetch future to completion on the dedicated multi-thread [`SHUFFLE_RT`],
+    /// blocking the calling thread on a channel for the result.
+    ///
+    /// `ShuffledRdd::compute` runs synchronously inside whatever runtime drove the action — a
+    /// current-thread `#[tokio::test]`, a multi-thread worker, or (via `run_in_async_rt`) the
+    /// internal `ASYNC_RT` — and a bare `Handle::current().block_on` panics ("runtime within a
+    /// runtime") on the current-thread case while `block_in_place` panics on the current-thread
+    /// case too. Spawning the fetch on `SHUFFLE_RT` (whose worker threads also host the shuffle
+    /// HTTP server, so a reactor is guaranteed) and only *waiting* here sidesteps both: this
+    /// thread never drives the fetch, so its own runtime flavor is irrelevant.
+    pub fn block_on_shuffle_rt<F>(fut: F) -> F::Output
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        SHUFFLE_RT.spawn(async move {
+            let _ = tx.send(fut.await);
+        });
+        rx.recv()
+            .expect("shuffle fetch task dropped without producing a result")
+    }
+
     fn build_async_executor() -> Option<Runtime> {
         if Handle::try_current().is_ok() {
             None

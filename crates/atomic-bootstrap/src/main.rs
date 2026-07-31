@@ -151,21 +151,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_bucket_and_key() {
+    fn parses_bucket_key() {
         let uri = S3Uri::parse("s3://my-bucket/prefix/app").unwrap();
         assert_eq!(uri.bucket, "my-bucket");
         assert_eq!(uri.key, "prefix/app");
     }
 
     #[test]
-    fn parses_bucket_with_no_key() {
+    fn parses_no_key() {
         let uri = S3Uri::parse("s3://my-bucket").unwrap();
         assert_eq!(uri.bucket, "my-bucket");
         assert_eq!(uri.key, "");
     }
 
     #[test]
-    fn rejects_non_s3_scheme() {
+    fn rejects_non_s3() {
         let err = S3Uri::parse("https://example.com/app").unwrap_err();
         assert!(matches!(err, BootstrapError::UnsupportedScheme(_)));
     }

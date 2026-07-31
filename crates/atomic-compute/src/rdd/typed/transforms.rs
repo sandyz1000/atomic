@@ -219,7 +219,7 @@ impl<T: Data + Clone> TypedRdd<T> {
                 (bucket, elem)
             })) as Box<dyn Iterator<Item = (usize, T)>>
         })
-        .combine_by_key_with_partitioner(
+        .combine_by_key_partitioned(
             |v| vec![v],
             |mut buf, v| {
                 buf.push(v);

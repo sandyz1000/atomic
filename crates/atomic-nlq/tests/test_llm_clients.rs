@@ -11,7 +11,7 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 #[tokio::test]
-async fn anthropic_chat_parses_text_from_response_body() {
+async fn anthropic_parses_text() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/messages"))
@@ -33,7 +33,7 @@ async fn anthropic_chat_parses_text_from_response_body() {
 }
 
 #[tokio::test]
-async fn anthropic_chat_surfaces_error_status() {
+async fn anthropic_error_status() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/messages"))
@@ -69,7 +69,7 @@ impl Respond for FlakyThenOk {
 }
 
 #[tokio::test]
-async fn anthropic_chat_with_retry_recovers_from_transient_failure() {
+async fn anthropic_retry_recovers() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/messages"))
@@ -89,7 +89,7 @@ async fn anthropic_chat_with_retry_recovers_from_transient_failure() {
 }
 
 #[tokio::test]
-async fn anthropic_chat_with_retry_exhausts_and_returns_last_error() {
+async fn anthropic_retry_exhausts() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/messages"))
@@ -108,7 +108,7 @@ async fn anthropic_chat_with_retry_exhausts_and_returns_last_error() {
 }
 
 #[tokio::test]
-async fn openai_chat_parses_text_from_response_body() {
+async fn openai_parses_text() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))

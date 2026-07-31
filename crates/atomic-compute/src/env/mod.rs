@@ -525,46 +525,46 @@ mod config_validate_tests {
     use super::*;
 
     #[test]
-    fn local_config_is_valid() {
+    fn local_config_valid() {
         assert!(Config::local().validate().is_ok());
     }
 
     #[test]
-    fn distributed_driver_needs_workers() {
+    fn driver_needs_workers() {
         let config = Config::distributed_driver(Ipv4Addr::LOCALHOST, vec![]);
         assert!(config.validate().is_err());
     }
 
     #[test]
-    fn distributed_driver_with_dns_is_valid() {
+    fn driver_dns_valid() {
         let mut config = Config::distributed_driver(Ipv4Addr::LOCALHOST, vec![]);
         config.worker_dns = Some(("workers.svc".to_string(), 10001));
         assert!(config.validate().is_ok());
     }
 
     #[test]
-    fn worker_rejects_zero_port() {
+    fn worker_rejects_zero() {
         let mut config = Config::worker(Ipv4Addr::LOCALHOST, 10001);
         config.worker.as_mut().unwrap().port = 0;
         assert!(config.validate().is_err());
     }
 
     #[test]
-    fn rejects_zero_metrics_port() {
+    fn metrics_zero_port() {
         let mut config = Config::local();
         config.metrics_port = Some(0);
         assert!(config.validate().is_err());
     }
 
     #[test]
-    fn rejects_partial_tls_triple() {
+    fn rejects_partial_tls() {
         let mut config = Config::local();
         config.tls_cert = Some(PathBuf::from("/tmp/does-not-matter.pem"));
         assert!(config.validate().is_err());
     }
 
     #[test]
-    fn rejects_missing_tls_file() {
+    fn rejects_missing_tls() {
         let mut config = Config::local();
         config.tls_ca_cert = Some(PathBuf::from("/nonexistent/ca.pem"));
         config.tls_cert = Some(PathBuf::from("/nonexistent/cert.pem"));
@@ -630,7 +630,7 @@ mod allocator_from_env_tests {
     /// directly; this confirms the overlay line it runs doesn't disturb the rest of
     /// a `Config` built via the non-`from_env` constructors it actually uses.
     #[test]
-    fn overlay_preserves_other_fields() {
+    fn overlay_preserves_fields() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
         let mut config = Config::local();

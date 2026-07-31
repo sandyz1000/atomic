@@ -576,7 +576,7 @@ impl Service<Request<Incoming>> for ShuffleService {
 //     }
 //
 //     #[tokio::test]
-//     async fn cached_data_not_found() -> Result<(), Box<dyn std::error::Error + 'static>> {
+//     async fn cached_data_missing() -> Result<(), Box<dyn std::error::Error + 'static>> {
 //         let (_, port) = ShuffleManager::start_server(None)?;
 //
 //         let url = format!(

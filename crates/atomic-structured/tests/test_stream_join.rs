@@ -138,7 +138,7 @@ fn test_inner_join_matches() {
 /// D4 — the same inner join with sharded state (`.distributed(4)`): both sides of
 /// a match share the join key, so they route to one shard and the match is found.
 #[test]
-fn test_distributed_inner_join_matches() {
+fn test_sharded_join_matches() {
     let left = Arc::new(QueueSource::from_batches(
         left_schema(),
         vec![vec![left_row(100, "x", 10)], vec![left_row(500, "y", 20)]],

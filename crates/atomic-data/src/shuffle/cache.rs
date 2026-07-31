@@ -272,7 +272,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spill_cache_memory_path() {
+    fn spill_memory_path() {
         let dir = tempfile::tempdir().unwrap();
         let cache = SpillableShuffleCache::new(dir.path().to_path_buf(), 1024);
         let key = (0usize, 0usize, 0usize);
@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn spill_cache_disk_path() {
+    fn spill_disk_path() {
         let dir = tempfile::tempdir().unwrap();
         // threshold = 50 bytes, item is 100 bytes — goes to disk immediately
         let cache = SpillableShuffleCache::new(dir.path().to_path_buf(), 50);
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn spill_cache_mixed_and_remove() {
+    fn spill_mixed_remove() {
         let dir = tempfile::tempdir().unwrap();
         let cache = SpillableShuffleCache::new(dir.path().to_path_buf(), 200);
         // First item: 150 bytes — stays in memory (150 < 200)
@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn consolidated_roundtrip_and_slice() {
+    fn consolidated_slice() {
         let cache = DashMapShuffleCache::default();
         let b0 = enc(&[(1, 10)]);
         let b1 = enc(&[]); // empty reduce partition still framed
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_bucket_still_served() {
+    fn legacy_bucket_served() {
         let cache = DashMapShuffleCache::default();
         cache.insert((1, 0, 0), vec![1, 2, 3]);
         // No index → falls back to the per-bucket entry.
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn get_slice_default_bounds() {
+    fn slice_default_bounds() {
         let cache = DashMapShuffleCache::default();
         cache.insert((0, 0, SHUFFLE_DATA_KEY), vec![10, 11, 12, 13, 14]);
         assert_eq!(
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn spill_get_slice_ranged_disk_read() {
+    fn spill_slice_ranged() {
         let dir = tempfile::tempdir().unwrap();
         let cache = SpillableShuffleCache::new(dir.path().to_path_buf(), 0); // 0 → always spill
         cache.insert((0, 0, SHUFFLE_DATA_KEY), (0..20u8).collect());
@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn consolidated_served_from_spill() {
+    fn consolidated_from_spill() {
         let dir = tempfile::tempdir().unwrap();
         let cache = SpillableShuffleCache::new(dir.path().to_path_buf(), 0); // force DATA+INDEX to disk
         let b0 = enc(&[(1, 10)]);

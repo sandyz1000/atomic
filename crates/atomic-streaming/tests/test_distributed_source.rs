@@ -47,7 +47,7 @@ fn test_file_source_distributes() {
 /// After a successful batch the files are committed; the next `plan_batch`
 /// returns zero tasks (no new files).
 #[test]
-fn test_no_reread_after_commit() {
+fn test_no_reread_commit() {
     let dir = TempDir::new().unwrap();
     write_file(&dir, "only.txt", "line1\nline2");
 
@@ -103,7 +103,7 @@ fn test_split_replanned() {
 
 /// `get_or_compute` returns the same RDD for a repeated batch time (idempotent).
 #[test]
-fn test_get_or_compute_caches() {
+fn test_compute_caches() {
     let dir = TempDir::new().unwrap();
     write_file(&dir, "x.txt", "data");
 

@@ -44,7 +44,7 @@ impl Context {
         atomic_data::cache::init_partition_cache();
         let spill_dir = job_work_dir.join("rdd-cache");
         std::fs::create_dir_all(&spill_dir).ok();
-        atomic_data::env::set_rdd_cache_spill_dir(spill_dir);
+        atomic_data::env::set_cache_spill_dir(spill_dir);
         if let Some(port) = config.metrics_port {
             atomic_scheduler::metrics::init_metrics();
             env::Env::run_in_async_rt(|| {

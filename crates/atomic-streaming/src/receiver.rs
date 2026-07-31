@@ -212,7 +212,7 @@ mod tests {
     // from both the spawning thread and any thread that clones the Arc.
 
     #[test]
-    fn arc_counter_cross_thread() {
+    fn arc_cross_thread() {
         let bg = BlockGenerator::new(0, Duration::from_secs(1));
         // Clone the Arc just like BlockGenerator::start() does.
         let shared = Arc::clone(&bg.next_block_id);
@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn arc_no_lost_updates() {
+    fn arc_no_loss() {
         let bg = BlockGenerator::new(0, Duration::from_secs(1));
         let mut handles = vec![];
         for _ in 0..8 {
@@ -246,7 +246,7 @@ mod tests {
     // --- add_data respects the Active state guard ---
 
     #[test]
-    fn add_data_not_active() {
+    fn add_data_inactive() {
         let bg = BlockGenerator::new(0, Duration::from_secs(1));
         // Generator is Initialised, not Active — data must be silently dropped.
         bg.add_data(Box::new(42u32));

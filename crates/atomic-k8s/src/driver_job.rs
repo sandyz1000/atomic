@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn image_path_runs_image_directly() {
+    fn image_path_runs() {
         let spec = base_spec(None);
         let job = build_driver_job(&spec, "job-abc");
 
@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_path_adds_fetch_init_container() {
+    fn binary_init_container() {
         let fetch = InitFetch {
             bootstrap_image: "ghcr.io/atomic-rs/bootstrap:0.1".to_string(),
             url: "s3://bucket/prefix/app".to_string(),
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn job_args_appended_after_driver_flag() {
+    fn args_after_driver() {
         let job_args = vec!["--my-flag".to_string(), "foo".to_string()];
         let mut spec = base_spec(None);
         spec.job_args = &job_args;

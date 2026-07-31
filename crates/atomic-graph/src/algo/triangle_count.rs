@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn k4_total_and_per_vertex() {
+    fn k4_triangle_counts() {
         let ctx = Context::local().unwrap();
         let g = k4(ctx);
         assert_eq!(total(&g), 4, "K4 has 4 triangles");
@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn path_has_no_triangle() {
+    fn path_no_triangle() {
         let ctx = Context::local().unwrap();
         let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 2)], ());
         assert_eq!(total(&g), 0);

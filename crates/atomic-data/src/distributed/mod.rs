@@ -30,7 +30,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_envelope_round_trips_with_rkyv() {
+    fn task_envelope_roundtrip() {
         let steps = vec![Step {
             task_name: "mycrate::double".to_string(),
             kind: StepKind::Task(TaskAction::Map),
@@ -48,7 +48,7 @@ mod tests {
     }
 
     #[test]
-    fn task_result_round_trips() {
+    fn task_result_roundtrip() {
         let result =
             TaskResultEnvelope::ok(1, 2, 3, 0, 0, "worker-1".to_string(), vec![4, 5, 6], None);
         let bytes = result.encode_wire().expect("serialize result");
@@ -59,7 +59,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_action_round_trips() {
+    fn fold_action_roundtrip() {
         let steps = vec![Step {
             task_name: "mycrate::sum".to_string(),
             kind: StepKind::Task(TaskAction::Fold),
@@ -75,7 +75,7 @@ mod tests {
     }
 
     #[test]
-    fn shuffle_map_carries_ids() {
+    fn shuffle_map_ids() {
         let steps = vec![Step {
             task_name: "sys.shuffle_map".to_string(),
             kind: StepKind::Engine(EngineAction::ShuffleMap {
@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_op_pipeline_round_trips() {
+    fn pipeline_roundtrip() {
         let steps = vec![
             Step {
                 task_name: "myapp::double".to_string(),
@@ -129,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn default_runtime_is_native() {
+    fn default_runtime_native() {
         let op = Step {
             task_name: "x".to_string(),
             kind: StepKind::Task(TaskAction::Map),
@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn native_runtime_roundtrips_rkyv() {
+    fn native_runtime_roundtrip() {
         let steps = vec![Step {
             task_name: "x".to_string(),
             kind: StepKind::Task(TaskAction::Map),
@@ -154,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn task_action_variants_exhaustive() {
+    fn task_action_exhaustive() {
         let action = TaskAction::Map;
         let _ = match action {
             TaskAction::Map
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[test]
-    fn step_kind_variants_exhaustive() {
+    fn step_kind_exhaustive() {
         let step = EngineAction::ReadFileSplit;
         let _ = match step {
             EngineAction::ShuffleMap { .. }
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_caps_round_trips() {
+    fn worker_caps_roundtrip() {
         let steps = vec!["myapp::double".to_string(), "myapp::sum".to_string()];
         let caps = WorkerCapabilities::new("worker-42".to_string(), 8, steps.clone());
         let bytes = caps.encode_wire().expect("serialize caps");
@@ -196,13 +196,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_frame_ids_rejected() {
+    fn legacy_frames_rejected() {
         assert!(TransportFrameKind::try_from(1).is_err());
         assert!(TransportFrameKind::try_from(2).is_err());
     }
 
     #[test]
-    fn rkyv_codec_round_trips() {
+    fn rkyv_codec_roundtrip() {
         let encoded = vec![1_u32, 2, 3].encode_wire().expect("serialize values");
         let decoded = Vec::<u32>::decode_wire(&encoded).expect("deserialize values");
         assert_eq!(decoded, vec![1, 2, 3]);

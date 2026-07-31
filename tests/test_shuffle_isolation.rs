@@ -98,7 +98,7 @@ async fn test_first_shuffle_succeeds() {
 /// **Current behaviour:** second context shuffle fails — this test will FAIL until
 /// the OnceLock is replaced with a resettable handle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_second_context_shuffle_fails() {
+async fn test_second_context_fails() {
     let _g = shuffle_guard();
 
     // First context — sets SHUFFLE_SERVER_URI.

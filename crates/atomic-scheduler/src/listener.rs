@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn add_listener_receives_events_posted_after_start() {
+    fn receives_after_start() {
         let mut bus = LiveListenerBus::new();
         bus.start().unwrap();
 
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn add_listener_before_start_replays_buffered_events() {
+    fn replays_before_start() {
         let mut bus = LiveListenerBus::new();
 
         // Posted before start(): buffered on the bus, not yet delivered anywhere.

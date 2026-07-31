@@ -96,7 +96,7 @@ fn complete_emits_all() {
 }
 
 #[test]
-fn recovery_no_double_emit() {
+fn no_double_emit() {
     // A FileSink uses deterministic part-{epoch} names. After a restart that
     // restores state, re-processing the same epoch overwrites its part file
     // rather than producing a duplicate — so the output dir has one part per epoch.

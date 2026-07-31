@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_step_leaves_rust_op_id_unresolved() {
+    fn resolve_rust_unresolved() {
         // Any #[task]-registered task_name (none registered in this crate's test binary,
         // but the call path is identical) is left out of resolved_tools — it's
         // dispatched by the worker via TASK_REGISTRY at call time, not pre-resolved here.
@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_step_resolves_python_tool() {
+    fn resolve_python_tool() {
         let registry = test_registry();
         registry.register_tool(ToolDefinition {
             name: "py_tool".to_string(),
@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_step_resolves_javascript_tool() {
+    fn resolve_javascript_tool() {
         let registry = test_registry();
         registry.register_tool(ToolDefinition {
             name: "js_tool".to_string(),
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_step_rejects_builtin_tool() {
+    fn resolve_rejects_builtin() {
         let registry = test_registry();
         let result = registry.resolve_agent_step(base_payload(vec!["sql_query".to_string()]));
         assert!(
@@ -312,14 +312,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_agent_step_rejects_unknown_tool() {
+    fn resolve_rejects_unknown() {
         let registry = test_registry();
         let result = registry.resolve_agent_step(base_payload(vec!["totally_unknown".to_string()]));
         assert!(result.is_err());
     }
 
     #[test]
-    fn resolve_agent_step_empty_tool_refs_is_noop() {
+    fn resolve_empty_refs() {
         let registry = test_registry();
         let config = registry
             .resolve_agent_step(base_payload(vec![]))

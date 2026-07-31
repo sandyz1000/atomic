@@ -10,7 +10,7 @@ where
     /// Uses sampling + range-partition shuffle + per-partition sort:
     /// 1. Sample ~20 keys per partition to estimate the key distribution.
     /// 2. Build a `RangePartitioner` from the sampled boundaries.
-    /// 3. Shuffle via `combine_by_key_with_partitioner` into range-ordered buckets
+    /// 3. Shuffle via `combine_by_key_partitioned` into range-ordered buckets
     ///    (each partition holds all pairs for one key range).
     /// 4. Sort within each partition — O(partition_size) memory per worker.
     ///
@@ -73,7 +73,7 @@ where
         } else {
             Arc::new(|a: &K, b: &K| b.cmp(a))
         };
-        self.combine_by_key_with_partitioner(
+        self.combine_by_key_partitioned(
             |v| vec![v],
             |mut buf, v| {
                 buf.push(v);
@@ -176,7 +176,7 @@ where
         } else {
             Arc::new(|a: &K, b: &K| b.cmp(a))
         };
-        self.combine_by_key_with_partitioner(
+        self.combine_by_key_partitioned(
             |v| vec![v],
             |mut buf, v| {
                 buf.push(v);

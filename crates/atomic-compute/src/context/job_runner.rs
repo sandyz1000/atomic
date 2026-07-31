@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use atomic_data::data::Data;
-use atomic_data::dependency::Dependency;
 use atomic_data::distributed::{
     ResultStatus, Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
 };
@@ -184,7 +183,7 @@ impl Context {
     ) -> ComputeResult<()> {
         let sched = match &self.scheduler {
             Schedulers::Distributed(s) => s.clone(),
-            Schedulers::Local(_) => return self.run_pending_shuffle_stages_local(rdd),
+            Schedulers::Local(_) => return self.run_shuffle_stages_local(rdd),
         };
 
         let dispatched = env::Env::run_in_async_rt(|| {
@@ -211,24 +210,24 @@ impl Context {
         Ok(())
     }
 
-    fn run_pending_shuffle_stages_local(&self, rdd: &Arc<dyn RddBase>) -> ComputeResult<()> {
+    fn run_shuffle_stages_local(&self, rdd: &Arc<dyn RddBase>) -> ComputeResult<()> {
         let Some(tracker) = atomic_data::env::get_map_output_tracker() else {
             return Ok(());
         };
-        for dep in rdd.get_dependencies() {
-            if let Dependency::Shuffle(shuffle_dep) = dep {
-                let shuffle_id = shuffle_dep.get_shuffle_id();
-                let num_map_partitions = shuffle_dep.get_rdd_base().number_of_splits();
-                let uris: Vec<Option<String>> = (0..num_map_partitions)
-                    .map(|p| Some(shuffle_dep.do_shuffle_task(p)))
-                    .collect();
-                tracker.register_shuffle(shuffle_id, num_map_partitions);
-                tracker.register_map_outputs(shuffle_id, uris);
-                log::info!(
-                    "shuffle map stage complete (local): shuffle_id={shuffle_id} \
-                     num_map_partitions={num_map_partitions}"
-                );
-            }
+        // Walk narrow deps too: a shuffle can sit upstream of a `.values()`/`.map_values()`
+        // hop, where a direct-dep scan would miss it (see `reduce_side_shuffles`).
+        for shuffle_dep in atomic_data::dependency::reduce_side_shuffles(rdd) {
+            let shuffle_id = shuffle_dep.get_shuffle_id();
+            let num_map_partitions = shuffle_dep.get_rdd_base().number_of_splits();
+            let uris: Vec<Option<String>> = (0..num_map_partitions)
+                .map(|p| Some(shuffle_dep.do_shuffle_task(p)))
+                .collect();
+            tracker.register_shuffle(shuffle_id, num_map_partitions);
+            tracker.register_map_outputs(shuffle_id, uris);
+            log::info!(
+                "shuffle map stage complete (local): shuffle_id={shuffle_id} \
+                 num_map_partitions={num_map_partitions}"
+            );
         }
         Ok(())
     }

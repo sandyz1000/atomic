@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn simple_cycle_is_one_scc() {
+    fn cycle_one_scc() {
         let ctx = Context::local().unwrap();
         let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 2), edge(2, 0)], ());
         let labels = run(&g, 0);
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn dag_has_singleton_sccs() {
+    fn dag_singleton_sccs() {
         let ctx = Context::local().unwrap();
         let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 2)], ());
         let labels = run(&g, 0);
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn self_loop_vertex_is_own_scc() {
+    fn self_loop_scc() {
         let ctx = Context::local().unwrap();
         let g: Graph<(), ()> = Graph::from_vertices_edges(ctx, vec![(0, ())], vec![edge(0, 0)]);
         let labels = run(&g, 0);

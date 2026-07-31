@@ -116,7 +116,7 @@ where
         Vec<(K, V)>: WireEncode,
     {
         let p = Partitioner::from_custom(partitioner);
-        self.combine_by_key_with_partitioner(|v| v, |_, v| v, |c, _| c, p, None)
+        self.combine_by_key_partitioned(|v| v, |_, v| v, |c, _| c, p, None)
     }
 
     /// Re-partition using a registered [`NamedPartitioner`] — the distributed-capable
@@ -134,11 +134,11 @@ where
         Vec<(K, V)>: WireEncode,
     {
         let p = Partitioner::from_named::<P>(partitioner.num_partitions());
-        self.combine_by_key_with_partitioner(|v| v, |_, v| v, |c, _| c, p, None)
+        self.combine_by_key_partitioned(|v| v, |_, v| v, |c, _| c, p, None)
     }
 
     /// Internal: `combine_by_key` with an explicit `Partitioner` instead of hash.
-    pub(crate) fn combine_by_key_with_partitioner<C, CC, MV, MC>(
+    pub(crate) fn combine_by_key_partitioned<C, CC, MV, MC>(
         self,
         create_combiner: CC,
         merge_value: MV,
@@ -750,9 +750,9 @@ where
     /// # Example
     /// ```ignore
     /// #[task] fn add(a: i32, b: i32) -> i32 { a + b }
-    /// let totals: HashMap<String, i32> = pairs.reduce_by_key_locally_task(Add)?;
+    /// let totals: HashMap<String, i32> = pairs.reduce_by_key_local(Add)?;
     /// ```
-    pub fn reduce_by_key_locally_task<B>(
+    pub fn reduce_by_key_local<B>(
         &self,
         merge: B,
     ) -> Result<std::collections::HashMap<K, V>, DataError>

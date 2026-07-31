@@ -21,8 +21,8 @@ pub mod shuffle;
 pub mod state_merge;
 
 pub use combine::{
-    COMBINE_KEY_REGISTRY, CombineKeyEntry, combine_handler, combine_lift_handler,
-    combine_handler_registered,
+    COMBINE_KEY_REGISTRY, CombineKeyEntry, combine_handler, combine_handler_registered,
+    combine_lift_handler,
 };
 pub use partitioner::{
     PARTITIONER_REGISTRY, PartitionerEntry, PartitionerFactoryFn, lookup_partitioner,
@@ -257,14 +257,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_registry_is_accessible() {
+    fn registry_accessible() {
         // Registry may be empty in unit tests (no #[task] functions in this crate),
         // but it must be constructible without panicking.
         let _ = &*TASK_REGISTRY;
     }
 
     #[test]
-    fn task_registry_get_unknown_returns_none() {
+    fn registry_unknown_none() {
         assert!(TASK_REGISTRY.get("nonexistent::op").is_none());
     }
 }

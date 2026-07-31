@@ -180,7 +180,7 @@ fn test_mid_op_shortcircuit() {
 /// A fold op uses `TaskAction::Fold` rather than `Map`.
 /// This test verifies that builtin `sum::i32` correctly sums a partition.
 #[test]
-fn test_fold_op_sums_partition() {
+fn test_fold_sums_partition() {
     let backend = ComputeEngine::default();
     let zero: i32 = 0;
     let items: Vec<i32> = vec![1, 2, 3, 4, 5];

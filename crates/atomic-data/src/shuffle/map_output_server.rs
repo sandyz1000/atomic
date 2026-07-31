@@ -321,25 +321,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decode_shuffle_id_success() {
+    fn decode_id_success() {
         let bytes = bincode::encode_to_vec(42usize, bincode::config::standard()).unwrap();
         assert_eq!(decode_shuffle_id(&bytes).unwrap(), 42);
     }
 
     #[test]
-    fn decode_shuffle_id_invalid_bytes() {
+    fn decode_id_invalid() {
         let bytes = vec![];
         assert!(decode_shuffle_id(&bytes).is_err());
     }
 
     #[test]
-    fn collect_locations_returns_not_found_for_unknown_shuffle() {
+    fn collect_unknown_shuffle() {
         let uris: ServerUris = Arc::new(DashMap::new());
         assert_eq!(collect_locations(&uris, 7), Err(StatusCode::NOT_FOUND));
     }
 
     #[test]
-    fn collect_locations_returns_flattened_locations() {
+    fn collect_flattened_locations() {
         let uris: ServerUris = Arc::new(DashMap::new());
         uris.insert(
             3,
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_and_collect_locations_waits_until_ready() {
+    async fn wait_collect_ready() {
         let uris: ServerUris = Arc::new(DashMap::new());
         uris.insert(5, vec![None, None]);
 

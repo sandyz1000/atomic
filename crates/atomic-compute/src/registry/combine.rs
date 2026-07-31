@@ -180,9 +180,9 @@ where
         .lift_task_name
         .as_deref()
         .ok_or_else(|| "combine_lift_handler: lift task name missing".to_string())?;
-    let lift = TASK_REGISTRY.get(lift_name).ok_or_else(|| {
-        format!("combine_lift_handler: lift task '{lift_name}' not registered")
-    })?;
+    let lift = TASK_REGISTRY
+        .get(lift_name)
+        .ok_or_else(|| format!("combine_lift_handler: lift task '{lift_name}' not registered"))?;
     let merge = TASK_REGISTRY
         .get(ctx.merge_task_name.as_str())
         .ok_or_else(|| {
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn combine_cv_order_preserved() {
+    fn combine_cv_ordered() {
         let pairs: Vec<(String, i32)> = vec![
             ("b".into(), 1),
             ("a".into(), 10),
@@ -274,8 +274,7 @@ mod tests {
         let data = pairs.encode_wire().unwrap();
         let payload = ctx_payload(None, "test::combine::merge_i32");
 
-        let out_bytes =
-            combine_handler::<String, i32>(&TaskAction::Map, &payload, &data).unwrap();
+        let out_bytes = combine_handler::<String, i32>(&TaskAction::Map, &payload, &data).unwrap();
         let out = Vec::<(String, i32)>::decode_wire(&out_bytes).unwrap();
 
         // One pair per key; first-seen order ("b" before "a"); values summed.
@@ -283,19 +282,18 @@ mod tests {
     }
 
     #[test]
-    fn combine_cv_single_identity() {
+    fn combine_cv_single() {
         let pairs: Vec<(String, i32)> = vec![("solo".into(), 42)];
         let data = pairs.encode_wire().unwrap();
         let payload = ctx_payload(None, "test::combine::merge_i32");
 
-        let out_bytes =
-            combine_handler::<String, i32>(&TaskAction::Map, &payload, &data).unwrap();
+        let out_bytes = combine_handler::<String, i32>(&TaskAction::Map, &payload, &data).unwrap();
         let out = Vec::<(String, i32)>::decode_wire(&out_bytes).unwrap();
         assert_eq!(out, vec![("solo".into(), 42)]);
     }
 
     #[test]
-    fn combine_lift_grouped_reduce() {
+    fn combine_lift_reduce() {
         let pairs: Vec<(String, i32)> = vec![
             ("a".into(), 4),
             ("b".into(), 100),
@@ -308,12 +306,9 @@ mod tests {
             "test::combine::merge_sum_count",
         );
 
-        let out_bytes = combine_lift_handler::<String, i32, (i64, u64)>(
-            &TaskAction::Map,
-            &payload,
-            &data,
-        )
-        .unwrap();
+        let out_bytes =
+            combine_lift_handler::<String, i32, (i64, u64)>(&TaskAction::Map, &payload, &data)
+                .unwrap();
         let out = Vec::<(String, (i64, u64))>::decode_wire(&out_bytes).unwrap();
 
         // "a": (4+6+10, 3 values); "b": (100, 1 value). First-seen order preserved.
@@ -321,12 +316,11 @@ mod tests {
     }
 
     #[test]
-    fn combine_missing_merge_errors() {
+    fn combine_missing_merge() {
         let pairs: Vec<(String, i32)> = vec![("a".into(), 1)];
         let data = pairs.encode_wire().unwrap();
         let payload = ctx_payload(None, "test::combine::does_not_exist");
-        let err =
-            combine_handler::<String, i32>(&TaskAction::Map, &payload, &data).unwrap_err();
+        let err = combine_handler::<String, i32>(&TaskAction::Map, &payload, &data).unwrap_err();
         assert!(err.contains("not registered"), "unexpected error: {err}");
     }
 }

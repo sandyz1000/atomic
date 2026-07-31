@@ -69,7 +69,7 @@ fn kafka_roundtrip() {
 
 #[test]
 #[ignore = "requires a Kafka broker at localhost:9092"]
-fn transactional_sink_commits_atomically() {
+fn sink_commits_atomically() {
     const BROKERS: &str = "localhost:9092";
 
     // A transactional sink: each `add_batch` is one Kafka transaction. The rows of
@@ -95,7 +95,7 @@ fn transactional_sink_commits_atomically() {
 
 #[test]
 #[ignore = "requires a Kafka broker at localhost:9092 (exactly-once end-to-end)"]
-fn exactly_once_kafka_to_kafka() {
+fn exactly_once_kafka() {
     const BROKERS: &str = "localhost:9092";
     const IN_TOPIC: &str = "eo-in";
     const OUT_TOPIC: &str = "eo-out";

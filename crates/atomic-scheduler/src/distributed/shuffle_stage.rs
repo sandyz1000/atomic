@@ -1,5 +1,4 @@
 use atomic_data::{
-    dependency::Dependency,
     distributed::{EngineAction, ShuffleMapPayload, Step, StepKind, TaskEnvelope, TaskRuntime},
     rdd::RddBase,
 };
@@ -66,21 +65,22 @@ impl DistributedScheduler {
         preceding_steps: Vec<Step>,
     ) -> LibResult<Vec<ActiveShuffleStage>> {
         let mut dispatched = Vec::new();
-        for dep in rdd.get_dependencies() {
-            if let Dependency::Shuffle(shuffle_dep) = dep {
-                let steps = Self::shuffle_map_ops(&shuffle_dep, &preceding_steps)?;
-                let parent_partitions = shuffle_dep.encode_partitions().map_err(|e| {
-                    SchedulerError::TaskFailed(format!("shuffle input encode: {e}"))
-                })?;
-                let shuffle_id = shuffle_dep.get_shuffle_id();
-                self.run_shuffle_map_stage(shuffle_id, steps.clone(), parent_partitions)
-                    .await?;
-                dispatched.push(ActiveShuffleStage {
-                    shuffle_id,
-                    dep: shuffle_dep,
-                    steps,
-                });
-            }
+        // Reduce-side shuffles can sit one or more narrow hops upstream (e.g. after a
+        // `.values()`/`.map_values()`); a direct-dep scan would miss those and leave the
+        // shuffle-map undispatched. `reduce_side_shuffles` walks narrow deps to find them all.
+        for shuffle_dep in atomic_data::dependency::reduce_side_shuffles(rdd) {
+            let steps = Self::shuffle_map_ops(&shuffle_dep, &preceding_steps)?;
+            let parent_partitions = shuffle_dep
+                .encode_partitions()
+                .map_err(|e| SchedulerError::TaskFailed(format!("shuffle input encode: {e}")))?;
+            let shuffle_id = shuffle_dep.get_shuffle_id();
+            self.run_shuffle_map_stage(shuffle_id, steps.clone(), parent_partitions)
+                .await?;
+            dispatched.push(ActiveShuffleStage {
+                shuffle_id,
+                dep: shuffle_dep,
+                steps,
+            });
         }
         Ok(dispatched)
     }
@@ -107,7 +107,7 @@ impl DistributedScheduler {
             let partitions = partitions.clone();
             async move {
                 let result = self
-                    .run_shuffle_map_stage_inner(shuffle_id, steps, partitions)
+                    .run_map_stage_inner(shuffle_id, steps, partitions)
                     .await;
                 if let Err(ref e) = result {
                     // Clear stale map output URIs so the reduce phase doesn't try
@@ -204,7 +204,7 @@ impl DistributedScheduler {
         Ok(())
     }
 
-    async fn run_shuffle_map_stage_inner(
+    async fn run_map_stage_inner(
         &self,
         shuffle_id: usize,
         steps: Vec<Step>,

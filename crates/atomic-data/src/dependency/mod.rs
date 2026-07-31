@@ -130,3 +130,39 @@ impl Dependency {
         }
     }
 }
+
+/// Every reduce-side [`ShuffleDependency`] reachable from `rdd` through narrow
+/// (`OneToOne`/`Range`/`CoalescedSplitDep`) dependencies, stopping at each shuffle boundary —
+/// a shuffle's own input is the map side, resolved separately, so we never recurse past one.
+///
+/// An un-staged reduce needs this to find shuffles sitting one or more narrow hops upstream
+/// (e.g. `reduce_by_key().values()`); a direct `get_dependencies` scan sees only depth-0 deps
+/// and misses them, leaving the shuffle-map undispatched and the reduce-side fetch to hang.
+/// Mirrors the narrow-vs-shuffle traversal `StagePlanner::visit_missing_parent` already uses.
+pub fn reduce_side_shuffles(rdd: &Arc<dyn RddBase>) -> Vec<Arc<ShuffleDependency>> {
+    let mut out = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    collect_reduce_side_shuffles(rdd, &mut out, &mut visited);
+    out
+}
+
+fn collect_reduce_side_shuffles(
+    rdd: &Arc<dyn RddBase>,
+    out: &mut Vec<Arc<ShuffleDependency>>,
+    visited: &mut std::collections::HashSet<usize>,
+) {
+    if !visited.insert(rdd.get_rdd_id()) {
+        return;
+    }
+    for dep in rdd.get_dependencies() {
+        match dep {
+            Dependency::Shuffle(shuf) => out.push(shuf),
+            Dependency::OneToOne { rdd_base } | Dependency::Range { rdd_base, .. } => {
+                collect_reduce_side_shuffles(&rdd_base, out, visited)
+            }
+            Dependency::CoalescedSplitDep { rdd, .. } => {
+                collect_reduce_side_shuffles(&rdd, out, visited)
+            }
+        }
+    }
+}

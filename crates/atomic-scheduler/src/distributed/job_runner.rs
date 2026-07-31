@@ -324,7 +324,7 @@ impl DistributedScheduler {
     }
 
     /// Run a native job, attaching broadcast variable payloads to every `TaskEnvelope`.
-    pub async fn run_native_job_with_broadcasts(
+    pub async fn run_broadcast_job(
         &self,
         steps: Vec<Step>,
         partitions: Vec<Vec<u8>>,

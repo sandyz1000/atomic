@@ -176,7 +176,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pod_carries_alloc_labels_and_resources() {
+    fn pod_alloc_labels() {
         let tmpl = PodTemplate {
             namespace: "atomic",
             image: "atomic:latest",

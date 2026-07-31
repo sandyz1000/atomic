@@ -32,7 +32,7 @@ where
 
 /// Registry wiring only — no network call, must always run fast and offline.
 #[test]
-fn agent_step_runner_registered() {
+fn runner_registered() {
     register_once();
     assert!(
         AGENT_RUNNER_REGISTRY.get().is_some(),
@@ -42,7 +42,7 @@ fn agent_step_runner_registered() {
 
 /// Exercises the full dispatch path (decode -> LLM call -> encode) against the mock client.
 #[test]
-fn agent_step_dispatch_via_runner() {
+fn dispatch_via_runner() {
     register_once();
     let runner = AGENT_RUNNER_REGISTRY.get().unwrap();
 
@@ -79,7 +79,7 @@ fn agent_step_dispatch_via_runner() {
 /// JSON-encoded inputs (Python/JS PyRdd format) — exercises the fallback decode
 /// path through the real dispatch, against the mock client.
 #[test]
-fn agent_step_json_partition_decode() {
+fn json_partition_decode() {
     register_once();
     let runner = AGENT_RUNNER_REGISTRY.get().expect("runner registered");
 
@@ -108,7 +108,7 @@ fn agent_step_json_partition_decode() {
 
 /// Output-schema validation against a mock model response.
 #[test]
-fn agent_step_output_schema_validation() {
+fn output_schema_valid() {
     register_once();
     let runner = AGENT_RUNNER_REGISTRY.get().expect("runner registered");
 
@@ -139,7 +139,7 @@ fn agent_step_output_schema_validation() {
 
 /// Full local-mode pipeline test against the mock client.
 #[test]
-fn agent_step_local_mode_e2e() {
+fn local_mode_e2e() {
     register_once();
 
     // Provider/model are irrelevant under the mock client — any value round-trips.

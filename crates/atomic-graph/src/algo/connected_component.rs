@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn isolated_vertices_each_in_own_component() {
+    fn isolated_own_component() {
         let ctx = Context::local().unwrap();
         let g: Graph<i64, ()> =
             Graph::from_vertices_edges(ctx, vec![(10, 0), (20, 0), (30, 0)], vec![]);

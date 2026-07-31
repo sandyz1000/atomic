@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_call_extracts_ref_and_args() {
+    fn parse_tool_args() {
         let response = "I need data.\nTOOL_CALL: my_tool {\"x\": 1}";
         let (tool_ref, json_args) = parse_tool_call(response).expect("should parse");
         assert_eq!(tool_ref, "my_tool");
@@ -378,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_call_defaults_empty_args() {
+    fn parse_empty_args() {
         let response = "TOOL_CALL: my_tool";
         let (tool_ref, json_args) = parse_tool_call(response).expect("should parse");
         assert_eq!(tool_ref, "my_tool");
@@ -386,12 +386,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_tool_call_returns_none_without_marker() {
+    fn parse_no_marker() {
         assert!(parse_tool_call("FINAL ANSWER: done").is_none());
     }
 
     #[test]
-    fn dispatch_tool_invokes_registered_rust_task() {
+    fn dispatch_rust_task() {
         let payload = base_payload();
         let task_name = ShoutTool::NAME;
         let result = dispatch_tool(&payload, task_name, "\"hello\"");
@@ -399,14 +399,14 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_tool_unresolved_returns_error_string() {
+    fn dispatch_unresolved_errors() {
         let payload = base_payload();
         let result = dispatch_tool(&payload, "no_such_tool", "{}");
         assert!(result.starts_with("error:"), "got: {result}");
     }
 
     #[test]
-    fn dispatch_tool_unresolved_python_runtime_returns_error_string() {
+    fn dispatch_python_unresolved() {
         let mut payload = base_payload();
         payload.resolved_tools.push(ResolvedTool {
             name: "py_tool".to_string(),
@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_string_partition_rkyv_roundtrip() {
+    fn decode_partition_rkyv() {
         let inputs = vec!["alpha".to_string(), "beta".to_string()];
         let encoded = inputs.encode_wire().expect("encode_wire failed");
         let decoded = decode_string_partition(&encoded).expect("decode_wire failed");
@@ -440,14 +440,14 @@ mod tests {
     }
 
     #[test]
-    fn decode_string_partition_json_fallback() {
+    fn decode_partition_json() {
         let json_bytes = serde_json::to_vec(&["doc_a", "doc_b"]).unwrap();
         let decoded = decode_string_partition(&json_bytes).expect("json decode failed");
         assert_eq!(decoded, vec!["doc_a".to_string(), "doc_b".to_string()]);
     }
 
     #[test]
-    fn decode_string_partition_garbage_errors() {
+    fn decode_partition_garbage() {
         let garbage = vec![0xFF, 0x00, 0x13, 0x37];
         assert!(decode_string_partition(&garbage).is_err());
     }

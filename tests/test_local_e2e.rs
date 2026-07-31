@@ -18,6 +18,9 @@ use atomic_compute::env::Config;
 use atomic_compute::task;
 use std::sync::Arc;
 
+// Shuffle needs a registered (K, V) write handler even in local mode.
+atomic_compute::register_shuffle_map!(String, i32);
+
 fn ctx() -> Arc<Context> {
     Context::new_with_config(Config::local()).unwrap()
 }
@@ -101,7 +104,7 @@ async fn test_5op_pipeline() {
 
 /// Chained map operations on a single partition verify correct ordering.
 #[tokio::test]
-async fn test_chained_maps_single_partition() {
+async fn test_chained_single_partition() {
     let ctx = ctx();
     let result = ctx
         .parallelize_typed(vec![1i32, 2, 3], 1)
@@ -157,6 +160,24 @@ async fn test_skewed_reduce() {
     assert_eq!(sum, expected_sum);
 }
 
+/// A narrow op (`.values()`) between a `reduce_by_key` shuffle and a terminal `fold_task`
+/// must still dispatch the shuffle-map: the shuffle is one narrow hop upstream of the action,
+/// so a direct-dependency scan would miss it and the reduce-side fetch would hang.
+#[tokio::test]
+async fn test_shuffle_narrow_reduce() {
+    let ctx = ctx();
+    let lines = vec!["a b".to_string(), "a c".to_string(), "b c c".to_string()];
+    let total = ctx
+        .parallelize_typed(lines, 2)
+        .flat_map_task(WordsToPairs)
+        .reduce_by_key_task(Add)
+        .values()
+        .fold_task(0i32, Add)
+        .unwrap();
+    // 7 words total: a=2, b=2, c=3.
+    assert_eq!(total, 7);
+}
+
 // ── Cache + two actions ──────────────────────────────────────────────────────
 
 /// `collect()` and `count()` on the same cached RDD must agree.
@@ -209,7 +230,7 @@ async fn test_cache_stability() {
 
 /// Union of two RDDs then fold must sum all elements.
 #[tokio::test]
-async fn test_union_then_fold_sums_all() {
+async fn test_union_fold_sum() {
     let ctx = ctx();
     let a = ctx.parallelize_typed(vec![1i32, 2, 3], 2);
     let b = ctx.parallelize_typed(vec![4i32, 5, 6], 2);
@@ -231,7 +252,7 @@ async fn test_union_preserves_duplicates() {
 
 /// `coalesce()` to fewer partitions must not lose elements.
 #[tokio::test]
-async fn test_coalesce_preserves_all_elements() {
+async fn test_coalesce_preserves() {
     let ctx = ctx();
     let data: Vec<i32> = (1..=20).collect();
     let rdd = ctx.parallelize_typed(data.clone(), 10);
@@ -243,7 +264,7 @@ async fn test_coalesce_preserves_all_elements() {
 
 /// `repartition()` to more partitions must not lose elements.
 #[tokio::test]
-async fn test_repartition_up_preserves_elements() {
+async fn test_repartition_up() {
     let ctx = ctx();
     let data: Vec<i32> = (1..=8).collect();
     let rdd = ctx.parallelize_typed(data.clone(), 2);
@@ -255,7 +276,7 @@ async fn test_repartition_up_preserves_elements() {
 
 /// `repartition()` to fewer partitions must not lose elements.
 #[tokio::test]
-async fn test_repartition_down_preserves_elements() {
+async fn test_repartition_down() {
     let ctx = ctx();
     let data: Vec<i32> = (1..=50).collect();
     let rdd = ctx.parallelize_typed(data.clone(), 10);
@@ -269,7 +290,7 @@ async fn test_repartition_down_preserves_elements() {
 
 /// `flat_map_task` expanding each element to multiple items.
 #[tokio::test]
-async fn test_flat_map_task_expands_correctly() {
+async fn test_flat_map_expands() {
     let ctx = ctx();
     let result = ctx
         .parallelize_typed(vec!["a b".to_string(), "c d e".to_string()], 2)
@@ -283,7 +304,7 @@ async fn test_flat_map_task_expands_correctly() {
 
 /// All actions on an empty RDD must return zero/empty without error.
 #[tokio::test]
-async fn test_all_actions_on_empty_rdd() {
+async fn test_actions_empty_rdd() {
     let ctx = ctx();
     let rdd = ctx.parallelize_typed(Vec::<i32>::new(), 2);
 
@@ -296,7 +317,7 @@ async fn test_all_actions_on_empty_rdd() {
 // ── Broadcast variables ───────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_broadcast_store_and_snapshot() {
+async fn test_broadcast_snapshot() {
     let ctx = ctx();
     let bcast_i = ctx.broadcast(99i32);
     let bcast_s = ctx.broadcast("hello".to_string());
@@ -307,7 +328,7 @@ async fn test_broadcast_store_and_snapshot() {
 }
 
 #[tokio::test]
-async fn test_broadcast_cache_and_read() {
+async fn test_broadcast_read() {
     use atomic_data::broadcast::{
         BroadcastVar, cache_broadcast_values, ensure_broadcasts_cached, evict_broadcast,
     };
@@ -363,7 +384,7 @@ async fn test_accumulator_string_concat() {
 }
 
 #[tokio::test]
-async fn test_broadcast_embedded_in_pipeline() {
+async fn test_broadcast_pipeline() {
     // Broadcasts are cached per worker (process-global) keyed by id. Once cached, the
     // value persists across tasks — the driver need only send the bytes once per worker.
     let ctx = ctx();

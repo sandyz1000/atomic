@@ -75,8 +75,7 @@ pub use atomic_data::{
 pub mod __macro_support {
     pub use crate::registry::{
         CombineKeyEntry, PartitionerEntry, ShuffleKeyEntry, StateMergeEntry, TaskEntry,
-        combine_handler, combine_lift_handler, shuffle_map_handler,
-        sort_shuffle_map_handler,
+        combine_handler, combine_lift_handler, shuffle_map_handler, sort_shuffle_map_handler,
     };
     pub use crate::task_traits::{AggregateTask, BinaryTask, PartitionTask, UnaryTask};
     pub use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
@@ -85,9 +84,9 @@ pub mod __macro_support {
 }
 
 pub use atomic_runtime_macros::{
-    register_aggregate_task, register_binary_task, register_combine,
-    register_combine_lift, register_partition_task, register_partitioner,
-    register_shuffle_map, register_sort_shuffle_map, register_state_merge, task, task_fn,
+    register_aggregate_task, register_binary_task, register_combine, register_combine_lift,
+    register_partition_task, register_partitioner, register_shuffle_map, register_sort_shuffle_map,
+    register_state_merge, task, task_fn,
 };
 
 pub use atomic_scheduler::{ResourceProfile, WorkerAllocator};

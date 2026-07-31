@@ -353,7 +353,7 @@ mod worker_cache_tests {
     }
 
     #[test]
-    fn remove_rdd_drops_all() {
+    fn remove_drops_all() {
         let cache = WorkerPartitionCache::new();
         cache.put(1, 0, vec![1]);
         cache.put(1, 1, vec![2]);

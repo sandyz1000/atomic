@@ -39,7 +39,7 @@ fn streaming_ctx(batch_ms: u64) -> Arc<StreamingContext> {
 const FILTER_SQL: &str = "SELECT user, amount FROM input WHERE amount > 100";
 
 #[test]
-fn once_runs_one_batch() {
+fn once_one_batch() {
     let source = Arc::new(QueueSource::from_batches(
         schema(),
         vec![vec![batch(&["a", "b"], &[150, 50])]],
@@ -88,7 +88,7 @@ fn streams_filtered_rows() {
 }
 
 #[test]
-fn file_sink_writes_parquet() {
+fn sink_writes_parquet() {
     use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let dir = tempfile::tempdir().unwrap();

@@ -532,7 +532,12 @@ impl<T: Data + Clone> TypedRdd<T> {
             Some(s) => Ok((s.source_partitions.clone(), s.steps.clone())),
             None => {
                 let rdd_base = self.rdd.get_rdd_base();
-                let has_shuffle = rdd_base.get_dependencies().iter().any(|d| d.is_shuffle());
+                // Detect shuffles anywhere upstream, not just as a direct dep — a narrow hop
+                // (`.values()`/`.map_values()`/`.filter()`) between the shuffle and this
+                // terminal action would otherwise hide it, leaving the shuffle-map
+                // undispatched and the reduce-side fetch below to hang.
+                let has_shuffle =
+                    !atomic_data::dependency::reduce_side_shuffles(&rdd_base).is_empty();
                 if has_shuffle {
                     self.context
                         .run_pending_shuffle_stages(&rdd_base, vec![])

@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn static_zero_means_all() {
+    async fn static_zero_all() {
         let alloc = StaticAllocator::new(vec![ep(1), ep(2)]);
         let got = alloc.allocate("a", &ResourceProfile::new(0)).await.unwrap();
         assert_eq!(got.len(), 2);

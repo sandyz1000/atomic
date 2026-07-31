@@ -126,21 +126,21 @@ impl JsGraph {
     #[napi(ts_return_type = "Record<string, number>")]
     pub fn connected_components(&self) -> serde_json::Value {
         let result = connected_component::run(&self.inner, usize::MAX);
-        i64_to_i64_map_to_json(result)
+        i64_map_to_json(result)
     }
 
     /// Strongly connected components (Tarjan's). Returns Record<string, number>.
     #[napi(ts_return_type = "Record<string, number>")]
     pub fn strongly_connected_components(&self) -> serde_json::Value {
         let result = strongly_connected_component::run(&self.inner, 0);
-        i64_to_i64_map_to_json(result)
+        i64_map_to_json(result)
     }
 
     /// Label propagation community detection. Returns Record<string, number>.
     #[napi(ts_return_type = "Record<string, number>")]
     pub fn label_propagation(&self, max_iter: u32) -> serde_json::Value {
         let result = label_propagation::run(&self.inner, max_iter as usize);
-        i64_to_i64_map_to_json(result)
+        i64_map_to_json(result)
     }
 
     /// Triangle count per vertex. Returns Record<string, number>.
@@ -788,7 +788,7 @@ fn i64map_f64_to_json(map: HashMap<VertexId, f64>) -> serde_json::Value {
     serde_json::Value::Object(m)
 }
 
-fn i64_to_i64_map_to_json(map: HashMap<VertexId, VertexId>) -> serde_json::Value {
+fn i64_map_to_json(map: HashMap<VertexId, VertexId>) -> serde_json::Value {
     let m: serde_json::Map<String, serde_json::Value> = map
         .into_iter()
         .map(|(k, v)| (k.to_string(), serde_json::Value::Number(v.into())))

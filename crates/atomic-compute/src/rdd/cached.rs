@@ -74,7 +74,7 @@ impl<T: Data + Clone> CachedRdd<T> {
 
     /// Path for the disk-spill file for a given partition.
     pub fn spill_path(&self, partition: usize) -> Option<PathBuf> {
-        atomic_data::env::get_rdd_cache_spill_dir().map(|base| {
+        atomic_data::env::get_cache_spill_dir().map(|base| {
             base.join(format!("{}", self.rdd_id()))
                 .join(format!("{}.bin", partition))
         })
@@ -227,7 +227,7 @@ mod tests {
     use crate::env::Config;
 
     #[tokio::test]
-    async fn cache_returns_same_results_across_actions() {
+    async fn cache_results_stable() {
         let sc = Context::new_with_config(Config::local()).unwrap();
         let data = vec![1i32, 2, 3, 4, 5, 6];
         let rdd = sc.parallelize_typed(data.clone(), 2).cache();

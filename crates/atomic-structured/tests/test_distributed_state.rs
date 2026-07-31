@@ -66,7 +66,7 @@ fn cells(sink: &MemorySink) -> Vec<(i64, String, i64)> {
 }
 
 #[test]
-fn distributed_windowed_counts_match() {
+fn windowed_counts_match() {
     // Same data and query as the driver-local windowed Complete test, but with
     // `.distributed(4)`: the result must be identical regardless of sharding.
     let source = Arc::new(QueueSource::from_batches(
@@ -101,7 +101,7 @@ fn distributed_windowed_counts_match() {
 }
 
 #[test]
-fn distributed_update_emits_changed() {
+fn update_emits_changed() {
     // Update mode emits the cells changed each batch. The final emission is from
     // the second batch: window-0/a bumped to 2 and the new window-1000/b at 1.
     let source = Arc::new(QueueSource::from_batches(
@@ -135,7 +135,7 @@ fn distributed_update_emits_changed() {
 }
 
 #[test]
-fn distributed_single_shard_matches() {
+fn single_shard_matches() {
     // A single shard must behave exactly like the driver-local engine.
     let source = Arc::new(QueueSource::from_batches(
         schema(),

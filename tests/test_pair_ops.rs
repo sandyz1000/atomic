@@ -30,7 +30,7 @@ fn word_pairs(ctx: &Arc<Context>) -> atomic_compute::rdd::typed::TypedRdd<(Strin
 
 // ── reduce_by_key() ───────────────────────────────────────────────────────────
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_reduce_by_key_sum() {
+async fn test_reduce_key_sum() {
     let ctx = ctx();
     let mut result = word_pairs(&ctx)
         .reduce_by_key_task(AddI32)
@@ -48,7 +48,7 @@ async fn test_reduce_by_key_sum() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_reduce_by_key_empty() {
+async fn test_reduce_key_empty() {
     let ctx = ctx();
     let result = ctx
         .parallelize_typed(Vec::<(String, i32)>::new(), 2)
@@ -255,7 +255,7 @@ async fn test_range_sort_global() {
 // sort_by_key now uses shuffle (sample → range partition → local sort); needs multi-thread + guard.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_sort_by_key_ascending() {
+async fn test_sort_key_asc() {
     let ctx = ctx();
     let mut result = ctx
         .parallelize_typed(
@@ -282,7 +282,7 @@ async fn test_sort_by_key_ascending() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_sort_by_key_descending() {
+async fn test_sort_key_desc() {
     let ctx = ctx();
     let mut result = ctx
         .parallelize_typed(
@@ -312,7 +312,7 @@ async fn test_sort_by_key_descending() {
 /// consumer like `count()`. Reverse-ordered input across 4 partitions forces a
 /// real multi-run merge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sort_shuffle_globally_ordered() {
+async fn sort_globally_ordered() {
     let ctx = ctx();
     let data: Vec<(i32, i32)> = (0..40).rev().map(|k| (k, k * 10)).collect();
 
@@ -618,7 +618,7 @@ fn add_sum_count(a: (f64, u64), b: (f64, u64)) -> (f64, u64) {
 /// Mean rating per key: lift each value into the (sum, count) monoid, merge, divide.
 /// This is the canonical `C != V` case `reduce_by_key_task` cannot express.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_aggregate_by_key_mean() {
+async fn test_aggregate_key_mean() {
     let ctx = ctx();
     // a → [1, 3]  (mean 2.0),  b → [2, 4, 6]  (mean 4.0),  c → [5]  (mean 5.0)
     let ratings = ctx.parallelize_typed(
@@ -652,14 +652,14 @@ async fn test_aggregate_by_key_mean() {
     );
 }
 
-// ── reduce_by_key_locally_task(): driver-side reduce, no shuffle ──────────────
+// ── reduce_by_key_local(): driver-side reduce, no shuffle ──────────────
 
 /// Reduce per key into a `HashMap` on the driver without a shuffle. Map-side
 /// combine per partition, then merge the partial maps on the driver.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_reduce_by_key_locally() {
+async fn test_reduce_key_local() {
     let ctx = ctx();
-    let totals = word_pairs(&ctx).reduce_by_key_locally_task(AddI32).unwrap();
+    let totals = word_pairs(&ctx).reduce_by_key_local(AddI32).unwrap();
 
     // word_pairs: a→[1,3]=4, b→[2,4]=6, c→[5]=5
     let mut entries: Vec<(String, i32)> = totals.into_iter().collect();

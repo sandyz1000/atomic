@@ -14,7 +14,7 @@ fn by_len(word: String) -> (usize, String) {
 atomic_compute::register_sort_shuffle_map!(usize, String);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sorts_by_key_task() {
+async fn sorts_by_key() {
     let ctx = Context::local().unwrap();
     let words: Vec<String> = ["pear", "fig", "banana", "kiwi", "a"]
         .iter()

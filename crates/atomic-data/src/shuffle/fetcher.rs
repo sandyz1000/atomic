@@ -591,7 +591,7 @@ mod tests {
 //     }
 //
 //     #[test]
-//     fn build_shuffle_id_uri() -> Result<(), Box<dyn std::error::Error + 'static>> {
+//     fn build_shuffle_uri() -> Result<(), Box<dyn std::error::Error + 'static>> {
 //         let base = "http://127.0.0.1/shuffle";
 //         let mut chunk = base.to_owned();
 //

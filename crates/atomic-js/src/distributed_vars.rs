@@ -251,7 +251,7 @@ mod tests {
     // only on the JS main thread.  This assertion verifies the trait bounds hold.
     fn _assert_send_sync<T: Send + Sync>() {}
     #[test]
-    fn merge_fn_send_sync() {
+    fn merge_send_sync() {
         _assert_send_sync::<MergeFn>();
     }
 }

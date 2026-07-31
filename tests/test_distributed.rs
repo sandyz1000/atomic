@@ -95,7 +95,7 @@ fn run_driver(scenario: &str, workers: &[u16]) -> std::process::Output {
 
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_map_and_fold() {
+fn distributed_map_fold() {
     let port = free_port();
     let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
@@ -169,7 +169,7 @@ fn distributed_shuffle_wordcount() {
 /// regression in either layer fails loudly.
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_unstaged_shuffle_take() {
+fn distributed_unstaged_take() {
     let port = free_port();
     let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
@@ -215,7 +215,7 @@ fn distributed_unstaged_shuffle_take() {
 /// `dispatch_pipeline` before any `Stage` is touched), which is why it went uncaught.
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_staged_shuffle_terminal_action() {
+fn distributed_staged_terminal() {
     let port = free_port();
     let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
@@ -252,7 +252,7 @@ fn distributed_staged_shuffle_terminal_action() {
 /// never affect the `(String, i32)` fallback-path wordcount scenarios in the same binary.
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_combine_reduce_by_key() {
+fn distributed_combine_reduce() {
     let port = free_port();
     let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
@@ -288,7 +288,7 @@ fn distributed_combine_reduce_by_key() {
 /// side merges them via `merge_combiners`. Asserts the correct mean rating per movie.
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_combine_aggregate_by_key() {
+fn distributed_combine_aggregate() {
     let port = free_port();
     let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
@@ -320,7 +320,7 @@ fn distributed_combine_aggregate_by_key() {
 /// The output must list words ordered by count descending.
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_multi_stage_pipeline() {
+fn distributed_multi_stage() {
     let port = free_port();
     let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
@@ -373,7 +373,7 @@ fn distributed_multi_stage_pipeline() {
 /// Fix: skip unreachable workers during handshake and proceed with healthy subset.
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_fault_tolerance_one_dead_worker() {
+fn distributed_dead_worker() {
     let healthy_port = free_port();
     let dead_port = free_port();
     // Worker 1: healthy
@@ -424,7 +424,7 @@ fn call_id_map(arr: &[serde_json::Value]) -> std::collections::HashMap<i64, i64>
 /// entirely from the holding workers' caches — every call id is unchanged.
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_cache_no_recompute() {
+fn distributed_no_recompute() {
     let port_a = free_port();
     let port_b = free_port();
     let mut worker_a = spawn_worker(port_a);
@@ -465,7 +465,7 @@ fn distributed_cache_no_recompute() {
 /// while the surviving worker's own partitions keep their call id (cache hit).
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_cache_recompute_on_worker_death() {
+fn distributed_cache_recompute() {
     let port_a = free_port();
     let port_b = free_port();
     let mut worker_a = spawn_worker(port_a);
@@ -537,7 +537,7 @@ fn distributed_cache_recompute_on_worker_death() {
 /// 3 output partitions, each containing only keys congruent to its index mod 3.
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_named_partitioner_buckets() {
+fn distributed_named_partitioner() {
     let port = free_port();
     let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));
@@ -586,7 +586,7 @@ fn distributed_named_partitioner_buckets() {
 /// partitions across real worker processes with no client-side re-sort.
 #[test]
 #[ignore = "requires pre-built integration binary and free TCP ports"]
-fn distributed_sort_by_task_ordered() {
+fn distributed_sort_ordered() {
     let port = free_port();
     let mut worker = spawn_worker(port);
     wait_for_port(port, Duration::from_secs(10));

@@ -173,12 +173,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stage_key_no_prefix() {
+    fn stage_key_unprefixed() {
         assert_eq!(stage_key(&None, "job-abc"), "job-abc/app");
     }
 
     #[test]
-    fn stage_key_with_prefix_trims_slashes() {
+    fn stage_key_trims() {
         assert_eq!(
             stage_key(&Some("/jobs/".to_string()), "job-abc"),
             "jobs/job-abc/app"

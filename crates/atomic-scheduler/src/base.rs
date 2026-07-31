@@ -7,6 +7,7 @@ use crate::planner::StagePlanner;
 use crate::stage::Stage;
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
+use atomic_data::distributed::Step;
 use atomic_data::rdd::RddBase;
 use atomic_data::shuffle::MapOutputTracker;
 use atomic_data::task::TaskOption;
@@ -77,11 +78,9 @@ pub trait NativeScheduler: StagePlanner {
         // Drop the lost output from both the stage's output_locs and the
         // MapOutputTracker, then mark the producing map stage failed so
         // `submit_missing_tasks` recomputes exactly that partition.
-        m.remove_output_loc_from_stage(shuffle_id, map_id, &server_uri);
+        m.remove_stage_output_loc(shuffle_id, map_id, &server_uri);
         m.unregister_map_output(shuffle_id, map_id, server_uri);
-        jt.failed
-            .lock()
-            .insert(m.fetch_from_shuffle_to_cache(shuffle_id));
+        jt.failed.lock().insert(m.stage_for_shuffle(shuffle_id));
     }
 
     async fn on_event_success<T: Data, U: Data + Clone, F, L>(
@@ -152,7 +151,7 @@ pub trait NativeScheduler: StagePlanner {
                     shuffle_server_uri
                 );
                 let state = self.state();
-                state.add_output_loc_to_stage(
+                state.add_stage_output_loc(
                     smt.meta.stage_id,
                     smt.meta.partition,
                     shuffle_server_uri,
@@ -308,6 +307,15 @@ pub trait NativeScheduler: StagePlanner {
                                 pipeline.source_partitions.len()
                             ))
                         })?;
+                    // Distributed cache locality: if this partition is already cached on a
+                    // live worker, pin the task there and serve it from cache (with a
+                    // recompute fallback baked into the `PipelineTask`). Local mode and the
+                    // first, cache-populating run get `(None, None)` and recompute anywhere.
+                    let (pinned, cache_serve) = self.pipeline_partition_plan(
+                        &pipeline.result_steps,
+                        *part,
+                        jt.num_output_parts,
+                    );
                     let pipeline_task = PipelineTask::new(
                         m.get_next_task_id(),
                         jt.run_id,
@@ -318,9 +326,11 @@ pub trait NativeScheduler: StagePlanner {
                         pipeline.result_steps.clone(),
                         pipeline.broadcasts.clone(),
                         id,
+                        cache_serve,
                     );
                     let task_option = TaskOption::PipelineTask(pipeline_task);
-                    let executor = self.next_executor_server(&task_option);
+                    let executor =
+                        pinned.unwrap_or_else(|| self.next_executor_server(&task_option));
                     my_pending.insert(task_option.clone());
                     self.submit_task::<T, U, F>(task_option, executor)
                 }
@@ -570,6 +580,21 @@ pub trait NativeScheduler: StagePlanner {
     async fn update_cache_locs(&self) -> LibResult<()>;
 
     fn next_executor_server(&self, task: &TaskOption) -> SocketAddrV4;
+
+    /// Per-partition dispatch hint for a pipeline task: an optional worker to pin to (the one
+    /// holding this partition's cache) and the cache-serve `(rdd_id, post_ops)` that turns the
+    /// task into a cache read. Default recomputes anywhere — `(None, None)` — which is correct
+    /// for local mode (its cache is process-global, no worker routing needed) and for the
+    /// first, cache-populating run. `DistributedScheduler` overrides it to consult
+    /// `plan_cache_dispatch`.
+    fn pipeline_partition_plan(
+        &self,
+        _steps: &[Step],
+        _partition: usize,
+        _num_partitions: usize,
+    ) -> (Option<SocketAddrV4>, Option<(usize, Vec<Step>)>) {
+        (None, None)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -619,7 +644,7 @@ impl SchedulerState {
     }
 
     #[inline]
-    pub fn add_output_loc_to_stage(&self, stage_id: usize, partition: usize, host: String) {
+    pub fn add_stage_output_loc(&self, stage_id: usize, partition: usize, host: String) {
         self.stage_cache
             .get_mut(&stage_id)
             .expect("stage must exist in stage_cache before add_output_loc is called")
@@ -640,7 +665,7 @@ impl SchedulerState {
     }
 
     #[inline]
-    pub fn fetch_from_shuffle_to_cache(&self, id: usize) -> Stage {
+    pub fn stage_for_shuffle(&self, id: usize) -> Stage {
         self.shuffle_to_map_stage
             .get(&id)
             .expect("stage must exist in shuffle_to_map_stage")
@@ -777,7 +802,7 @@ impl SchedulerState {
     }
 
     #[inline]
-    pub fn remove_output_loc_from_stage(&self, shuffle_id: usize, map_id: usize, server_uri: &str) {
+    pub fn remove_stage_output_loc(&self, shuffle_id: usize, map_id: usize, server_uri: &str) {
         self.shuffle_to_map_stage
             .get_mut(&shuffle_id)
             .expect("stage must exist in shuffle_to_map_stage before remove_output_loc is called")

@@ -166,7 +166,7 @@ mod tests {
     // Broker-free: construct the stream and drain an empty buffer. The consumer
     // thread is never started, so no network is touched.
     #[test]
-    fn empty_compute_yields_empty_rdd() {
+    fn compute_yields_empty() {
         let sc = Context::local().unwrap();
         let ssc = StreamingContext::new(sc.clone(), Duration::from_millis(100));
         let stream = ssc.kafka_stream("localhost:9092", "g", &["t"]);

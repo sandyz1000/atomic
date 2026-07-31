@@ -323,17 +323,17 @@ mod tests {
     }
 
     #[test]
-    fn key_str_negative_number() {
+    fn key_str_negative() {
         assert_eq!(key_str(&json!(-7)).unwrap(), "-7");
     }
 
     #[test]
-    fn key_str_bool_true() {
+    fn key_bool_true() {
         assert_eq!(key_str(&json!(true)).unwrap(), "true");
     }
 
     #[test]
-    fn key_str_bool_false() {
+    fn key_bool_false() {
         assert_eq!(key_str(&json!(false)).unwrap(), "false");
     }
 
@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn group_rejects_non_pair() {
+    fn group_non_pair() {
         let pairs = vec![json!("not_a_pair")];
         let (inner, _q) = make_queue(vec![pairs]);
         let grouped = Arc::new(JsDStreamInner::Transform {
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn loj_no_match_null() {
+    fn loj_match_null() {
         let left = vec![json!(["a", "lv"])];
         let right = vec![json!(["b", "rv"])];
         let (left_inner, _) = make_queue(vec![left]);

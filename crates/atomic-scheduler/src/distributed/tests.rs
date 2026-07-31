@@ -114,7 +114,7 @@ fn plan_serve_cached() {
 }
 
 #[test]
-fn worker_death_clears_cache() {
+fn death_clears_cache() {
     let sched = DistributedScheduler::new(4, true);
     let dead = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
     let live = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
@@ -142,7 +142,7 @@ fn unpersist_clears_rdd() {
 }
 
 #[test]
-fn cache_locs_grow_sparse() {
+fn cache_locs_sparse() {
     let scheduler = DistributedScheduler::new(4, true);
     let ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 7), 11007);
     scheduler.register_cache_locs(&[(500, 2), (500, 0)], ip);
@@ -158,7 +158,7 @@ fn cache_locs_grow_sparse() {
 }
 
 #[test]
-fn next_executor_round_robins() {
+fn executor_round_robin() {
     let scheduler = DistributedScheduler::new(4, true);
     let addr1 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31011);
     let addr2 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31012);
@@ -236,7 +236,7 @@ async fn submit_task_roundtrip() {
 // G1: report-back state affinity tests.
 
 #[test]
-fn register_state_locs_and_pin_prefers_registered() {
+fn state_pin_prefers() {
     let sched = DistributedScheduler::new(4, true);
     let w1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
     let w2 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
@@ -257,7 +257,7 @@ fn register_state_locs_and_pin_prefers_registered() {
 }
 
 #[test]
-fn invalidate_state_for_worker_clears_its_shards() {
+fn invalidate_worker_shards() {
     let sched = DistributedScheduler::new(4, true);
     let w1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
     let w2 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
@@ -277,7 +277,7 @@ fn invalidate_state_for_worker_clears_its_shards() {
 }
 
 #[test]
-fn pin_state_shard_falls_back_when_worker_gone() {
+fn pin_shard_fallback() {
     let sched = DistributedScheduler::new(4, true);
     let w1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
     let w2 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
@@ -296,7 +296,7 @@ fn pin_state_shard_falls_back_when_worker_gone() {
 }
 
 #[test]
-fn agent_step_timeout_unset_by_default() {
+fn agent_timeout_default() {
     let sched = DistributedScheduler::new(4, true);
     assert_eq!(sched.agent_step_timeout, None);
     // task_timeout (the cheap-CPU-task default) is unaffected.
@@ -304,14 +304,14 @@ fn agent_step_timeout_unset_by_default() {
 }
 
 #[test]
-fn with_agent_step_timeout_overrides() {
+fn with_agent_timeout() {
     let sched =
         DistributedScheduler::new(4, true).with_agent_step_timeout(Duration::from_secs(900));
     assert_eq!(sched.agent_step_timeout, Some(Duration::from_secs(900)));
 }
 
 #[test]
-fn distributed_scheduler_does_not_support_closure_tasks() {
+fn rejects_closure_tasks() {
     let sched = DistributedScheduler::new(4, true);
     assert!(
         !sched.supports_closure_tasks(),
@@ -324,7 +324,7 @@ fn envelope_with_ops(steps: Vec<Step>) -> TaskEnvelope {
 }
 
 #[test]
-fn effective_timeout_uses_agent_step_default_when_unset() {
+fn timeout_agent_default() {
     let sched = DistributedScheduler::new(4, true);
     let task = envelope_with_ops(vec![Step {
         task_name: String::new(),
@@ -339,7 +339,7 @@ fn effective_timeout_uses_agent_step_default_when_unset() {
 }
 
 #[test]
-fn effective_timeout_uses_configured_agent_step_timeout() {
+fn timeout_agent_configured() {
     let sched = DistributedScheduler::new(4, true).with_agent_step_timeout(Duration::from_secs(60));
     let task = envelope_with_ops(vec![Step {
         task_name: String::new(),
@@ -354,7 +354,7 @@ fn effective_timeout_uses_configured_agent_step_timeout() {
 }
 
 #[test]
-fn effective_timeout_falls_back_to_task_timeout_for_non_agent_ops() {
+fn timeout_non_agent() {
     let sched = DistributedScheduler::new(4, true);
     let task = envelope_with_ops(vec![Step {
         task_name: String::new(),

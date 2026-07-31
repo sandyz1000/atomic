@@ -154,7 +154,7 @@ fn lost_output(shuffle_id: usize) -> FetchFailedVals {
 /// output and retries only the fetching stage — the map stage is never marked
 /// failed (a driver-local recompute would write an empty placeholder bucket).
 #[tokio::test]
-async fn test_hook_retries_reduce_only() {
+async fn test_hook_retries_reduce() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tracker = Arc::new(MapOutputTracker::default());
     atomic_data::env::set_map_output_tracker(Arc::clone(&tracker));

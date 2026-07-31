@@ -195,7 +195,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn metrics_init_and_record() {
+    fn metrics_record() {
         let m = init_metrics();
         m.register_all();
         m.record_task_success(0.5);
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_server_starts_and_accepts_connections() {
+    async fn metrics_server_accepts() {
         use atomic_utils::get_dynamic_port;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

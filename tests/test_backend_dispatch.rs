@@ -53,7 +53,7 @@ fn envelope(steps: Vec<Step>, data: Vec<u8>) -> TaskEnvelope {
 
 /// Single-op pipeline executes without error and produces correct output.
 #[test]
-fn single_op_square_pipeline() {
+fn single_op_square() {
     let backend = ComputeEngine::default();
     let input: Vec<i32> = vec![2, 3, 4];
     let task = envelope(
@@ -71,7 +71,7 @@ fn single_op_square_pipeline() {
 
 /// Two-op pipeline: square then negate — verifies data threading between steps.
 #[test]
-fn two_op_pipeline_square_then_negate() {
+fn square_then_negate() {
     let backend = ComputeEngine::default();
     let input: Vec<i32> = vec![3, 4];
     let task = envelope(
@@ -89,7 +89,7 @@ fn two_op_pipeline_square_then_negate() {
 
 /// A failed op mid-pipeline short-circuits: subsequent steps do not run.
 #[test]
-fn failed_op_mid_pipeline_produces_fatal_failure() {
+fn failed_op_fatal() {
     let backend = ComputeEngine::default();
     let task = envelope(
         vec![
@@ -107,7 +107,7 @@ fn failed_op_mid_pipeline_produces_fatal_failure() {
 /// `accumulator_deltas` field in the result envelope is populated (even if empty)
 /// — verifies `drain_deltas()` is called and the field is accessible.
 #[test]
-fn result_envelope_has_accumulator_deltas_field() {
+fn envelope_has_deltas() {
     let backend = ComputeEngine::default();
     let task = envelope(
         vec![native_op(
@@ -124,7 +124,7 @@ fn result_envelope_has_accumulator_deltas_field() {
 
 /// `NativeBackend` does not panic on an empty broadcast_values list.
 #[test]
-fn empty_broadcast_values_is_fine() {
+fn empty_broadcast_ok() {
     let backend = ComputeEngine::default();
     let task = envelope(
         vec![native_op(
@@ -140,7 +140,7 @@ fn empty_broadcast_values_is_fine() {
 
 /// Full roundtrip through Context → LocalScheduler → NativeBackend → dispatcher.
 #[tokio::test]
-async fn context_map_task_roundtrip() {
+async fn map_task_roundtrip() {
     let ctx = Arc::new(Context::new_with_config(Config::local()).unwrap());
     let mut result = ctx
         .parallelize_typed(vec![2i32, 3, 4], 2)
@@ -153,7 +153,7 @@ async fn context_map_task_roundtrip() {
 
 /// Verify `partition_id` is correctly threaded through to `TaskResultEnvelope`.
 #[test]
-fn result_envelope_carries_partition_id() {
+fn envelope_partition_id() {
     let backend = ComputeEngine::default();
     let mut task = envelope(
         vec![native_op(
@@ -171,7 +171,7 @@ fn result_envelope_carries_partition_id() {
 /// the worker-side dispatch decodes it before running the body. Exercises the full wire
 /// round-trip that local mode (which uses the task instance directly) does not.
 #[test]
-fn task_fn_capture_roundtrips_over_wire() {
+fn task_capture_wire() {
     fn op_meta<F: UnaryTask<i32, i32>>(t: &F) -> (String, Vec<u8>) {
         (F::NAME.to_string(), t.encode_params())
     }
@@ -201,7 +201,7 @@ fn part_sum(items: Vec<i32>) -> Vec<i32> {
 /// A `map_partitions_task` (`UnaryTask<Vec<T>, Vec<U>>`) dispatches with `MapPartitions`:
 /// the worker decodes the whole partition and runs the function once over it.
 #[test]
-fn map_partitions_dispatches_over_wire() {
+fn map_partitions_wire() {
     let op = native_op(
         <PartSum as UnaryTask<Vec<i32>, Vec<i32>>>::NAME,
         TaskAction::MapPartitions,
@@ -224,7 +224,7 @@ fn fe_accumulate(x: i64) {
 /// A `for_each_task` (`UnaryTask<T, ()>`) dispatches with `Foreach`: the side effect runs
 /// on the worker and the op produces no output.
 #[test]
-fn foreach_runs_side_effect_over_wire() {
+fn foreach_over_wire() {
     use std::sync::atomic::Ordering;
     FE_SUM.store(0, Ordering::SeqCst);
     let op = native_op(
@@ -274,7 +274,7 @@ fn reduce_dispatches_binary() {
 /// the single execution contract Part 1 enforces (dispatch routes through `call()`, not the
 /// bare function). If the handler ever diverges from `call()`, this fails.
 #[test]
-fn dispatch_matches_local_call() {
+fn dispatch_matches_local() {
     let input: Vec<i32> = vec![2, 3, 4];
     let local: Vec<i32> = input.iter().map(|&x| Square.call(x)).collect();
     let task = envelope(
@@ -292,7 +292,7 @@ fn dispatch_matches_local_call() {
 /// The builtin `MaxTask` reduces a partition to its single maximum (the worker-side path
 /// `TypedRdd::max` dispatches for primitive types).
 #[test]
-fn max_builtin_reduces_partition() {
+fn max_reduces_partition() {
     let op = native_op("atomic::builtin::max::i32", TaskAction::Reduce);
     let task = envelope(vec![op], encode(vec![3i32, 9, 2, 7]));
     let result = ComputeEngine::default().execute("w", &task).unwrap();
@@ -303,7 +303,7 @@ fn max_builtin_reduces_partition() {
 /// An empty partition yields empty bytes (not an error), so `max`/`min` over an RDD with
 /// empty partitions doesn't fail the job — the driver skips empty results.
 #[test]
-fn max_builtin_empty_partition() {
+fn max_empty_partition() {
     let op = native_op("atomic::builtin::max::i32", TaskAction::Reduce);
     let task = envelope(vec![op], encode(Vec::<i32>::new()));
     let result = ComputeEngine::default().execute("w", &task).unwrap();
@@ -313,7 +313,7 @@ fn max_builtin_empty_partition() {
 
 /// The builtin `TopKTask` returns each partition's local top-k (k from the payload).
 #[test]
-fn top_k_builtin_local_topk() {
+fn top_k_local() {
     let op = Step {
         task_name: "atomic::builtin::top_k::i32".to_string(),
         kind: StepKind::Task(TaskAction::Collect),

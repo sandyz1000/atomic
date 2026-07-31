@@ -131,14 +131,14 @@ mod tests {
     }
 
     #[test]
-    fn new_registers_one_to_one_dependency() {
+    fn new_registers_dependency() {
         let (sc, parent) = make_ctx_and_parent();
         let core = RddCore::<i32>::new(sc.new_rdd_id(), parent, "test_op");
         assert_eq!(core.dependencies().len(), 1);
     }
 
     #[test]
-    fn rdd_id_matches_constructor_arg() {
+    fn rdd_id_matches() {
         let (sc, parent) = make_ctx_and_parent();
         let id = sc.new_rdd_id();
         let core = RddCore::<i32>::new(id, parent, "test_op");
@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn splits_and_number_delegate_to_parent() {
+    fn splits_delegate_parent() {
         let (sc, parent) = make_ctx_and_parent();
         let parent_splits = parent.splits().len();
         let core = RddCore::<i32>::new(sc.new_rdd_id(), Arc::clone(&parent), "test_op");
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn clone_produces_independent_name() {
+    fn clone_independent_name() {
         let (sc, parent) = make_ctx_and_parent();
         let core = RddCore::<i32>::new(sc.new_rdd_id(), parent, "original");
         let cloned = core.clone();

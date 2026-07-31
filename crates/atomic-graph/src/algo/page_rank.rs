@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn hub_has_highest_rank() {
+    fn hub_highest_rank() {
         let ctx = Context::local().unwrap();
         let ranks = run(&star_graph(ctx), 10, 0.15);
         let hub = ranks[&0];
@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_graph_returns_empty_ranks() {
+    fn empty_graph_ranks() {
         let ctx = Context::local().unwrap();
         let g: Graph<(), ()> = Graph::from_vertices_edges(ctx, vec![], vec![]);
         let ranks = run(&g, 10, 0.15);
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn two_node_cycle_equal_ranks() {
+    fn cycle_equal_ranks() {
         let ctx = Context::local().unwrap();
         let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 0)], ());
         let ranks = run(&g, 20, 0.15);

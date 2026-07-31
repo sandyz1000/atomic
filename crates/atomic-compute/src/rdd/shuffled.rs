@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
-use tokio::runtime::Handle;
 
 /// Reduce-side fetch switches from in-memory runs to disk-spilled lazy runs once
 /// a reduce partition draws from more than this many map outputs (wide shuffles).
@@ -54,26 +53,6 @@ impl<K, M: Iterator<Item = (K, V)>, V, C> Iterator for KeyFold<K, M, V, C> {
         }
         Some((key, acc))
     }
-}
-
-/// Run a shuffle-fetch future to completion without risking Tokio's nested-`block_on`
-/// panic. `compute()` can be called from a thread that is itself a Tokio runtime worker
-/// (e.g. a `#[tokio::test(flavor = "multi_thread")]` test body, or a task driving the
-/// shared `event_process_loop`), where a bare `Handle::block_on` aborts with "Cannot
-/// start a runtime from within a runtime." Spawning onto the ambient runtime and
-/// blocking this thread on a channel sidesteps that check entirely — the same fix
-/// already used in `Context::install_map_output_recovery` for the identical hazard.
-fn block_on_local<F>(fut: F) -> F::Output
-where
-    F: std::future::Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    Handle::current().spawn(async move {
-        let _ = tx.send(fut.await);
-    });
-    rx.recv()
-        .expect("shuffle fetch task dropped without producing a result")
 }
 
 /// Lazy k-way sort-merge of pre-sorted `runs` of raw `(K, V)` pairs (each run internally
@@ -403,9 +382,10 @@ where
             for orig_id in original_ids {
                 let fetcher = self.fetcher.clone();
                 let shuffle_id = self.shuffle_id;
-                let result =
-                    block_on_local(async move { fetcher.fetch::<K, C>(shuffle_id, orig_id).await })
-                        .map_err(DataError::from)?;
+                let result = crate::env::Env::block_on_shuffle_rt(async move {
+                    fetcher.fetch::<K, C>(shuffle_id, orig_id).await
+                })
+                .map_err(DataError::from)?;
                 for (k, c) in result {
                     match combiners.entry(k) {
                         std::collections::hash_map::Entry::Occupied(mut e) => {
@@ -454,7 +434,7 @@ where
                 for orig_id in original_ids {
                     let fetcher = self.fetcher.clone();
                     let shuffle_id = self.shuffle_id;
-                    let fetched = block_on_local(async move {
+                    let fetched = crate::env::Env::block_on_shuffle_rt(async move {
                         fetcher
                             .fetch_runs_spilled::<K, V>(shuffle_id, orig_id)
                             .await
@@ -479,11 +459,10 @@ where
             for orig_id in original_ids {
                 let fetcher = self.fetcher.clone();
                 let shuffle_id = self.shuffle_id;
-                let fetched =
-                    block_on_local(
-                        async move { fetcher.fetch_runs::<K, V>(shuffle_id, orig_id).await },
-                    )
-                    .map_err(DataError::from)?;
+                let fetched = crate::env::Env::block_on_shuffle_rt(async move {
+                    fetcher.fetch_runs::<K, V>(shuffle_id, orig_id).await
+                })
+                .map_err(DataError::from)?;
                 runs.extend(fetched.into_iter().map(IntoIterator::into_iter));
             }
             log::debug!(
@@ -502,9 +481,10 @@ where
         for orig_id in original_ids {
             let fetcher = self.fetcher.clone();
             let shuffle_id = self.shuffle_id;
-            let result =
-                block_on_local(async move { fetcher.fetch::<K, V>(shuffle_id, orig_id).await })
-                    .map_err(DataError::from)?;
+            let result = crate::env::Env::block_on_shuffle_rt(async move {
+                fetcher.fetch::<K, V>(shuffle_id, orig_id).await
+            })
+            .map_err(DataError::from)?;
             for (k, v) in result {
                 match combiners.entry(k) {
                     std::collections::hash_map::Entry::Occupied(mut e) => {

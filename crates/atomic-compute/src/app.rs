@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn literals_have_no_dns() {
+    fn literals_no_dns() {
         assert!(AtomicApp::worker_dns(Some("127.0.0.1:10001")).is_none());
     }
 

@@ -42,7 +42,7 @@ async fn test_slice_uneven() {
 /// More partitions than elements: the requested count is honored with empty partitions,
 /// matching Spark's `parallelize`. `[4,5]` over 5 slices → `[[],[],[4],[],[5]]`.
 #[tokio::test]
-async fn test_slice_more_partitions_than_elements() {
+async fn test_slice_sparse_partitions() {
     let ctx = ctx();
     let parts = ctx
         .parallelize_typed(vec![4i32, 5], 5)
@@ -141,7 +141,7 @@ async fn test_take() {
 }
 
 #[tokio::test]
-async fn test_take_more_than_available() {
+async fn test_take_overflow() {
     let ctx = ctx();
     let taken = ctx.parallelize_typed(vec![1i32, 2, 3], 2).take(10).unwrap();
     assert_eq!(taken.len(), 3);
@@ -160,7 +160,7 @@ async fn test_count_by_value() {
 }
 
 #[tokio::test]
-async fn test_chained_map_filter_fold() {
+async fn test_map_filter_fold() {
     // double → keep positives → sum, all via task pipeline
     #[task]
     fn double_i32(x: i32) -> i32 {
@@ -203,7 +203,7 @@ async fn test_single_partition() {
 }
 
 #[tokio::test]
-async fn test_more_partitions_than_elements() {
+async fn test_sparse_partitions() {
     let ctx = ctx();
     let result = ctx
         .parallelize_typed(vec![1i32, 2], 8)

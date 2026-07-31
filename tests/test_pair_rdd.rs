@@ -9,7 +9,7 @@ fn ctx() -> Arc<Context> {
 }
 
 #[tokio::test]
-async fn test_count_by_value_words() {
+async fn test_count_value_words() {
     let ctx = ctx();
     let words: Vec<String> = vec!["apple", "banana", "apple", "cherry", "banana", "apple"]
         .into_iter()
@@ -24,7 +24,7 @@ async fn test_count_by_value_words() {
 }
 
 #[tokio::test]
-async fn test_word_count_flat_map_task() {
+async fn test_word_count_flatmap() {
     #[task]
     fn split_words(line: String) -> Vec<String> {
         line.split_whitespace().map(|w| w.to_string()).collect()
@@ -63,7 +63,7 @@ async fn test_pairs_fold() {
 }
 
 #[tokio::test]
-async fn test_count_by_value_empty() {
+async fn test_count_value_empty() {
     let ctx = ctx();
     let counts = ctx
         .parallelize_typed(Vec::<i32>::new(), 2)
@@ -73,7 +73,7 @@ async fn test_count_by_value_empty() {
 }
 
 #[tokio::test]
-async fn test_count_by_value_single_value() {
+async fn test_count_single_value() {
     let ctx = ctx();
     let counts = ctx
         .parallelize_typed(vec![42i32; 100], 4)

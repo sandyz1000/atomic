@@ -33,25 +33,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn other_error_displays_message() {
+    fn other_error_displays() {
         let err = DataError::Other("something went wrong".into());
         assert_eq!(err.to_string(), "something went wrong");
     }
 
     #[test]
-    fn downcast_failure_displays_message() {
+    fn downcast_displays() {
         let err = DataError::DowncastFailure("type mismatch".into());
         assert_eq!(err.to_string(), "type mismatch");
     }
 
     #[test]
-    fn base_result_ok_round_trip() {
+    fn base_result_ok() {
         let result: DataResult<u32> = Ok(42);
         assert_eq!(result.ok(), Some(42));
     }
 
     #[test]
-    fn base_result_err_propagates() {
+    fn base_result_err() {
         let result: DataResult<u32> = Err(DataError::Other("fail".into()));
         match result {
             Err(e) => assert_eq!(e.to_string(), "fail"),

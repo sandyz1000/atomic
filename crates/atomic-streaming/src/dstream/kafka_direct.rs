@@ -542,7 +542,7 @@ mod tests {
 
     // Broker-free: the offset tracker must initialize with offset 0.
     #[test]
-    fn offset_tracker_default_start() {
+    fn offset_default_start() {
         let mut tracker = OffsetTracker::default();
         assert_eq!(tracker.start_for("events", 0), 0);
         tracker.commit("events", 0, 100);
@@ -551,7 +551,7 @@ mod tests {
 
     // Broker-free: snapshot/restore round-trip.
     #[test]
-    fn offset_tracker_snapshot_restore() {
+    fn offset_snapshot_restore() {
         let mut t1 = OffsetTracker::default();
         t1.commit("t", 0, 50);
         t1.commit("t", 1, 75);
@@ -565,7 +565,7 @@ mod tests {
 
     // Broker-free: empty ranges → no RDD.
     #[test]
-    fn build_rdd_empty_ranges_returns_none() {
+    fn empty_ranges_none() {
         let sc = Context::local().unwrap();
         let ssc = StreamingContext::new(sc.clone(), Duration::from_millis(100));
         let stream = ssc.direct_kafka_stream("localhost:9092", &["t"], None);

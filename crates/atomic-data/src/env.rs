@@ -161,11 +161,11 @@ pub fn bearer_authorized(auth_header: Option<&str>) -> bool {
 
 // --- RDD cache spill ---
 
-pub fn set_rdd_cache_spill_dir(dir: PathBuf) {
+pub fn set_cache_spill_dir(dir: PathBuf) {
     ENV.write().unwrap().rdd_cache_spill_dir = Some(dir);
 }
 
-pub fn get_rdd_cache_spill_dir() -> Option<PathBuf> {
+pub fn get_cache_spill_dir() -> Option<PathBuf> {
     ENV.read().unwrap().rdd_cache_spill_dir.clone()
 }
 

@@ -41,6 +41,14 @@ pub struct PipelineTask {
     pub steps: Vec<Step>,
     pub broadcasts: Vec<(usize, Vec<u8>)>,
     pub output_id: usize,
+    /// When `Some((rdd_id, post_ops))`, this partition is served from a worker's cache:
+    /// [`to_envelope`](Self::to_envelope) builds a `cache_source` read that runs only
+    /// `post_ops` on the cached bytes instead of recomputing `steps` over `source`. Set only
+    /// by `DistributedScheduler` when `plan_cache_dispatch` finds the partition cached; on a
+    /// cache miss (holder gone / evicted) the dispatcher falls back to
+    /// [`recompute_envelope`](Self::recompute_envelope). Always `None` for local dispatch and
+    /// for the first, cache-populating run.
+    pub cache_serve: Option<(usize, Vec<Step>)>,
 }
 
 impl PipelineTask {
@@ -55,6 +63,7 @@ impl PipelineTask {
         steps: Vec<Step>,
         broadcasts: Vec<(usize, Vec<u8>)>,
         output_id: usize,
+        cache_serve: Option<(usize, Vec<Step>)>,
     ) -> Self {
         PipelineTask {
             meta: TaskMeta::new(task_id, run_id, stage_id, partition, locs, false),
@@ -62,14 +71,39 @@ impl PipelineTask {
             steps,
             broadcasts,
             output_id,
+            cache_serve,
         }
     }
 
     /// Build the wire `TaskEnvelope` for this task — shared by both the in-process
     /// (`LocalScheduler`) and worker-RPC (`DistributedScheduler`) dispatch paths, so the
     /// bytes a local thread runs and the bytes shipped to a remote worker are constructed
-    /// identically.
+    /// identically. A [`cache_serve`](Self::cache_serve) task reads its partition from the
+    /// holding worker's cache (running only `post_ops`); everything else recomputes.
     pub fn to_envelope(&self, attempt_id: usize) -> TaskEnvelope {
+        match &self.cache_serve {
+            Some((rdd_id, post_ops)) => TaskEnvelope::new(
+                self.meta.run_id,
+                self.meta.stage_id,
+                self.meta.task_id,
+                attempt_id,
+                self.meta.partition,
+                format!(
+                    "pipeline-cache-{}-{}",
+                    self.meta.stage_id, self.meta.partition
+                ),
+                post_ops.clone(),
+                Vec::new(),
+            )
+            .with_cache_source(*rdd_id)
+            .with_broadcasts(self.broadcasts.clone()),
+            None => self.recompute_envelope(attempt_id),
+        }
+    }
+
+    /// The full recompute `TaskEnvelope`: runs `steps` over `source`, ignoring any
+    /// `cache_serve`. Used as the fallback when a cache-serve read misses.
+    pub fn recompute_envelope(&self, attempt_id: usize) -> TaskEnvelope {
         TaskEnvelope::new(
             self.meta.run_id,
             self.meta.stage_id,

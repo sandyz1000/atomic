@@ -32,7 +32,7 @@ fn times_ten(x: i32) -> i32 {
 
 #[test]
 #[ignore = "requires a Kubernetes cluster + a worker image (see module docs)"]
-fn with_workers_kube_e2e() {
+fn workers_kube_e2e() {
     let worker_image = std::env::var("ATOMIC_K8S_WORKER_IMAGE")
         .expect("set ATOMIC_K8S_WORKER_IMAGE to the worker pod image");
     let local_ip: Ipv4Addr = std::env::var("ATOMIC_LOCAL_IP")

@@ -32,7 +32,7 @@ mod tests {
     use super::BoundedDouble;
 
     #[test]
-    fn display_formats_low_high_interval() {
+    fn display_formats_interval() {
         let bd = BoundedDouble::from((10.0, 0.95, 8.5, 11.25));
         assert_eq!(format!("{bd}"), "[8.500, 11.250]");
     }

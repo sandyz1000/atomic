@@ -124,7 +124,7 @@ impl PyRdd {
     /// In distributed mode this dispatches the fold to workers.
     pub fn fold(&mut self, py: Python, zero: Py<PyAny>, f: Py<PyAny>) -> PyResult<Py<PyAny>> {
         if self.context.is_distributed() {
-            let wrapper = Self::make_partition_wrapper_with_zero(
+            let wrapper = Self::partition_wrapper_zero(
                 py,
                 "lambda partition, _f=_f, _z=_z: [__import__('functools').reduce(_f, partition, _z)]",
                 &f,

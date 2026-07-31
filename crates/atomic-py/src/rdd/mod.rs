@@ -110,7 +110,7 @@ impl PyRdd {
     }
 
     /// Like `make_partition_wrapper` but also captures a `zero` value as `_z`.
-    fn make_partition_wrapper_with_zero<'py>(
+    fn partition_wrapper_zero<'py>(
         py: Python<'py>,
         expr: &str,
         f: &Py<PyAny>,

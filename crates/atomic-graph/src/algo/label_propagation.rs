@@ -87,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn each_vertex_gets_a_valid_label() {
+    fn vertices_get_labels() {
         let ctx = Context::local().unwrap();
         let g: Graph<(), ()> = Graph::from_edges(ctx, vec![edge(0, 1), edge(1, 2), edge(2, 0)], ());
         let n = g.num_vertices() as usize;
@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn isolated_vertex_keeps_own_label() {
+    fn isolated_keeps_label() {
         let ctx = Context::local().unwrap();
         let g: Graph<(), ()> =
             Graph::from_vertices_edges(ctx, vec![(0, ()), (1, ()), (99, ())], vec![edge(0, 1)]);

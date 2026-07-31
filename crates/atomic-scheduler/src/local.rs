@@ -391,11 +391,9 @@ impl NativeScheduler for LocalScheduler {
             "fetch failed: shuffle {shuffle_id} map {map_id} on {server_uri} — \
              invalidating the lost map output and resubmitting its stage for recompute"
         );
-        m.remove_output_loc_from_stage(shuffle_id, map_id, &server_uri);
+        m.remove_stage_output_loc(shuffle_id, map_id, &server_uri);
         m.unregister_map_output(shuffle_id, map_id, server_uri);
-        jt.failed
-            .lock()
-            .insert(m.fetch_from_shuffle_to_cache(shuffle_id));
+        jt.failed.lock().insert(m.stage_for_shuffle(shuffle_id));
     }
 
     fn max_failures(&self) -> usize {
@@ -462,7 +460,7 @@ impl StagePlanner for LocalScheduler {
         match stage_id {
             Some(id) => {
                 // Return the up-to-date copy from stage_cache — shuffle_to_map_stage holds a
-                // stale clone that never sees add_output_loc_to_stage updates.
+                // stale clone that never sees add_stage_output_loc updates.
                 Ok(self.state.stage_cache.get(&id).unwrap().clone())
             }
             None => {
@@ -489,7 +487,7 @@ impl StagePlanner for LocalScheduler {
                     // staged pipelines). Only populate as many slots as the stage has.
                     for (partition, uri) in uris.into_iter().enumerate().take(stage.num_partitions)
                     {
-                        self.state.add_output_loc_to_stage(stage.id, partition, uri);
+                        self.state.add_stage_output_loc(stage.id, partition, uri);
                     }
                 }
                 // Re-fetch from stage_cache so output_locs mutations are reflected.

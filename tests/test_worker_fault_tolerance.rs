@@ -68,7 +68,7 @@ fn test_register_worker_idempotent() {
 
 /// `next_executor()` on an empty scheduler returns an error.
 #[test]
-fn test_next_executor_empty_returns_error() {
+fn test_next_executor_empty() {
     let sched = DistributedScheduler::new(3, true);
     let result = sched.next_executor();
     assert!(
@@ -81,7 +81,7 @@ fn test_next_executor_empty_returns_error() {
 
 /// Worker with empty `registered_ops` accepts any op (backwards compatibility).
 #[test]
-fn test_worker_with_empty_ops_accepts_all() {
+fn test_empty_ops_accepts() {
     let sched = DistributedScheduler::new(3, true);
     let addr = worker_addr(29102);
     sched.register_worker(addr, capabilities(&[])); // empty = accept all
@@ -264,7 +264,7 @@ fn test_zero_capacity() {
 /// `MapOutputTracker` so the lost partitions are recomputed (not refetched from
 /// the dead host). Verifies the `remove_worker` → tracker glue end-to-end.
 #[test]
-fn removed_worker_clears_outputs() {
+fn removed_clears_outputs() {
     use atomic_data::shuffle::MapOutputTracker;
     use std::sync::Arc;
 

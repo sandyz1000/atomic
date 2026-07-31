@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_with_context_json() {
+    fn filter_context_json() {
         let d = dispatcher();
         let result = d
             .eval_partition(
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_local_runtime_reused() {
+    fn runtime_reused() {
         let d = dispatcher();
         d.eval_partition(
             "(partition) => partition.map(x => { globalThis.__marker = 99; return x; })",
@@ -254,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_compiled_once_per_thread() {
+    fn compiled_once_thread() {
         let d = dispatcher();
         let fn_source = "(p) => p.map(x => x + 1)";
         d.eval_partition(fn_source, None, "[10]").unwrap();
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_fresh_each_call() {
+    fn scope_fresh_call() {
         let d = dispatcher();
         for i in 0..10i64 {
             let data = format!("[{}]", i);
