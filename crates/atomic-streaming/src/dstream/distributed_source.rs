@@ -26,7 +26,9 @@ use std::time::Duration;
 
 use atomic_compute::rdd::ParallelCollection;
 use atomic_data::data::Data;
-use atomic_data::distributed::{EngineAction, FileSplitPayload, Step, StepKind, TaskRuntime};
+use atomic_data::distributed::{
+    EngineAction, FileSplitPayload, Step, StepKind, TaskRuntime, WireEncode,
+};
 use atomic_data::rdd::Rdd;
 use parking_lot::Mutex;
 
@@ -244,8 +246,7 @@ impl DistributedSource for DistributedFileSource {
                     start_byte: 0,
                     end_byte: None,
                 };
-                let partition_bytes = bincode::encode_to_vec(&payload, bincode::config::standard())
-                    .unwrap_or_default();
+                let partition_bytes = payload.encode_wire().unwrap_or_default();
                 let task = SourcePartitionTask {
                     op: Step {
                         task_name: String::new(),

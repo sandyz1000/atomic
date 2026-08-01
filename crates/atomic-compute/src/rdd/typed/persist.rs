@@ -13,7 +13,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
     ///
     /// - `MemoryOnly` / `MemoryOnlySer`: memoises in the global `PartitionStore` (LRU-bounded).
     /// - `MemoryAndDisk` / `DiskOnly`: accepted but fall back to memory semantics unless `T`
-    ///   implements `bincode::Encode + bincode::Decode<()>`. For actual disk spill, call
+    ///   implements `WireEncode + WireDecode`. For actual disk spill, call
     ///   `persist_with_disk(level)` instead.
     pub fn persist(mut self, level: StorageLevel) -> Self {
         let ctx = self.context.clone();
@@ -40,15 +40,15 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
 
     /// Persist with real disk spill for `MemoryAndDisk` and `DiskOnly` levels.
     ///
-    /// Requires `T: bincode::Encode + bincode::Decode<()>` so partitions can be
-    /// serialized to `{work_dir}/rdd-cache/{rdd_id}/{partition}.bin`.
+    /// Requires `T: WireEncode + WireDecode` so partitions can be serialized to
+    /// `{work_dir}/rdd-cache/{rdd_id}/{partition}.bin`.
     ///
     /// - `MemoryAndDisk`: memory-first; on LRU eviction falls back to disk; on miss reads disk.
     /// - `DiskOnly`: always reads from disk; never occupies `PartitionStore` memory.
     /// - Other levels: identical to `persist(level)`.
     pub fn persist_with_disk(self, level: StorageLevel) -> Self
     where
-        T: bincode::Encode + bincode::Decode<()>,
+        T: WireSerde,
     {
         use atomic_data::cache::{PARTITION_CACHE, disk_write_partition};
 
@@ -145,13 +145,12 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
     /// and return a new `TypedRdd` backed by a `CheckpointRdd` — fully truncating
     /// the upstream lineage.
     ///
-    /// Partitions are written to `{dir}/{rdd_id}/{partition}.bin` (bincode-encoded).
+    /// Partitions are written to `{dir}/{rdd_id}/{partition}.bin` (rkyv-encoded).
     ///
-    /// Requires `T: bincode::Encode + bincode::Decode<()>`.
+    /// Requires `T: WireEncode + WireDecode`.
     pub fn checkpoint(self, dir: impl AsRef<str>) -> Result<TypedRdd<T>, DataError>
     where
-        T: bincode::Encode + bincode::Decode<()> + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
     {
         use crate::rdd::checkpoint::{CheckpointRdd, CheckpointStore};
         use atomic_data::cache::disk_write_partition;
@@ -178,7 +177,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
 
                 CheckpointStore::S3 { bucket, prefix } => {
                     use crate::io::s3::write_text;
-                    let bytes = bincode::encode_to_vec(data, bincode::config::standard())
+                    let bytes = data.encode_wire()
                         .map_err(|e| DataError::Other(format!("checkpoint encode: {e}")))?;
                     let b64 =
                         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);

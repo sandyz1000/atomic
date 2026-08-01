@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use atomic_compute::context::Context;
 use atomic_data::distributed::{
-    EngineAction, StateMergePayload, Step, StepKind, TaskRuntime, decode_payload,
+    EngineAction, StateMergePayload, Step, StepKind, TaskRuntime, WireDecode, WireEncode,
+    decode_payload,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 
@@ -44,9 +45,9 @@ pub(crate) fn mode_code(mode: OutputMode) -> u8 {
     }
 }
 
-/// Per-batch merge/emit configuration shipped to each shard (bincode-encoded into
+/// Per-batch merge/emit configuration shipped to each shard (rkyv-encoded into
 /// `StateMergePayload.params`).
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
 struct WindowedMergeParams {
     /// Post-batch watermark; `None` until the first event time is observed.
     watermark_ms: Option<u64>,
@@ -55,11 +56,10 @@ struct WindowedMergeParams {
     mode: u8,
 }
 
-/// Stable shard assignment for a key (FNV-1a over its bincode encoding, so it is
-/// deterministic across driver and workers — the `Hash` derive is not). Used for
-/// the windowed `StateKey` and the session/join group key alike.
-pub(crate) fn shard_of<T: bincode::Encode>(key: &T, num_shards: u32) -> u32 {
-    let bytes = bincode::encode_to_vec(key, bincode::config::standard()).unwrap_or_default();
+/// Stable shard assignment for a key (FNV-1a over its rkyv encoding, so it is
+/// deterministic across driver and workers — the `Hash` derive is not).
+pub(crate) fn shard_of<T: WireEncode>(key: &T, num_shards: u32) -> u32 {
+    let bytes = key.encode_wire().unwrap_or_default();
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in &bytes {
         h ^= *b as u64;
@@ -69,15 +69,10 @@ pub(crate) fn shard_of<T: bincode::Encode>(key: &T, num_shards: u32) -> u32 {
 }
 
 /// Shared dispatch skeleton for every sharded `Distributed*Engine::process()`:
-/// bincode-encode `params` once, wrap each shard's already-routed `bucket` into a
+/// rkyv-encode `params` once, wrap each shard's already-routed `bucket` into a
 /// `StateMergePayload` (state id = `state_id_base + shard index`), dispatch one
 /// `MergeState` task per shard via `merge_fn`, then decode and concatenate each
 /// shard's emitted items in shard order.
-///
-/// Callers own the engine-specific parts: building `Params`, routing this batch's
-/// items into per-shard `Bucket`s (a windowed engine buckets one list per shard, a
-/// join buckets a `(left, right)` pair — that shape genuinely differs), and turning
-/// the flat `Vec<Emitted>` back into output `RecordBatch`es.
 pub(crate) fn dispatch_merge_state<Bucket, Params, Emitted>(
     sc: &Context,
     merge_fn: &str,
@@ -87,17 +82,18 @@ pub(crate) fn dispatch_merge_state<Bucket, Params, Emitted>(
     buckets: Vec<Bucket>,
 ) -> StructuredResult<Vec<Emitted>>
 where
-    Bucket: bincode::Encode,
-    Params: bincode::Encode,
-    Emitted: bincode::Decode<()>,
+    Bucket: WireEncode,
+    Params: WireEncode,
+    Emitted: WireDecode,
 {
-    let cfg = bincode::config::standard();
-    let params_bytes =
-        bincode::encode_to_vec(params, cfg).map_err(|e| StructuredError::Sql(e.to_string()))?;
+    let params_bytes = params
+        .encode_wire()
+        .map_err(|e| StructuredError::Sql(e.to_string()))?;
 
     let mut source_partitions: Vec<Vec<u8>> = Vec::with_capacity(buckets.len());
     for (shard, bucket) in buckets.into_iter().enumerate() {
-        let partials = bincode::encode_to_vec(&bucket, cfg)
+        let partials = bucket
+            .encode_wire()
             .map_err(|e| StructuredError::Sql(e.to_string()))?;
         let payload = StateMergePayload {
             state_id: state_id_base + shard as u64,
@@ -106,7 +102,8 @@ where
             checkpoint_dir: checkpoint_dir.clone(),
         };
         source_partitions.push(
-            bincode::encode_to_vec(&payload, cfg)
+            payload
+                .encode_wire()
                 .map_err(|e| StructuredError::Sql(e.to_string()))?,
         );
     }
@@ -120,9 +117,6 @@ where
         payload: vec![],
     }];
 
-    // No RDD lineage to walk here (a stateful merge has no shuffle boundary of its own) —
-    // `dispatch_pipeline`'s `final_rdd` param only matters for its `RddBase` shape, so an
-    // empty placeholder is exactly as valid as a real one.
     let placeholder_rdd: Arc<dyn atomic_data::rdd::Rdd<Item = ()>> = Arc::new(
         atomic_compute::rdd::ParallelCollection::new(sc.new_rdd_id(), Vec::new(), 1),
     );
@@ -140,8 +134,7 @@ where
 }
 
 /// The registered windowed state-merge: merge this batch's partials into the
-/// shard's state, then emit per output mode. `prev` is the shard's current
-/// serialized [`StateStore`] (`None` on first use).
+/// shard's state, then emit per output mode.
 fn windowed_state_merge(
     prev: Option<&[u8]>,
     partials: &[u8],
@@ -151,7 +144,6 @@ fn windowed_state_merge(
         Some(b) => StateStore::decode(b).map_err(|e| e.to_string())?,
         None => StateStore::new(),
     };
-    let cfg = bincode::config::standard();
     let cells: Vec<(StateKey, Vec<AggState>)> =
         decode_payload(partials).map_err(|e| e.to_string())?;
     let touched: Vec<StateKey> = cells.iter().map(|(k, _)| k.clone()).collect();
@@ -173,26 +165,18 @@ fn windowed_state_merge(
     };
 
     let new_state = store.encode().map_err(|e| e.to_string())?;
-    let emitted_bytes = bincode::encode_to_vec(&emitted, cfg).map_err(|e| e.to_string())?;
+    let emitted_bytes = emitted.encode_wire().map_err(|e| e.to_string())?;
     Ok((new_state, emitted_bytes))
 }
 
 atomic_compute::register_state_merge!(WINDOWED_MERGE_FN, windowed_state_merge);
 
 /// Windowed aggregation whose keyed state is sharded across the cluster.
-///
-/// Wraps a [`WindowedEngine`] for the driver-side per-batch work (partial SQL,
-/// late-data filtering, watermark, output assembly) but replaces its local state
-/// merge with a sharded, worker-resident merge dispatched per batch.
 pub(crate) struct DistributedStateEngine {
     inner: WindowedEngine,
     sc: Arc<Context>,
     num_shards: u32,
-    /// Base `state_id`; shard `i` uses `state_id_base + i` so multiple queries in
-    /// one process do not collide.
     state_id_base: u64,
-    /// When set, each shard's post-merge state is checkpointed under this directory
-    /// and reloaded on a cold shard after a restart.
     checkpoint_dir: Option<String>,
 }
 
@@ -225,13 +209,10 @@ impl BatchEngine for DistributedStateEngine {
         let mode = spec.mode;
         let bp = self.inner.compute_partials(epoch)?;
 
-        // With no new data, only Append (watermark-driven eviction) and Complete
-        // (re-emit) need a round; Update emits nothing.
         if !bp.had_data && mode == OutputMode::Update {
             return Ok(vec![]);
         }
 
-        // Route partials to shards by stable key hash.
         let mut by_shard: Vec<Vec<(StateKey, Vec<AggState>)>> =
             vec![Vec::new(); self.num_shards as usize];
         for (k, v) in bp.cells {
@@ -245,8 +226,6 @@ impl BatchEngine for DistributedStateEngine {
             mode: mode_code(mode),
         };
 
-        // One MergeState task per shard. Empty shards still run so Append eviction
-        // and Complete re-emission cover state with no new partials this batch.
         let emitted: Vec<(StateKey, Vec<AggState>)> = dispatch_merge_state(
             &self.sc,
             WINDOWED_MERGE_FN,

@@ -10,9 +10,11 @@
 //!
 //! The operator is transport-agnostic (generic over the row and output types), so the query
 //! layer decides how to extract group keys and rows from Arrow batches and how to encode the
-//! outputs. State is checkpointable whenever `S: bincode::Encode + bincode::Decode`.
+//! outputs. State is checkpointable whenever `S: WireEncode + WireDecode`.
 
 use std::collections::HashMap;
+
+use atomic_data::distributed::{WireDecode, WireEncode};
 
 use crate::errors::{StructuredError, StructuredResult};
 use crate::state::GroupVal;
@@ -97,7 +99,7 @@ impl<S> GroupState<S> {
 }
 
 /// One group's persisted state: the value plus its armed timeout.
-#[derive(Clone, bincode::Encode, bincode::Decode)]
+#[derive(Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct StoredState<S> {
     value: S,
     timeout_ms: Option<u64>,
@@ -195,21 +197,19 @@ where
 
 impl<S, R, Out, F> MapGroupsWithState<S, R, Out, F>
 where
-    S: Clone + bincode::Encode + bincode::Decode<()>,
+    S: Clone + WireEncode + WireDecode,
     F: Fn(&[GroupVal], Vec<R>, &mut GroupState<S>) -> Vec<Out>,
 {
-    /// Serialize the current per-group state for checkpointing.
     pub fn encode_state(&self) -> StructuredResult<Vec<u8>> {
         let snapshot: Vec<(&Vec<GroupVal>, &StoredState<S>)> = self.states.iter().collect();
-        bincode::encode_to_vec(snapshot, bincode::config::standard())
+        snapshot
+            .encode_wire()
             .map_err(|e| StructuredError::Checkpoint(e.to_string()))
     }
 
-    /// Restore per-group state from a checkpoint blob, replacing any current state.
     pub fn restore_state(&mut self, bytes: &[u8]) -> StructuredResult<()> {
-        let (snapshot, _): (Vec<(Vec<GroupVal>, StoredState<S>)>, _) =
-            bincode::decode_from_slice(bytes, bincode::config::standard())
-                .map_err(|e| StructuredError::Checkpoint(e.to_string()))?;
+        let snapshot = Vec::<(Vec<GroupVal>, StoredState<S>)>::decode_wire(bytes)
+            .map_err(|e| StructuredError::Checkpoint(e.to_string()))?;
         self.states = snapshot.into_iter().collect();
         Ok(())
     }

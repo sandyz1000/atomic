@@ -12,7 +12,7 @@ use std::sync::Arc;
 use datafusion::arrow::record_batch::RecordBatch;
 
 use atomic_compute::context::Context;
-use atomic_data::distributed::decode_payload;
+use atomic_data::distributed::{WireEncode, decode_payload};
 
 use crate::distributed_state::{dispatch_merge_state, shard_of};
 use crate::errors::StructuredResult;
@@ -24,14 +24,14 @@ use crate::stream_join::{JoinRow, JoinStateStore, JoinType, StreamJoinEngine, pr
 pub(crate) const JOIN_MERGE_FN: &str = "atomic_structured::stream_join_v1";
 
 /// A shard's two-sided buffer state (both join inputs for the keys in the shard).
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct JoinShardState {
     left: JoinStateStore,
     right: JoinStateStore,
 }
 
 /// Per-shard merge config for a stream-stream join.
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct JoinMergeParams {
     watermark_ms: Option<u64>,
     time_bound_ms: u64,
@@ -50,7 +50,6 @@ fn join_state_merge(
     partials: &[u8],
     params: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let cfg = bincode::config::standard();
     let mut state = match prev {
         Some(b) => decode_payload::<JoinShardState>(b).map_err(|e| e.to_string())?,
         None => JoinShardState {
@@ -71,8 +70,8 @@ fn join_state_merge(
         params.watermark_ms,
         params.left_ncols as usize,
     );
-    let new_state = bincode::encode_to_vec(&state, cfg).map_err(|e| e.to_string())?;
-    let matched_bytes = bincode::encode_to_vec(&matched, cfg).map_err(|e| e.to_string())?;
+    let new_state = state.encode_wire().map_err(|e| e.to_string())?;
+    let matched_bytes = matched.encode_wire().map_err(|e| e.to_string())?;
     Ok((new_state, matched_bytes))
 }
 

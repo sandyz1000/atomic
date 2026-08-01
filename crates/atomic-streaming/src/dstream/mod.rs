@@ -8,7 +8,6 @@ crate::cfg_kafka! {
 }
 pub mod mapped;
 pub mod pair;
-pub mod shuffle;
 pub mod transformed;
 pub mod windowed;
 

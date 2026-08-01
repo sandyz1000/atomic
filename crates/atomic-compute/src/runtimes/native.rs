@@ -5,7 +5,7 @@ use atomic_data::broadcast;
 use atomic_data::cache::worker_partition_cache;
 use atomic_data::distributed::{
     EngineAction, FileSplitPayload, ResultStatus, ShuffleMapPayload, StateMergePayload, Step,
-    StepKind, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime, decode_payload,
+    StepKind, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime, WireEncode, decode_payload,
 };
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
@@ -57,8 +57,7 @@ impl Dispatcher for NativeDispatcher {
                             num_reduce_partitions: *num_output_partitions,
                             partitioner_spec: spec.clone(),
                         };
-                        let ctx_bytes = bincode::encode_to_vec(&ctx, bincode::config::standard())
-                            .map_err(|e| {
+                        let ctx_bytes = ctx.encode_wire().map_err(|e| {
                             ComputeError::InvalidPayload(format!("shuffle write ctx encode: {e}"))
                         })?;
                         Ok(entry.call(&TaskAction::Map, &ctx_bytes, data)?)
@@ -84,10 +83,9 @@ impl Dispatcher for NativeDispatcher {
                     lift_task_name: lift_task_name.clone(),
                     merge_task_name: merge_task_name.clone(),
                 };
-                let ctx_bytes =
-                    bincode::encode_to_vec(&ctx, bincode::config::standard()).map_err(|e| {
-                        ComputeError::InvalidPayload(format!("combine ctx encode: {e}"))
-                    })?;
+                let ctx_bytes = ctx.encode_wire().map_err(|e| {
+                    ComputeError::InvalidPayload(format!("combine ctx encode: {e}"))
+                })?;
                 Ok(entry.call(&TaskAction::Map, &ctx_bytes, data)?)
             }
             StepKind::Engine(EngineAction::Cache { rdd_id }) => {

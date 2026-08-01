@@ -4,12 +4,11 @@ use crate::registry::SHUFFLE_KEY_REGISTRY;
 use atomic_data::aggregator::{Aggregator, CreateCombinerFn, MergeValueFn};
 use atomic_data::data::Data;
 use atomic_data::dependency::{Dependency, KeyComparator, ShuffleDependency, TypedShuffle};
-use atomic_data::distributed::WireEncode;
+use atomic_data::distributed::WireSerde;
 use atomic_data::error::DataError;
 use atomic_data::partitioner::Partitioner;
 use atomic_data::shuffle::fetcher::{ShuffleFetcher, SpilledRunIter};
 use atomic_data::split::{ShuffledRddSplit, Split};
-use bincode::{Decode, Encode};
 use itertools::Itertools;
 use std::any::TypeId;
 use std::cmp::Ordering;
@@ -87,9 +86,9 @@ where
 
 pub struct ShuffledRdd<K, V, C>
 where
-    K: Data + Eq + Hash + Clone + Encode + Decode<()>,
+    K: Data + Eq + Hash + Clone + WireSerde,
     V: Data + Clone,
-    C: Data + Clone + Encode + Decode<()>,
+    C: Data + Clone + WireSerde,
 {
     parent: Arc<dyn Rdd<Item = (K, V)>>,
     aggregator: Arc<Aggregator<K, V, C>>,
@@ -110,9 +109,9 @@ where
 
 impl<K, V, C> Clone for ShuffledRdd<K, V, C>
 where
-    K: Data + Eq + Hash + Clone + Encode + Decode<()>,
+    K: Data + Eq + Hash + Clone + WireSerde,
     V: Data + Clone,
-    C: Data + Clone + Encode + Decode<()>,
+    C: Data + Clone + WireSerde,
 {
     fn clone(&self) -> Self {
         ShuffledRdd {
@@ -130,10 +129,9 @@ where
 
 impl<K, V, C> ShuffledRdd<K, V, C>
 where
-    K: Data + Eq + Hash + Clone + Encode + Decode<()>,
-    V: Data + Clone + Encode,
-    C: Data + Clone + Encode + Decode<()>,
-    Vec<(K, V)>: WireEncode,
+    K: Data + Eq + Hash + Clone + WireSerde,
+    V: Data + Clone + WireSerde,
+    C: Data + Clone + WireSerde,
 {
     pub fn new(
         id: usize,
@@ -273,9 +271,9 @@ where
 
 impl<K, V, C> RddBase for ShuffledRdd<K, V, C>
 where
-    K: Data + Eq + Hash + Clone + Encode + Decode<()>,
-    V: Data + Clone + Decode<()>,
-    C: Data + Clone + Encode + Decode<()>,
+    K: Data + Eq + Hash + Clone + WireSerde,
+    V: Data + Clone + WireSerde,
+    C: Data + Clone + WireSerde,
 {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
@@ -330,9 +328,9 @@ where
 
 impl<K, V, C> Rdd for ShuffledRdd<K, V, C>
 where
-    K: Data + Eq + Hash + Clone + Encode + Decode<()>,
-    V: Data + Clone + Decode<()>,
-    C: Data + Clone + Encode + Decode<()>,
+    K: Data + Eq + Hash + Clone + WireSerde,
+    V: Data + Clone + WireSerde,
+    C: Data + Clone + WireSerde,
 {
     type Item = (K, C);
 

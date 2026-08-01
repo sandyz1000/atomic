@@ -12,8 +12,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// **Warning**: This brings all data to the driver. Only use on small datasets.
     pub fn collect(&self) -> Result<Vec<T>, DataError>
     where
-        T: WireEncode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
     {
         let (source, steps) = self.resolve_pipeline()?;
         let result_bytes = self
@@ -36,8 +35,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Useful for `save_as_text_file` and `checkpoint` which write one file per partition.
     pub fn collect_partitions(&self) -> Result<Vec<Vec<T>>, DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
     {
         let (source, steps) = self.resolve_pipeline()?;
         let result_bytes = self
@@ -61,8 +59,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// elements incrementally.
     pub fn to_local_iterator(&self) -> Result<impl Iterator<Item = T>, DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
     {
         let (source, steps) = self.resolve_pipeline()?;
         let mut result: Vec<T> = Vec::new();
@@ -87,8 +84,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// the driver.
     pub fn count(&self) -> Result<u64, DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
     {
         self.reduce_partitions(0u64, |acc, part| acc + part.len() as u64)
     }
@@ -102,8 +98,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// can no longer stop mid-iteration once `num` is reached).
     pub fn take(&self, num: usize) -> Result<Vec<T>, DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
     {
         if num == 0 {
             return Ok(vec![]);
@@ -155,8 +150,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Returns an error if the RDD is empty.
     pub fn first(&self) -> Result<T, DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
     {
         if let Some(result) = self.take(1)?.into_iter().next() {
             Ok(result)
@@ -168,8 +162,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Returns `true` if the RDD contains no elements.
     pub fn is_empty(&self) -> Result<bool, DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
     {
         Ok(self.take(1)?.is_empty())
     }
@@ -181,8 +174,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// The result is an estimate — the actual count may differ from the return value.
     pub fn count_approx(&self, confidence: f64) -> Result<u64, DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
     {
         let (source, steps) = self.resolve_pipeline()?;
         let n = source.len();
@@ -211,8 +203,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     pub fn aggregate<U, SF, CF>(&self, init: U, seq_fn: SF, comb_fn: CF) -> Result<U, DataError>
     where
         U: Data + Clone,
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
         SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
         CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
     {
@@ -234,8 +225,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Returns `None` if the RDD is empty.
     pub fn tree_reduce<F>(&self, f: F, depth: usize) -> Result<Option<T>, DataError>
     where
-        T: Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Clone + WireSerde,
         F: Fn(T, T) -> T + Clone + Send + Sync + 'static,
     {
         // Per-partition reduce: each partition sends 0 or 1 element.
@@ -262,8 +252,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     ) -> Result<U, DataError>
     where
         U: Data + Clone,
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
         SF: Fn(U, T) -> U + Clone + Send + Sync + 'static,
         CF: Fn(U, U) -> U + Clone + Send + Sync + 'static,
     {
@@ -285,8 +274,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// elements crosses the wire at a time (bounded memory), never the whole RDD at once.
     pub fn for_each<F>(&self, f: F) -> Result<(), DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
         F: Fn(&T) + Clone + Send + Sync + 'static,
     {
         self.reduce_partitions((), move |(), part| {
@@ -300,8 +288,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// partition boundaries are preserved.
     pub fn for_each_partition<F>(&self, f: F) -> Result<(), DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
         F: Fn(Box<dyn Iterator<Item = T>>) + Clone + Send + Sync + 'static,
     {
         self.reduce_partitions((), move |(), part| {
@@ -315,8 +302,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// owns each partition.
     pub fn for_each_task<F>(&self, task: F) -> Result<(), DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
         F: UnaryTask<T, ()>,
     {
         let (source_partitions, mut steps) = self.resolve_pipeline()?;
@@ -337,8 +323,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Each partition's counts are folded in one at a time (bounded memory), then merged.
     pub fn count_by_value(&self) -> Result<std::collections::HashMap<T, u64>, DataError>
     where
-        T: Eq + std::hash::Hash + Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Eq + std::hash::Hash + Clone + WireSerde,
     {
         use std::collections::HashMap;
 
@@ -362,8 +347,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         op: impl Fn(T, T) -> T + Clone + Send + Sync + 'static,
     ) -> Result<T, DataError>
     where
-        T: Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Clone + WireSerde,
     {
         let z = zero.clone();
         let o = op.clone();
@@ -389,8 +373,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         op: impl Fn(T, T) -> T + Clone + Send + Sync + 'static,
     ) -> Result<Option<T>, DataError>
     where
-        T: Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Clone + WireSerde,
     {
         let o = op.clone();
         self.reduce_partitions(None, move |acc: Option<T>, part| {
@@ -414,8 +397,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// ```
     pub fn max(&self) -> Result<Option<T>, DataError>
     where
-        T: Ord + Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Ord + Clone + WireSerde,
     {
         // Primitive types reduce on the worker via the builtin `MaxTask` (one value per
         // partition crosses the wire); other types reduce per-partition on the driver.
@@ -452,8 +434,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// ```
     pub fn min(&self) -> Result<Option<T>, DataError>
     where
-        T: Ord + Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Ord + Clone + WireSerde,
     {
         if let Some(name) = crate::builtin_tasks::min_task_name::<T>() {
             let parts = self.dispatch_with_step(name, TaskAction::Reduce, vec![])?;
@@ -488,8 +469,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// per-partition work keeps memory bounded.
     pub fn histogram(&self, bucket_bounds: &[f64]) -> Result<Vec<u64>, DataError>
     where
-        T: crate::builtin_tasks::NumericValue + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: crate::builtin_tasks::NumericValue + WireSerde,
     {
         if bucket_bounds.len() < 2 {
             return Ok(vec![]);
@@ -525,8 +505,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// of missing it independently.
     pub(super) fn resolve_pipeline(&self) -> Result<(Vec<Vec<u8>>, Vec<Step>), DataError>
     where
-        T: WireEncode,
-        Vec<T>: WireEncode,
+        T: WireSerde,
     {
         match &self.staged {
             Some(s) => Ok((s.source_partitions.clone(), s.steps.clone())),
@@ -564,8 +543,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         payload: Vec<u8>,
     ) -> Result<Vec<Vec<u8>>, DataError>
     where
-        T: WireEncode,
-        Vec<T>: WireEncode,
+        T: WireSerde,
     {
         let (source, mut steps) = self.resolve_pipeline()?;
         steps.push(Step {
@@ -589,8 +567,7 @@ impl<T: Data + Clone> TypedRdd<T> {
         mut per_partition: F,
     ) -> Result<A, DataError>
     where
-        T: WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: WireSerde,
         F: FnMut(A, Vec<T>) -> A,
     {
         let (source, steps) = self.resolve_pipeline()?;
@@ -610,8 +587,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Return the top k elements in descending order.
     pub fn top(&self, k: usize) -> Result<Vec<T>, DataError>
     where
-        T: Ord + Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Ord + Clone + WireSerde,
     {
         // Primitives: each worker emits its local top-k via the builtin `TopKTask`
         // (≤ k per partition); other types truncate per-partition on the driver.
@@ -645,8 +621,7 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// Return the first k elements in ascending order.
     pub fn take_ordered(&self, k: usize) -> Result<Vec<T>, DataError>
     where
-        T: Ord + Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Ord + Clone + WireSerde,
     {
         let mut all_items: Vec<T> =
             if let Some(name) = crate::builtin_tasks::take_ordered_task_name::<T>() {

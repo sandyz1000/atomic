@@ -43,7 +43,7 @@ use crate::registry::TASK_REGISTRY;
 /// Per-invocation lift/merge task names, packed by `NativeDispatcher` into the handler's
 /// `payload` from the `CombineByKey` step (whose `combine_key` already selected the handler).
 /// `lift_task_name` is `Some` only for the `C != V` path.
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct CombineCtx {
     pub lift_task_name: Option<String>,
     pub merge_task_name: String,
@@ -84,9 +84,7 @@ pub fn combine_handler_registered(type_id: TypeId) -> Option<&'static str> {
 }
 
 fn decode_ctx(payload: &[u8]) -> Result<CombineCtx, String> {
-    bincode::decode_from_slice(payload, bincode::config::standard())
-        .map(|(ctx, _)| ctx)
-        .map_err(|e| format!("combine ctx decode: {e}"))
+    CombineCtx::decode_wire(payload).map_err(|e| format!("combine ctx decode: {e}"))
 }
 
 /// Group `pairs` by key into `Vec<(K, Vec<T>)>`, preserving first-seen key order so the
@@ -259,7 +257,7 @@ mod tests {
             lift_task_name: lift.map(str::to_string),
             merge_task_name: merge.to_string(),
         };
-        bincode::encode_to_vec(&ctx, bincode::config::standard()).unwrap()
+        ctx.encode_wire().unwrap()
     }
 
     #[test]

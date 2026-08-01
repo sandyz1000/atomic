@@ -2,6 +2,7 @@ use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::distributed::{WireDecode, WireEncode};
 use crate::error::{DataError, DataResult};
 
 /// Reserved `reduce_id` sentinel for the consolidated DATA blob of the sort-shuffle layout.
@@ -9,7 +10,7 @@ use crate::error::{DataError, DataResult};
 /// `(shuffle_id, map_id, SHUFFLE_DATA_KEY)`. Never used as a real reduce-partition id.
 pub const SHUFFLE_DATA_KEY: usize = usize::MAX;
 
-/// Reserved `reduce_id` sentinel for the consolidated offset INDEX (`bincode(Vec<u64>)`,
+/// Reserved `reduce_id` sentinel for the consolidated offset INDEX (wire-encoded `Vec<u64>`,
 /// length `R + 1`). Partition `r`'s slice of the DATA blob is `[index[r], index[r + 1])`.
 pub const SHUFFLE_INDEX_KEY: usize = usize::MAX - 1;
 
@@ -49,11 +50,8 @@ pub trait ShuffleCache: Send + Sync + Debug {
             .map(|map_id| {
                 if let Some(idx_bytes) = self.get(&(shuffle_id, map_id, SHUFFLE_INDEX_KEY)) {
                     // Consolidated layout: size is the span between adjacent offsets.
-                    match bincode::decode_from_slice::<Vec<u64>, _>(
-                        &idx_bytes,
-                        bincode::config::standard(),
-                    ) {
-                        Ok((index, _)) if reduce_id + 1 < index.len() => {
+                    match Vec::<u64>::decode_wire(&idx_bytes) {
+                        Ok(index) if reduce_id + 1 < index.len() => {
                             index[reduce_id + 1] - index[reduce_id]
                         }
                         _ => 0,
@@ -74,7 +72,7 @@ pub trait ShuffleCache: Send + Sync + Debug {
 /// (`Vec<u64>` of length `R + 1`) under `SHUFFLE_INDEX_KEY` — two entries per map task
 /// instead of `R`.
 ///
-/// `encoded_buckets[r]` must be the bincode-encoded `Vec<(K, V)>` (or `Vec<(K, C)>`) for
+/// `encoded_buckets[r]` must be the wire-encoded `Vec<(K, V)>` (or `Vec<(K, C)>`) for
 /// reduce partition `r`. Because the per-partition framing is preserved inside the blob,
 /// the slice `[index[r], index[r + 1])` is byte-identical to the legacy per-bucket entry,
 /// so the reduce-side fetch/decode path is unchanged.
@@ -91,7 +89,8 @@ pub fn write_consolidated(
         data.extend_from_slice(bucket);
         index.push(data.len() as u64);
     }
-    let index_bytes = bincode::encode_to_vec(&index, bincode::config::standard())
+    let index_bytes = index
+        .encode_wire()
         .map_err(|e| DataError::Other(format!("write_consolidated: encode index: {e}")))?;
     cache.insert((shuffle_id, map_id, SHUFFLE_DATA_KEY), data);
     cache.insert((shuffle_id, map_id, SHUFFLE_INDEX_KEY), index_bytes);
@@ -109,8 +108,7 @@ pub fn get_consolidated_or_bucket(
     reduce_id: usize,
 ) -> Option<Vec<u8>> {
     if let Some(idx_bytes) = cache.get(&(shuffle_id, map_id, SHUFFLE_INDEX_KEY)) {
-        let (index, _): (Vec<u64>, _) =
-            bincode::decode_from_slice(&idx_bytes, bincode::config::standard()).ok()?;
+        let index: Vec<u64> = Vec::<u64>::decode_wire(&idx_bytes).ok()?;
         if reduce_id + 1 >= index.len() {
             return None;
         }
@@ -318,7 +316,7 @@ mod tests {
     }
 
     fn enc(pairs: &[(i32, i32)]) -> Vec<u8> {
-        bincode::encode_to_vec(pairs.to_vec(), bincode::config::standard()).unwrap()
+        pairs.to_vec().encode_wire().unwrap()
     }
 
     #[test]
@@ -346,8 +344,7 @@ mod tests {
         {
             let slice = get_consolidated_or_bucket(&cache, 0, 0, r).unwrap();
             assert_eq!(slice, bytes, "slice bytes match original bucket for r={r}");
-            let (decoded, _): (Vec<(i32, i32)>, _) =
-                bincode::decode_from_slice(&slice, bincode::config::standard()).unwrap();
+            let decoded: Vec<(i32, i32)> = Vec::<(i32, i32)>::decode_wire(&slice).unwrap();
             assert_eq!(decoded, expect, "decoded pairs match for r={r}");
         }
 

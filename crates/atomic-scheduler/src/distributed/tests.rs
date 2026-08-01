@@ -9,15 +9,15 @@ use atomic_data::distributed::{
 fn accumulator_sink_merges() {
     let sched = DistributedScheduler::new(4, true);
     // No sink installed: silently ignored.
-    sched.merge_accumulator_deltas(&[(1, vec![1])]);
+    sched.merge_accumulator(&[(1, vec![1])]);
 
     let seen: Arc<Mutex<Vec<(usize, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
     let sink_seen = Arc::clone(&seen);
     sched.set_accumulator_sink(Arc::new(move |deltas| {
         sink_seen.lock().extend_from_slice(deltas);
     }));
-    sched.merge_accumulator_deltas(&[(7, vec![42])]);
-    sched.merge_accumulator_deltas(&[]);
+    sched.merge_accumulator(&[(7, vec![42])]);
+    sched.merge_accumulator(&[]);
     assert_eq!(*seen.lock(), vec![(7, vec![42_u8])]);
 }
 

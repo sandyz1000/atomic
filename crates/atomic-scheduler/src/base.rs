@@ -313,6 +313,7 @@ pub trait NativeScheduler: StagePlanner {
                     // first, cache-populating run get `(None, None)` and recompute anywhere.
                     let (pinned, cache_serve) = self.pipeline_partition_plan(
                         &pipeline.result_steps,
+                        &source,
                         *part,
                         jt.num_output_parts,
                     );
@@ -581,15 +582,18 @@ pub trait NativeScheduler: StagePlanner {
 
     fn next_executor_server(&self, task: &TaskOption) -> SocketAddrV4;
 
-    /// Per-partition dispatch hint for a pipeline task: an optional worker to pin to (the one
-    /// holding this partition's cache) and the cache-serve `(rdd_id, post_ops)` that turns the
-    /// task into a cache read. Default recomputes anywhere — `(None, None)` — which is correct
-    /// for local mode (its cache is process-global, no worker routing needed) and for the
+    /// Per-partition dispatch hint for a pipeline task: an optional worker to pin to and the
+    /// cache-serve `(rdd_id, post_ops)` that turns the task into a cache read. The pin is the
+    /// worker holding this partition's cache, or — for a `MergeState` partition — the worker
+    /// holding its state shard (`source` carries the shard's `StateMergePayload`, decoded for
+    /// its `state_id`). Default recomputes anywhere — `(None, None)` — which is correct for
+    /// local mode (cache and state are process-global, no worker routing needed) and for the
     /// first, cache-populating run. `DistributedScheduler` overrides it to consult
-    /// `plan_cache_dispatch`.
+    /// `plan_cache_dispatch` / `pin_state_shard`.
     fn pipeline_partition_plan(
         &self,
         _steps: &[Step],
+        _source: &[u8],
         _partition: usize,
         _num_partitions: usize,
     ) -> (Option<SocketAddrV4>, Option<(usize, Vec<Step>)>) {

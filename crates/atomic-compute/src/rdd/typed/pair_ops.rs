@@ -56,13 +56,12 @@ where
         num_partitions: usize,
     ) -> TypedRdd<(K, C)>
     where
-        C: Data + Clone + bincode::Encode + bincode::Decode<()>,
+        C: Data + Clone + WireSerde,
         CC: Fn(V) -> C + Clone + Send + Sync + 'static,
         MV: Fn(C, V) -> C + Clone + Send + Sync + 'static,
         MC: Fn(C, C) -> C + Clone + Send + Sync + 'static,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         use crate::rdd::shuffled::ShuffledRdd;
         use atomic_data::aggregator::Aggregator;
@@ -111,9 +110,8 @@ where
     pub fn partition_by<P>(self, partitioner: P) -> TypedRdd<(K, V)>
     where
         P: CustomPartitioner + 'static,
-        V: bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        V: WireSerde,
+        K: WireSerde,
     {
         let p = Partitioner::from_custom(partitioner);
         self.combine_by_key_partitioned(|v| v, |_, v| v, |c, _| c, p, None)
@@ -129,9 +127,8 @@ where
     pub fn partition_by_named<P>(self, partitioner: P) -> TypedRdd<(K, V)>
     where
         P: NamedPartitioner,
-        V: bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        V: WireSerde,
+        K: WireSerde,
     {
         let p = Partitioner::from_named::<P>(partitioner.num_partitions());
         self.combine_by_key_partitioned(|v| v, |_, v| v, |c, _| c, p, None)
@@ -147,13 +144,12 @@ where
         comparator: Option<atomic_data::dependency::KeyComparator<K>>,
     ) -> TypedRdd<(K, C)>
     where
-        C: Data + Clone + bincode::Encode + bincode::Decode<()>,
+        C: Data + Clone + WireSerde,
         CC: Fn(V) -> C + Clone + Send + Sync + 'static,
         MV: Fn(C, V) -> C + Clone + Send + Sync + 'static,
         MC: Fn(C, C) -> C + Clone + Send + Sync + 'static,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         use crate::rdd::shuffled::ShuffledRdd;
         use atomic_data::aggregator::Aggregator;
@@ -201,9 +197,8 @@ where
     pub(crate) fn fold_by_key<F>(self, zero: V, f: F, num_partitions: usize) -> TypedRdd<(K, V)>
     where
         F: Fn(V, V) -> V + Clone + Send + Sync + 'static,
-        V: bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        V: WireSerde,
+        K: WireSerde,
     {
         let f1 = f.clone();
         let f2 = f.clone();
@@ -265,13 +260,12 @@ where
         combine: CombineWiring,
     ) -> TypedRdd<(K, C)>
     where
-        C: Data + Clone + bincode::Encode + bincode::Decode<()>,
+        C: Data + Clone + WireSerde,
         CC: Fn(V) -> C + Clone + Send + Sync + 'static,
         MV: Fn(C, V) -> C + Clone + Send + Sync + 'static,
         MC: Fn(C, C) -> C + Clone + Send + Sync + 'static,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         use crate::rdd::shuffled::ShuffledRdd;
         use atomic_data::aggregator::Aggregator;
@@ -340,9 +334,8 @@ where
     pub fn reduce_by_key_task<B>(self, task: B) -> TypedRdd<(K, V)>
     where
         B: BinaryTask<V>,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         // No combine handler registered (or no staged pipeline / local mode): fall back to the
         // unchanged closure substrate — byte-identical to today's behaviour.
@@ -369,9 +362,8 @@ where
     pub fn fold_by_key_task<B>(self, zero: V, task: B, num_partitions: usize) -> TypedRdd<(K, V)>
     where
         B: BinaryTask<V>,
-        V: bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        V: WireSerde,
+        K: WireSerde,
     {
         match self.combine_wiring_cv(B::NAME) {
             None => self.fold_by_key(zero, move |a, b| task.call(a, b), num_partitions),
@@ -430,12 +422,11 @@ where
         num_partitions: usize,
     ) -> TypedRdd<(K, C)>
     where
-        C: Data + Clone + bincode::Encode + bincode::Decode<()>,
+        C: Data + Clone + WireSerde,
         L: UnaryTask<V, C>,
         M: BinaryTask<C>,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         match self.combine_wiring_lift::<C>(L::NAME, M::NAME) {
             None => {
@@ -497,9 +488,8 @@ where
     pub fn sum_values(self) -> TypedRdd<(K, V)>
     where
         SumTask<V>: BinaryTask<V> + Default,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         self.reduce_by_key_task(SumTask::<V>::default())
     }
@@ -508,9 +498,8 @@ where
     pub fn max_values(self) -> TypedRdd<(K, V)>
     where
         MaxTask<V>: BinaryTask<V> + Default,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         self.reduce_by_key_task(MaxTask::<V>::default())
     }
@@ -519,9 +508,8 @@ where
     pub fn min_values(self) -> TypedRdd<(K, V)>
     where
         MinTask<V>: BinaryTask<V> + Default,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         self.reduce_by_key_task(MinTask::<V>::default())
     }
@@ -531,9 +519,8 @@ where
     /// A `combine_by_key` with `C = u64` — value-agnostic, so it works for any `V`.
     pub fn count_values(self, num_partitions: usize) -> TypedRdd<(K, u64)>
     where
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         self.combine_by_key(|_v| 1u64, |c, _v| c + 1, |a, b| a + b, num_partitions)
     }
@@ -543,10 +530,8 @@ where
     /// Collects all keys from `other` to the driver, then filters `self` to exclude them.
     pub fn subtract_by_key<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, V)>
     where
-        U: Data + Clone,
-        K: std::hash::Hash + Eq,
-        Vec<(K, U)>: Data + Clone + WireEncode + WireDecode,
-        (K, U): WireEncode,
+        U: Data + Clone + WireSerde,
+        K: std::hash::Hash + Eq + WireSerde,
     {
         use std::collections::HashSet;
         let ctx = self.context.clone();
@@ -578,12 +563,11 @@ where
     ///
     /// Internal substrate for [`reduce_by_key_task`](Self::reduce_by_key_task) — the
     /// public API takes a registered binary task, not a closure.
-    pub(crate) fn reduce_by_key<F>(self, f: F) -> TypedRdd<(K, V)>
+    pub fn reduce_by_key<F>(self, f: F) -> TypedRdd<(K, V)>
     where
         F: Fn(V, V) -> V + Clone + Send + Sync + 'static,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         use crate::rdd::shuffled::ShuffledRdd;
         use atomic_data::aggregator::Aggregator;
@@ -642,9 +626,8 @@ where
     /// ```
     pub fn group_by_key(self) -> TypedRdd<(K, Vec<V>)>
     where
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         let n = self.context.default_parallelism().max(1);
         self.group_by_key_n(n)
@@ -652,11 +635,10 @@ where
 
     /// Like `group_by_key` but shuffles into exactly `num_partitions` output partitions.
     /// Used internally by `cogroup_shuffle` to guarantee both sides use the same partitioner.
-    pub(crate) fn group_by_key_n(self, num_partitions: usize) -> TypedRdd<(K, Vec<V>)>
+    pub fn group_by_key_n(self, num_partitions: usize) -> TypedRdd<(K, Vec<V>)>
     where
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
+        K: WireSerde,
+        V: WireSerde,
     {
         use crate::rdd::shuffled::ShuffledRdd;
         use atomic_data::aggregator::Aggregator;
@@ -691,8 +673,8 @@ where
 
     pub fn count_by_key(&self) -> Result<std::collections::HashMap<K, u64>, DataError>
     where
-        (K, V): WireEncode + WireDecode,
-        Vec<(K, V)>: WireEncode + WireDecode,
+        K: WireSerde,
+        V: WireSerde,
     {
         use std::collections::HashMap;
 
@@ -706,9 +688,8 @@ where
 
     pub fn lookup(&self, key: &K) -> Result<Vec<V>, DataError>
     where
-        K: Clone,
-        (K, V): WireEncode,
-        Vec<(K, V)>: WireEncode + WireDecode,
+        K: Clone + WireSerde,
+        V: WireSerde,
     {
         Ok(self
             .collect()?
@@ -724,9 +705,8 @@ where
     /// Collects every pair into a single map on the driver.
     pub fn collect_as_map(&self) -> Result<std::collections::HashMap<K, V>, DataError>
     where
-        K: std::hash::Hash + Eq,
-        (K, V): WireEncode,
-        Vec<(K, V)>: WireEncode + WireDecode,
+        K: std::hash::Hash + Eq + WireSerde,
+        V: WireSerde,
     {
         let mut map = std::collections::HashMap::new();
         for (k, v) in self.collect()? {
@@ -758,9 +738,8 @@ where
     ) -> Result<std::collections::HashMap<K, V>, DataError>
     where
         B: BinaryTask<V>,
-        K: std::hash::Hash + Eq,
-        (K, V): WireEncode + WireDecode,
-        Vec<(K, V)>: WireEncode + WireDecode,
+        K: std::hash::Hash + Eq + WireSerde,
+        V: WireSerde,
     {
         use std::collections::HashMap;
 

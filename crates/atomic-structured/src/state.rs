@@ -7,10 +7,12 @@
 
 use std::collections::HashMap;
 
+use atomic_data::distributed::{WireDecode, WireEncode};
+
 use crate::errors::{StructuredError, StructuredResult};
 
 /// A mergeable aggregate function.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
 pub enum AggKind {
     Count,
     Sum,
@@ -84,7 +86,7 @@ impl Agg {
 }
 
 /// Running value of one aggregate within a (window, group) cell.
-#[derive(Clone, Debug, PartialEq, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Debug, PartialEq, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
 pub enum AggState {
     Count(i64),
     Sum(f64),
@@ -130,7 +132,8 @@ impl AggState {
 }
 
 /// A value of a grouping key column (the subset of Arrow types we group on).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
+#[rkyv(derive(Hash, PartialEq, Eq))]
 pub enum GroupVal {
     Str(String),
     Int(i64),
@@ -138,14 +141,15 @@ pub enum GroupVal {
 }
 
 /// Identity of one aggregation cell: its window plus grouping-key values.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
+#[rkyv(derive(Hash, PartialEq, Eq))]
 pub struct StateKey {
     pub window_start_ms: u64,
     pub group: Vec<GroupVal>,
 }
 
 /// The keyed aggregation state, persisted to/restored from a checkpoint.
-#[derive(Default, bincode::Encode, bincode::Decode)]
+#[derive(Default)]
 pub struct StateStore {
     map: HashMap<StateKey, Vec<AggState>>,
 }
@@ -209,17 +213,25 @@ impl StateStore {
         self.map.is_empty()
     }
 
-    /// Serialize for checkpointing.
     pub fn encode(&self) -> StructuredResult<Vec<u8>> {
-        bincode::encode_to_vec(self, bincode::config::standard())
+        let entries: Vec<(StateKey, Vec<AggState>)> = self
+            .map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        entries
+            .encode_wire()
             .map_err(|e| StructuredError::Checkpoint(e.to_string()))
     }
 
-    /// Restore from a checkpoint blob.
     pub fn decode(bytes: &[u8]) -> StructuredResult<Self> {
-        bincode::decode_from_slice(bytes, bincode::config::standard())
-            .map(|(s, _)| s)
-            .map_err(|e| StructuredError::Checkpoint(e.to_string()))
+        let entries = Vec::<(StateKey, Vec<AggState>)>::decode_wire(bytes)
+            .map_err(|e| StructuredError::Checkpoint(e.to_string()))?;
+        let mut store = StateStore::new();
+        for (k, v) in entries {
+            store.map.insert(k, v);
+        }
+        Ok(store)
     }
 }
 

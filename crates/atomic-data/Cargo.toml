@@ -39,6 +39,7 @@ subtle = { workspace = true }
 lru = { workspace = true }
 toml = { workspace = true }
 tempfile = { workspace = true }
+arrow = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }

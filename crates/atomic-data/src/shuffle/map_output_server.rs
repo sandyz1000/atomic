@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::distributed::{WireDecode, WireEncode};
 use dashmap::DashMap;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -263,7 +264,7 @@ async fn handle_request(
         Err(status) => return response(status, Bytes::from("shuffle id not found")),
     };
 
-    match bincode::encode_to_vec(&locs, bincode::config::standard()) {
+    match locs.encode_wire() {
         Ok(bytes) => {
             let mut resp = response(StatusCode::OK, Bytes::from(bytes));
             resp.headers_mut().insert(
@@ -305,8 +306,8 @@ fn collect_locations(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-fn decode_shuffle_id(body: &[u8]) -> Result<usize, bincode::error::DecodeError> {
-    bincode::decode_from_slice(body, bincode::config::standard()).map(|(id, _)| id)
+fn decode_shuffle_id(body: &[u8]) -> crate::error::DataResult<usize> {
+    usize::decode_wire(body)
 }
 
 fn response(status: StatusCode, body: Bytes) -> Response<Full<Bytes>> {
@@ -322,7 +323,7 @@ mod tests {
 
     #[test]
     fn decode_id_success() {
-        let bytes = bincode::encode_to_vec(42usize, bincode::config::standard()).unwrap();
+        let bytes = 42usize.encode_wire().unwrap();
         assert_eq!(decode_shuffle_id(&bytes).unwrap(), 42);
     }
 

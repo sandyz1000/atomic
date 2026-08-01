@@ -1,10 +1,10 @@
-use bincode::{Decode, Encode};
+use atomic_data::distributed::{WireDecode, WireEncode};
 use std::fs;
 use std::io;
 use std::path::Path;
 
 /// Serializable checkpoint state for a streaming application.
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct Checkpoint {
     /// The batch time at which this checkpoint was taken (ms since UNIX epoch).
     pub checkpoint_time_ms: u64,
@@ -13,11 +13,8 @@ pub struct Checkpoint {
     /// Path to the checkpoint directory.
     pub checkpoint_dir: String,
     /// Batch times that were in progress when the checkpoint was written.
-    /// For the synchronous batch loop this is always empty at checkpoint write time;
-    /// it would be non-empty in a future async/pipelined batch model.
     pub pending_batch_times: Vec<u64>,
     /// The last batch time for which all jobs completed successfully.
-    /// On recovery, resume from `last_completed_batch_time_ms + batch_duration_ms`.
     pub last_completed_batch_time_ms: Option<u64>,
 }
 
@@ -37,25 +34,19 @@ impl Checkpoint {
         }
     }
 
-    /// The batch time to resume from after recovery.
-    /// Returns the next batch time after the last completed one, or `None` if
-    /// no batches have completed yet.
     pub fn resume_from_batch_ms(&self) -> Option<u64> {
         self.last_completed_batch_time_ms
             .map(|t| t + self.batch_duration_ms)
     }
 
-    /// Write this checkpoint atomically to `dir`.
-    ///
-    /// Writes to a `.tmp` file first, then renames to the final name to ensure
-    /// atomicity on most operating systems.
     pub fn write(&self, dir: &Path) -> io::Result<()> {
         fs::create_dir_all(dir)?;
         let filename = format!("checkpoint-{}", self.checkpoint_time_ms);
         let final_path = dir.join(&filename);
         let tmp_path = dir.join(format!("{}.tmp", filename));
 
-        let bytes = bincode::encode_to_vec(self, bincode::config::standard())
+        let bytes = self
+            .encode_wire()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         fs::write(&tmp_path, &bytes)?;
@@ -64,7 +55,6 @@ impl Checkpoint {
         Ok(())
     }
 
-    /// Read the most recent checkpoint from `dir`, or `None` if no checkpoint exists.
     pub fn read_latest(dir: &Path) -> io::Result<Option<Self>> {
         if !dir.exists() {
             return Ok(None);
@@ -83,7 +73,7 @@ impl Checkpoint {
             None => return Ok(None),
         };
         let bytes = fs::read(&latest)?;
-        let (cp, _) = bincode::decode_from_slice::<Self, _>(&bytes, bincode::config::standard())
+        let cp = Self::decode_wire(&bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         log::info!(
             "Loaded checkpoint from {:?} (time={}ms)",
@@ -93,7 +83,6 @@ impl Checkpoint {
         Ok(Some(cp))
     }
 
-    /// Delete checkpoint files older than `threshold_ms`.
     pub fn clean(dir: &Path, threshold_ms: u64) -> io::Result<()> {
         if !dir.exists() {
             return Ok(());

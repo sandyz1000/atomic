@@ -42,7 +42,7 @@ pub(crate) type SessionEvent = (Vec<GroupVal>, i64, Vec<AggState>);
 
 // ── Session state ─────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct Session {
     start_ms: i64,
     end_ms: i64,
@@ -79,7 +79,7 @@ impl Session {
     }
 }
 
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct SessionStore {
     map: HashMap<Vec<GroupVal>, Vec<Session>>,
 }

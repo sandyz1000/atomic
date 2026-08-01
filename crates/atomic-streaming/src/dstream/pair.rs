@@ -3,7 +3,7 @@ use crate::context::StreamingContext;
 use crate::dstream::{DStream, DStreamBase};
 use atomic_compute::rdd::TypedRdd;
 use atomic_data::data::Data;
-use atomic_data::distributed::{WireDecode, WireEncode};
+use atomic_data::distributed::WireSerde;
 use atomic_data::rdd::Rdd;
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -270,35 +270,16 @@ where
 
 impl<K, V, F> DStream<(K, V)> for ReduceByKeyDStream<K, V, F>
 where
-    K: Data + Clone + Hash + Eq + std::fmt::Debug + Send + Sync + 'static,
-    V: Data + Clone + std::fmt::Debug + Send + Sync + 'static,
+    K: Data + Clone + Hash + Eq + std::fmt::Debug + Send + Sync + WireSerde + 'static,
+    V: Data + Clone + std::fmt::Debug + Send + Sync + WireSerde + 'static,
     F: Fn(V, V) -> V + Send + Sync + Clone + 'static,
 {
     fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, V)>>> {
         let parent_rdd = self.parent.get_or_compute(valid_time_ms)?;
         let ctx = self.ssc.sc.clone();
         let f = self.reduce_func.clone();
-
-        let pairs = ctx
-            .run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
-            .unwrap_or_default();
-
-        let mut agg: std::collections::HashMap<K, V> = std::collections::HashMap::new();
-        for partition in pairs {
-            for (k, v) in partition {
-                agg.entry(k)
-                    .and_modify(|c| {
-                        let new_c = f(c.clone(), v.clone());
-                        *c = new_c;
-                    })
-                    .or_insert(v);
-            }
-        }
-        let result: Vec<(K, V)> = agg.into_iter().collect();
-        let id = ctx.new_rdd_id();
-        Some(Arc::new(
-            atomic_compute::rdd::parallel_collection::ParallelCollection::new(id, result, 1),
-        ))
+        let typed = TypedRdd::new(parent_rdd, ctx);
+        Some(typed.reduce_by_key(move |a, b| f(a, b)).into_rdd())
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, V)>>> {
@@ -324,8 +305,6 @@ where
     stream_id: usize,
     parent: Arc<dyn DStream<(K, V)>>,
     ssc: Arc<StreamingContext>,
-    /// Output partition count taken at construction; reserved for partition-aware shuffle.
-    #[allow(dead_code)]
     num_partitions: usize,
     generated: GeneratedRdds<(K, Vec<V>)>,
 }
@@ -369,28 +348,14 @@ where
 
 impl<K, V> DStream<(K, Vec<V>)> for GroupByKeyDStream<K, V>
 where
-    K: Data + Clone + Hash + Eq + std::fmt::Debug + Send + Sync + 'static,
-    V: Data + Clone + std::fmt::Debug + Send + Sync + 'static,
+    K: Data + Clone + Hash + Eq + std::fmt::Debug + Send + Sync + WireSerde + 'static,
+    V: Data + Clone + std::fmt::Debug + Send + Sync + WireSerde + 'static,
 {
     fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, Vec<V>)>>> {
         let parent_rdd = self.parent.get_or_compute(valid_time_ms)?;
         let ctx = self.ssc.sc.clone();
-
-        let pairs = ctx
-            .run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
-            .unwrap_or_default();
-
-        let mut agg: std::collections::HashMap<K, Vec<V>> = std::collections::HashMap::new();
-        for partition in pairs {
-            for (k, v) in partition {
-                agg.entry(k).or_default().push(v);
-            }
-        }
-        let result: Vec<(K, Vec<V>)> = agg.into_iter().collect();
-        let id = ctx.new_rdd_id();
-        Some(Arc::new(
-            atomic_compute::rdd::parallel_collection::ParallelCollection::new(id, result, 1),
-        ))
+        let typed = TypedRdd::new(parent_rdd, ctx);
+        Some(typed.group_by_key_n(self.num_partitions).into_rdd())
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, Vec<V>)>>> {
@@ -465,13 +430,9 @@ where
 
 impl<K, V, W> DStream<(K, (V, W))> for JoinDStream<K, V, W>
 where
-    K: Data + Clone + Hash + Eq + std::fmt::Debug + 'static,
-    V: Data + Clone + std::fmt::Debug + 'static,
-    W: Data + Clone + std::fmt::Debug + 'static,
-    Vec<(K, V)>: Data + Clone + WireEncode + WireDecode,
-    Vec<(K, W)>: Data + Clone + WireEncode + WireDecode,
-    (K, V): WireEncode,
-    (K, W): WireEncode,
+    K: Data + Clone + Hash + Eq + std::fmt::Debug + WireSerde + 'static,
+    V: Data + Clone + std::fmt::Debug + WireSerde + 'static,
+    W: Data + Clone + std::fmt::Debug + WireSerde + 'static,
 {
     fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, (V, W))>>> {
         let left_rdd = self.left.get_or_compute(valid_time_ms)?;
@@ -479,7 +440,7 @@ where
         let ctx = self.ssc.sc.clone();
         let left_typed: TypedRdd<(K, V)> = TypedRdd::new(left_rdd, ctx.clone());
         let right_typed: TypedRdd<(K, W)> = TypedRdd::new(right_rdd, ctx);
-        Some(left_typed.join_local(right_typed).into_rdd())
+        Some(left_typed.join(right_typed).into_rdd())
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, (V, W))>>> {
@@ -552,13 +513,9 @@ where
 
 impl<K, V, W> DStream<(K, (V, Option<W>))> for LeftOuterJoinDStream<K, V, W>
 where
-    K: Data + Clone + Hash + Eq + std::fmt::Debug + 'static,
-    V: Data + Clone + std::fmt::Debug + 'static,
-    W: Data + Clone + std::fmt::Debug + 'static,
-    Vec<(K, V)>: Data + Clone + WireEncode + WireDecode,
-    Vec<(K, W)>: Data + Clone + WireEncode + WireDecode,
-    (K, V): WireEncode,
-    (K, W): WireEncode,
+    K: Data + Clone + Hash + Eq + std::fmt::Debug + WireSerde + 'static,
+    V: Data + Clone + std::fmt::Debug + WireSerde + 'static,
+    W: Data + Clone + std::fmt::Debug + WireSerde + 'static,
 {
     fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, (V, Option<W>))>>> {
         let left_rdd = self.left.get_or_compute(valid_time_ms)?;
@@ -566,7 +523,7 @@ where
         let ctx = self.ssc.sc.clone();
         let left_typed: TypedRdd<(K, V)> = TypedRdd::new(left_rdd, ctx.clone());
         let right_typed: TypedRdd<(K, W)> = TypedRdd::new(right_rdd, ctx);
-        Some(left_typed.left_outer_join_local(right_typed).into_rdd())
+        Some(left_typed.left_outer_join(right_typed).into_rdd())
     }
 
     fn get_or_compute(

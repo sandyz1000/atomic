@@ -5,6 +5,7 @@ use std::time::Duration;
 use atomic_data::data::Data;
 use atomic_data::distributed::{
     ResultStatus, Step, StepKind, TaskAction, TaskEnvelope, TaskRuntime, WireDecode, WireEncode,
+    WireSerde,
 };
 use atomic_data::partial::{ApproximateEvaluator, result::PartialResult};
 use atomic_data::rdd::{Rdd, RddBase};
@@ -28,10 +29,8 @@ impl Context {
         rdd: Arc<dyn Rdd<Item = T>>,
     ) -> ComputeResult<Vec<Vec<U>>>
     where
-        T: Data + Clone + WireEncode,
-        Vec<T>: WireEncode,
-        U: Data + Clone + WireDecode,
-        Vec<U>: WireDecode,
+        T: Data + Clone + WireSerde,
+        U: Data + Clone + WireSerde,
     {
         let steps = vec![Step {
             task_name: task_name.to_string(),
@@ -56,8 +55,7 @@ impl Context {
         rdd: Arc<dyn Rdd<Item = T>>,
     ) -> ComputeResult<T>
     where
-        T: Data + Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Data + Clone + WireSerde,
     {
         let payload = zero.encode_wire()?;
         let steps = vec![Step {
@@ -154,8 +152,7 @@ impl Context {
         rdd: Arc<dyn Rdd<Item = T>>,
     ) -> ComputeResult<Vec<Vec<u8>>>
     where
-        T: Data + Clone + WireEncode,
-        Vec<T>: WireEncode,
+        T: Data + Clone + WireSerde,
     {
         rdd.splits()
             .iter()
@@ -386,8 +383,7 @@ impl Context {
     /// Collect all elements of an RDD into a `Vec`, distribution-aware.
     pub fn collect_rdd<T>(self: &Arc<Self>, rdd: Arc<dyn Rdd<Item = T>>) -> ComputeResult<Vec<T>>
     where
-        T: Data + Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Data + Clone + WireSerde,
     {
         use crate::rdd::TypedRdd;
         if matches!(self.scheduler, Schedulers::Distributed(_))

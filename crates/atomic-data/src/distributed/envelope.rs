@@ -1,6 +1,8 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
+use crate::partitioner::PartitionerSchema;
+
 use super::WIRE_SCHEMA_V1;
 
 /// Which execution runtime handles a [`Step`] on the worker.
@@ -326,8 +328,9 @@ crate::cfg_kafka! {
         Eq,
         serde::Serialize,
         serde::Deserialize,
-        bincode::Encode,
-        bincode::Decode,
+        rkyv::Archive,
+        rkyv::Serialize,
+        rkyv::Deserialize,
     )]
     pub struct KafkaConsumePayload {
         pub brokers: String,
@@ -355,8 +358,9 @@ crate::cfg_kafka! {
     Eq,
     serde::Serialize,
     serde::Deserialize,
-    bincode::Encode,
-    bincode::Decode,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 pub struct FileSplitPayload {
     pub path: String,
@@ -369,18 +373,16 @@ pub struct FileSplitPayload {
 /// Payload for one `EngineAction::ShuffleMap` pipeline op.
 ///
 /// Sent in `Step.payload` and decoded on the worker by the native runtime.
-#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ShuffleMapPayload {
     /// `SHUFFLE_MAP_REGISTRY` key for the concrete `(K, V)` pair.
     pub type_id: String,
     /// Serializable partitioner description used by the worker when writing buckets.
-    pub partitioner_spec: crate::partitioner::PartitionerSchema,
+    pub partitioner_spec: PartitionerSchema,
 }
 
-/// Per-shard input for a [`TaskAction::MergeState`] task (bincode-encoded into the
-/// task `data`). Content-agnostic: `params` and `partials` are opaque to the data
-/// layer and interpreted only by the registered state-merge function.
-#[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+/// Per-shard input for a `MergeState` task (rkyv-encoded into task `data`).
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct StateMergePayload {
     /// Identifies the shard whose persistent state this task merges into.
     pub state_id: u64,

@@ -10,10 +10,8 @@ use std::cmp::Ordering;
 use std::hash::Hash;
 use std::sync::Arc;
 
-use bincode::Encode;
-
 use crate::data::Data;
-use crate::distributed::{Step, WireEncode};
+use crate::distributed::{Step, WireEncode, WireSerde};
 use crate::error::DataResult;
 use crate::partitioner::{Partitioner, PartitionerSchema};
 use crate::rdd::RddBase;
@@ -157,11 +155,9 @@ pub struct TypedShuffle<K: Data, V: Data, C: Data> {
 
 impl<K, V, C> TypedShuffle<K, V, C>
 where
-    K: Eq + Hash + Encode + Clone,
-    C: Encode + Clone,
-    K: Data,
-    V: Data + Clone + Encode,
-    C: Data,
+    K: Data + Eq + Hash + Clone + WireSerde,
+    V: Data + Clone + WireSerde,
+    C: Data + Clone,
 {
     /// Create a new shuffle dependency (legacy unsorted layout).
     pub fn new(
@@ -263,7 +259,6 @@ where
             }
         };
 
-        let config = bincode::config::standard();
         let encoded: Vec<Vec<u8>> = buckets
             .into_iter()
             .map(|mut bucket| {
@@ -271,9 +266,9 @@ where
                 if let Some(cmp) = &self.comparator {
                     bucket.sort_by(|a, b| cmp(&a.0, &b.0));
                 }
-                bincode::encode_to_vec(&bucket, config).unwrap_or_else(|e| {
+                bucket.encode_wire().unwrap_or_else(|e| {
                     log::error!("Error serializing shuffle bucket: {:?}", e);
-                    bincode::encode_to_vec(Vec::<(K, V)>::new(), config).unwrap_or_default()
+                    Vec::<(K, V)>::new().encode_wire().unwrap_or_default()
                 })
             })
             .collect();
@@ -309,10 +304,9 @@ where
 /// available from the compile-time `SHUFFLE_KEY_REGISTRY`.
 impl<K, V, C> From<Arc<TypedShuffle<K, V, C>>> for ShuffleDependency
 where
-    K: Data + Eq + Hash + Encode + Clone,
-    V: Data + Clone + Encode,
-    C: Data + Encode + Clone,
-    Vec<(K, V)>: WireEncode,
+    K: Data + Eq + Hash + Clone + WireSerde,
+    V: Data + Clone + WireSerde,
+    C: Data + Clone,
 {
     fn from(dep: Arc<TypedShuffle<K, V, C>>) -> Self {
         ShuffleDependency::from_typed_with_key(dep, std::any::type_name::<(K, V)>())
@@ -335,10 +329,9 @@ impl ShuffleDependency {
         shuffle_key: &'static str,
     ) -> Self
     where
-        K: Data + Eq + Hash + Encode + Clone,
-        V: Data + Clone + Encode,
-        C: Data + Encode + Clone,
-        Vec<(K, V)>: WireEncode,
+        K: Data + Eq + Hash + Clone + WireSerde,
+        V: Data + Clone + WireSerde,
+        C: Data + Clone,
     {
         ShuffleDependency {
             type_id: shuffle_key,
@@ -364,10 +357,9 @@ impl ShuffleDependency {
 
 impl<K, V, C> ShuffleExecutor for TypedShuffle<K, V, C>
 where
-    K: Data + Eq + Hash + Encode + Clone,
-    V: Data + Clone + Encode,
-    C: Data + Encode + Clone,
-    Vec<(K, V)>: WireEncode,
+    K: Data + Eq + Hash + Clone + WireSerde,
+    V: Data + Clone + WireSerde,
+    C: Data + Clone,
 {
     fn shuffle_id(&self) -> usize {
         self.shuffle_id

@@ -84,6 +84,7 @@ StreamingDataFrame::read_stream(source)
 Supported aggregates: `Count`, `Sum`, `Min`, `Max`, `Avg`.
 
 Output modes for windowed queries:
+
 - `Append` — emit only finalized (past-watermark) windows.
 - `Update` — emit every window that changed this batch (partial results included).
 

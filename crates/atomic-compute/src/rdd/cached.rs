@@ -34,7 +34,7 @@ use crate::rdd::{Rdd, RddBase};
 /// | `MemoryOnlySer`   | Treated as `MemoryOnly` (serialized-memory path deferred) |
 ///
 /// Disk partitions are stored at:
-/// `{RDD_CACHE_SPILL_DIR}/{rdd_id}/{partition_index}.bin` (bincode-encoded `Vec<T>`).
+/// `{RDD_CACHE_SPILL_DIR}/{rdd_id}/{partition_index}.bin` (encoded `Vec<T>`).
 pub struct CachedRdd<T: Data + Clone> {
     /// The wrapped RDD whose partitions will be memoised.
     inner: Arc<dyn Rdd<Item = T>>,
@@ -183,7 +183,7 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
             }
 
             StorageLevel::DiskOnly => {
-                // Disk path requires bincode bounds; without them, recompute each time.
+                // Disk path requires wire-encode bounds; without them, recompute each time.
                 // For true disk-only persistence use `persist_with_disk(DiskOnly)`.
                 let items: Vec<T> = self.inner.iterator(split)?.collect();
                 Ok(Box::new(items.into_iter()))

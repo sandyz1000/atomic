@@ -18,18 +18,8 @@ where
     /// partition N has the largest. No full-dataset collect on the driver.
     pub fn sort_by_key(self, ascending: bool) -> Self
     where
-        Vec<(K, V)>: WireDecode + WireEncode,
-        Vec<K>: WireEncode + WireDecode,
-        K: WireEncode
-            + WireDecode
-            + bincode::Encode
-            + bincode::Decode<()>
-            + Clone
-            + std::hash::Hash
-            + Eq,
-        V: WireEncode + bincode::Encode + bincode::Decode<()> + Clone,
-        (K, V): WireEncode + WireDecode,
-        Vec<(K, Vec<V>)>: WireEncode,
+        K: WireSerde + Clone + std::hash::Hash + Eq,
+        V: WireSerde + Clone,
     {
         let num_partitions = self.rdd.number_of_splits();
         let ctx = self.context.clone();
@@ -106,10 +96,8 @@ where
     /// partition covers a contiguous, non-overlapping key range.
     pub fn sort_by_key_range(self, num_partitions: usize, ascending: bool) -> Self
     where
-        Vec<(K, V)>: WireEncode + WireDecode,
-        K: WireEncode + bincode::Encode,
-        V: WireEncode,
-        (K, V): WireEncode + WireDecode,
+        K: WireSerde,
+        V: WireSerde,
     {
         use atomic_data::partitioner::Partitioner;
         let ctx = self.context.clone();
@@ -161,10 +149,8 @@ where
     pub fn repartition_and_sort<P>(self, partitioner: P, ascending: bool) -> TypedRdd<(K, V)>
     where
         P: atomic_data::partitioner::NamedPartitioner,
-        Vec<(K, V)>: WireDecode + WireEncode,
-        K: WireEncode + bincode::Encode + bincode::Decode<()> + std::hash::Hash + Eq,
-        V: WireEncode + bincode::Encode + bincode::Decode<()>,
-        Vec<(K, Vec<V>)>: WireEncode,
+        K: WireSerde + std::hash::Hash + Eq,
+        V: WireSerde,
     {
         let p = Partitioner::from_named::<P>(partitioner.num_partitions());
 
@@ -202,8 +188,7 @@ where
 
 impl<T> TypedRdd<T>
 where
-    T: Data + Clone + WireEncode + WireDecode,
-    Vec<T>: WireEncode + WireDecode,
+    T: Data + Clone + WireSerde,
 {
     /// Distributed sort of a non-pair RDD by a **registered** key-value task.
     ///
@@ -225,20 +210,7 @@ where
     pub fn sort_by_task<F, K>(self, key_value_task: F, ascending: bool) -> TypedRdd<T>
     where
         F: UnaryTask<T, (K, T)>,
-        K: Data
-            + Ord
-            + Eq
-            + std::hash::Hash
-            + Clone
-            + WireEncode
-            + WireDecode
-            + bincode::Encode
-            + bincode::Decode<()>,
-        T: bincode::Encode + bincode::Decode<()>,
-        (K, T): Data + Clone + WireEncode + WireDecode,
-        Vec<(K, T)>: WireEncode + WireDecode,
-        Vec<K>: WireEncode + WireDecode,
-        Vec<(K, Vec<T>)>: WireEncode,
+        K: Data + Ord + Eq + std::hash::Hash + Clone + WireSerde,
     {
         self.map_task(key_value_task)
             .sort_by_key(ascending)

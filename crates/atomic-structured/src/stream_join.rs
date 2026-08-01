@@ -33,7 +33,7 @@ use crate::windowed::{read_group, read_i64};
 // ── Join type ─────────────────────────────────────────────────────────────────
 
 /// Which rows are emitted from an equi-join.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum JoinType {
     Inner,
     LeftOuter,
@@ -44,14 +44,14 @@ pub enum JoinType {
 
 /// One row buffered in a join side, with the event-time and a condensed
 /// representation of all column values.
-#[derive(Clone, Debug, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct JoinRow {
     pub time_ms: i64,
     pub cols: Vec<GroupVal>,
 }
 
 /// Per-side key-indexed buffer for stream-stream joins.
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct JoinStateStore {
     /// join_key_vals → buffered rows with that key
     map: HashMap<Vec<GroupVal>, Vec<JoinRow>>,

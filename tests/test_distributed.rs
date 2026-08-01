@@ -639,3 +639,52 @@ fn distributed_sort_ordered() {
         "expected all 10 elements present across partitions"
     );
 }
+
+// ── Test: distributed stateful-streaming state-shard routing (two workers) ──────
+
+/// A windowed aggregation with `.distributed(2)` over two real workers, fed two
+/// micro-batches. The keyed state is sharded and merged into each worker's
+/// resident `WORKER_STATE_STORE` via `MergeState` tasks. window-0/user-`a` appears
+/// in both batches, so its running count only reaches 2 if the shard routes back
+/// to the worker holding its first-batch state on the second batch
+/// (`pin_state_shard` report-back affinity, wired into the `PipelineTask` dispatch
+/// path). Without per-shard routing the second batch could land on a cold worker
+/// and the count would come back 1 — the regression this guards.
+#[test]
+#[ignore = "requires pre-built integration binary and free TCP ports"]
+fn distributed_state_shard_routing() {
+    let port_a = free_port();
+    let port_b = free_port();
+    let mut worker_a = spawn_worker(port_a);
+    let mut worker_b = spawn_worker(port_b);
+    wait_for_port(port_a, Duration::from_secs(10));
+    wait_for_port(port_b, Duration::from_secs(10));
+
+    let driver_out = run_driver("distributed_state", &[port_a, port_b]);
+    worker_a.kill().ok();
+    worker_a.wait().ok();
+    worker_b.kill().ok();
+    worker_b.wait().ok();
+
+    assert!(
+        driver_out.status.success(),
+        "distributed_state driver failed:\nstderr: {}",
+        String::from_utf8_lossy(&driver_out.stderr)
+    );
+
+    let out: serde_json::Value = serde_json::from_slice(&driver_out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON from distributed_state: {e}\nstdout: {}",
+            String::from_utf8_lossy(&driver_out.stdout)
+        )
+    });
+
+    // window-0/a cnt=2 (ts 100 then 200, state carried across batches on one worker),
+    // window-1000/b cnt=1 (ts 1500, second batch only).
+    assert_eq!(
+        out["cells"],
+        serde_json::json!([[0, "a", 2], [1000, "b", 1]]),
+        "state-shard routing mismatch — a shard's second batch did not merge into its \
+         first-batch worker state"
+    );
+}

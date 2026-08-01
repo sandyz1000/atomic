@@ -12,7 +12,10 @@ use std::{
 use atomic_data::{
     data::Data,
     dependency::ShuffleDependency,
-    distributed::{EngineAction, Step, StepKind, TaskEnvelope, TaskRuntime, WorkerCapabilities},
+    distributed::{
+        EngineAction, StateMergePayload, Step, StepKind, TaskEnvelope, TaskRuntime, WireEncode,
+        WorkerCapabilities, decode_payload,
+    },
     partial::{ApproximateEvaluator, result::PartialResult},
     rdd::Rdd,
     task::{ShuffleMapTask, TaskOption},
@@ -25,7 +28,7 @@ use crate::{
     base::{NativeScheduler, SchedulerState},
     dag::{CompletionEvent, TaskEndReason},
     error::{LibResult, SchedulerError},
-    job::{Job, JobTracker},
+    job::JobTracker,
     listener::LiveListenerBus,
     planner::StagePlanner,
     stage::Stage,
@@ -94,11 +97,6 @@ pub struct DistributedScheduler {
     /// Scheduler role flag taken at construction; retained as config (driver vs. worker).
     #[allow(dead_code)]
     pub(crate) master: bool,
-    pub(crate) active_jobs: Arc<DashMap<usize, Job>>,
-    pub(crate) active_job_queue: Arc<Mutex<VecDeque<Job>>>,
-    pub(crate) taskid_to_jobid: Arc<DashMap<String, usize>>,
-    pub(crate) taskid_to_slaveid: Arc<DashMap<String, String>>,
-    pub(crate) job_tasks: Arc<DashMap<usize, HashSet<String>>>,
     /// Per-job cancellation tokens — cancelled when `cancel_job()` is called.
     pub(crate) job_cancel_tokens: Arc<DashMap<usize, tokio_util::sync::CancellationToken>>,
 
@@ -143,11 +141,6 @@ impl DistributedScheduler {
             agent_step_timeout: None,
             speculation_multiplier: None,
             master,
-            active_jobs: Arc::new(DashMap::new()),
-            active_job_queue: Arc::new(Mutex::new(VecDeque::new())),
-            taskid_to_jobid: Arc::new(DashMap::new()),
-            taskid_to_slaveid: Arc::new(DashMap::new()),
-            job_tasks: Arc::new(DashMap::new()),
             server_uris: Arc::new(Mutex::new(VecDeque::new())),
             cache_endpoints: Arc::new(DashMap::new()),
             state_locs: Arc::new(DashMap::new()),
@@ -171,7 +164,7 @@ impl DistributedScheduler {
     }
 
     /// Forward non-empty accumulator deltas to the installed sink, if any.
-    pub(crate) fn merge_accumulator_deltas(&self, deltas: &[(usize, Vec<u8>)]) {
+    pub(crate) fn merge_accumulator(&self, deltas: &[(usize, Vec<u8>)]) {
         if !deltas.is_empty()
             && let Some(sink) = self.accumulator_sink.get()
         {
@@ -279,13 +272,11 @@ impl DistributedScheduler {
                 ))
             })?;
 
-        let payload = bincode::encode_to_vec(
-            atomic_data::distributed::ShuffleMapPayload {
-                type_id: shuffle_dep.type_id.to_string(),
-                partitioner_spec: shuffle_dep.partitioner_spec(),
-            },
-            bincode::config::standard(),
-        )
+        let payload = atomic_data::distributed::ShuffleMapPayload {
+            type_id: shuffle_dep.type_id.to_string(),
+            partitioner_spec: shuffle_dep.partitioner_spec(),
+        }
+        .encode_wire()
         .map_err(|e| SchedulerError::TaskFailed(format!("shuffle-map payload encode: {e}")))?;
 
         let mut steps: Vec<Step> = shuffle_dep.preceding_steps.clone();
@@ -334,7 +325,7 @@ impl DistributedScheduler {
 
         // A cache-serve primary can miss (holder gone / evicted) — either a `CacheMiss`
         // status or a connection error to the pinned holder. Recompute the partition on any
-        // worker, the fallback the old `run_native_job` path provided. A non-cache-serve
+        // worker via a recompute fallback. A non-cache-serve
         // failure is a real task failure. `plan_cache_dispatch` is all-or-nothing, so a job
         // whose holder died still serves its live partitions from cache and only recomputes
         // the dead one through this fallback.
@@ -355,10 +346,16 @@ impl DistributedScheduler {
         match outcome {
             Ok((result, worker_addr)) => match result.status {
                 atomic_data::distributed::ResultStatus::Success => {
-                    self.merge_accumulator_deltas(&result.accumulator_deltas);
+                    self.merge_accumulator(&result.accumulator_deltas);
                     // Record which worker now holds each partition this task cached, so a
                     // later job over the same RDD routes back to it (`plan_cache_dispatch`).
                     self.register_cache_locs(&result.cached_partitions, worker_addr);
+                    // Same for stateful-streaming shards: pin each `MergeState` shard back to
+                    // the worker that now holds it, so the next micro-batch routes there
+                    // (`pin_state_shard`).
+                    if !result.held_state_ids.is_empty() {
+                        self.register_state_locs(&result.held_state_ids, worker_addr);
+                    }
                     // Same registration `PipelineTask::run` does for the local path — see
                     // its doc comment. Here the worker's `shuffle_server_uri` arrives
                     // directly on the RPC response instead of a `PipelineExecutor` return.
@@ -416,7 +413,7 @@ impl DistributedScheduler {
         {
             Ok((result, _worker_addr)) => match result.status {
                 atomic_data::distributed::ResultStatus::Success => {
-                    self.merge_accumulator_deltas(&result.accumulator_deltas);
+                    self.merge_accumulator(&result.accumulator_deltas);
                     match result.shuffle_server_uri {
                         Some(uri) => CompletionEvent {
                             task: task_option,
@@ -600,11 +597,16 @@ impl NativeScheduler for DistributedScheduler {
         false
     }
 
-    /// Consult `plan_cache_dispatch`: when this partition's cache is available on a live
-    /// worker, pin the task there and serve it from cache; otherwise recompute anywhere.
+    /// Route a pipeline partition to a worker. Cache locality wins: when this partition's
+    /// terminal `Cache` op is available on a live worker (`plan_cache_dispatch`), pin there and
+    /// serve from cache. Otherwise, for a `MergeState` partition, pin to the worker holding its
+    /// state shard (`state_locs` report-back affinity, modulo fallback via `pin_state_shard`) —
+    /// no cache-serve rewrite, since the worker reads its own `WORKER_STATE_STORE` and the task
+    /// recomputes normally, just pinned. Everything else recomputes anywhere.
     fn pipeline_partition_plan(
         &self,
         steps: &[Step],
+        source: &[u8],
         partition: usize,
         num_partitions: usize,
     ) -> (Option<SocketAddrV4>, Option<(usize, Vec<Step>)>) {
@@ -613,9 +615,19 @@ impl NativeScheduler for DistributedScheduler {
                 rdd_id,
                 post_ops,
                 locs,
-            } => (locs.get(partition).copied(), Some((rdd_id, post_ops))),
-            crate::distributed::CacheDispatch::Recompute => (None, None),
+            } => return (locs.get(partition).copied(), Some((rdd_id, post_ops))),
+            crate::distributed::CacheDispatch::Recompute => {}
         }
+        let is_merge_state = steps
+            .iter()
+            .any(|s| matches!(s.kind, StepKind::Engine(EngineAction::MergeState { .. })));
+        if is_merge_state {
+            let state_id = decode_payload::<StateMergePayload>(source)
+                .ok()
+                .map(|pl| pl.state_id);
+            return (self.pin_state_shard(partition, state_id), None);
+        }
+        (None, None)
     }
 }
 

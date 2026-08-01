@@ -10,6 +10,7 @@ use std::sync::Arc;
 use datafusion::arrow::record_batch::RecordBatch;
 
 use atomic_compute::context::Context;
+use atomic_data::distributed::{WireEncode, decode_payload};
 
 use crate::OutputMode;
 use crate::distributed_state::{MODE_APPEND, dispatch_merge_state, mode_code, shard_of};
@@ -22,7 +23,7 @@ use crate::state::GroupVal;
 pub(crate) const SESSION_MERGE_FN: &str = "atomic_structured::session_v1";
 
 /// Per-shard merge/emit config for session windows.
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct SessionMergeParams {
     watermark_ms: Option<u64>,
     gap_ms: u64,
@@ -36,17 +37,14 @@ fn session_state_merge(
     events: &[u8],
     params: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let cfg = bincode::config::standard();
     let mut store = match prev {
-        Some(b) => bincode::decode_from_slice::<SessionStore, _>(b, cfg)
-            .map(|(s, _)| s)
-            .map_err(|e| e.to_string())?,
+        Some(b) => decode_payload::<SessionStore>(b).map_err(|e| e.to_string())?,
         None => SessionStore::new(),
     };
-    let (events, _): (Vec<SessionEvent>, _) =
-        bincode::decode_from_slice(events, cfg).map_err(|e| e.to_string())?;
-    let (params, _): (SessionMergeParams, _) =
-        bincode::decode_from_slice(params, cfg).map_err(|e| e.to_string())?;
+    let events: Vec<SessionEvent> =
+        decode_payload(events).map_err(|e| e.to_string())?;
+    let params: SessionMergeParams =
+        decode_payload(params).map_err(|e| e.to_string())?;
     let gap = params.gap_ms as i64;
     for (group, t, partial) in events {
         store.absorb(group, t, partial, gap);
@@ -56,11 +54,10 @@ fn session_state_merge(
             Some(w) => store.drain_final(gap, w as i64),
             None => vec![],
         },
-        // Update — Complete is rejected for sessions before dispatch.
         _ => store.all_sessions(),
     };
-    let new_state = bincode::encode_to_vec(&store, cfg).map_err(|e| e.to_string())?;
-    let emitted_bytes = bincode::encode_to_vec(&emitted, cfg).map_err(|e| e.to_string())?;
+    let new_state = store.encode_wire().map_err(|e| e.to_string())?;
+    let emitted_bytes = emitted.encode_wire().map_err(|e| e.to_string())?;
     Ok((new_state, emitted_bytes))
 }
 

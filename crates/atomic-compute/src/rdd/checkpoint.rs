@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
+use atomic_data::distributed::WireSerde;
 use atomic_data::error::DataError;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::split::Split;
@@ -108,7 +109,7 @@ impl<T> Clone for CheckpointRdd<T> {
     }
 }
 
-impl<T: Data + Clone + bincode::Decode<()> + 'static> RddBase for CheckpointRdd<T> {
+impl<T: Data + Clone + WireSerde + 'static> RddBase for CheckpointRdd<T> {
     fn get_rdd_id(&self) -> usize {
         self.vals.id
     }
@@ -147,7 +148,7 @@ impl<T: Data + Clone + bincode::Decode<()> + 'static> RddBase for CheckpointRdd<
 
 impl<T> Rdd for CheckpointRdd<T>
 where
-    T: Data + Clone + bincode::Decode<()> + 'static,
+    T: Data + Clone + WireSerde + 'static,
 {
     type Item = T;
 
@@ -176,8 +177,8 @@ where
 
             CheckpointStore::S3 { bucket, prefix } => {
                 use crate::io::s3::read_lines;
-                // For S3 we store bincode-encoded bytes as a base64 object.
-                // Read the object, base64-decode, then bincode-decode.
+                // For S3 we store rkyv-encoded bytes as a base64 object.
+                // Read the object, base64-decode, then wire-decode.
                 let key = format!("{prefix}/{}/{idx}.bin", self.vals.id);
                 let lines = read_lines(bucket, &key);
                 let b64 = lines.into_iter().collect::<Vec<_>>().join("");
@@ -186,11 +187,10 @@ where
                         .map_err(|e| {
                             DataError::Other(format!("checkpoint s3 base64 decode: {e}"))
                         })?;
-                let (items, _) =
-                    bincode::decode_from_slice::<Vec<T>, _>(&bytes, bincode::config::standard())
-                        .map_err(|e| {
-                            DataError::Other(format!("checkpoint s3 bincode decode: {e}"))
-                        })?;
+                let items = Vec::<T>::decode_wire(&bytes)
+                    .map_err(|e| {
+                        DataError::Other(format!("checkpoint s3 decode: {e}"))
+                    })?;
                 Ok(Box::new(items.into_iter()))
             }
         }

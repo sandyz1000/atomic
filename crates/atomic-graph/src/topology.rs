@@ -1,7 +1,7 @@
 //! Core graph value types shared across the engine-backed graph layer.
 //!
 //! Vertex and edge attributes travel as RDD elements, so every type here derives
-//! the wire (`rkyv`) and shuffle (`bincode`) encodings the compute engine requires,
+//! the wire/shuffle encodings (`rkyv`) the compute engine requires,
 //! alongside `serde` for the language bindings.
 
 use std::collections::HashMap;
@@ -19,8 +19,6 @@ pub type VertexId = i64;
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
-    bincode::Encode,
-    bincode::Decode,
 )]
 pub struct Edge<ED> {
     pub src: VertexId,
@@ -43,8 +41,6 @@ pub struct Edge<ED> {
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
-    bincode::Encode,
-    bincode::Decode,
 )]
 pub struct EdgeTriplet<VD, ED> {
     pub src_id: VertexId,

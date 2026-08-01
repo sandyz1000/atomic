@@ -24,6 +24,9 @@ pub enum DataError {
     /// Filesystem or other I/O failure.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("arrow error: {0}")]
+    Arrow(#[from] arrow::error::ArrowError),
 }
 
 pub type DataResult<T> = Result<T, DataError>;

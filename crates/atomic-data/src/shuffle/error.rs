@@ -71,11 +71,8 @@ pub enum NetworkError {
     #[error("failed to find free port {0}, tried {1} times")]
     FreePortNotFound(u16, usize),
 
-    #[error("bincode encode error: {0}")]
-    BincodeEncode(#[from] bincode::error::EncodeError),
-
-    #[error("bincode decode error: {0}")]
-    BincodeDecode(#[from] bincode::error::DecodeError),
+    #[error("wire encode/decode error: {0}")]
+    Wire(String),
 
     #[error("HTTP error: {0}")]
     HttpError(String),

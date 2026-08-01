@@ -91,8 +91,7 @@ impl<T: Data> TypedRdd<T> {
     /// element wire type must be registered once in the binary: `register_shuffle_map!(T, ())`.
     pub fn distinct(self) -> TypedRdd<T>
     where
-        T: Eq + std::hash::Hash + Clone + bincode::Encode + bincode::Decode<()>,
-        Vec<(T, ())>: WireEncode,
+        T: Eq + std::hash::Hash + Clone + WireSerde,
     {
         let num_partitions = self.rdd.number_of_splits().max(1);
         self.map_partitions_to_pair(|_idx, iter| {
@@ -109,8 +108,7 @@ impl<T: Data> TypedRdd<T> {
         other: &TypedRdd<T>,
     ) -> Result<Arc<std::collections::HashSet<T>>, DataError>
     where
-        T: Eq + std::hash::Hash + Clone + WireEncode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Eq + std::hash::Hash + Clone + WireSerde,
     {
         let items: Vec<T> = other.collect()?;
         Ok(Arc::new(items.into_iter().collect()))
@@ -118,8 +116,7 @@ impl<T: Data> TypedRdd<T> {
 
     pub fn subtract(self, other: TypedRdd<T>) -> Result<TypedRdd<T>, DataError>
     where
-        T: Eq + std::hash::Hash + Clone + WireEncode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Eq + std::hash::Hash + Clone + WireSerde,
     {
         let other_set = self.materialize_other_set(&other)?;
         let filter_fn =
@@ -140,8 +137,7 @@ impl<T: Data> TypedRdd<T> {
 
     pub fn intersection(self, other: TypedRdd<T>) -> Result<TypedRdd<T>, DataError>
     where
-        T: Eq + std::hash::Hash + Clone + WireEncode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Eq + std::hash::Hash + Clone + WireSerde,
     {
         let other_set = self.materialize_other_set(&other)?;
         let filter_fn =
@@ -189,13 +185,12 @@ impl<T: Data + Clone> TypedRdd<T> {
     /// eliminating data skew. Unlike `repartition`, elements are redistributed evenly rather
     /// than whole partitions being reassigned.
     ///
-    /// Requires T to be bincode-serializable (needed for the shuffle wire format).
+    /// Requires T to be wire-serializable (needed for the shuffle wire format).
     /// The call site must also have `register_shuffle_map!(usize, T)` in scope so the shuffle
     /// type registry is populated.
     pub fn repartition_shuffle(self, num_partitions: usize) -> TypedRdd<T>
     where
-        T: Data + Clone + bincode::Encode + bincode::Decode<()>,
-        Vec<(usize, T)>: WireEncode,
+        T: Data + Clone + WireSerde,
     {
         use atomic_data::partitioner::CustomPartitioner;
 
@@ -472,8 +467,7 @@ impl<T: Data> TypedRdd<T> {
     /// Each element is converted to a string via `Display` and written as one line.
     pub fn save_as_text_file(&self, uri: &str) -> Result<(), DataError>
     where
-        T: std::fmt::Display + Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: std::fmt::Display + Clone + WireSerde,
     {
         if uri.starts_with("s3://") {
             return self.write_s3(uri);
@@ -501,8 +495,7 @@ impl<T: Data> TypedRdd<T> {
 
     fn write_s3(&self, uri: &str) -> Result<(), DataError>
     where
-        T: std::fmt::Display + Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: std::fmt::Display + Clone + WireSerde,
     {
         use crate::io::s3::{S3Uri, write_text};
         let s3uri = S3Uri::parse(uri)
@@ -607,8 +600,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
         seed: u64,
     ) -> Result<Vec<T>, DataError>
     where
-        T: Clone + WireEncode + WireDecode,
-        Vec<T>: WireEncode + WireDecode,
+        T: Clone + WireSerde,
     {
         use rand::SeedableRng;
 

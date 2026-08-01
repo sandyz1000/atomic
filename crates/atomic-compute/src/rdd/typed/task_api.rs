@@ -2,8 +2,7 @@ use super::*;
 
 impl<T> TypedRdd<T>
 where
-    T: Data + Clone + WireEncode + WireDecode,
-    Vec<T>: WireEncode + WireDecode,
+    T: Data + Clone + WireSerde,
 {
     /// Apply a `#[task]`-registered unary function element-wise.
     ///
@@ -17,8 +16,7 @@ where
     /// ```
     pub fn map_task<U, F>(self, task: F) -> TypedRdd<U>
     where
-        U: Data + Clone + WireEncode + WireDecode,
-        Vec<U>: WireEncode + WireDecode,
+        U: Data + Clone + WireSerde,
         F: UnaryTask<T, U>,
     {
         let context = self.context.clone();
@@ -99,8 +97,7 @@ where
     /// ```
     pub fn flat_map_task<U, F>(self, task: F) -> TypedRdd<U>
     where
-        U: Data + Clone + WireEncode + WireDecode,
-        Vec<U>: WireEncode + WireDecode,
+        U: Data + Clone + WireSerde,
         F: UnaryTask<T, Vec<U>>,
     {
         let context = self.context.clone();
@@ -144,8 +141,7 @@ where
     /// ```
     pub fn map_partitions_task<U, F>(self, task: F) -> TypedRdd<U>
     where
-        U: Data + Clone + WireEncode + WireDecode,
-        Vec<U>: WireEncode + WireDecode,
+        U: Data + Clone + WireSerde,
         F: UnaryTask<Vec<T>, Vec<U>>,
     {
         let context = self.context.clone();
@@ -188,7 +184,6 @@ where
     pub fn fold_task<F>(&self, init: T, task: F) -> Result<T, DataError>
     where
         F: BinaryTask<T>,
-        Vec<T>: WireEncode + WireDecode,
     {
         // Build pipeline: existing staged steps (if any) + fold op.
         let fold_payload = init
@@ -245,7 +240,6 @@ where
     pub fn reduce_task<F>(&self, _task: F) -> Result<Option<T>, DataError>
     where
         F: BinaryTask<T>,
-        Vec<T>: WireEncode + WireDecode,
     {
         let reduce_op = Step {
             task_name: F::NAME.to_string(),
@@ -326,9 +320,8 @@ where
     /// ```
     pub fn aggregate_task<Acc, F>(&self, zero: Acc, task: F) -> Result<Acc, DataError>
     where
-        Acc: Data + Clone + WireEncode + WireDecode,
+        Acc: Data + Clone + WireSerde,
         F: AggregateTask<Acc, T>,
-        Vec<T>: WireEncode + WireDecode,
     {
         let payload = zero
             .encode_wire()

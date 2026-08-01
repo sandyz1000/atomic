@@ -1,5 +1,7 @@
 use atomic_data::{
-    distributed::{EngineAction, ShuffleMapPayload, Step, StepKind, TaskEnvelope, TaskRuntime},
+    distributed::{
+        EngineAction, ShuffleMapPayload, Step, StepKind, TaskEnvelope, TaskRuntime, WireEncode,
+    },
     rdd::RddBase,
 };
 use futures::future::try_join_all;
@@ -29,13 +31,11 @@ impl DistributedScheduler {
         dep: &atomic_data::dependency::ShuffleDependency,
         fallback_preceding: &[Step],
     ) -> LibResult<Vec<Step>> {
-        let payload = bincode::encode_to_vec(
-            ShuffleMapPayload {
-                type_id: dep.type_id.to_string(),
-                partitioner_spec: dep.partitioner_spec(),
-            },
-            bincode::config::standard(),
-        )
+        let payload = ShuffleMapPayload {
+            type_id: dep.type_id.to_string(),
+            partitioner_spec: dep.partitioner_spec(),
+        }
+        .encode_wire()
         .map_err(|e| SchedulerError::TaskFailed(format!("shuffle-map payload encode: {e}")))?;
 
         let mut steps = if dep.preceding_steps.is_empty() {
@@ -154,7 +154,7 @@ impl DistributedScheduler {
                     )));
                 }
                 atomic_data::distributed::ResultStatus::Success => {
-                    self.merge_accumulator_deltas(&result.accumulator_deltas);
+                    self.merge_accumulator(&result.accumulator_deltas);
                     return Ok(result.shuffle_server_uri);
                 }
             }

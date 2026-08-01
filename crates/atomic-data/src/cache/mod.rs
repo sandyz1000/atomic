@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use dashmap::DashMap;
 use lru::LruCache;
 
+use crate::distributed::{WireEncode, WireSerde};
+
 // StorageLevel
 
 /// Hints for how an RDD's partitions should be persisted.
@@ -34,13 +36,15 @@ pub enum StorageLevel {
 
 pub fn disk_write_partition<T>(path: &std::path::Path, items: &[T]) -> std::io::Result<()>
 where
-    T: bincode::Encode,
+    T: Clone + WireSerde,
 {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("bin.tmp");
-    let bytes = bincode::encode_to_vec(items, bincode::config::standard())
+    let bytes = items
+        .to_vec()
+        .encode_wire()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, path)
@@ -48,11 +52,10 @@ where
 
 pub fn disk_read_partition<T>(path: &std::path::Path) -> std::io::Result<Vec<T>>
 where
-    T: bincode::Decode<()>,
+    T: WireSerde,
 {
     let bytes = std::fs::read(path)?;
-    bincode::decode_from_slice::<Vec<T>, _>(&bytes, bincode::config::standard())
-        .map(|(v, _)| v)
+    Vec::<T>::decode_wire(&bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
@@ -117,7 +120,7 @@ impl PartitionStore {
     /// - `get()` will read from `path` on a memory miss (without recomputing).
     pub fn register_spill_path<T>(&self, rdd_id: usize, partition: usize, path: PathBuf)
     where
-        T: bincode::Encode + bincode::Decode<()> + Any + Send + Sync + 'static,
+        T: Clone + Any + Send + Sync + WireSerde + 'static,
     {
         let write_path = path.clone();
         let read_path = path;

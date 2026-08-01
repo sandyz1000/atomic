@@ -2,6 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::distributed::{WireDecode, WireEncode};
 use crate::shuffle::error::NetworkError;
 use crate::shuffle::map_output_server::{MapOutputServerHandle, spawn_shuffling_server};
 use dashmap::{DashMap, DashSet};
@@ -95,8 +96,9 @@ impl MapOutputTracker {
         );
 
         // Serialize the shuffle_id request
-        let shuffle_id_bytes = bincode::encode_to_vec(shuffle_id, bincode::config::standard())
-            .map_err(NetworkError::from)?;
+        let shuffle_id_bytes = shuffle_id
+            .encode_wire()
+            .map_err(|e| NetworkError::Wire(e.to_string()))?;
 
         // Connect to master with retry
         let stream = loop {
@@ -154,9 +156,8 @@ impl MapOutputTracker {
             .to_bytes();
 
         // Deserialize the Vec<String> response
-        let (locs, _): (Vec<String>, _) =
-            bincode::decode_from_slice(&body_bytes, bincode::config::standard())
-                .map_err(NetworkError::from)?;
+        let locs: Vec<String> = Vec::<String>::decode_wire(&body_bytes)
+            .map_err(|e| NetworkError::Wire(e.to_string()))?;
 
         log::debug!(
             "received {} locations for shuffle task #{}",

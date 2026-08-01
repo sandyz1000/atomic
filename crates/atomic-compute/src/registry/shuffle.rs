@@ -38,7 +38,7 @@
 use std::any::TypeId;
 use std::hash::Hasher;
 
-use atomic_data::distributed::{TaskAction, WireDecode};
+use atomic_data::distributed::{TaskAction, WireDecode, WireEncode, WireSerde};
 use atomic_data::partitioner::PartitionerSchema;
 use once_cell::sync::Lazy;
 use rustc_hash::FxHasher;
@@ -54,7 +54,7 @@ use crate::task_traits::{OrdShuffleKey, ShuffleKey, ShuffleValue, ShuffleWriter}
 /// handler) is `fn(&TaskAction, payload, data)` — no dedicated slot for it — so
 /// `NativeDispatcher` packs it in fresh at each call, from the `partition_id` it already has
 /// in scope from its own `dispatch(&self, op, partition_id, data)` parameter.
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ShuffleWriteCtx {
     pub shuffle_id: usize,
     pub map_partition_id: usize,
@@ -208,8 +208,8 @@ where
 /// completion log line) exists in exactly one place instead of being duplicated per strategy.
 fn write_buckets<K, V>(ctx: &ShuffleWriteCtx, buckets: Vec<Vec<(K, V)>>) -> ComputeResult<()>
 where
-    K: bincode::Encode,
-    V: bincode::Encode,
+    K: WireSerde,
+    V: WireSerde,
 {
     let cache = atomic_data::env::get_shuffle_cache()
         .ok_or_else(|| ComputeError::Other("shuffle cache not initialized".to_string()))?;
@@ -218,7 +218,7 @@ where
     let encoded: Vec<Vec<u8>> = buckets
         .into_iter()
         .map(|bucket| {
-            bincode::encode_to_vec(&bucket, bincode::config::standard())
+            bucket.encode_wire()
                 .map_err(|e| ComputeError::InvalidPayload(format!("shuffle bucket encode: {e}")))
         })
         .collect::<ComputeResult<_>>()?;
@@ -258,7 +258,6 @@ pub fn shuffle_map_handler<K, V>(
 where
     K: ShuffleKey,
     V: ShuffleValue,
-    Vec<(K, V)>: WireDecode,
 {
     let ctx: ShuffleWriteCtx = decode_ctx(payload)?;
     let pairs: Vec<(K, V)> = Vec::<(K, V)>::decode_wire(data)
@@ -280,7 +279,6 @@ pub fn sort_shuffle_map_handler<K, V>(
 where
     K: OrdShuffleKey,
     V: ShuffleValue,
-    Vec<(K, V)>: WireDecode,
 {
     let ctx: ShuffleWriteCtx = decode_ctx(payload)?;
     let pairs: Vec<(K, V)> = Vec::<(K, V)>::decode_wire(data)
@@ -294,7 +292,5 @@ where
 /// Decode the `ShuffleWriteCtx` `NativeDispatcher` packs into `payload` at each call —
 /// shared by both handlers above.
 fn decode_ctx(payload: &[u8]) -> Result<ShuffleWriteCtx, String> {
-    bincode::decode_from_slice(payload, bincode::config::standard())
-        .map(|(ctx, _)| ctx)
-        .map_err(|e| format!("shuffle write ctx decode: {e}"))
+    ShuffleWriteCtx::decode_wire(payload).map_err(|e| format!("shuffle write ctx decode: {e}"))
 }

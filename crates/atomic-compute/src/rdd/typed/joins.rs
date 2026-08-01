@@ -15,10 +15,9 @@ where
     where
         U: Data + Clone,
         K: std::hash::Hash + Eq,
-        (K, V): WireEncode,
-        (K, U): WireEncode,
-        Vec<(K, V)>: WireEncode + WireDecode,
-        Vec<(K, U)>: WireEncode + WireDecode,
+        K: WireSerde,
+        V: WireSerde,
+        U: WireSerde,
     {
         use std::collections::HashMap;
         let ctx = self.context.clone();
@@ -47,10 +46,9 @@ where
     where
         U: Data + Clone,
         K: std::hash::Hash + Eq,
-        (K, V): WireEncode,
-        (K, U): WireEncode,
-        Vec<(K, V)>: WireEncode + WireDecode,
-        Vec<(K, U)>: WireEncode + WireDecode,
+        K: WireSerde,
+        V: WireSerde,
+        U: WireSerde,
     {
         use std::collections::HashMap;
         let ctx = self.context.clone();
@@ -91,11 +89,9 @@ where
         num_partitions: usize,
     ) -> TypedRdd<(K, Vec<V>, Vec<U>)>
     where
-        U: Data + Clone + bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
-        Vec<(K, U)>: WireEncode,
+        U: Data + Clone + WireSerde,
+        K: WireSerde,
+        V: WireSerde,
     {
         use crate::rdd::co_grouped::CoGroupedRdd;
         let ctx = self.context.clone();
@@ -124,11 +120,9 @@ where
     /// Equivalent to `cogroup_shuffle(other, self.num_partitions())`.
     pub fn cogroup<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, Vec<V>, Vec<U>)>
     where
-        U: Data + Clone + bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
-        Vec<(K, U)>: WireEncode,
+        U: Data + Clone + WireSerde,
+        K: WireSerde,
+        V: WireSerde,
     {
         let n = self.rdd.number_of_splits();
         self.cogroup_shuffle(other, n)
@@ -137,11 +131,9 @@ where
     /// Inner join via shuffle — distributed, no driver-side collect.
     pub fn join<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, (V, U))>
     where
-        U: Data + Clone + bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
-        Vec<(K, U)>: WireEncode,
+        U: Data + Clone + WireSerde,
+        K: WireSerde,
+        V: WireSerde,
     {
         let n = self.rdd.number_of_splits();
         self.cogroup_shuffle(other, n).map_partitions(|iter| {
@@ -158,11 +150,9 @@ where
     /// Left outer join via shuffle — every left key is preserved; missing right keys produce `None`.
     pub fn left_outer_join<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, (V, Option<U>))>
     where
-        U: Data + Clone + bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
-        Vec<(K, U)>: WireEncode,
+        U: Data + Clone + WireSerde,
+        K: WireSerde,
+        V: WireSerde,
     {
         let n = self.rdd.number_of_splits();
         self.cogroup_shuffle(other, n).map_partitions(|iter| {
@@ -187,11 +177,9 @@ where
     /// Right outer join via shuffle — every right key is preserved; missing left keys produce `None`.
     pub fn right_outer_join<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<(K, (Option<V>, U))>
     where
-        U: Data + Clone + bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
-        Vec<(K, U)>: WireEncode,
+        U: Data + Clone + WireSerde,
+        K: WireSerde,
+        V: WireSerde,
     {
         let n = self.rdd.number_of_splits();
         self.cogroup_shuffle(other, n).map_partitions(|iter| {
@@ -216,11 +204,9 @@ where
     /// Full outer join via shuffle — all keys from both sides are preserved.
     pub fn full_outer_join<U>(self, other: TypedRdd<(K, U)>) -> TypedRdd<FullOuterJoined<K, V, U>>
     where
-        U: Data + Clone + bincode::Encode + bincode::Decode<()>,
-        K: bincode::Encode + bincode::Decode<()>,
-        V: bincode::Encode + bincode::Decode<()>,
-        Vec<(K, V)>: WireEncode,
-        Vec<(K, U)>: WireEncode,
+        U: Data + Clone + WireSerde,
+        K: WireSerde,
+        V: WireSerde,
     {
         let n = self.rdd.number_of_splits();
         self.cogroup_shuffle(other, n).map_partitions(|iter| {

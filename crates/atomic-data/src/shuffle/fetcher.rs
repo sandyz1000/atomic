@@ -1,5 +1,6 @@
 use super::error::ShuffleError;
 use crate::data::Data;
+use crate::distributed::{WireDecode, WireEncode, WireSerde};
 use crate::shuffle::map_output::MapOutputTracker;
 use futures::future;
 use http_body_util::{BodyExt, Full};
@@ -44,8 +45,8 @@ impl ShuffleFetcher {
         reduce_id: usize,
     ) -> LibResult<Vec<Vec<(K, V)>>>
     where
-        K: Data + bincode::Decode<()>,
-        V: Data + bincode::Decode<()>,
+        K: Data + WireSerde,
+        V: Data + WireSerde,
     {
         log::debug!("inside fetch_runs function");
         let mut inputs_by_uri = HashMap::new();
@@ -128,10 +129,8 @@ impl ShuffleFetcher {
                                 }
                             };
 
-                        // bincode 2.0 API
-                        let config = bincode::config::standard();
-                        match bincode::decode_from_slice::<Vec<(K, V)>, _>(&data_bytes, config) {
-                            Ok((deser_data, _)) => {
+                        match Vec::<(K, V)>::decode_wire(&data_bytes) {
+                            Ok(deser_data) => {
                                 shuffle_chunks.push(deser_data);
                             }
                             Err(e) => {
@@ -172,8 +171,8 @@ impl ShuffleFetcher {
         reduce_id: usize,
     ) -> LibResult<Vec<SpilledRunIter<K, V>>>
     where
-        K: Data + bincode::Decode<()>,
-        V: Data + bincode::Decode<()>,
+        K: Data + WireSerde,
+        V: Data + WireSerde,
     {
         let server_uris: Vec<String> =
             self.tracker
@@ -268,8 +267,8 @@ impl ShuffleFetcher {
         reduce_id: usize,
     ) -> LibResult<impl Iterator<Item = (K, V)> + use<K, V>>
     where
-        K: Data + bincode::Decode<()>,
-        V: Data + bincode::Decode<()>,
+        K: Data + WireSerde,
+        V: Data + WireSerde,
     {
         Ok(self
             .fetch_runs::<K, V>(shuffle_id, reduce_id)
@@ -449,9 +448,10 @@ impl ShuffleFetcher {
     }
 }
 
-/// A lazily-decoded shuffle run backed by an anonymous temp file. Holds the file
-/// open (so it is auto-removed when the iterator drops) and decodes one `(K, V)`
-/// pair per `next()`, so the run's elements are never all resident at once.
+/// A lazily-decoded shuffle run backed by an anonymous temp file. Each pair is
+/// stored as a length-prefixed rkyv blob. Holds the file open (so it is auto-removed
+/// when the iterator drops) and decodes one `(K, V)` pair per `next()`, so the
+/// run's elements are never all resident at once.
 pub struct SpilledRunIter<K, V> {
     reader: BufReader<std::fs::File>,
     remaining: u64,
@@ -459,24 +459,37 @@ pub struct SpilledRunIter<K, V> {
 }
 
 impl<K, V> SpilledRunIter<K, V> {
-    /// Spill a bincode-encoded `Vec<(K, V)>` to an anonymous temp file and return
-    /// an iterator positioned just after the length prefix.
-    fn spill(bytes: &[u8]) -> LibResult<Self> {
+    /// Spill a wire-encoded `Vec<(K, V)>` to an anonymous temp file and return
+    /// an iterator that decodes one pair per `next()`.
+    fn spill(bytes: &[u8]) -> LibResult<Self>
+    where
+        K: WireSerde,
+        V: WireSerde,
+    {
+        let pairs: Vec<(K, V)> =
+            Vec::<(K, V)>::decode_wire(bytes).map_err(|_| ShuffleError::FailedFetchOp)?;
+        let count = pairs.len() as u64;
         let mut file = tempfile::tempfile().map_err(|_| ShuffleError::FailedFetchOp)?;
-        file.write_all(bytes)
+        // Write count header (8 bytes LE).
+        file.write_all(&count.to_le_bytes())
             .map_err(|_| ShuffleError::FailedFetchOp)?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|_| ShuffleError::FailedFetchOp)?;
-        let mut reader = BufReader::new(file);
-        let config = bincode::config::standard();
-        // A `Vec`'s length prefix uses the same `u64` varint encoding a standalone
-        // `u64` decodes with, so this consumes exactly the header the map side
-        // wrote and leaves the reader at the first element.
-        let remaining: u64 = bincode::decode_from_std_read(&mut reader, config)
+        // Write each pair as [4-byte LE size][rkyv bytes].
+        for pair in &pairs {
+            let pair_bytes = pair
+                .encode_wire()
+                .map_err(|_| ShuffleError::FailedFetchOp)?;
+            let len = pair_bytes.len() as u32;
+            file.write_all(&len.to_le_bytes())
+                .map_err(|_| ShuffleError::FailedFetchOp)?;
+            file.write_all(&pair_bytes)
+                .map_err(|_| ShuffleError::FailedFetchOp)?;
+        }
+        drop(pairs);
+        file.seek(SeekFrom::Start(8))
             .map_err(|_| ShuffleError::FailedFetchOp)?;
         Ok(SpilledRunIter {
-            reader,
-            remaining,
+            reader: BufReader::new(file),
+            remaining: count,
             _pd: PhantomData,
         })
     }
@@ -484,17 +497,22 @@ impl<K, V> SpilledRunIter<K, V> {
 
 impl<K, V> Iterator for SpilledRunIter<K, V>
 where
-    K: Data + bincode::Decode<()>,
-    V: Data + bincode::Decode<()>,
+    K: Data + WireSerde,
+    V: Data + WireSerde,
 {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
+        use std::io::Read;
         if self.remaining == 0 {
             return None;
         }
-        let config = bincode::config::standard();
-        match bincode::decode_from_std_read::<(K, V), _, _>(&mut self.reader, config) {
+        let mut len_buf = [0u8; 4];
+        self.reader.read_exact(&mut len_buf).ok()?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; len];
+        self.reader.read_exact(&mut buf).ok()?;
+        match <(K, V)>::decode_wire(&buf) {
             Ok(pair) => {
                 self.remaining -= 1;
                 Some(pair)
@@ -513,8 +531,9 @@ mod tests {
 
     #[test]
     fn spilled_run_roundtrips() {
+        use crate::distributed::{WireDecode, WireEncode};
         let data: Vec<(i32, String)> = vec![(1, "a".into()), (2, "bb".into()), (3, "ccc".into())];
-        let bytes = bincode::encode_to_vec(&data, bincode::config::standard()).unwrap();
+        let bytes = data.encode_wire().unwrap();
         let got: Vec<(i32, String)> = SpilledRunIter::<i32, String>::spill(&bytes)
             .unwrap()
             .collect();
@@ -523,8 +542,9 @@ mod tests {
 
     #[test]
     fn spilled_run_empty() {
+        use crate::distributed::{WireDecode, WireEncode};
         let data: Vec<(i32, String)> = vec![];
-        let bytes = bincode::encode_to_vec(&data, bincode::config::standard()).unwrap();
+        let bytes = data.encode_wire().unwrap();
         let n = SpilledRunIter::<i32, String>::spill(&bytes)
             .unwrap()
             .count();

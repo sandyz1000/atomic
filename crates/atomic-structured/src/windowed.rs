@@ -17,7 +17,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
 
-use atomic_data::distributed::decode_payload;
+use atomic_data::distributed::{WireEncode, decode_payload};
 
 use crate::OutputMode;
 use crate::errors::{StructuredError, StructuredResult};
@@ -40,7 +40,7 @@ pub(crate) struct WindowedSpec {
 }
 
 /// Persisted snapshot: the state store plus the watermark.
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct Snapshot {
     store: Vec<u8>,
     watermark_ms: Option<u64>,
@@ -104,7 +104,8 @@ impl WindowedEngine {
             store: self.state.lock().encode()?,
             watermark_ms: self.watermark.lock().current(),
         };
-        let bytes = bincode::encode_to_vec(&snap, bincode::config::standard())
+        let bytes = snap
+            .encode_wire()
             .map_err(|e| StructuredError::Checkpoint(e.to_string()))?;
         let tmp = dir.join("state.bin.tmp");
         std::fs::write(&tmp, &bytes).map_err(|e| StructuredError::Checkpoint(e.to_string()))?;

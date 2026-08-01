@@ -16,8 +16,8 @@ use atomic_data::distributed::{RkyvWireSerializer, RkyvWireStrategy, RkyvWireVal
 use crate::topology::{Edge, EdgeTriplet, VertexId};
 
 /// Bound bundle for any value that travels as an RDD element in a graph job:
-/// cloneable and debuggable (the engine's `Data`), wire-encodable (`rkyv`) and
-/// shuffle-encodable (`bincode`).
+/// cloneable and debuggable (the engine's `Data`), wire-encodable and
+/// shuffle-encodable (`rkyv`).
 ///
 /// The `rkyv` *decode* side (`Archived: CheckBytes + Deserialize`) is required
 /// separately at each `impl`/function via the [`GraphDecode`] alias, because a
@@ -30,8 +30,6 @@ pub trait GraphData:
     + 'static
     + rkyv::Archive
     + for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>
-    + bincode::Encode
-    + bincode::Decode<()>
 {
 }
 
@@ -43,8 +41,6 @@ impl<T> GraphData for T where
         + 'static
         + rkyv::Archive
         + for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>
-        + bincode::Encode
-        + bincode::Decode<()>
 {
 }
 

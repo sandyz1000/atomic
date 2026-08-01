@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::data::Data;
+use crate::distributed::{WireEncode, WireSerde};
 
 pub fn hash<T: Hash>(t: &T) -> u64 {
     let mut s: FxHasher = Default::default();
@@ -131,7 +132,7 @@ pub enum Partitioner {
         num_partitions: usize,
         /// Sort direction, retained so the partitioner can be shipped/reconstructed on workers.
         ascending: bool,
-        /// `bincode(Vec<K>)` of the sorted split-point bounds, captured at construction so the
+        /// Wire-encoded `Vec<K>` of the sorted split-point bounds, captured at construction so the
         /// range partitioner can be shipped to and reconstructed on workers.
         bounds_bytes: Vec<u8>,
         get_partition_fn: PartitionFn,
@@ -173,12 +174,11 @@ impl Partitioner {
     /// Pass `ascending = false` to reverse the ordering (largest keys to partition 0).
     pub fn range<K>(bounds: Vec<K>, ascending: bool) -> Self
     where
-        K: Data + Ord + Clone + bincode::Encode,
+        K: Data + Ord + Clone + WireSerde,
     {
         let num_partitions = bounds.len() + 1;
         // Capture the bounds in serializable form so this partitioner can be shipped to workers.
-        let bounds_bytes =
-            bincode::encode_to_vec(&bounds, bincode::config::standard()).unwrap_or_default();
+        let bounds_bytes = bounds.encode_wire().unwrap_or_default();
         let get_partition_fn = Arc::new(move |key: &dyn Any| -> usize {
             let k = key
                 .downcast_ref::<K>()
@@ -318,7 +318,7 @@ impl Partitioner {
 ///
 /// `Custom` partitioners hold a user closure and cannot be serialized, so they degrade to hash
 /// partitioning in distributed mode (their `num_partitions` is still honored).
-#[derive(Clone, Debug, bincode::Encode, bincode::Decode)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum PartitionerSchema {
     Hash {
         num_parts: usize,
@@ -376,7 +376,7 @@ impl PartitionerSchema {
     /// `RangePartitioner`; `Hash`/`Custom` produce a hash partitioner.
     pub fn into_partitioner<K>(&self) -> Partitioner
     where
-        K: Data + Ord + Clone + Hash + Eq + bincode::Encode + bincode::Decode<()>,
+        K: Data + Ord + Clone + Hash + Eq + WireSerde,
     {
         match self {
             PartitionerSchema::Range {
@@ -384,10 +384,7 @@ impl PartitionerSchema {
                 bounds_bytes,
                 ..
             } => {
-                let bounds: Vec<K> =
-                    bincode::decode_from_slice(bounds_bytes, bincode::config::standard())
-                        .map(|(b, _)| b)
-                        .unwrap_or_default();
+                let bounds: Vec<K> = Vec::<K>::decode_wire(bounds_bytes).unwrap_or_default();
                 Partitioner::range(bounds, *ascending)
             }
             _ => Partitioner::hash::<K>(self.num_partitions()),

@@ -23,8 +23,6 @@ use crate::topology::{Edge, EdgeTriplet, VertexId, VertexMap};
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
-    bincode::Encode,
-    bincode::Decode,
 )]
 pub struct PrVertex {
     pub rank: f64,

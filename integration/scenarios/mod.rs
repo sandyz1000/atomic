@@ -14,6 +14,7 @@ use std::sync::Arc;
 mod cache_locality;
 mod combine_aggregate_by_key;
 mod combine_reduce_by_key;
+mod distributed_state;
 mod fault_tolerance;
 mod map_fold;
 mod multi_stage;
@@ -37,6 +38,7 @@ pub enum Scenario {
     StagedShuffleTerminalAction,
     CombineReduceByKey,
     CombineAggregateByKey,
+    DistributedState,
 }
 
 pub fn run(scenario: Scenario, ctx: &Arc<Context>) -> Result<(), Box<dyn Error>> {
@@ -52,5 +54,6 @@ pub fn run(scenario: Scenario, ctx: &Arc<Context>) -> Result<(), Box<dyn Error>>
         Scenario::StagedShuffleTerminalAction => staged_shuffle_terminal_action::run_driver(ctx),
         Scenario::CombineReduceByKey => combine_reduce_by_key::run_driver(ctx),
         Scenario::CombineAggregateByKey => combine_aggregate_by_key::run_driver(ctx),
+        Scenario::DistributedState => distributed_state::run_driver(ctx),
     }
 }

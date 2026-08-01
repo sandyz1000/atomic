@@ -32,7 +32,9 @@ use atomic_compute::context::Context;
 use atomic_compute::rdd::ParallelCollection;
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::distributed::{KafkaConsumePayload, StepKind, Step, EngineAction, TaskRuntime};
+use atomic_data::distributed::{
+    KafkaConsumePayload, StepKind, Step, EngineAction, TaskRuntime, WireDecode, WireEncode,
+};
 use atomic_data::error::DataError;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::split::{Split, SplitStruct};
@@ -464,7 +466,7 @@ pub fn build_staged_pipeline(
                 end_offset: r.end_offset,
                 max_records,
             };
-            bincode::encode_to_vec(&p, bincode::config::standard()).unwrap_or_default()
+            p.encode_wire().unwrap_or_default()
         })
         .collect();
 
@@ -494,8 +496,7 @@ impl crate::dstream::distributed_source::DistributedSource for DirectKafkaInputD
                     end_offset: r.end_offset,
                     max_records: self.max_records_per_partition,
                 };
-                let partition_bytes = bincode::encode_to_vec(&payload, bincode::config::standard())
-                    .unwrap_or_default();
+                let partition_bytes = payload.encode_wire().unwrap_or_default();
                 SourcePartitionTask {
                     op: Step {
                         task_name: String::new(),
@@ -513,10 +514,7 @@ impl crate::dstream::distributed_source::DistributedSource for DirectKafkaInputD
     fn commit(&self, tasks: &[crate::dstream::distributed_source::SourcePartitionTask]) {
         let mut tracker = self.offset_tracker.lock();
         for task in tasks {
-            if let Ok((payload, _)) = bincode::decode_from_slice::<KafkaConsumePayload, _>(
-                &task.partition_bytes,
-                bincode::config::standard(),
-            ) {
+            if let Ok(payload) = KafkaConsumePayload::decode_wire(&task.partition_bytes) {
                 tracker.commit(&payload.topic, payload.partition, payload.end_offset);
             }
         }

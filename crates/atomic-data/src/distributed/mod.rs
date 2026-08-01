@@ -4,6 +4,7 @@ mod capabilities;
 mod envelope;
 mod transport;
 mod wire;
+pub mod wire_arrow;
 
 pub use capabilities::*;
 pub use envelope::*;
@@ -18,11 +19,9 @@ pub type RkyvWireStrategy = rkyv::rancor::Strategy<Pool, Error>;
 /// Semantic version for wire contracts used by distributed task transport.
 pub const WIRE_SCHEMA_V1: u16 = 1;
 
-/// Decode a bincode-encoded value from a byte slice, discarding the consumed-byte count.
-pub fn decode_payload<T: bincode::Decode<()>>(
-    bytes: &[u8],
-) -> Result<T, bincode::error::DecodeError> {
-    bincode::decode_from_slice(bytes, bincode::config::standard()).map(|(v, _)| v)
+/// Decode an rkyv-encoded value from a byte slice.
+pub fn decode_payload<T: WireDecode>(bytes: &[u8]) -> crate::error::DataResult<T> {
+    T::decode_wire(bytes)
 }
 
 #[cfg(test)]
