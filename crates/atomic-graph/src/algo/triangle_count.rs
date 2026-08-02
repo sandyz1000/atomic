@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use atomic_compute::task;
 
-use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::graph::Graph;
+use atomic_data::distributed::WireSerde;
 use crate::topology::{Edge, EdgeTriplet, VertexId, VertexMap};
 
 /// Sorted neighbor id list carried as a vertex attribute.
@@ -51,10 +52,8 @@ fn tc_merge(a: usize, b: usize) -> usize {
 /// Returns a [`VertexMap`] from vertex id to triangle count.
 pub fn run<VD, ED>(graph: &Graph<VD, ED>) -> VertexMap<usize>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     let raw_edges = graph.collect_edges();
 
@@ -103,10 +102,8 @@ where
 /// Count the total number of triangles in the graph (each triangle counted once).
 pub fn total<VD, ED>(graph: &Graph<VD, ED>) -> usize
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     run(graph).values().sum::<usize>() / 3
 }

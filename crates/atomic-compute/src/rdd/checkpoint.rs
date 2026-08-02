@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use atomic_data::data::Data;
 use atomic_data::dependency::Dependency;
-use atomic_data::distributed::WireSerde;
+use atomic_data::distributed::{WireDecode, WireSerde};
 use atomic_data::error::DataError;
 use atomic_data::rdd::{Rdd, RddBase};
 use atomic_data::split::Split;

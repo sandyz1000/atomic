@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use atomic_data::distributed::{WireDecode, WireEncode};
+use atomic_data::distributed::{WireDecode, WireEncode, WireSerde};
 
 use crate::errors::{StructuredError, StructuredResult};
 use crate::state::GroupVal;
@@ -197,11 +197,15 @@ where
 
 impl<S, R, Out, F> MapGroupsWithState<S, R, Out, F>
 where
-    S: Clone + WireEncode + WireDecode,
+    S: Clone + WireSerde,
     F: Fn(&[GroupVal], Vec<R>, &mut GroupState<S>) -> Vec<Out>,
 {
     pub fn encode_state(&self) -> StructuredResult<Vec<u8>> {
-        let snapshot: Vec<(&Vec<GroupVal>, &StoredState<S>)> = self.states.iter().collect();
+        let snapshot: Vec<(Vec<GroupVal>, StoredState<S>)> = self
+            .states
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         snapshot
             .encode_wire()
             .map_err(|e| StructuredError::Checkpoint(e.to_string()))

@@ -10,7 +10,8 @@ use std::collections::HashMap;
 
 use atomic_compute::task;
 
-use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::graph::Graph;
+use atomic_data::distributed::WireSerde;
 use crate::pregel;
 use crate::topology::{Edge, EdgeTriplet, VertexId, VertexMap};
 
@@ -69,10 +70,8 @@ fn deg_add(a: i64, b: i64) -> i64 {
 /// probability (a common default is `0.15`).
 pub fn run<VD, ED>(graph: &Graph<VD, ED>, num_iter: usize, reset_prob: f64) -> VertexMap<f64>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     run_inner(graph, num_iter, reset_prob, None)
 }
@@ -89,10 +88,8 @@ pub fn run_until_convergence<VD, ED>(
     max_iterations: usize,
 ) -> VertexMap<f64>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     let n = graph.num_vertices();
     if n == 0 {
@@ -138,10 +135,8 @@ pub fn run_personalized<VD, ED>(
     reset_prob: f64,
 ) -> VertexMap<f64>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     let source_set: std::collections::HashSet<VertexId> = sources.iter().copied().collect();
     run_inner(graph, num_iter, reset_prob, Some(&source_set))
@@ -158,10 +153,8 @@ fn prepare_weighted_graph<VD, ED>(
     sources: Option<&std::collections::HashSet<VertexId>>,
 ) -> (Vec<(VertexId, PrVertex)>, Vec<Edge<f64>>)
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     // Out-degree per source.
     let out_deg: HashMap<VertexId, i64> = graph
@@ -226,10 +219,8 @@ fn run_inner<VD, ED>(
     sources: Option<&std::collections::HashSet<VertexId>>,
 ) -> VertexMap<f64>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     let n = graph.num_vertices();
     if n == 0 {

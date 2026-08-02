@@ -7,15 +7,14 @@
 
 use atomic_compute::rdd::TypedRdd;
 
-use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::graph::Graph;
+use atomic_data::distributed::WireSerde;
 use crate::topology::{EdgeDirection, VertexId};
 
 impl<VD, ED> Graph<VD, ED>
 where
-    VD: GraphData,
-    ED: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     /// For every vertex, collect the ids of its neighbours according to `direction`.
     ///
@@ -65,8 +64,8 @@ where
         direction: EdgeDirection,
     ) -> TypedRdd<(VertexId, Vec<(VertexId, VD)>)>
     where
-        ((VertexId, ()), VD): GraphData,
-        (VertexId, ()): GraphData,
+        ((VertexId, ()), VD): WireSerde,
+        (VertexId, ()): WireSerde,
     {
         let neighbor_ids = self.collect_neighbor_ids(direction);
 

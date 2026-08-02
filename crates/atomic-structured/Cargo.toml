@@ -15,7 +15,6 @@ atomic-compute = { workspace = true }
 atomic-data = { workspace = true }
 datafusion = { workspace = true }
 tokio = { workspace = true }
-bincode = { workspace = true }
 rkyv = { workspace = true }
 parking_lot = { workspace = true }
 log = { workspace = true }

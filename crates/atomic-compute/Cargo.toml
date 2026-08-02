@@ -34,7 +34,6 @@ rand_pcg.workspace = true
 dotenvy.workspace = true
 rustc-hash.workspace = true
 num_cpus.workspace = true
-bincode.workspace = true
 rkyv.workspace = true
 dyn-clone.workspace = true
 futures.workspace = true

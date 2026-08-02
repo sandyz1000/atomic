@@ -10,8 +10,6 @@ pub enum ShuffleError {
     #[error("failed to create local shuffle dir after 10 attempts")]
     CouldNotCreateShuffleDir,
 
-    // #[error("deserialization error")]
-    // DeserializationError(#[from] bincode::Error),
     #[error("gRPC transport error")]
     TransportError(#[from] tonic::transport::Error),
 

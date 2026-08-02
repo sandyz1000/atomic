@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use dashmap::DashMap;
 use lru::LruCache;
 
-use crate::distributed::{WireEncode, WireSerde};
+use crate::distributed::{WireDecode, WireEncode, WireSerde};
 
 // StorageLevel
 

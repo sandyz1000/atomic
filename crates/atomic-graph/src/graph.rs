@@ -11,52 +11,9 @@ use std::sync::Arc;
 
 use atomic_compute::context::Context;
 use atomic_compute::rdd::TypedRdd;
-use atomic_data::distributed::{RkyvWireSerializer, RkyvWireStrategy, RkyvWireValidator};
+use atomic_data::distributed::WireSerde;
 
 use crate::topology::{Edge, EdgeTriplet, VertexId};
-
-/// Bound bundle for any value that travels as an RDD element in a graph job:
-/// cloneable and debuggable (the engine's `Data`), wire-encodable and
-/// shuffle-encodable (`rkyv`).
-///
-/// The `rkyv` *decode* side (`Archived: CheckBytes + Deserialize`) is required
-/// separately at each `impl`/function via the [`GraphDecode`] alias, because a
-/// bound on `Self::Archived` placed on this trait would not propagate to use sites.
-pub trait GraphData:
-    Clone
-    + std::fmt::Debug
-    + Send
-    + Sync
-    + 'static
-    + rkyv::Archive
-    + for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>
-{
-}
-
-impl<T> GraphData for T where
-    T: Clone
-        + std::fmt::Debug
-        + Send
-        + Sync
-        + 'static
-        + rkyv::Archive
-        + for<'a> rkyv::Serialize<RkyvWireSerializer<'a>>
-{
-}
-
-/// The `rkyv` decode obligation for a graph value type: its archived form can be
-/// validated and deserialized back. Spelled as a macro-free helper so the built-in
-/// algorithms can repeat it in one line: `where VD: GraphData, VD::Archived: GraphDecode<VD>`.
-pub trait GraphDecode<T>:
-    for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>> + rkyv::Deserialize<T, RkyvWireStrategy>
-{
-}
-
-impl<T, A> GraphDecode<T> for A where
-    A: for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
-        + rkyv::Deserialize<T, RkyvWireStrategy>
-{
-}
 
 /// A directed graph with vertex data `VD` and edge data `ED`, backed by RDDs.
 ///
@@ -73,10 +30,8 @@ pub struct Graph<VD, ED> {
 
 impl<VD, ED> Graph<VD, ED>
 where
-    VD: GraphData,
-    ED: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     /// Build a graph directly from a vertex RDD and an edge RDD.
     pub fn from_rdds(
@@ -177,13 +132,8 @@ where
     /// over the separate [`triplets`](Self::triplets) call.
     pub fn map_triplets<ED2, F>(&self, f: F) -> Graph<VD, ED2>
     where
-        ED2: GraphData,
-        ED2::Archived: GraphDecode<ED2>,
+        ED2: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
         F: Fn(&EdgeTriplet<VD, ED>) -> ED2 + Clone + Send + Sync + 'static,
-        (VertexId, ED): GraphData,
-        (VertexId, ED, VD): GraphData,
-        ((VertexId, ED), VD): GraphData,
-        ((VertexId, ED, VD), VD): GraphData,
     {
         let new_edges = self.triplets().map_partitions(move |iter| {
             let f = f.clone();
@@ -202,8 +152,7 @@ where
     /// built-in algorithms is the per-edge message pass, not this transform.
     pub fn map_vertices<VD2, F>(&self, f: F) -> Graph<VD2, ED>
     where
-        VD2: GraphData,
-        VD2::Archived: GraphDecode<VD2>,
+        VD2: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
         F: Fn(VertexId, &VD) -> VD2 + Clone + Send + Sync + 'static,
     {
         let mapped = self
@@ -222,8 +171,7 @@ where
     /// `map_edges(|_| ())` so the per-edge message task is a concrete type.
     pub fn map_edges<ED2, F>(&self, f: F) -> Graph<VD, ED2>
     where
-        ED2: GraphData,
-        ED2::Archived: GraphDecode<ED2>,
+        ED2: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
         F: Fn(&Edge<ED>) -> ED2 + Clone + Send + Sync + 'static,
     {
         let mapped = self.edges.clone().map_partitions(move |iter| {
@@ -245,11 +193,6 @@ where
     /// Two shuffle joins attach the source and destination vertex attributes to
     /// each edge. This is the input a message-sending task consumes.
     pub fn triplets(&self) -> TypedRdd<EdgeTriplet<VD, ED>>
-    where
-        (VertexId, ED): GraphData,
-        (VertexId, ED, VD): GraphData,
-        ((VertexId, ED), VD): GraphData,
-        ((VertexId, ED, VD), VD): GraphData,
     {
         // edges keyed by src: (src, (dst, edge_attr))
         let by_src: TypedRdd<(VertexId, (VertexId, ED))> = self
@@ -287,14 +230,9 @@ where
     /// Returns a vertex RDD of the merged message per vertex that received one.
     pub fn aggregate_messages<A, S, M>(&self, send: S, merge: M) -> TypedRdd<(VertexId, A)>
     where
-        A: GraphData,
-        A::Archived: GraphDecode<A>,
+        A: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
         S: atomic_compute::__macro_support::UnaryTask<EdgeTriplet<VD, ED>, Vec<(VertexId, A)>>,
         M: atomic_compute::__macro_support::BinaryTask<A>,
-        (VertexId, ED): GraphData,
-        (VertexId, ED, VD): GraphData,
-        ((VertexId, ED), VD): GraphData,
-        ((VertexId, ED, VD), VD): GraphData,
     {
         self.triplets()
             .flat_map_task::<(VertexId, A), S>(send)

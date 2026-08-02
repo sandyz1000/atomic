@@ -18,7 +18,8 @@ use std::collections::{HashMap, HashSet};
 
 use atomic_compute::task;
 
-use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::graph::Graph;
+use atomic_data::distributed::WireSerde;
 use crate::pregel;
 use crate::topology::{Edge, EdgeTriplet, VertexId, VertexMap};
 
@@ -97,10 +98,8 @@ fn unit_edges(pairs: &[(VertexId, VertexId)]) -> Vec<Edge<()>> {
 /// own driver-coordinated rounds to completion.
 pub fn run<VD, ED>(graph: &Graph<VD, ED>, _num_iter: usize) -> VertexMap<VertexId>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     let ctx = graph.context().clone();
 

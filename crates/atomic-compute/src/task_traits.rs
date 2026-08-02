@@ -1,7 +1,7 @@
 use std::hash::Hash;
 
 use atomic_data::data::Data;
-use atomic_data::distributed::{WireDecode, WireEncode, WireSerde};
+use atomic_data::distributed::WireSerde;
 use atomic_data::error::DataResult;
 use atomic_data::partitioner::PartitionerSchema;
 

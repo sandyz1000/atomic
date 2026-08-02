@@ -7,15 +7,14 @@
 
 use atomic_compute::rdd::TypedRdd;
 
-use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::graph::Graph;
+use atomic_data::distributed::WireSerde;
 use crate::topology::{Edge, VertexId};
 
 impl<VD, ED> Graph<VD, ED>
 where
-    VD: GraphData,
-    ED: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     fn parallelism(&self) -> usize {
         self.context().default_parallelism().max(1)
@@ -73,8 +72,8 @@ where
     pub fn group_edges<F>(&self, merge: F) -> Graph<VD, ED>
     where
         F: Fn(ED, ED) -> ED + Clone + Send + Sync + 'static,
-        (VertexId, VertexId): GraphData,
-        ((VertexId, VertexId), ED): GraphData,
+        (VertexId, VertexId): WireSerde,
+        ((VertexId, VertexId), ED): WireSerde,
     {
         let n = self.parallelism();
         let merged = self
@@ -97,11 +96,10 @@ where
         f: F,
     ) -> Graph<VD2, ED>
     where
-        U: GraphData,
-        VD2: GraphData,
-        VD2::Archived: GraphDecode<VD2>,
+        U: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+        VD2: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
         F: Fn(VertexId, &VD, Option<&U>) -> VD2 + Clone + Send + Sync + 'static,
-        (VD, Option<U>): GraphData,
+        (VD, Option<U>): WireSerde,
     {
         let joined = self.vertices.clone().left_outer_join(other);
         let mapped = joined.map_partitions_to_pair(move |_idx, iter| {
@@ -115,9 +113,9 @@ where
     /// that appear in `other`; all others keep their current attribute.
     pub fn join_vertices<U, F>(&self, other: TypedRdd<(VertexId, U)>, f: F) -> Graph<VD, ED>
     where
-        U: GraphData,
+        U: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
         F: Fn(VertexId, &VD, &U) -> VD + Clone + Send + Sync + 'static,
-        (VD, Option<U>): GraphData,
+        (VD, Option<U>): WireSerde,
     {
         self.outer_join_vertices(other, move |vid, vd, ou| match ou {
             Some(u) => f(vid, vd, u),
@@ -131,15 +129,13 @@ where
     /// its `(src, dst)` pair appears in `other`'s edge set. Attributes come from `self`.
     pub fn mask<VD2, ED2>(&self, other: &Graph<VD2, ED2>) -> Graph<VD, ED>
     where
-        VD2: GraphData,
-        ED2: GraphData,
-        VD2::Archived: GraphDecode<VD2>,
-        ED2::Archived: GraphDecode<ED2>,
-        (VD, ()): GraphData,
-        (VertexId, VertexId): GraphData,
-        (ED, ()): GraphData,
-        ((VertexId, VertexId), ED): GraphData,
-        ((VertexId, VertexId), ()): GraphData,
+        VD2: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+        ED2: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+        (VD, ()): WireSerde,
+        (VertexId, VertexId): WireSerde,
+        (ED, ()): WireSerde,
+        ((VertexId, VertexId), ED): WireSerde,
+        ((VertexId, VertexId), ()): WireSerde,
     {
         let other_v = other
             .vertices
@@ -177,8 +173,8 @@ where
     where
         VP: Fn(VertexId, &VD) -> bool + Clone + Send + Sync + 'static,
         EP: Fn(&Edge<ED>) -> bool + Clone + Send + Sync + 'static,
-        (VD, ()): GraphData,
-        (Edge<ED>, ()): GraphData,
+        (VD, ()): WireSerde,
+        (Edge<ED>, ()): WireSerde,
     {
         let kept_v = self.vertices.clone().map_partitions(move |iter| {
             let vpred = vpred.clone();

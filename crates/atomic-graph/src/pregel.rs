@@ -8,7 +8,8 @@
 
 use atomic_compute::__macro_support::{BinaryTask, UnaryTask};
 
-use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::graph::Graph;
+use atomic_data::distributed::WireSerde;
 use crate::topology::{EdgeTriplet, VertexId};
 
 type VertexVal<VD, A> = (VD, Option<A>);
@@ -41,14 +42,10 @@ pub fn run<VD, ED, A, SendT, MergeF, VProgT>(
     vprog: VProgT,
 ) -> Graph<VD, ED>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
-    A: GraphData,
-    A::Archived: GraphDecode<A>,
-    Option<A>: GraphData,
-    <Option<A> as rkyv::Archive>::Archived: GraphDecode<Option<A>>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    A: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    Option<A>: WireSerde,
     SendT: UnaryTask<EdgeTriplet<VD, ED>, Vec<(VertexId, A)>> + Copy,
     VProgT: UnaryTask<VertexPair<VD, A>, (VertexId, VD)> + Copy,
     MergeF: BinaryTask<A> + Copy,
@@ -71,14 +68,10 @@ pub fn run_until_convergence<VD, ED, A, SendT, MergeF, VProgT>(
     converged: Converged<'_, VD>,
 ) -> Graph<VD, ED>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
-    A: GraphData,
-    A::Archived: GraphDecode<A>,
-    Option<A>: GraphData,
-    <Option<A> as rkyv::Archive>::Archived: GraphDecode<Option<A>>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    A: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    Option<A>: WireSerde,
     SendT: UnaryTask<EdgeTriplet<VD, ED>, Vec<(VertexId, A)>> + Copy,
     VProgT: UnaryTask<VertexPair<VD, A>, (VertexId, VD)> + Copy,
     MergeF: BinaryTask<A> + Copy,
@@ -104,14 +97,10 @@ fn run_loop<VD, ED, A, SendT, MergeF, VProgT>(
     converged: Option<Converged<'_, VD>>,
 ) -> Graph<VD, ED>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
-    A: GraphData,
-    A::Archived: GraphDecode<A>,
-    Option<A>: GraphData,
-    <Option<A> as rkyv::Archive>::Archived: GraphDecode<Option<A>>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    A: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    Option<A>: WireSerde,
     SendT: UnaryTask<EdgeTriplet<VD, ED>, Vec<(VertexId, A)>> + Copy,
     VProgT: UnaryTask<VertexPair<VD, A>, (VertexId, VD)> + Copy,
     MergeF: BinaryTask<A> + Copy,

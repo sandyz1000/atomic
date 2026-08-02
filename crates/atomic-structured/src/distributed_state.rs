@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use atomic_compute::context::Context;
 use atomic_data::distributed::{
-    EngineAction, StateMergePayload, Step, StepKind, TaskRuntime, WireDecode, WireEncode,
+    EngineAction, StateMergePayload, Step, StepKind, TaskRuntime, WireEncode, WireSerde,
     decode_payload,
 };
 use datafusion::arrow::record_batch::RecordBatch;
@@ -84,7 +84,7 @@ pub(crate) fn dispatch_merge_state<Bucket, Params, Emitted>(
 where
     Bucket: WireEncode,
     Params: WireEncode,
-    Emitted: WireDecode,
+    Emitted: WireSerde,
 {
     let params_bytes = params
         .encode_wire()

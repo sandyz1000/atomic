@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::data::Data;
-use crate::distributed::{WireEncode, WireSerde};
+use crate::distributed::{WireDecode, WireEncode, WireSerde};
 
 pub fn hash<T: Hash>(t: &T) -> u64 {
     let mut s: FxHasher = Default::default();

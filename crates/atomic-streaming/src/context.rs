@@ -222,9 +222,7 @@ impl StreamingContext {
     where
         T: Data
             + Clone
-            + atomic_data::distributed::WireEncode
-            + atomic_data::distributed::WireDecode,
-        Vec<T>: atomic_data::distributed::WireEncode + atomic_data::distributed::WireDecode,
+            + atomic_data::distributed::WireSerde,
     {
         let id = self.next_stream_id();
         let sc = self.sc.clone();
@@ -250,9 +248,7 @@ impl StreamingContext {
             + Clone
             + Eq
             + std::hash::Hash
-            + atomic_data::distributed::WireEncode
-            + atomic_data::distributed::WireDecode,
-        Vec<T>: atomic_data::distributed::WireEncode + atomic_data::distributed::WireDecode,
+            + atomic_data::distributed::WireSerde,
         (T, u64): Data + Clone,
     {
         let id = self.next_stream_id();
@@ -362,9 +358,7 @@ impl StreamingContext {
         T: Data
             + Clone
             + std::fmt::Debug
-            + atomic_data::distributed::WireEncode
-            + atomic_data::distributed::WireDecode,
-        Vec<T>: atomic_data::distributed::WireEncode + atomic_data::distributed::WireDecode,
+            + atomic_data::distributed::WireSerde,
     {
         let sc = self.sc.clone();
         self.foreach_rdd(stream, move |rdd, time_ms| {
@@ -395,9 +389,7 @@ impl StreamingContext {
         T: Data
             + Clone
             + std::fmt::Debug
-            + atomic_data::distributed::WireEncode
-            + atomic_data::distributed::WireDecode,
-        Vec<T>: atomic_data::distributed::WireEncode + atomic_data::distributed::WireDecode,
+            + atomic_data::distributed::WireSerde,
     {
         let prefix = prefix.into();
         let suffix = suffix.into();

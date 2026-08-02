@@ -2,7 +2,8 @@
 
 use atomic_compute::task;
 
-use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::graph::Graph;
+use atomic_data::distributed::WireSerde;
 use crate::pregel;
 use crate::topology::{EdgeTriplet, VertexId, VertexMap};
 
@@ -44,10 +45,8 @@ fn cc_merge(a: VertexId, b: VertexId) -> VertexId {
 /// its component.
 pub fn run<VD, ED>(graph: &Graph<VD, ED>, max_iterations: usize) -> VertexMap<VertexId>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     // Normalize to a graph whose vertex attribute is its own id and whose edges
     // carry no attribute, so the message task operates on concrete types.

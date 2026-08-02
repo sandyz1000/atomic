@@ -306,7 +306,7 @@ pub struct DirectKafkaBatchRdd {
     ranges: Vec<OffsetRange>,
     max_records: usize,
     /// Pre-built source bytes for the distributed staged pipeline.
-    /// `source_partitions[i]` = bincode-encoded `KafkaConsumePayload` for partition `i`.
+    /// `source_partitions[i]` = rkyv-encoded `KafkaConsumePayload` for partition `i`.
     source_partitions: Vec<Vec<u8>>,
     /// Singleton op: `[Step { action: KafkaConsume, payload: [] }]`.
     steps: Vec<Step>,

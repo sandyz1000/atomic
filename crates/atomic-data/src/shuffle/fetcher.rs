@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn spilled_run_roundtrips() {
-        use crate::distributed::{WireDecode, WireEncode};
+        use crate::distributed::WireEncode;
         let data: Vec<(i32, String)> = vec![(1, "a".into()), (2, "bb".into()), (3, "ccc".into())];
         let bytes = data.encode_wire().unwrap();
         let got: Vec<(i32, String)> = SpilledRunIter::<i32, String>::spill(&bytes)
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn spilled_run_empty() {
-        use crate::distributed::{WireDecode, WireEncode};
+        use crate::distributed::WireEncode;
         let data: Vec<(i32, String)> = vec![];
         let bytes = data.encode_wire().unwrap();
         let n = SpilledRunIter::<i32, String>::spill(&bytes)
@@ -556,59 +556,9 @@ mod tests {
 // in the atomic-shuffle crate. These tests need to be rewritten in the main atomic crate where
 // env:: is available, creating concrete implementations of MapOutputTracker and passing them to
 // ShuffleFetcher::new().
-//
 // #[cfg(test)]
 // mod tests {
-//
 //     use super::*;
-//
-//     #[tokio::test(flavor = "multi_thread")]
-//     async fn fetch_ok() -> Result<(), Box<dyn std::error::Error + 'static>> {
-//         {
-//             let addr = format!(
-//                 "http://127.0.0.1:{}",
-//                 env::Env::get().shuffle_manager.server_port
-//             );
-//             let servers = &env::Env::get().map_output_tracker.server_uris;
-//             servers.insert(11000, vec![Some(addr)]);
-//
-//             let data = vec![(0i32, "example data".to_string())];
-//             let config = bincode::config::standard();
-//             let serialized_data = bincode::encode_to_vec(&data, config).unwrap();
-//             env::SHUFFLE_CACHE.insert((11000, 0, 11001), serialized_data);
-//         }
-//
-//         let result: Vec<(i32, String)> = ShuffleFetcher::fetch(11000, 11001)
-//             .await?
-//             .into_iter()
-//             .collect();
-//         assert_eq!(result[0].0, 0);
-//         assert_eq!(result[0].1, "example data");
-//
-//         Ok(())
-//     }
-//
-//     #[tokio::test(flavor = "multi_thread")]
-//     async fn fetch_failure() -> Result<(), Box<dyn std::error::Error + 'static>> {
-//         {
-//             let addr = format!(
-//                 "http://127.0.0.1:{}",
-//                 env::Env::get().shuffle_manager.server_port
-//             );
-//             let servers = &env::Env::get().map_output_tracker.server_uris;
-//             servers.insert(10000, vec![Some(addr)]);
-//
-//             let data = "corrupted data";
-//             let config = bincode::config::standard();
-//             let serialized_data = bincode::encode_to_vec(&data, config).unwrap();
-//             env::SHUFFLE_CACHE.insert((10000, 0, 10001), serialized_data);
-//         }
-//
-//         let err = ShuffleFetcher::fetch::<i32, String>(10000, 10001).await;
-//         assert!(err.is_err());
-//
-//         Ok(())
-//     }
 //
 //     #[test]
 //     fn build_shuffle_uri() -> Result<(), Box<dyn std::error::Error + 'static>> {

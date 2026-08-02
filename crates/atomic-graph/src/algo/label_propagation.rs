@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 
 use atomic_compute::task;
 
-use crate::graph::{Graph, GraphData, GraphDecode};
+use crate::graph::Graph;
+use atomic_data::distributed::WireSerde;
 use crate::pregel;
 use crate::topology::{EdgeTriplet, VertexId, VertexMap};
 
@@ -65,10 +66,8 @@ fn lp_vprog(input: (VertexId, (VertexId, Option<LabelFreq>))) -> (VertexId, Vert
 /// static (no convergence test), matching the conventional formulation.
 pub fn run<VD, ED>(graph: &Graph<VD, ED>, max_steps: usize) -> VertexMap<VertexId>
 where
-    VD: GraphData,
-    VD::Archived: GraphDecode<VD>,
-    ED: GraphData,
-    ED::Archived: GraphDecode<ED>,
+    VD: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
+    ED: Clone + std::fmt::Debug + Send + Sync + 'static + WireSerde,
 {
     let g = graph.map_vertices(|vid, _| vid).map_edges(|_| ());
     let result =

@@ -268,6 +268,7 @@ impl ShuffleCache for SpillableShuffleCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::distributed::WireDecode;
 
     #[test]
     fn spill_memory_path() {
