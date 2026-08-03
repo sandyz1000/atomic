@@ -1,35 +1,46 @@
 # atomic-nlq
 
 Natural-language analytics for the Atomic engine. A user asks a question in plain English; an LLM
-(OpenAI) plans a **`WorkflowPlan`** — a dependency graph of tool calls — and an executor runs it on
-Atomic, looping until the question is answered and streaming progress along the way.
+(OpenAI) runs **on the coordinator** and produces a **`WorkflowPlan`** — a JSON DSL dependency
+graph of tool calls. `WorkflowExecutor` dispatches each tool directly through the Atomic engine
+(`#[task]` functions, SQL, or Python/JS runtimes), and `AgentLoop` iterates until the answer is
+complete, streaming progress along the way.
 
 ## Overview
 
-`atomic-nlq` is an **agent**, not an NL→SQL translator. The LLM never emits raw SQL or a DataFusion
-plan directly; it chooses *tools*. SQL is one built-in tool. Inside a SQL step, LLM operations
-(`llm_filter`, `llm_map`, `embed`, `vector_search`) are real DataFusion plan operators, so the
-optimizer can batch per-row LLM calls.
+`atomic-nlq` is a **coordinator-level planner**, not a per-partition agent. The LLM never runs on
+workers and never operates on partial data. Instead:
+
+1. `LlmPlanner` calls the LLM once per round on the coordinator, producing a `WorkflowPlan` DSL.
+2. `WorkflowExecutor` resolves tool names through `ToolRegistry` and dispatches concrete engine
+   tasks (`sql_query`, `filter`, `aggregate`, Python/JS code) through `Context::dispatch_pipeline`.
+3. `AgentLoop` evaluates results and decides whether to run another round.
+
+LLM operations (`llm_filter`, `llm_map`, `embed`, `vector_search`) are DataFusion extension
+operators that run inside SQL steps — they're real distributed operators batched by
+`LlmBatchingRule`, not per-partition agent loops.
 
 ```text
-User NL query
+User NL query (coordinator)
     │
     ▼  LlmPlanner (OpenAI: schema + tool list + query)
-WorkflowPlan — a dependency graph of tool calls (JSON)
+WorkflowPlan — a JSON dependency graph of tool calls
     │
-    ▼  WorkflowExecutor — runs steps in parallel dependency waves (tokio JoinSet)
+    ▼  WorkflowExecutor — engine dispatch (Context::dispatch_pipeline)
     │     ├── Builtin(SqlQuery) → AtomicSqlContext.sql()
     │     │     └─ in-SQL LLM ops: LlmBatchingRule → LlmFilterExec / LlmMapExec / EmbedExec
-    │     ├── Python(code)      → atomic-worker PyO3 runtime
-    │     └── JavaScript(code)  → atomic-worker V8 runtime
+    │     ├── Builtin(Filter) → TypedRdd::filter_task
+    │     ├── Builtin(Aggregate) → TypedRdd::combine_by_key
+    │     ├── Python(code) → TaskRuntime::Native dispatch
+    │     └── JavaScript(code) → TaskRuntime::Native dispatch
     │
-    ▼  AgentLoop.evaluate (OpenAI) → { done, answer, visualization? } — repeat until done
+    ▼  AgentLoop.evaluate (coordinator LLM call) → { done, answer, visualization? }
 AgentResult  (+ a live stream of AgentEvents)
 ```
 
-> An earlier design had the LLM emit JSON parsed by an `IrParser` into a DataFusion `LogicalPlan`.
-> That `ir/` module is gone; the planner now produces a `WorkflowPlan`. The LLM operators survive as
-> DataFusion extension nodes used inside SQL steps.
+> **Design principle:** the LLM runs on the coordinator and makes planning decisions over the
+> full schema and tool registry. Workers receive concrete task ops through the standard engine
+> dispatch path — no per-partition LLM calls, no partial-data queries.
 
 ## Features
 

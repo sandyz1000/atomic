@@ -523,7 +523,7 @@ impl StreamWriter {
                                 NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed)
                             }
                         };
-                        let inner = StreamJoinEngine::new(self.source.clone(), right, spec, None)?;
+                        let inner = StreamJoinEngine::new(self.source.clone(), right, spec)?;
                         Arc::new(DistributedJoinEngine::new(
                             inner,
                             ssc.sc.clone(),
@@ -536,7 +536,6 @@ impl StreamWriter {
                         self.source.clone(),
                         right,
                         spec,
-                        self.checkpoint_dir,
                     )?),
                 }
             }
@@ -569,7 +568,7 @@ impl StreamWriter {
                                 NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed)
                             }
                         };
-                        let inner = SessionEngine::new(self.source.clone(), spec, None)?;
+                        let inner = SessionEngine::new(self.source.clone(), spec)?;
                         Arc::new(DistributedSessionEngine::new(
                             inner,
                             ssc.sc.clone(),
@@ -581,7 +580,6 @@ impl StreamWriter {
                     None => Arc::new(SessionEngine::new(
                         self.source.clone(),
                         spec,
-                        self.checkpoint_dir,
                     )?),
                 }
             }

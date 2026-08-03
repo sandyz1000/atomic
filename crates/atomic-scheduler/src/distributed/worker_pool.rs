@@ -245,7 +245,7 @@ impl DistributedScheduler {
     ///
     /// Regular steps use their `task_name`. `ShuffleMap` steps use `"shuffle:<key>"` where
     /// `<key>` is the stringify-based type key — the first field of the
-    /// rkyv-encoded `ShuffleMapPayload`.
+    /// bincode-encoded `ShuffleMapPayload`.
     pub(crate) fn required_capability(op: &Step) -> String {
         match &op.kind {
             StepKind::Engine(EngineAction::ShuffleMap { .. }) => {

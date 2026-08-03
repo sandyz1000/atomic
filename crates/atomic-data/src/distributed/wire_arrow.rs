@@ -24,7 +24,7 @@ pub fn decode_batch(bytes: &[u8]) -> DataResult<RecordBatch> {
             "arrow IPC stream contained no batches".into(),
         )),
         n => Err(crate::error::DataError::Other(
-            format!("arrow IPC stream contained {n} batches, expected 1").into(),
+            format!("arrow IPC stream contained {n} batches, expected 1"),
         )),
     }
 }

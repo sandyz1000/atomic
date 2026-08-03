@@ -27,7 +27,7 @@ impl PyRdd {
             self.staged = saved_staged;
             let result_bytes = self
                 .context
-                .dispatch_pipeline(source_partitions, ops)
+                .dispatch_pipeline(self.placeholder_rdd(), source_partitions, ops)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             // Merge N partial (key → [val…]) dicts on the driver
@@ -114,7 +114,7 @@ impl PyRdd {
             self.staged = saved_staged;
             let result_bytes = self
                 .context
-                .dispatch_pipeline(source_partitions, ops)
+                .dispatch_pipeline(self.placeholder_rdd(), source_partitions, ops)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             // Merge N partial dicts on the driver with the same f
@@ -286,7 +286,7 @@ impl PyRdd {
             self.staged = saved_staged;
             let result_bytes = self
                 .context
-                .dispatch_pipeline(source_partitions, ops)
+                .dispatch_pipeline(self.placeholder_rdd(), source_partitions, ops)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             let elements = Self::decode_result_bytes(py, result_bytes)?;
@@ -364,7 +364,7 @@ impl PyRdd {
             self.staged = saved_staged;
             let result_bytes = self
                 .context
-                .dispatch_pipeline(source_partitions, ops)
+                .dispatch_pipeline(self.placeholder_rdd(), source_partitions, ops)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             let elements = Self::decode_result_bytes(py, result_bytes)?;

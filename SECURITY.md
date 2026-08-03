@@ -14,6 +14,7 @@
 To report a security issue, email [sandip.dey1988@yahoo.com](mailto:sandip.dey1988@yahoo.com) with the subject line `[SECURITY] Atomic — <brief description>`.
 
 Include:
+
 - A description of the vulnerability and its potential impact
 - Steps to reproduce or proof-of-concept code
 - Any suggested mitigations if you have them

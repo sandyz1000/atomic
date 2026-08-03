@@ -221,9 +221,6 @@ where
     parent: Arc<dyn DStream<(K, V)>>,
     ssc: Arc<StreamingContext>,
     reduce_func: Arc<F>,
-    /// Output partition count taken at construction; reserved for partition-aware shuffle.
-    #[allow(dead_code)]
-    num_partitions: usize,
     generated: GeneratedRdds<(K, V)>,
 }
 
@@ -238,14 +235,13 @@ where
         parent: Arc<dyn DStream<(K, V)>>,
         ssc: Arc<StreamingContext>,
         func: F,
-        num_partitions: usize,
+        _num_partitions: usize,
     ) -> Self {
         ReduceByKeyDStream {
             stream_id,
             parent,
             ssc,
             reduce_func: Arc::new(func),
-            num_partitions,
             generated: Mutex::new(HashMap::new()),
         }
     }

@@ -103,12 +103,9 @@ impl PyStreamingContext {
         }))
     }
 
-    pub fn socket_text_stream(&self, host: &str, port: u16) -> PyDStream {
+    pub fn socket_text_stream(&self, _host: &str, _port: u16) -> PyDStream {
         PyDStream {
-            inner: Arc::new(PyDStreamInner::Socket {
-                host: host.to_string(),
-                port,
-            }),
+            inner: Arc::new(PyDStreamInner::Socket),
             is_pair: false,
         }
     }

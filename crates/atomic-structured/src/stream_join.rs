@@ -15,7 +15,6 @@
 //! lives in [`stream_join_distributed`](crate::stream_join_distributed).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
@@ -138,8 +137,6 @@ pub(crate) struct StreamJoinEngine {
     left_time_idx: usize,
     /// Index of time column in right schema.
     right_time_idx: usize,
-    #[allow(dead_code)]
-    checkpoint_dir: Option<PathBuf>,
 }
 
 impl StreamJoinEngine {
@@ -147,7 +144,6 @@ impl StreamJoinEngine {
         left: Arc<dyn StreamSource>,
         right: Arc<dyn StreamSource>,
         spec: StreamJoinSpec,
-        checkpoint_dir: Option<PathBuf>,
     ) -> StructuredResult<Self> {
         let left_key_idx = spec
             .left_schema
@@ -177,7 +173,6 @@ impl StreamJoinEngine {
             right_key_idx,
             left_time_idx,
             right_time_idx,
-            checkpoint_dir,
         })
     }
 

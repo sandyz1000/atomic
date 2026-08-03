@@ -8,7 +8,7 @@ use datafusion::execution::context::SessionContext;
 use datafusion::execution::session_state::SessionStateBuilder;
 
 use crate::config::{LlmProvider, NlqConfig};
-use crate::errors::Result;
+use crate::errors::{NlqError, Result};
 use crate::llm::LlmClient;
 use crate::llm::anthropic::AnthropicClient;
 use crate::openai::OpenAiClient;
@@ -27,10 +27,6 @@ pub struct NlqContext {
     pub sql_ctx: Arc<AtomicSqlContext>,
     agent_loop: AgentLoop,
     pub registry: Arc<ToolRegistry>,
-    /// Retained NLQ configuration (model, rounds, batching); referenced by future
-    /// agent tuning, not read on the current query path.
-    #[allow(dead_code)]
-    config: Arc<NlqConfig>,
     vector_indexes: Arc<DashMap<String, Arc<dyn VectorIndexProvider>>>,
 }
 
@@ -80,13 +76,17 @@ impl NlqContext {
             .build();
         let session = SessionContext::new_with_state(state);
         let registry_session = Arc::new(session.clone());
-        let sql_ctx = Arc::new(AtomicSqlContext::from_session(session, compute));
+        let sql_ctx = Arc::new(AtomicSqlContext::from_session(session, compute.clone()));
 
         let registry = Arc::new(ToolRegistry::new(registry_session));
         let planner = Arc::new(LlmPlanner::new(client.clone(), config.clone()));
+        let context = compute
+            .clone()
+            .ok_or_else(|| NlqError::Config("context is required".to_string()))?;
         let executor = Arc::new(WorkflowExecutor::new(
             Arc::clone(&registry),
             Some(Arc::clone(&sql_ctx)),
+            context,
             client,
         ));
         let agent_loop = AgentLoop::new(planner, executor, config.clone());
@@ -95,7 +95,6 @@ impl NlqContext {
             sql_ctx,
             agent_loop,
             registry,
-            config,
             vector_indexes,
         })
     }

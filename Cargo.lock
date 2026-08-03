@@ -46,35 +46,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent_code_audit"
-version = "0.1.0"
-dependencies = [
- "atomic-compute",
- "atomic-data",
- "atomic-nlq",
-]
-
-[[package]]
-name = "agent_news_triage"
-version = "0.1.0"
-dependencies = [
- "atomic-compute",
- "atomic-data",
- "atomic-nlq",
- "serde_json",
-]
-
-[[package]]
-name = "agent_step"
-version = "0.1.0"
-dependencies = [
- "atomic-compute",
- "atomic-data",
- "atomic-nlq",
- "tokio",
-]
-
-[[package]]
 name = "agent_workflow_dag"
 version = "0.1.0"
 dependencies = [

@@ -31,7 +31,6 @@
 //! the environment at runtime. Tests use [`llm::mock::MockLlmClient`] or a local
 //! `wiremock` server and never call a real provider.
 
-pub mod agent_runner;
 pub mod config;
 pub mod context;
 pub mod errors;

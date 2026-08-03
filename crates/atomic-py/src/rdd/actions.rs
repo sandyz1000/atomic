@@ -18,7 +18,7 @@ impl PyRdd {
         {
             let result_bytes = self
                 .context
-                .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
+                .dispatch_pipeline(self.placeholder_rdd(), staged.source_partitions.clone(), staged.steps.clone())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             return Self::collect_distributed(py, result_bytes);
         }
@@ -84,7 +84,7 @@ impl PyRdd {
             let staged = self.staged.as_ref().unwrap();
             let result_bytes = self
                 .context
-                .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
+                .dispatch_pipeline(self.placeholder_rdd(), staged.source_partitions.clone(), staged.steps.clone())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             let json_mod = PyModule::import(py, "json")?;
@@ -149,7 +149,7 @@ impl PyRdd {
             let staged = self.staged.as_ref().unwrap();
             let result_bytes = self
                 .context
-                .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
+                .dispatch_pipeline(self.placeholder_rdd(), staged.source_partitions.clone(), staged.steps.clone())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             let json_mod = PyModule::import(py, "json")?;
@@ -746,7 +746,7 @@ impl PyRdd {
         {
             let result_bytes = self
                 .context
-                .dispatch_pipeline(staged.source_partitions.clone(), staged.steps.clone())
+                .dispatch_pipeline(self.placeholder_rdd(), staged.source_partitions.clone(), staged.steps.clone())
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let list = Self::collect_distributed(py, result_bytes)?;
             let mut out = Vec::new();

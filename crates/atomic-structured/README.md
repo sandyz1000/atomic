@@ -155,7 +155,7 @@ let sink = shared(FileSink::new("/data/output/"));
 
 ## Checkpoint and recovery
 
-State is serialized with bincode and written atomically
+State is serialized with rkyv and written atomically
 (`state.bin.tmp` → `state.bin`) after each batch.
 
 ```rust

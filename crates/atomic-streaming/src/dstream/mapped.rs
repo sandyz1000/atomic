@@ -256,14 +256,8 @@ where
     T: Data + Clone,
     F: Fn(Arc<dyn Rdd<Item = T>>, u64) + Send + Sync + 'static,
 {
-    // Retained from construction; the output-operation path drives execution
-    // through `foreach_func`/`parent` and does not read these directly.
-    #[allow(dead_code)]
-    stream_id: usize,
     parent: Arc<dyn DStream<T>>,
     foreach_func: Arc<F>,
-    #[allow(dead_code)]
-    ssc: Arc<StreamingContext>,
 }
 
 impl<T, F> ForEachDStream<T, F>
@@ -272,16 +266,14 @@ where
     F: Fn(Arc<dyn Rdd<Item = T>>, u64) + Send + Sync + 'static,
 {
     pub fn new(
-        stream_id: usize,
+        _stream_id: usize,
         parent: Arc<dyn DStream<T>>,
         func: F,
-        ssc: Arc<StreamingContext>,
+        _ssc: Arc<StreamingContext>,
     ) -> Self {
         ForEachDStream {
-            stream_id,
             parent,
             foreach_func: Arc::new(func),
-            ssc,
         }
     }
 }

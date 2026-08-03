@@ -58,7 +58,6 @@ use structured::{
 #[pymodule(name = "atomic_compute")]
 fn atomic(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Idempotent — safe even if the interpreter re-imports the module.
-    atomic_nlq::agent_runner::register();
 
     m.add_class::<PyContext>()?;
     m.add_class::<PyRdd>()?;

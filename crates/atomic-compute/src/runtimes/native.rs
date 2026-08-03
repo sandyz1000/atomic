@@ -104,7 +104,7 @@ impl Dispatcher for NativeDispatcher {
                 kafka_consume_handler(&payload)
             }
             StepKind::Engine(EngineAction::ReadFileSplit) => {
-                // Per-partition config shipped in `data` (rkyv-encoded FileSplitPayload);
+                // Per-partition config shipped in `data` (bincode-encoded FileSplitPayload);
                 // `op.payload` is empty.
                 let payload: FileSplitPayload = decode_payload(data).map_err(|e| {
                     ComputeError::InvalidPayload(format!("ReadFileSplit data decode: {e}"))
@@ -112,7 +112,7 @@ impl Dispatcher for NativeDispatcher {
                 file_split_handler(&payload)
             }
             StepKind::Engine(EngineAction::MergeState { merge_fn }) => {
-                // Per-shard input shipped in `data` (rkyv-encoded StateMergePayload).
+                // Per-shard input shipped in `data` (bincode-encoded StateMergePayload).
                 // The merge fn is content-agnostic; the shard's state persists across
                 // batches in the worker-global WORKER_STATE_STORE.
                 let payload: StateMergePayload = decode_payload(data).map_err(|e| {

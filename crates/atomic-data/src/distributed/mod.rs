@@ -176,7 +176,6 @@ mod tests {
             | EngineAction::Cache { .. }
             | EngineAction::ReadFileSplit
             | EngineAction::MergeState { .. }
-            | EngineAction::AgentStep
             | EngineAction::CombineByKey { .. } => true,
             #[cfg(feature = "kafka")]
             EngineAction::KafkaConsume => true,

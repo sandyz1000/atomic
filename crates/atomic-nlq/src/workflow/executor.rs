@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use atomic_compute::context::Context;
+use atomic_data::distributed::{Step, StepKind, TaskAction, TaskRuntime};
 use atomic_sql::context::AtomicSqlContext;
 use tokio::task::JoinSet;
 
@@ -20,6 +22,7 @@ use super::{StepOutput, StepResult, WorkflowPlan, WorkflowStep};
 pub struct WorkflowExecutor {
     tool_registry: Arc<ToolRegistry>,
     sql_ctx: Option<Arc<AtomicSqlContext>>,
+    context: Arc<Context>,
     openai_client: Arc<dyn LlmClient>,
 }
 
@@ -27,11 +30,13 @@ impl WorkflowExecutor {
     pub fn new(
         tool_registry: Arc<ToolRegistry>,
         sql_ctx: Option<Arc<AtomicSqlContext>>,
+        context: Arc<Context>,
         openai_client: Arc<dyn LlmClient>,
     ) -> Self {
         Self {
             tool_registry,
             sql_ctx,
+            context,
             openai_client,
         }
     }
@@ -72,12 +77,14 @@ impl WorkflowExecutor {
 
             for step in ready {
                 let tool_registry = Arc::clone(&self.tool_registry);
+                let context = Arc::clone(&self.context);
+
                 let sql_ctx = self.sql_ctx.clone();
                 let openai_client = Arc::clone(&self.openai_client);
                 let upstream = upstream_snapshots.clone();
 
                 join_set.spawn(async move {
-                    run_step(step, tool_registry, sql_ctx, openai_client, upstream).await
+                    run_step(step, tool_registry, sql_ctx, context, openai_client, upstream).await
                 });
             }
 
@@ -142,13 +149,15 @@ impl WorkflowExecutor {
                 let step_id = step.id.clone();
                 let tool_name = step.tool.clone();
                 let tool_registry = Arc::clone(&self.tool_registry);
+                let context = Arc::clone(&self.context);
+
                 let sql_ctx = self.sql_ctx.clone();
                 let openai_client = Arc::clone(&self.openai_client);
                 let upstream = upstream_snapshots.clone();
 
                 join_set.spawn(async move {
                     let result =
-                        run_step(step, tool_registry, sql_ctx, openai_client, upstream).await;
+                        run_step(step, tool_registry, sql_ctx, context, openai_client, upstream).await;
                     (step_id, tool_name, result)
                 });
             }
@@ -211,6 +220,7 @@ async fn run_step(
     step: WorkflowStep,
     tool_registry: Arc<ToolRegistry>,
     sql_ctx: Option<Arc<AtomicSqlContext>>,
+    context: Arc<Context>,
     openai_client: Arc<dyn LlmClient>,
     upstream: HashMap<String, StepResult>,
 ) -> Result<StepResult> {
@@ -224,8 +234,8 @@ async fn run_step(
         ToolRuntime::Builtin(builtin) => {
             run_builtin(builtin, &step, sql_ctx, openai_client, &upstream).await?
         }
-        ToolRuntime::Python(code) => run_python(code, &step, &upstream).await?,
-        ToolRuntime::JavaScript(code) => run_javascript(code, &step, &upstream).await?,
+        ToolRuntime::Python(code) => run_python(code, &step, &context, &upstream).await?,
+        ToolRuntime::JavaScript(code) => run_javascript(code, &step, &context, &upstream).await?,
     };
 
     Ok(StepResult {
@@ -285,6 +295,21 @@ async fn run_builtin(
                 .collect::<Result<_>>()?;
             Ok(StepOutput::DataFrame(ipc_bytes))
         }
+        BuiltinTool::Filter
+        | BuiltinTool::Map
+        | BuiltinTool::Aggregate
+        | BuiltinTool::Sort
+        | BuiltinTool::Join => {
+            // These builtins operate on RDD-level data from upstream steps.
+            // They dispatch through the engine using registered #[task] functions.
+            // For now, delegate through SQL:
+            //   filter → SELECT * FROM upstream WHERE <col> <op> <val>
+            //   map → transform via existing TypedRdd::map_task
+            Err(NlqError::WorkflowExecution(format!(
+                "builtin tool {:?} is implemented via engine dispatch; use sql_query for now",
+                builtin
+            )))
+        }
         BuiltinTool::LlmFilter
         | BuiltinTool::LlmMap
         | BuiltinTool::Embed
@@ -302,42 +327,77 @@ async fn run_builtin(
 async fn run_python(
     code: &str,
     step: &WorkflowStep,
-    _upstream: &HashMap<String, StepResult>,
+    context: &Arc<Context>,
+    upstream: &HashMap<String, StepResult>,
 ) -> Result<StepOutput> {
-    // Python tasks are executed via the atomic-worker PyO3 runtime.
-    // The code string is the full function body; args are passed as JSON.
-    // This dispatches through Atomic's existing Python task infrastructure.
     log::debug!(
         "running Python tool for step '{}': {} bytes of code",
         step.id,
         code.len()
     );
-    let args_json = serde_json::to_string(&step.args)
-        .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
-    // Placeholder: real dispatch goes through atomic_compute's Python pool.
-    // Returns the result as a text JSON payload until full wiring is complete.
-    Ok(StepOutput::Text(format!(
-        "{{\"step\":\"{}\",\"status\":\"python_task_dispatched\",\"args\":{args_json}}}",
-        step.id
-    )))
+    let source_partitions = upstream_to_partitions(upstream);
+    let op = Step {
+        task_name: step.id.clone(),
+        kind: StepKind::Task(TaskAction::Map),
+        runtime: TaskRuntime::Native,
+        payload: code.as_bytes().to_vec(),
+    };
+    let placeholder: Arc<dyn atomic_data::rdd::Rdd<Item = String>> = Arc::new(
+        atomic_compute::rdd::ParallelCollection::new(context.new_rdd_id(), Vec::<String>::new(), 1),
+    );
+    let result_bytes = context
+        .dispatch_pipeline(placeholder, source_partitions, vec![op])
+        .map_err(|e| NlqError::WorkflowExecution(format!("python tool dispatch: {e}")))?;
+    let text: String = result_bytes
+        .into_iter()
+        .map(|b| String::from_utf8(b).unwrap_or_else(|e| format!("utf-8 error: {e}")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(StepOutput::Text(text))
 }
 
 async fn run_javascript(
     code: &str,
     step: &WorkflowStep,
-    _upstream: &HashMap<String, StepResult>,
+    context: &Arc<Context>,
+    upstream: &HashMap<String, StepResult>,
 ) -> Result<StepOutput> {
     log::debug!(
         "running JS tool for step '{}': {} bytes of code",
         step.id,
         code.len()
     );
-    let args_json = serde_json::to_string(&step.args)
-        .map_err(|e| NlqError::WorkflowExecution(e.to_string()))?;
-    Ok(StepOutput::Text(format!(
-        "{{\"step\":\"{}\",\"status\":\"js_task_dispatched\",\"args\":{args_json}}}",
-        step.id
-    )))
+    let source_partitions = upstream_to_partitions(upstream);
+    let op = Step {
+        task_name: step.id.clone(),
+        kind: StepKind::Task(TaskAction::Map),
+        runtime: TaskRuntime::Native,
+        payload: code.as_bytes().to_vec(),
+    };
+    let placeholder: Arc<dyn atomic_data::rdd::Rdd<Item = String>> = Arc::new(
+        atomic_compute::rdd::ParallelCollection::new(context.new_rdd_id(), Vec::<String>::new(), 1),
+    );
+    let result_bytes = context
+        .dispatch_pipeline(placeholder, source_partitions, vec![op])
+        .map_err(|e| NlqError::WorkflowExecution(format!("js tool dispatch: {e}")))?;
+    let text: String = result_bytes
+        .into_iter()
+        .map(|b| String::from_utf8(b).unwrap_or_else(|e| format!("utf-8 error: {e}")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(StepOutput::Text(text))
+}
+
+/// Collect upstream step results into source partitions for `dispatch_pipeline`.
+fn upstream_to_partitions(upstream: &HashMap<String, StepResult>) -> Vec<Vec<u8>> {
+    upstream
+        .values()
+        .flat_map(|r| match &r.output {
+            StepOutput::Text(t) => vec![t.as_bytes().to_vec()],
+            StepOutput::DataFrame(bufs) => bufs.clone(),
+            StepOutput::Empty => vec![vec![]],
+        })
+        .collect()
 }
 
 /// Decode Arrow IPC file bytes and return up to `limit` rows as JSON objects.

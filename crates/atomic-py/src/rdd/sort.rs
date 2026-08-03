@@ -199,7 +199,7 @@ impl PyRdd {
             self.staged = saved_staged;
             let result_bytes = self
                 .context
-                .dispatch_pipeline(source_partitions, ops)
+                .dispatch_pipeline(self.placeholder_rdd(), source_partitions, ops)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             // Decode N sorted partition lists

@@ -57,11 +57,6 @@ pub use worker_pool::InflightGuard;
 /// Consecutive TCP-level failure count per worker before removal.
 pub(crate) const MAX_WORKER_FAILURES: u32 = 3;
 
-/// Default per-task timeout for `AgentStep` pipelines when `agent_step_timeout` is
-/// unset. Multi-round LLM calls (with provider-side retry/backoff already happening
-/// inside the agent runner) need far more headroom than the 5-minute CPU-task default.
-pub(crate) const AGENT_STEP_DEFAULT_TIMEOUT: Duration = Duration::from_secs(1800);
-
 /// Driver-side merge of `TaskResultEnvelope::accumulator_deltas`, installed by the
 /// compute context. Called once per committed task result (duplicate speculative
 /// results are dropped before the sink fires); a retried stage re-runs its tasks,
@@ -89,7 +84,7 @@ pub struct DistributedScheduler {
     pub(crate) task_timeout: Option<Duration>,
     /// Per-task timeout for pipelines containing an `AgentStep` op. Multi-round LLM
     /// calls run far longer than the cheap-CPU-task default `task_timeout`, so this
-    /// is a separate, larger knob. Falls back to `AGENT_STEP_DEFAULT_TIMEOUT` when unset.
+    /// is a separate, larger knob.
     pub(crate) agent_step_timeout: Option<Duration>,
     /// Speculative execution multiplier.
     pub(crate) speculation_multiplier: Option<f64>,

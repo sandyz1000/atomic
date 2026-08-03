@@ -126,14 +126,14 @@ pub enum EngineAction {
     Cache { rdd_id: usize },
     /// File-split source op. The worker opens `path`, optionally seeks to `start_byte`,
     /// reads lines up to `end_byte` (or EOF), and returns them as rkyv-encoded `Vec<String>`.
-    /// All config is in the task `data` (rkyv-encoded `FileSplitPayload`); `op.payload`
+    /// All config is in the task `data` (bincode-encoded `FileSplitPayload`); `op.payload`
     /// is empty.
     ReadFileSplit,
     /// Distributed stateful-streaming merge. The worker reads its shard's serialized
     /// state from `WORKER_STATE_STORE[state_id]`, applies the registered `merge_fn`
     /// (looked up in `STATE_MERGE_REGISTRY`) to this batch's partials, stores the new
     /// state, and returns the emitted cells. All per-shard config (state_id, params,
-    /// partials) is in the task `data` (rkyv-encoded `StateMergePayload`).
+    /// partials) is in the task `data` (bincode-encoded `StateMergePayload`).
     MergeState {
         /// Registered state-merge function name (e.g. `"atomic_structured::windowed_v1"`).
         merge_fn: String,
@@ -164,7 +164,7 @@ pub enum EngineAction {
     /// Kafka Direct source op (requires `kafka` feature). The worker `assign`+`seek`s to
     /// the given offset range and polls until `end_offset`, returning the messages as
     /// `rkyv`-encoded `Vec<String>`. `data` in the TaskEnvelope is ignored; all config
-    /// is in `Step.payload` (rkyv-encoded `KafkaConsumePayload`).
+    /// is in `Step.payload` (bincode-encoded `KafkaConsumePayload`).
     #[cfg(feature = "kafka")]
     KafkaConsume,
 }

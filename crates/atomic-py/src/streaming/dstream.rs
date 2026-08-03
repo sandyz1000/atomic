@@ -28,12 +28,7 @@ pub(crate) enum PyDStreamInner {
     Queue {
         queue: Arc<Mutex<VecDeque<Vec<Py<PyAny>>>>>,
     },
-    Socket {
-        #[allow(dead_code)]
-        host: String,
-        #[allow(dead_code)]
-        port: u16,
-    },
+    Socket,
     File {
         directory: String,
     },

@@ -21,7 +21,6 @@
 //! [`session_window_distributed`](crate::session_window_distributed).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{Array, Float64Array, Int64Array, StringArray};
@@ -175,15 +174,12 @@ pub(crate) struct SessionEngine {
     pub(crate) spec: SessionSpec,
     store: Mutex<SessionStore>,
     watermark: Mutex<WatermarkTracker>,
-    #[allow(dead_code)]
-    checkpoint_dir: Option<PathBuf>,
 }
 
 impl SessionEngine {
     pub(crate) fn new(
         source: Arc<dyn StreamSource>,
         spec: SessionSpec,
-        checkpoint_dir: Option<PathBuf>,
     ) -> StructuredResult<Self> {
         let watermark = WatermarkTracker::new(spec.watermark_delay_ms.unwrap_or(0));
         Ok(SessionEngine {
@@ -191,7 +187,6 @@ impl SessionEngine {
             spec,
             store: Mutex::new(SessionStore::new()),
             watermark: Mutex::new(watermark),
-            checkpoint_dir,
         })
     }
 

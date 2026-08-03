@@ -40,6 +40,16 @@ pub enum BuiltinTool {
     Embed,
     /// Approximate nearest-neighbour vector search.
     VectorSearch,
+    /// Keep rows matching a predicate on a named column.
+    Filter,
+    /// Apply a transformation to each row.
+    Map,
+    /// Aggregate rows by key with a combiner function.
+    Aggregate,
+    /// Sort rows by a key column.
+    Sort,
+    /// Join two tables on a common key column.
+    Join,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +118,31 @@ impl ToolRegistry {
                 "vector_search",
                 "Run approximate nearest-neighbour search against a registered vector index.",
                 BuiltinTool::VectorSearch,
+            ),
+            (
+                "filter",
+                "Keep rows where a column value satisfies a condition: eq, neq, gt, gte, lt, lte, contains.",
+                BuiltinTool::Filter,
+            ),
+            (
+                "map",
+                "Apply a transformation to each row; produces new columns or modifies existing ones.",
+                BuiltinTool::Map,
+            ),
+            (
+                "aggregate",
+                "Group rows by a key column and apply a combiner function (sum, count, avg, min, max) to a value column.",
+                BuiltinTool::Aggregate,
+            ),
+            (
+                "sort",
+                "Sort rows by a key column, ascending or descending.",
+                BuiltinTool::Sort,
+            ),
+            (
+                "join",
+                "Join two tables on a common key column. Use 'left' and 'right' upstream step IDs.",
+                BuiltinTool::Join,
             ),
         ] {
             self.tools.insert(

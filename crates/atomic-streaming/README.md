@@ -227,7 +227,7 @@ let ssc = StreamingContext::from_checkpoint("/data/checkpoints")?;
 ssc.start()?;
 ```
 
-Checkpoint state is serialized with `bincode` and written atomically
+Checkpoint state is serialized with rkyv and written atomically
 (`.tmp` → rename) after each configured checkpoint interval.
 
 ---

@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use atomic_compute::context::Context;
+use atomic_compute::rdd::ParallelCollection;
 use atomic_data::distributed::{PythonTaskPayload, Step, StepKind, TaskAction, TaskRuntime};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
 mod actions;
-mod agent;
 mod errors;
 mod pair_ops;
 mod sort;
@@ -61,6 +61,16 @@ pub struct PyRdd {
 }
 
 impl PyRdd {
+    /// Placeholder RDD for `dispatch_pipeline`'s final shape parameter — unused beyond
+    /// type resolution, so a single-unit parallel collection suffices.
+    fn placeholder_rdd(&self) -> Arc<dyn atomic_data::rdd::Rdd<Item = ()>> {
+        Arc::new(ParallelCollection::new(
+            self.context.new_rdd_id(),
+            vec![()],
+            1,
+        ))
+    }
+
     pub fn from_data(
         _py: Python,
         elements: Vec<Py<PyAny>>,
