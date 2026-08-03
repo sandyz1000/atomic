@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use atomic_data::distributed::ScriptRuntime;
 use dashmap::DashMap;
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{AggregateUDF, ScalarUDF};
@@ -212,3 +211,4 @@ impl ToolRegistry {
             .map(|e| e.value().clone())
             .collect()
     }
+}

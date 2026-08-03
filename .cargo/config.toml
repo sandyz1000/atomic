@@ -1,0 +1,5 @@
+# macOS deployment target — required because V8 (deno_core) is compiled for
+# macOS 12.0+. Without this, linking the atomic-worker binary fails with
+# "object file was built for newer 'macOS' version (12.0) than being linked (11.0)".
+[env]
+MACOSX_DEPLOYMENT_TARGET = "12.0"

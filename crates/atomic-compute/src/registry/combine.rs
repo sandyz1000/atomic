@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 use atomic_data::data::Data;
-use atomic_data::distributed::{TaskAction, WireDecode, WireEncode};
+use atomic_data::distributed::{TaskAction, WireDecode, WireEncode, WireSerde};
 use once_cell::sync::Lazy;
 
 use crate::registry::TASK_REGISTRY;
@@ -119,10 +119,8 @@ pub fn combine_handler<K, V>(
     data: &[u8],
 ) -> Result<Vec<u8>, String>
 where
-    K: Data + Clone + Eq + Hash,
-    V: Data + Clone + WireDecode,
-    Vec<(K, V)>: WireDecode + WireEncode,
-    Vec<V>: WireEncode,
+    K: Data + Clone + Eq + Hash + WireSerde,
+    V: Data + Clone + WireSerde,
 {
     let ctx = decode_ctx(payload)?;
     let merge = TASK_REGISTRY
@@ -165,13 +163,9 @@ pub fn combine_lift_handler<K, V, C>(
     data: &[u8],
 ) -> Result<Vec<u8>, String>
 where
-    K: Data + Clone + Eq + Hash,
-    V: Data + Clone,
-    C: Data + Clone + WireDecode,
-    Vec<(K, V)>: WireDecode,
-    Vec<(K, C)>: WireEncode,
-    Vec<V>: WireEncode,
-    Vec<C>: WireEncode + WireDecode,
+    K: Data + Clone + Eq + Hash + WireSerde,
+    V: Data + Clone + WireSerde,
+    C: Data + Clone + WireSerde,
 {
     let ctx = decode_ctx(payload)?;
     let lift_name = ctx
