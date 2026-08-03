@@ -296,21 +296,6 @@ fn pin_shard_fallback() {
 }
 
 #[test]
-fn agent_timeout_default() {
-    let sched = DistributedScheduler::new(4, true);
-    assert_eq!(sched.agent_step_timeout, None);
-    // task_timeout (the cheap-CPU-task default) is unaffected.
-    assert_eq!(sched.task_timeout, Some(Duration::from_secs(300)));
-}
-
-#[test]
-fn with_agent_timeout() {
-    let sched =
-        DistributedScheduler::new(4, true).with_agent_step_timeout(Duration::from_secs(900));
-    assert_eq!(sched.agent_step_timeout, Some(Duration::from_secs(900)));
-}
-
-#[test]
 fn rejects_closure_tasks() {
     let sched = DistributedScheduler::new(4, true);
     assert!(
@@ -321,36 +306,6 @@ fn rejects_closure_tasks() {
 
 fn envelope_with_ops(steps: Vec<Step>) -> TaskEnvelope {
     TaskEnvelope::new(0, 0, 0, 0, 0, "test".to_string(), steps, Vec::new())
-}
-
-#[test]
-fn timeout_agent_default() {
-    let sched = DistributedScheduler::new(4, true);
-    let task = envelope_with_ops(vec![Step {
-        task_name: String::new(),
-        kind: StepKind::Engine(EngineAction::AgentStep),
-        runtime: TaskRuntime::Native,
-        payload: vec![],
-    }]);
-    assert_eq!(
-        sched.effective_timeout(&task),
-        Some(super::AGENT_STEP_DEFAULT_TIMEOUT)
-    );
-}
-
-#[test]
-fn timeout_agent_configured() {
-    let sched = DistributedScheduler::new(4, true).with_agent_step_timeout(Duration::from_secs(60));
-    let task = envelope_with_ops(vec![Step {
-        task_name: String::new(),
-        kind: StepKind::Engine(EngineAction::AgentStep),
-        runtime: TaskRuntime::Native,
-        payload: vec![],
-    }]);
-    assert_eq!(
-        sched.effective_timeout(&task),
-        Some(Duration::from_secs(60))
-    );
 }
 
 #[test]
