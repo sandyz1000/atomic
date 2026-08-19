@@ -66,9 +66,12 @@ impl DistributedScheduler {
     ) -> LibResult<Vec<ActiveShuffleStage>> {
         let mut dispatched = Vec::new();
         // Reduce-side shuffles can sit one or more narrow hops upstream (e.g. after a
-        // `.values()`/`.map_values()`); a direct-dep scan would miss those and leave the
-        // shuffle-map undispatched. `reduce_side_shuffles` walks narrow deps to find them all.
-        for shuffle_dep in atomic_data::dependency::reduce_side_shuffles(rdd) {
+        // `.values()`/`.map_values()`), or beyond another shuffle boundary (chained
+        // `by_dst.join` in graph `triplets`). `ancestor_shuffles` walks both, map-side first,
+        // so each shuffle's parent map outputs are registered/dispatched before the stage
+        // that reads them.
+        let shuffle_deps = atomic_data::dependency::ancestor_shuffles(rdd);
+        for shuffle_dep in shuffle_deps {
             let steps = Self::shuffle_map_ops(&shuffle_dep, &preceding_steps)?;
             let parent_partitions = shuffle_dep
                 .encode_partitions()

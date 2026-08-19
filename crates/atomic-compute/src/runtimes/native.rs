@@ -14,7 +14,7 @@ use crate::registry::{
     AGENT_RUNNER_REGISTRY, STATE_MERGE_REGISTRY, ShuffleWriteCtx, TASK_REGISTRY,
     combine::CombineCtx, resolve_shuffle_handler,
 };
-use crate::runtimes::{Backend, Dispatcher};
+use crate::runtimes::Dispatcher;
 
 /// Handles `TaskRuntime::Native` steps — both compile-time `#[task]` registry
 /// lookups and shuffle-map writes.
@@ -403,8 +403,12 @@ fn build_result_envelope(
     .with_held_state_ids(held_state_ids)
 }
 
-impl Backend for ComputeEngine {
-    fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> ComputeResult<TaskResultEnvelope> {
+impl ComputeEngine {
+    /// Execute a complete task envelope (possibly multiple pipeline steps).
+    ///
+    /// Errors are encoded as `FatalFailure` rather than propagated so the
+    /// scheduler can handle them uniformly.
+    pub fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> ComputeResult<TaskResultEnvelope> {
         let data = match resolve_input(task, worker_id)? {
             InputData::EarlyReturn(r) => return Ok(r),
             InputData::Pipeline(d) => d,

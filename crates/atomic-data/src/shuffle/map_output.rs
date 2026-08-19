@@ -100,13 +100,25 @@ impl MapOutputTracker {
             .encode_wire()
             .map_err(|e| NetworkError::Wire(e.to_string()))?;
 
-        // Connect to master with retry
+        // Bounded connect with retry. This is a hard error path (a missing or unreachable
+        // master for an unregistered shuffle), not a slow consumer; fail fast instead of
+        // retrying forever against a `0.0.0.0:0` placeholder.
+        const MAX_CONNECT_ATTEMPTS: u32 = 30;
+        let mut remaining = MAX_CONNECT_ATTEMPTS;
         let stream = loop {
             match TcpStream::connect(self.master_addr).await {
                 Ok(s) => break s,
-                Err(_) => {
+                Err(_) if remaining > 0 => {
+                    remaining -= 1;
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+                }
+                Err(e) => {
+                    return Err(MapOutputError::NetworkError(
+                        NetworkError::MasterUnreachable(format!(
+                            "master {} unreachable after {MAX_CONNECT_ATTEMPTS} tries: {e}",
+                            self.master_addr
+                        )),
+                    ));
                 }
             }
         };

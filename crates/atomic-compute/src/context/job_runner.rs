@@ -14,7 +14,7 @@ use atomic_scheduler::Schedulers;
 
 use crate::env;
 use crate::error::{ComputeError, ComputeResult};
-use crate::runtimes::{Backend, ComputeEngine};
+use crate::runtimes::ComputeEngine;
 
 use super::Context;
 
@@ -212,8 +212,8 @@ impl Context {
             return Ok(());
         };
         // Walk narrow deps too: a shuffle can sit upstream of a `.values()`/`.map_values()`
-        // hop, where a direct-dep scan would miss it (see `reduce_side_shuffles`).
-        for shuffle_dep in atomic_data::dependency::reduce_side_shuffles(rdd) {
+        // hop, where a direct-dep scan would miss it (see `ancestor_shuffles`).
+        for shuffle_dep in atomic_data::dependency::ancestor_shuffles(rdd) {
             let shuffle_id = shuffle_dep.get_shuffle_id();
             let num_map_partitions = shuffle_dep.get_rdd_base().number_of_splits();
             let uris: Vec<Option<String>> = (0..num_map_partitions)

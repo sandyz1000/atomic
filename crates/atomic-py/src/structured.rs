@@ -46,7 +46,7 @@ impl PyStructuredContext {
     #[new]
     #[pyo3(signature = (batch_secs = 1.0))]
     pub fn new(batch_secs: f64) -> PyResult<Self> {
-        let sc = atomic_compute::context::Context::new().map_err(runtime_err)?;
+        let sc = atomic_compute::context::Context::from_env().map_err(runtime_err)?;
         let ssc = StreamingContext::new(sc, Duration::from_secs_f64(batch_secs));
         Ok(Self { ssc })
     }

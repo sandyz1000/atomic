@@ -19,7 +19,7 @@
 
 use atomic_compute::context::Context;
 use atomic_compute::env::Config;
-use atomic_compute::runtimes::{Backend, ComputeEngine};
+use atomic_compute::runtimes::ComputeEngine;
 use atomic_compute::task;
 use atomic_compute::task_traits::UnaryTask;
 use atomic_data::distributed::{

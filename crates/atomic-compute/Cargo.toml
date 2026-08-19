@@ -10,9 +10,6 @@ toml = { workspace = true }
 
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-tonic = { workspace = true }
-prost = { workspace = true }
-tonic-build = { workspace = true }
 hyper = { workspace = true }
 http-body-util = { workspace = true }
 http = { workspace = true }

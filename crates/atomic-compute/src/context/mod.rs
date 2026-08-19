@@ -102,11 +102,14 @@ impl Context {
         }
     }
 
-    /// Create a context from environment variables.
+    /// Create a context from environment variables, with worker hosts resolved
+    /// from `~/hosts.conf` when in distributed mode.
     ///
-    /// Prefer [`Context::new_with_config`] for new Rust programs; this exists for
-    /// Python/JS bindings and legacy code where explicit config is not practical.
-    pub fn new() -> ComputeResult<Arc<Self>> {
+    /// Bindings-only entry point: called by the Python/JS wrappers where an
+    /// explicit [`Config`] is impractical. Prefer [`Context::new_with_config`]
+    /// or [`Context::local`] in Rust programs. Core [`Config::from_env`]
+    /// intentionally stays hosts-file free.
+    pub fn from_env() -> ComputeResult<Arc<Self>> {
         let mut config = Config::from_env()?;
         if config.mode == DeploymentMode::Distributed
             && config.workers.is_empty()

@@ -40,7 +40,7 @@ impl PyContext {
     #[new]
     #[pyo3(signature = (default_parallelism=None))]
     pub fn new(default_parallelism: Option<usize>) -> PyResult<Self> {
-        let inner = atomic_compute::context::Context::new()
+        let inner = atomic_compute::context::Context::from_env()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         let parallelism = default_parallelism.unwrap_or_else(num_cpus);
         Ok(Self {

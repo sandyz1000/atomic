@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn load_files() {
-        let _context = Context::new().unwrap();
+        let _context = Context::from_env().unwrap();
         let mut loader: LocalFsReader<Vec<u8>> = LocalFsReader {
             id: 0,
             path: "A".into(),

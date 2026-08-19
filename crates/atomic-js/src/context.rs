@@ -35,7 +35,7 @@ impl JsContext {
     ///   specified on individual operations. Defaults to the number of logical CPUs.
     #[napi(constructor)]
     pub fn new(default_parallelism: Option<u32>) -> Result<Self> {
-        let inner = atomic_compute::context::Context::new()
+        let inner = atomic_compute::context::Context::from_env()
             .map_err(|e| Error::from_reason(e.to_string()))?;
         let parallelism = default_parallelism.map(|n| n as usize).unwrap_or_else(|| {
             std::thread::available_parallelism()

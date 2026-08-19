@@ -110,7 +110,7 @@ pub struct JsStructuredContext {
 impl JsStructuredContext {
     #[napi(constructor)]
     pub fn new(batch_secs: Option<f64>) -> Result<Self> {
-        let sc = atomic_compute::context::Context::new().map_err(err)?;
+        let sc = atomic_compute::context::Context::from_env().map_err(err)?;
         let ssc = StreamingContext::new(sc, Duration::from_secs_f64(batch_secs.unwrap_or(1.0)));
         Ok(Self { ssc })
     }

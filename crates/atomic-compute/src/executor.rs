@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::env;
 use crate::error::{ComputeError, ComputeResult};
 use crate::registry::TASK_REGISTRY;
-use crate::runtimes::{Backend, ComputeEngine};
+use crate::runtimes::ComputeEngine;
 use atomic_data::distributed::{
     TRANSPORT_HEADER_LEN, TaskEnvelope, TransportFrameKind, WireDecode, WireEncode,
     WorkerCapabilities, encode_transport_frame, parse_transport_header,

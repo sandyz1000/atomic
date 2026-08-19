@@ -23,8 +23,6 @@ tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
 statrs = { workspace = true }
 parking_lot = { workspace = true }
-tonic = { workspace = true }
-prost = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 hyper = { workspace = true }

@@ -10,12 +10,6 @@ pub enum ShuffleError {
     #[error("failed to create local shuffle dir after 10 attempts")]
     CouldNotCreateShuffleDir,
 
-    #[error("gRPC transport error")]
-    TransportError(#[from] tonic::transport::Error),
-
-    #[error("gRPC status error: {0}")]
-    GrpcStatus(#[from] tonic::Status),
-
     #[error("incorrect URI sent in the request")]
     IncorrectUri(#[from] http::uri::InvalidUri),
 
@@ -75,6 +69,9 @@ pub enum NetworkError {
     #[error("HTTP error: {0}")]
     HttpError(String),
 
+    #[error("map-output master unreachable: {0}")]
+    MasterUnreachable(String),
+
     #[error("hyper error: {0}")]
     Hyper(#[from] hyper::Error),
 
@@ -127,16 +124,6 @@ impl ShuffleError {
             self,
             ShuffleError::NetworkError(NetworkError::FreePortNotFound(_, _))
         )
-    }
-}
-
-impl From<ShuffleError> for tonic::Status {
-    fn from(err: ShuffleError) -> Self {
-        match err {
-            ShuffleError::NotValidRequest => tonic::Status::invalid_argument(err.to_string()),
-            ShuffleError::RequestedCacheNotFound => tonic::Status::not_found(err.to_string()),
-            _ => tonic::Status::internal(err.to_string()),
-        }
     }
 }
 

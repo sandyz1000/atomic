@@ -12,7 +12,6 @@ pub mod distributed;
 pub mod env;
 pub mod error;
 pub mod fn_traits;
-pub mod hosts;
 pub mod partial;
 pub mod partitioner;
 pub mod rdd;
