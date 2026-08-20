@@ -103,9 +103,39 @@ impl PyStreamingContext {
         }))
     }
 
-    pub fn socket_text_stream(&self, _host: &str, _port: u16) -> PyDStream {
+    /// Read newline-delimited text from a TCP socket. Connects on a background thread
+    /// (mirrors `atomic_streaming::dstream::input::SocketInputDStream`); lines received
+    /// between batch ticks are buffered and drained into the next batch.
+    pub fn socket_text_stream(&self, host: &str, port: u16) -> PyDStream {
+        let buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let addr = format!("{host}:{port}");
+        let buf = Arc::clone(&buffer);
+        let spawned = std::thread::Builder::new()
+            .name(format!("py-socket-stream-{addr}"))
+            .spawn(move || {
+                let stream = match std::net::TcpStream::connect(&addr) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("socket_text_stream: failed to connect to {addr}: {e}");
+                        return;
+                    }
+                };
+                let reader = std::io::BufReader::new(stream);
+                for line in std::io::BufRead::lines(reader) {
+                    match line {
+                        Ok(l) => buf.lock().push(l),
+                        Err(e) => {
+                            eprintln!("socket_text_stream: read error: {e}");
+                            break;
+                        }
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            eprintln!("socket_text_stream: failed to spawn reader thread: {e}");
+        }
         PyDStream {
-            inner: Arc::new(PyDStreamInner::Socket),
+            inner: Arc::new(PyDStreamInner::Socket { buffer }),
             is_pair: false,
         }
     }

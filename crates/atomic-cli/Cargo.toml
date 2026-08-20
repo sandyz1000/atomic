@@ -9,7 +9,6 @@ serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 toml.workspace = true
 tokio = { workspace = true }
-async-trait = { workspace = true }
 
 # SSH / SFTP — pure-Rust, no Docker, no shelling out
 russh = "0.62.2"

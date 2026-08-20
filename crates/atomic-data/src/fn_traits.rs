@@ -21,7 +21,3 @@ impl<T, U, F> RddPartitionFn<T, U> for F where
         + 'static
 {
 }
-
-pub trait RddPredicateFn<T>: Fn(&T) -> bool + Send + Sync + 'static {}
-
-impl<T, F> RddPredicateFn<T> for F where F: Fn(&T) -> bool + Send + Sync + 'static {}

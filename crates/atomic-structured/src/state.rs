@@ -125,10 +125,6 @@ impl AggState {
             }
         }
     }
-
-    pub fn is_count(&self) -> bool {
-        matches!(self, AggState::Count(_))
-    }
 }
 
 /// A value of a grouping key column (the subset of Arrow types we group on).

@@ -11,18 +11,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-// Rate estimation (stub — Phase 4)
-
-pub trait RateEstimator: Send + Sync {
-    fn compute(
-        &self,
-        time_ms: u64,
-        elements: u64,
-        work_delay_ms: u64,
-        wait_delay_ms: u64,
-    ) -> Option<f64>;
-}
-
 // Common state for input DStreams
 
 pub struct InputDStreamState {

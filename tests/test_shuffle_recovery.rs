@@ -91,7 +91,7 @@ async fn test_rerun_reregisters_slot() {
 
     let fresh_uri = "http://127.0.0.1:45123";
     let endpoint = spawn_map_worker(fresh_uri).await;
-    let sched = DistributedScheduler::new(2, true);
+    let sched = DistributedScheduler::new(2);
     sched.register_worker(
         endpoint,
         WorkerCapabilities::new("w1".to_string(), 4, vec![]),
@@ -125,7 +125,7 @@ fn sum_partition((_ctx, iter): (TaskContext, Box<dyn Iterator<Item = i32>>)) -> 
 /// Build a `LocalScheduler` + single-stage job over a trivial RDD so
 /// `on_event_failure` can be driven directly.
 async fn scheduler_with_job() -> (LocalScheduler, CountJobTracker) {
-    let sched = LocalScheduler::new(3, true);
+    let sched = LocalScheduler::new(3);
     let rdd: Arc<dyn atomic_data::rdd::Rdd<Item = i32>> = Arc::new(
         atomic_compute::rdd::ParallelCollection::new(900, vec![1, 2, 3, 4], 2),
     );

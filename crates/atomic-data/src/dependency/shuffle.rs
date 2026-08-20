@@ -212,7 +212,7 @@ where
 
         let splits = self.rdd.get_rdd_base().splits();
         let split = splits[partition].clone();
-        let num_output_splits = self.partitioner.get_num_of_partitions();
+        let num_output_splits = self.partitioner.num_partitions();
 
         log::debug!("is cogroup rdd: {}", self.is_cogroup_flag);
         log::debug!("number of output splits: {}", num_output_splits);
@@ -374,7 +374,7 @@ where
     }
 
     fn num_output_partitions(&self) -> usize {
-        self.partitioner.get_num_of_partitions()
+        self.partitioner.num_partitions()
     }
 
     fn partitioner_spec(&self) -> PartitionerSchema {

@@ -9,10 +9,9 @@
 //!
 //! The crate adds:
 //! - [`AtomicSqlContext`] — the primary entry point; wraps DataFusion's
-//!   `SessionContext`.
-//! - [`AtomicTableProvider`] / [`AtomicScanExec`] — bridge pre-loaded Arrow
-//!   [`RecordBatch`]es (or data from atomic's `TypedRdd<RecordBatch>`) into
-//!   DataFusion's physical plan.
+//!   `SessionContext`. Pre-loaded Arrow `RecordBatch`es (or data from atomic's
+//!   `TypedRdd<RecordBatch>`) are bridged into DataFusion's physical plan via
+//!   DataFusion's own `MemTable` / `RddTableProvider`.
 //! - [`DataFrame`] — thin ergonomic wrapper over DataFusion's `DataFrame`.
 //!
 //! # Quick start
@@ -30,18 +29,12 @@
 //! }
 //! ```
 
-pub mod column;
 pub mod conf;
 pub mod context;
 pub mod dataframe;
-pub mod datasource;
 pub mod errors;
-pub mod exec_plan;
 pub mod rdd_table;
 pub mod schema;
-pub mod session;
-pub mod table;
-pub mod udf;
 
 // Re-export the most commonly used types at the crate root.
 pub use context::AtomicSqlContext;
@@ -49,7 +42,6 @@ pub use context::DataFormat;
 pub use dataframe::DataFrame;
 pub use errors::{AtomicSqlError, Result};
 pub use rdd_table::RddTableProvider;
-pub use table::AtomicTableProvider;
 
 // Re-export DataFusion's expression helpers so users don't need a direct
 // `datafusion` dependency for common operations.

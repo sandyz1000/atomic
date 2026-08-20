@@ -90,48 +90,19 @@ impl AgentLoop {
     ///   2. `WorkflowExecutor` runs the plan (parallel Atomic jobs).
     ///   3. LLM evaluates whether the results answer the query or another round is needed.
     ///   4. Repeat until done or `max_rounds` is reached.
+    ///
+    /// Delegates to `run_streaming` with the receiver dropped immediately, so its
+    /// `AgentEvent` sends are no-ops and only the round loop runs.
     pub async fn run(
         &self,
         nl_query: &str,
         tool_registry: &ToolRegistry,
         table_schemas: &HashMap<String, SchemaRef>,
     ) -> Result<AgentResult> {
-        let mut ctx = AgentContext::default();
-
-        loop {
-            let plan = self
-                .planner
-                .plan(nl_query, table_schemas, tool_registry, &ctx)
-                .await?;
-
-            log::debug!(
-                "AgentLoop round {}: plan has {} steps",
-                ctx.rounds + 1,
-                plan.steps.len()
-            );
-
-            let results: HashMap<String, StepResult> = self.executor.execute(plan).await?;
-            let step_results: Vec<StepResult> = results.into_values().collect();
-            ctx.previous_results.extend(step_results);
-            ctx.rounds += 1;
-
-            let eval = self.evaluate(nl_query, &ctx).await?;
-
-            if eval.is_done || ctx.rounds >= self.config.max_rounds {
-                if !eval.is_done {
-                    log::warn!(
-                        "AgentLoop: max_rounds ({}) reached without a definitive answer",
-                        self.config.max_rounds
-                    );
-                }
-                return Ok(AgentResult {
-                    answer: eval.answer,
-                    steps: ctx.previous_results,
-                    rounds: ctx.rounds,
-                    visualization: eval.visualization,
-                });
-            }
-        }
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        self.run_streaming(nl_query, tool_registry, table_schemas, tx)
+            .await
     }
 
     /// Streaming variant: emits `AgentEvent` through `tx` as each step executes.
@@ -150,6 +121,12 @@ impl AgentLoop {
                 .planner
                 .plan(nl_query, table_schemas, tool_registry, &ctx)
                 .await?;
+
+            log::debug!(
+                "AgentLoop round {}: plan has {} steps",
+                ctx.rounds + 1,
+                plan.steps.len()
+            );
 
             let _ = tx
                 .send(AgentEvent::PlanCreated {
@@ -185,6 +162,10 @@ impl AgentLoop {
                         })
                         .await;
                 } else {
+                    log::warn!(
+                        "AgentLoop: max_rounds ({}) reached without a definitive answer",
+                        self.config.max_rounds
+                    );
                     let _ = tx
                         .send(AgentEvent::MaxRoundsReached {
                             answer: eval.answer.clone(),

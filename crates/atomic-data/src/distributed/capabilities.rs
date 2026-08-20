@@ -40,11 +40,6 @@ impl WorkerCapabilities {
         }
     }
 
-    pub fn with_shuffle_port(mut self, port: u16) -> Self {
-        self.shuffle_server_port = Some(port);
-        self
-    }
-
     pub fn with_registry_fingerprint(mut self, fingerprint: u64) -> Self {
         self.registry_fingerprint = fingerprint;
         self

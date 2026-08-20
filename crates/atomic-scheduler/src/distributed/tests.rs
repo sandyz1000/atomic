@@ -1,13 +1,13 @@
 use super::*;
 use atomic_data::distributed::{
-    EngineAction, ResultStatus, Step, StepKind, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope,
+    ResultStatus, Step, StepKind, TRANSPORT_HEADER_LEN, TaskAction, TaskEnvelope,
     TaskResultEnvelope, TaskRuntime, TransportFrameKind, WireDecode, WireEncode,
     encode_transport_frame, parse_transport_header,
 };
 
 #[test]
 fn accumulator_sink_merges() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     // No sink installed: silently ignored.
     sched.merge_accumulator(&[(1, vec![1])]);
 
@@ -23,14 +23,14 @@ fn accumulator_sink_merges() {
 
 #[test]
 fn drain_idle() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     assert_eq!(sched.total_inflight(), 0);
     assert!(sched.drain(Duration::from_millis(100), Duration::from_millis(5)));
 }
 
 #[test]
 fn drain_timeout() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31099);
     sched.inflight.insert(addr, Arc::new(AtomicI16::new(1)));
     assert_eq!(sched.total_inflight(), 1);
@@ -39,7 +39,7 @@ fn drain_timeout() {
 
 #[test]
 fn register_worker_adds() {
-    let scheduler = DistributedScheduler::new(4, true);
+    let scheduler = DistributedScheduler::new(4);
     let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31001);
     scheduler.register_worker(
         addr,
@@ -51,7 +51,7 @@ fn register_worker_adds() {
 
 #[test]
 fn scoped_pins_subset() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     let all: Vec<_> = (0..3)
         .map(|i| SocketAddrV4::new(Ipv4Addr::LOCALHOST, 32000 + i))
         .collect();
@@ -73,7 +73,7 @@ fn scoped_pins_subset() {
 #[test]
 fn plan_serve_cached() {
     use atomic_data::distributed::{EngineAction, Step, StepKind, TaskAction, TaskRuntime};
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     let ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
     sched.register_cache_locs(&[(700, 0), (700, 1)], ip);
 
@@ -115,7 +115,7 @@ fn plan_serve_cached() {
 
 #[test]
 fn death_clears_cache() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     let dead = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
     let live = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
     sched.register_cache_locs(&[(800, 0), (800, 1)], dead);
@@ -131,7 +131,7 @@ fn death_clears_cache() {
 
 #[test]
 fn unpersist_clears_rdd() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     sched.register_cache_locs(
         &[(801, 0)],
         SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001),
@@ -143,7 +143,7 @@ fn unpersist_clears_rdd() {
 
 #[test]
 fn cache_locs_sparse() {
-    let scheduler = DistributedScheduler::new(4, true);
+    let scheduler = DistributedScheduler::new(4);
     let ip = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 7), 11007);
     scheduler.register_cache_locs(&[(500, 2), (500, 0)], ip);
     let locs = scheduler.cache_endpoints.clone();
@@ -159,7 +159,7 @@ fn cache_locs_sparse() {
 
 #[test]
 fn executor_round_robin() {
-    let scheduler = DistributedScheduler::new(4, true);
+    let scheduler = DistributedScheduler::new(4);
     let addr1 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31011);
     let addr2 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 31012);
     scheduler.register_worker(addr1, WorkerCapabilities::new("w1".to_string(), 1, vec![]));
@@ -173,7 +173,7 @@ fn executor_round_robin() {
 async fn submit_task_roundtrip() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let scheduler = DistributedScheduler::new(4, true);
+    let scheduler = DistributedScheduler::new(4);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("bind");
@@ -237,7 +237,7 @@ async fn submit_task_roundtrip() {
 
 #[test]
 fn state_pin_prefers() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     let w1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
     let w2 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
     sched.register_worker(w1, WorkerCapabilities::new("w1".to_string(), 4, vec![]));
@@ -258,7 +258,7 @@ fn state_pin_prefers() {
 
 #[test]
 fn invalidate_worker_shards() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     let w1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
     let w2 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
 
@@ -278,7 +278,7 @@ fn invalidate_worker_shards() {
 
 #[test]
 fn pin_shard_fallback() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     let w1 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 11001);
     let w2 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 11002);
     sched.register_worker(w2, WorkerCapabilities::new("w2".to_string(), 4, vec![]));
@@ -297,7 +297,7 @@ fn pin_shard_fallback() {
 
 #[test]
 fn rejects_closure_tasks() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     assert!(
         !sched.supports_closure_tasks(),
         "distributed scheduler must reject closure-backed ResultTask execution"
@@ -310,7 +310,7 @@ fn envelope_with_ops(steps: Vec<Step>) -> TaskEnvelope {
 
 #[test]
 fn timeout_non_agent() {
-    let sched = DistributedScheduler::new(4, true);
+    let sched = DistributedScheduler::new(4);
     let task = envelope_with_ops(vec![Step {
         task_name: String::new(),
         kind: StepKind::Task(TaskAction::Map),

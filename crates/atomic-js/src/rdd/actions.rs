@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use rand::{RngExt, SeedableRng, rngs::SmallRng};
 use serde_json::Value as JsonValue;
 
-use super::{JsRdd, SimpleLcg};
+use super::JsRdd;
 
 #[napi]
 impl JsRdd {
@@ -575,11 +576,11 @@ impl JsRdd {
                 .iter()
                 .enumerate()
                 .flat_map(|(i, elem)| {
-                    let mut rng = SimpleLcg::new(s ^ (i as u64));
+                    let mut rng = SmallRng::seed_from_u64(s ^ (i as u64));
                     let mut n = 0u32;
                     let mut remaining = fraction;
                     loop {
-                        let roll = rng.next_f64();
+                        let roll = rng.random::<f64>();
                         if roll < remaining {
                             n += 1;
                             remaining -= roll;
@@ -600,8 +601,8 @@ impl JsRdd {
                 .iter()
                 .enumerate()
                 .filter(|(i, _elem)| {
-                    let mut rng = SimpleLcg::new(s ^ (*i as u64));
-                    rng.next_f64() < fraction
+                    let mut rng = SmallRng::seed_from_u64(s ^ (*i as u64));
+                    rng.random::<f64>() < fraction
                 })
                 .map(|(_, e)| e.clone())
                 .collect();
@@ -629,12 +630,12 @@ impl JsRdd {
             return Ok(vec![]);
         }
         let s = seed.unwrap_or(0) as u64;
-        let mut rng = SimpleLcg::new(s);
+        let mut rng = SmallRng::seed_from_u64(s);
         let n = num as usize;
         if with_replacement {
             let result: Vec<JsonValue> = (0..n)
                 .map(|_| {
-                    let idx = (rng.next_f64() * source.len() as f64) as usize;
+                    let idx = (rng.random::<f64>() * source.len() as f64) as usize;
                     source[idx.min(source.len() - 1)].clone()
                 })
                 .collect();
@@ -642,7 +643,7 @@ impl JsRdd {
         } else {
             let take = n.min(source.len());
             let mut keyed: Vec<(f64, &JsonValue)> =
-                source.iter().map(|e| (rng.next_f64(), e)).collect();
+                source.iter().map(|e| (rng.random::<f64>(), e)).collect();
             keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             Ok(keyed
                 .into_iter()

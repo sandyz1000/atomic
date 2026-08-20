@@ -1,6 +1,7 @@
 mod context;
 mod distributed_vars;
 mod graph;
+mod nlq;
 pub(crate) mod parallel;
 mod rdd;
 mod sql;
@@ -12,6 +13,7 @@ use pyo3::prelude::*;
 use context::PyContext;
 use distributed_vars::{PyAccumulator, PyBroadcastVar};
 use graph::PyGraph;
+use nlq::PyNlqContext;
 use parallel::run_partition;
 use rdd::{PyRdd, verify_picklable};
 use sql::{PyDataFrame, PySqlContext};
@@ -62,6 +64,7 @@ fn atomic(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyContext>()?;
     m.add_class::<PyRdd>()?;
     m.add_class::<PySqlContext>()?;
+    m.add_class::<PyNlqContext>()?;
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PyBroadcastVar>()?;
     m.add_class::<PyAccumulator>()?;

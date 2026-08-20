@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] — Dead-Code Audit Cleanup, Distributed `mapWithState`
+
+### New feature: distributed `mapWithState`
+
+`PairDStreamFunctions::map_with_state` now shards per-key state across the cluster via
+the same `EngineAction::MergeState` / `WORKER_STATE_STORE` mechanism `atomic-structured`
+uses for windowed/session state, instead of the old fully driver-local implementation.
+
+- **`MapWithStateTask<K, V, S, M>`** (new trait, `atomic-streaming::dstream::map_with_state`)
+  replaces the old `Fn(&K, &[V], Option<S>) -> (Option<M>, Option<S>)` closure parameter —
+  Atomic never ships raw closures to workers, so the per-key mapping logic is now a
+  compile-time registered task (`register_map_with_state!`), the same convention as
+  `#[task]`.
+- **`StateSpec::initial_state(rdd)`** and **`.num_partitions(n)`** are wired up: initial
+  state seeds each shard on the first batch that runs; `num_partitions` sets the shard
+  count (default 1). Both were previously accepted and silently discarded.
+- Per-shard state persists worker-side in `WORKER_STATE_STORE`, transparently local or
+  distributed via `Context::dispatch_pipeline` — the same call path atomic-structured's
+  `DistributedStateEngine` uses, so no `is_distributed()` branch is needed here either.
+- **Breaking change**: `map_with_state`'s signature changed from a closure parameter to
+  a `T: MapWithStateTask<K, V, S, M>` instance. The only in-tree caller (a test) was
+  updated.
+
+### Repo-wide dead-code audit and cleanup (ponytail)
+
+Four-phase removal of confirmed-dead code and duplicated logic found by a full-workspace
+audit, plus the `atomic-py::socket_text_stream` stub fix:
+
+- Removed: unused `ConfigBuilder`/`ConfigKey`, the superseded `io/local_file` reader
+  subsystem, the never-wired `AgentStep` engine action and its per-partition agent
+  runner (superseded by the coordinator-level `WorkflowExecutor` DSL), the unused
+  `atomic-streaming` Receiver/BlockGenerator/WriteAheadLog/`ReceiverTracker` framework
+  (superseded by `DistributedSource`'s driver-authoritative re-plan recovery),
+  `EventLoop`/`RecurringTimer`/`RateEstimator` stubs, and the unused `LiveListenerBus`
+  Spark-style job-event bus in `atomic-scheduler`.
+- Replaced the hand-rolled `AtomicTableProvider`/`AtomicScanExec` (atomic-sql) with
+  DataFusion's own `MemTable`. `variance()`/`stdev()` (atomic-compute) now delegate to
+  `stats()`'s single-pass accumulator instead of running a separate distributed pass.
+- Deduplicated repeated sort/comparator logic in `atomic-py`/`atomic-js`'s RDD bindings,
+  the `is_bool_type`/`is_vec_type`/body-hash boilerplate in `atomic-runtime-macros`, and
+  the LLM-client retry-backoff logic in `atomic-nlq`. `atomic-js`'s PageRank now
+  delegates to `atomic-graph` instead of a duplicate hand-rolled implementation.
+- **`atomic-py::socket_text_stream`** — was a stub that discarded `host`/`port` and
+  always returned an empty batch. Now spawns a background `TcpStream` reader (mirroring
+  `atomic_streaming::dstream::input::SocketInputDStream`'s pattern) and buffers lines
+  into each batch.
+- Also removed 8 unused Cargo dependencies and ~15 dead internal items (unused traits,
+  test-only dead code, duplicate free functions) across `atomic-data`, `atomic-utils`,
+  `atomic-scheduler`, `atomic-sql`, `atomic-structured`, and `atomic-nlq`.
+
+---
+
 ## [Unreleased] — K8s, Structured Streaming, Kafka, Distributed Cache, Distributed Correctness, Distributed Streaming Sources, Task Safety
 
 ### New feature: per-job Kubernetes worker allocation

@@ -222,7 +222,7 @@ async fn test_partitioner_assign() {
     use std::any::Any;
     // bounds = [3, 7]: partition 0 = keys < 3, partition 1 = 3..7, partition 2 = >= 7
     let p = Partitioner::range(vec![3i32, 7i32], true);
-    assert_eq!(p.get_num_of_partitions(), 3);
+    assert_eq!(p.num_partitions(), 3);
     assert_eq!(p.get_partition(&1i32 as &dyn Any), 0);
     assert_eq!(p.get_partition(&3i32 as &dyn Any), 1);
     assert_eq!(p.get_partition(&6i32 as &dyn Any), 1);

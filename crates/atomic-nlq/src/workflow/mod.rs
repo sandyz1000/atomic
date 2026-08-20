@@ -48,16 +48,3 @@ pub enum StepOutput {
     Text(String),
     Empty,
 }
-
-impl StepOutput {
-    pub fn as_text(&self) -> Option<&str> {
-        match self {
-            StepOutput::Text(s) => Some(s.as_str()),
-            _ => None,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        matches!(self, StepOutput::Empty)
-    }
-}

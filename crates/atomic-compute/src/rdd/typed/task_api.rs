@@ -237,7 +237,7 @@ where
     /// ```ignore
     /// let total = ctx.parallelize_typed(data, 2).reduce_task(task_fn!(|a: i32, b: i32| a + b))?;
     /// ```
-    pub fn reduce_task<F>(&self, _task: F) -> Result<Option<T>, DataError>
+    pub fn reduce_task<F>(&self, task: F) -> Result<Option<T>, DataError>
     where
         F: BinaryTask<T>,
     {
@@ -256,49 +256,12 @@ where
             .dispatch_pipeline(self.rdd.clone(), source_partitions, steps)
             .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
 
-        let mut values: Vec<T> = partition_results_raw
+        let values: Vec<T> = partition_results_raw
             .into_iter()
             .map(|b| T::decode_wire(&b).map_err(|e| DataError::DowncastFailure(e.to_string())))
             .collect::<Result<_, _>>()?;
 
-        match values.len() {
-            0 => Ok(None),
-            1 => Ok(Some(values.remove(0))),
-            _ => {
-                let combined = values
-                    .encode_wire()
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                let driver_ops = vec![Step {
-                    task_name: F::NAME.to_string(),
-                    kind: StepKind::Task(TaskAction::Reduce),
-                    runtime: TaskRuntime::Native,
-                    payload: vec![],
-                }];
-                let task = TaskEnvelope::new(
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    "driver-reduce".to_string(),
-                    driver_ops,
-                    combined,
-                );
-                let result = crate::runtimes::ComputeEngine::default()
-                    .execute("local-driver", &task)
-                    .map_err(|e| DataError::DowncastFailure(e.to_string()))?;
-                match result.status {
-                    atomic_data::distributed::ResultStatus::Success => T::decode_wire(&result.data)
-                        .map(Some)
-                        .map_err(|e| DataError::DowncastFailure(e.to_string())),
-                    _ => Err(DataError::DowncastFailure(
-                        result
-                            .error
-                            .unwrap_or_else(|| "reduce_task failed".to_string()),
-                    )),
-                }
-            }
-        }
+        Ok(values.into_iter().reduce(|a, b| task.call(a, b)))
     }
 
     /// Aggregate with a distinct accumulator type using an
@@ -373,36 +336,32 @@ where
         Ok(sum / count as f64)
     }
 
-    /// Population variance of the elements as `f64`.
+    /// Population variance of the elements as `f64`. Returns an error on an empty RDD.
     ///
-    /// Uses the built-in [`VarianceTask`](crate::builtin_tasks::variance::VarianceTask) —
-    /// each partition accumulates Welford `(count, mean, m2)` on the worker; the driver merges
-    /// them and returns `m2 / count`. Returns an error on an empty RDD.
+    /// Delegates to [`stats`](Self::stats) — same single-pass `StatCounterTask` worker
+    /// accumulator underlies both.
     ///
     /// Distributed float accumulation folds in partition-arrival order, so the result is not
     /// bit-identical to local mode.
     pub fn variance(&self) -> Result<f64, DataError>
     where
-        crate::builtin_tasks::variance::VarianceTask<T>:
-            AggregateTask<(u64, f64, f64), T> + Default,
+        crate::builtin_tasks::stats::StatCounterTask<T>:
+            AggregateTask<(u64, f64, f64, f64, f64), T> + Default,
     {
-        let (count, _mean, m2) = self.aggregate_task(
-            (0u64, 0.0f64, 0.0f64),
-            crate::builtin_tasks::variance::VarianceTask::<T>::default(),
-        )?;
-        if count == 0 {
+        let stats = self.stats()?;
+        if stats.count() == 0 {
             return Err(DataError::DowncastFailure(
                 "variance of empty collection".to_string(),
             ));
         }
-        Ok(m2 / count as f64)
+        Ok(stats.variance())
     }
 
     /// Population standard deviation of the elements as `f64` — `sqrt(variance())`.
     pub fn stdev(&self) -> Result<f64, DataError>
     where
-        crate::builtin_tasks::variance::VarianceTask<T>:
-            AggregateTask<(u64, f64, f64), T> + Default,
+        crate::builtin_tasks::stats::StatCounterTask<T>:
+            AggregateTask<(u64, f64, f64, f64, f64), T> + Default,
     {
         Ok(self.variance()?.sqrt())
     }
@@ -476,69 +435,6 @@ where
                     steps: vec![op],
                 })
             }
-        }
-    }
-}
-
-impl TypedRdd<String> {
-    /// Dispatch a framework-native sub-agent over each partition of string inputs.
-    ///
-    /// The registered [`AgentRunner`][crate::registry::AgentRunner] (installed
-    /// by `atomic-nlq` at startup via [`register_agent_runner`][crate::register_agent_runner])
-    /// executes a multi-round plan→execute→evaluate loop per partition, returning one
-    /// [`AgentFindings`][atomic_data::distributed::AgentFindings] per input string.
-    ///
-    /// **Lazy in distributed mode** — appends an `AgentStep` op to the staged pipeline
-    /// and dispatches on the next action.  **Local mode** runs the registered runner
-    /// in-process.
-    ///
-    /// Stages are automatically marked non-speculatable by the scheduler so no
-    /// partition runs twice and accrues double LLM cost.
-    pub fn agent_step(
-        self,
-        config: atomic_data::distributed::AgentStepPayload,
-    ) -> TypedRdd<atomic_data::distributed::AgentFindings> {
-        use atomic_data::distributed::{AgentFindings, TaskRuntime, WireDecode};
-
-        let context = self.context.clone();
-        let payload_bytes =
-            serde_json::to_vec(&config).expect("AgentStepPayload serialization failed");
-
-        if !context.is_distributed() {
-            let runner = crate::registry::AGENT_RUNNER_REGISTRY.get().expect(
-                "agent_step: no agent runner registered; \
-                     call `atomic_compute::register_agent_runner(...)` at startup",
-            );
-            let source_partitions = Context::encode_rdd_partitions(self.rdd.clone())
-                .expect("agent_step: failed to encode source partitions");
-            let flat: Vec<AgentFindings> = source_partitions
-                .into_iter()
-                .flat_map(|part_bytes| {
-                    let raw = runner
-                        .run_partition(&config, &part_bytes)
-                        .expect("agent_step local runner failed");
-                    Vec::<AgentFindings>::decode_wire(&raw)
-                        .expect("agent_step: failed to decode AgentFindings from runner output")
-                })
-                .collect();
-            let id = context.new_rdd_id();
-            return TypedRdd::new(Arc::new(ParallelCollection::new(id, flat, 1)), context);
-        }
-
-        let op = Step {
-            task_name: String::new(),
-            kind: StepKind::Engine(EngineAction::AgentStep),
-            runtime: TaskRuntime::Native,
-            payload: payload_bytes,
-        };
-        let staged = TypedRdd::<String>::stage_op(self.staged, &self.rdd, op)
-            .expect("agent_step: failed to encode source partitions");
-        let id = context.new_rdd_id();
-        TypedRdd {
-            rdd: Arc::new(ParallelCollection::new(id, Vec::<AgentFindings>::new(), 1)),
-            context,
-            staged: Some(staged),
-            _marker: PhantomData,
         }
     }
 }

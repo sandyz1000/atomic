@@ -31,8 +31,13 @@ pub struct NlqContext {
 }
 
 impl NlqContext {
+    /// Build against a fresh local (in-process) compute context. Use
+    /// [`build_with_compute`](Self::build_with_compute) to share an existing
+    /// `Context` (e.g. a distributed one) instead of creating a new local one.
     pub fn build(config: NlqConfig) -> Result<Self> {
-        Self::build_inner(config, None)
+        let sc = atomic_compute::context::Context::local()
+            .map_err(|e| NlqError::Config(format!("failed to build local compute context: {e}")))?;
+        Self::build_inner(config, Some(sc))
     }
 
     pub fn build_with_compute(

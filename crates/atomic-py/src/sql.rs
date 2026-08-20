@@ -22,11 +22,11 @@ use atomic_sql::context::AtomicSqlContext;
 /// every `DataFrame`/`SqlContext` method (~50 call sites); collapsing it here keeps
 /// each method's own SQL-construction logic front and center instead of buried
 /// under a repeated closure.
-fn to_py_err<E: std::fmt::Display>(e: E) -> PyErr {
+pub(crate) fn to_py_err<E: std::fmt::Display>(e: E) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
 }
 
-fn run_sql_async<F, T>(fut: F) -> T
+pub(crate) fn run_sql_async<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
@@ -925,6 +925,15 @@ impl PyDataFrame {
 pub struct PySqlContext {
     inner: Arc<AtomicSqlContext>,
     session: Arc<SessionContext>,
+}
+
+impl PySqlContext {
+    /// Wrap an existing `AtomicSqlContext` (e.g. `NlqContext.sql_ctx`) rather than
+    /// building a fresh one.
+    pub(crate) fn from_context(inner: Arc<AtomicSqlContext>) -> Self {
+        let session = Arc::new(inner.inner().clone());
+        Self { inner, session }
+    }
 }
 
 #[pymethods]

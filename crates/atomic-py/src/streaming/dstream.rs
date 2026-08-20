@@ -28,7 +28,11 @@ pub(crate) enum PyDStreamInner {
     Queue {
         queue: Arc<Mutex<VecDeque<Vec<Py<PyAny>>>>>,
     },
-    Socket,
+    /// Lines read from a TCP socket by the background reader thread spawned in
+    /// `socket_text_stream`, drained into a batch on each tick.
+    Socket {
+        buffer: Arc<Mutex<Vec<String>>>,
+    },
     File {
         directory: String,
     },

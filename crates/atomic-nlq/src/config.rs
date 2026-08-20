@@ -11,15 +11,21 @@ pub enum LlmProvider {
 }
 
 impl LlmProvider {
-    fn from_env() -> Self {
-        match std::env::var("LLM_PROVIDER")
-            .unwrap_or_default()
-            .to_lowercase()
-            .as_str()
-        {
-            "anthropic" | "claude" => LlmProvider::Anthropic,
-            _ => LlmProvider::OpenAi,
+    /// Parse a provider name (`"openai"`, `"anthropic"`/`"claude"`), case-insensitive.
+    /// `None` for anything else — callers decide how to report an invalid value.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "openai" => Some(LlmProvider::OpenAi),
+            "anthropic" | "claude" => Some(LlmProvider::Anthropic),
+            _ => None,
         }
+    }
+
+    fn from_env() -> Self {
+        std::env::var("LLM_PROVIDER")
+            .ok()
+            .and_then(|v| Self::parse(&v))
+            .unwrap_or_default()
     }
 
     /// Default API base URL for this provider.

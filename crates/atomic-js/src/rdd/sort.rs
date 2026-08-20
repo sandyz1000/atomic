@@ -6,6 +6,34 @@ use serde_json::Value as JsonValue;
 
 use super::JsRdd;
 
+/// Sort `elements` in place with a fallible comparator, returning the first error the
+/// comparator raised (if any). The comparator closure passed to `slice::sort_by` can't
+/// propagate a `Result`, so errors are captured during the sort and re-raised after.
+fn try_sort_by<F>(elements: &mut [JsonValue], mut cmp: F) -> Result<()>
+where
+    F: FnMut(&JsonValue, &JsonValue) -> Result<f64>,
+{
+    let mut sort_error: Option<Error> = None;
+    elements.sort_by(|a, b| {
+        if sort_error.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        match cmp(a, b) {
+            Ok(v) if v > 0.0 => std::cmp::Ordering::Greater,
+            Ok(v) if v < 0.0 => std::cmp::Ordering::Less,
+            Ok(_) => std::cmp::Ordering::Equal,
+            Err(e) => {
+                sort_error = Some(e);
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    match sort_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 #[napi]
 impl JsRdd {
     /// Return the top `n` elements (largest first). Optional comparator `f(a, b) => number`.
@@ -17,30 +45,9 @@ impl JsRdd {
     ) -> Result<Vec<JsonValue>> {
         let mut sorted = self.elements.clone();
         if let Some(ref cmp) = comparator {
-            let mut sort_error: Option<Error> = None;
-            sorted.sort_by(|a, b| {
-                if sort_error.is_some() {
-                    return std::cmp::Ordering::Equal;
-                }
-                match cmp.call(FnArgs::from((b.clone(), a.clone()))) {
-                    Ok(v) => {
-                        if v > 0.0 {
-                            std::cmp::Ordering::Greater
-                        } else if v < 0.0 {
-                            std::cmp::Ordering::Less
-                        } else {
-                            std::cmp::Ordering::Equal
-                        }
-                    }
-                    Err(e) => {
-                        sort_error = Some(e);
-                        std::cmp::Ordering::Equal
-                    }
-                }
-            });
-            if let Some(e) = sort_error {
-                return Err(e);
-            }
+            try_sort_by(&mut sorted, |a, b| {
+                cmp.call(FnArgs::from((b.clone(), a.clone())))
+            })?;
         } else {
             sorted.sort_by(|a, b| Self::json_compare(b, a));
         }
@@ -56,30 +63,9 @@ impl JsRdd {
     ) -> Result<Vec<JsonValue>> {
         let mut sorted = self.elements.clone();
         if let Some(ref cmp) = comparator {
-            let mut sort_error: Option<Error> = None;
-            sorted.sort_by(|a, b| {
-                if sort_error.is_some() {
-                    return std::cmp::Ordering::Equal;
-                }
-                match cmp.call(FnArgs::from((a.clone(), b.clone()))) {
-                    Ok(v) => {
-                        if v > 0.0 {
-                            std::cmp::Ordering::Greater
-                        } else if v < 0.0 {
-                            std::cmp::Ordering::Less
-                        } else {
-                            std::cmp::Ordering::Equal
-                        }
-                    }
-                    Err(e) => {
-                        sort_error = Some(e);
-                        std::cmp::Ordering::Equal
-                    }
-                }
-            });
-            if let Some(e) = sort_error {
-                return Err(e);
-            }
+            try_sort_by(&mut sorted, |a, b| {
+                cmp.call(FnArgs::from((a.clone(), b.clone())))
+            })?;
         } else {
             sorted.sort_by(Self::json_compare);
         }

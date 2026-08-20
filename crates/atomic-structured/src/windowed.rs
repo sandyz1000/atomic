@@ -174,7 +174,6 @@ impl WindowedEngine {
                 continue;
             }
 
-            let n = row_windows.len();
             let ws_col: Arc<dyn Array> = Arc::new(Int64Array::from(
                 row_windows.iter().map(|(_, ws)| *ws).collect::<Vec<_>>(),
             ));
@@ -192,7 +191,6 @@ impl WindowedEngine {
             let mut fields = vec![Field::new("window_start", DataType::Int64, false)];
             fields.extend(schema.fields().iter().map(|f| f.as_ref().clone()));
             let new_schema = Arc::new(Schema::new(fields));
-            let _ = n; // length captured in arrays
             expanded.push(
                 RecordBatch::try_new(new_schema, cols)
                     .map_err(|e| StructuredError::Sql(format!("sliding batch: {e}")))?,

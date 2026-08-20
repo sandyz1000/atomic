@@ -21,7 +21,13 @@ pub(crate) fn compute_batch(
             let mut q = queue.lock();
             Ok(q.pop_front().unwrap_or_default())
         }
-        PyDStreamInner::Socket { .. } => Ok(vec![]),
+        PyDStreamInner::Socket { buffer } => {
+            let lines: Vec<String> = buffer.lock().drain(..).collect();
+            lines
+                .into_iter()
+                .map(|l| Ok(l.into_pyobject(py)?.into_any().unbind()))
+                .collect()
+        }
         PyDStreamInner::File { directory } => {
             let mut lines: Vec<Py<PyAny>> = Vec::new();
             if let Ok(dir) = std::fs::read_dir(directory) {

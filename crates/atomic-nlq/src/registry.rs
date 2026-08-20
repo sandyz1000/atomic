@@ -169,11 +169,15 @@ impl ToolRegistry {
         self.tools.iter().map(|e| e.value().clone()).collect()
     }
 
-    /// Register a DataFusion scalar UDF with a human-readable description.
-    pub fn register_scalar(&self, udf: ScalarUDF, description: impl Into<String>) -> Result<()> {
-        let name = udf.name().to_string();
-        let signature = format!("({:?})", udf.signature().type_signature);
-        self.session.register_udf(udf);
+    /// Record a UDF/UDAF's name, type signature, and human-readable description.
+    /// Shared by `register_scalar`/`register_aggregate` after each registers the
+    /// function itself with the underlying DataFusion session.
+    fn record_udf_description(
+        &self,
+        name: String,
+        signature: String,
+        description: impl Into<String>,
+    ) {
         self.udf_descriptions.insert(
             name.clone(),
             UdfDescription {
@@ -182,6 +186,14 @@ impl ToolRegistry {
                 signature,
             },
         );
+    }
+
+    /// Register a DataFusion scalar UDF with a human-readable description.
+    pub fn register_scalar(&self, udf: ScalarUDF, description: impl Into<String>) -> Result<()> {
+        let name = udf.name().to_string();
+        let signature = format!("({:?})", udf.signature().type_signature);
+        self.session.register_udf(udf);
+        self.record_udf_description(name, signature, description);
         Ok(())
     }
 
@@ -194,14 +206,7 @@ impl ToolRegistry {
         let name = udaf.name().to_string();
         let signature = format!("({:?})", udaf.signature().type_signature);
         self.session.register_udaf(udaf);
-        self.udf_descriptions.insert(
-            name.clone(),
-            UdfDescription {
-                name,
-                description: description.into(),
-                signature,
-            },
-        );
+        self.record_udf_description(name, signature, description);
         Ok(())
     }
 

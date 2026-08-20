@@ -4,7 +4,6 @@ use crate::dstream::mapped::ForEachDStream;
 use crate::dstream::{DStream, DStreamGraph, InputStreamBase, OutputOperation};
 use crate::errors::{StreamingError, StreamingResult};
 use crate::scheduler::job::JobScheduler;
-use crate::scheduler::streaming::{StreamingListener, StreamingListenerEvent};
 use atomic_compute::context::Context;
 use atomic_data::data::Data;
 use atomic_data::rdd::Rdd;
@@ -52,8 +51,6 @@ pub struct StreamingContext {
     /// Set when `start()` is called.
     scheduler: Mutex<Option<Arc<JobScheduler>>>,
     next_stream_id: AtomicUsize,
-    /// Lifecycle listeners notified of batch/receiver events by the scheduler.
-    listeners: Mutex<Vec<Arc<dyn StreamingListener>>>,
 }
 
 impl StreamingContext {
@@ -70,25 +67,11 @@ impl StreamingContext {
             state: Mutex::new(StreamingContextState::Initialized),
             scheduler: Mutex::new(None),
             next_stream_id: AtomicUsize::new(0),
-            listeners: Mutex::new(Vec::new()),
         })
     }
 
     fn next_stream_id(&self) -> usize {
         self.next_stream_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Register a [`StreamingListener`] to receive batch and receiver lifecycle events.
-    /// Listeners must be added before `start()`.
-    pub fn add_streaming_listener(&self, listener: Arc<dyn StreamingListener>) {
-        self.listeners.lock().push(listener);
-    }
-
-    /// Deliver an event to every registered listener. Called by the scheduler.
-    pub fn post_event(&self, event: StreamingListenerEvent) {
-        for l in self.listeners.lock().iter() {
-            l.on_event(&event);
-        }
     }
 
     // Input stream factories
@@ -220,9 +203,7 @@ impl StreamingContext {
         stream: Arc<dyn DStream<T>>,
     ) -> Arc<crate::dstream::transformed::TransformedDStream<T, u64>>
     where
-        T: Data
-            + Clone
-            + atomic_data::distributed::WireSerde,
+        T: Data + Clone + atomic_data::distributed::WireSerde,
     {
         let id = self.next_stream_id();
         let sc = self.sc.clone();
@@ -244,11 +225,7 @@ impl StreamingContext {
         stream: Arc<dyn DStream<T>>,
     ) -> Arc<crate::dstream::transformed::TransformedDStream<T, (T, u64)>>
     where
-        T: Data
-            + Clone
-            + Eq
-            + std::hash::Hash
-            + atomic_data::distributed::WireSerde,
+        T: Data + Clone + Eq + std::hash::Hash + atomic_data::distributed::WireSerde,
         (T, u64): Data + Clone,
     {
         let id = self.next_stream_id();
@@ -355,10 +332,7 @@ impl StreamingContext {
     /// `dispatch_pipeline` / `run_pending_shuffle_stages` as appropriate.
     pub fn print<T>(self: &Arc<Self>, stream: Arc<dyn DStream<T>>, num: usize)
     where
-        T: Data
-            + Clone
-            + std::fmt::Debug
-            + atomic_data::distributed::WireSerde,
+        T: Data + Clone + std::fmt::Debug + atomic_data::distributed::WireSerde,
     {
         let sc = self.sc.clone();
         self.foreach_rdd(stream, move |rdd, time_ms| {
@@ -386,10 +360,7 @@ impl StreamingContext {
         prefix: impl Into<String>,
         suffix: impl Into<String>,
     ) where
-        T: Data
-            + Clone
-            + std::fmt::Debug
-            + atomic_data::distributed::WireSerde,
+        T: Data + Clone + std::fmt::Debug + atomic_data::distributed::WireSerde,
     {
         let prefix = prefix.into();
         let suffix = suffix.into();

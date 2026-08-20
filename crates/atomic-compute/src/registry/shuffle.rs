@@ -218,7 +218,8 @@ where
     let encoded: Vec<Vec<u8>> = buckets
         .into_iter()
         .map(|bucket| {
-            bucket.encode_wire()
+            bucket
+                .encode_wire()
                 .map_err(|e| ComputeError::InvalidPayload(format!("shuffle bucket encode: {e}")))
         })
         .collect::<ComputeResult<_>>()?;

@@ -3,20 +3,7 @@ use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{Token, Type, parse_macro_input};
 
-/// `register_combine!` input: `$K:ty, $V:ty`.
-struct KvPair {
-    k: Type,
-    v: Type,
-}
-
-impl Parse for KvPair {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let k: Type = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let v: Type = input.parse()?;
-        Ok(KvPair { k, v })
-    }
-}
+use super::KvPair;
 
 /// `register_combine_lift!` input: `$K:ty, $V:ty, $C:ty`.
 struct KvcTriple {

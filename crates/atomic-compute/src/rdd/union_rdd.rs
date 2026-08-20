@@ -191,7 +191,7 @@ impl<T: Data + Clone> RddBase for UnionRdd<T> {
                 })
                 .collect(),
             PartitionerAware { part, .. } => {
-                let num_partitions = part.get_num_of_partitions();
+                let num_partitions = part.num_partitions();
                 (0..num_partitions)
                     .map(|idx| Box::new(PartitionerAwareUnionSplit { idx }) as Box<dyn Split>)
                     .collect()

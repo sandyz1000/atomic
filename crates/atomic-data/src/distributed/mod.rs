@@ -176,7 +176,6 @@ mod tests {
             | EngineAction::Cache { .. }
             | EngineAction::ReadFileSplit
             | EngineAction::MergeState { .. }
-            | EngineAction::AgentStep // retained for wire compatibility; no dispatch path remains
             | EngineAction::CombineByKey { .. } => true,
             #[cfg(feature = "kafka")]
             EngineAction::KafkaConsume => true,

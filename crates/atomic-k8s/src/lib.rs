@@ -14,18 +14,30 @@
 mod driver_job;
 mod pod_spec;
 
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use atomic_scheduler::{AllocatorError, AllocatorResult, ResourceProfile, WorkerAllocator};
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{EnvVar, Pod};
 use kube::api::{DeleteParams, ListParams, PostParams};
 use kube::{Api, Client};
 
 pub use driver_job::{DriverJobSpec, InitFetch, build_driver_job};
 pub use pod_spec::{ALLOC_ID_LABEL, DriverOwner, ROLE_LABEL};
 use pod_spec::{PodTemplate, build_pod, ready_ip};
+
+/// Convert a plain env map into Kubernetes `EnvVar`s (no `valueFrom` support).
+fn env_vars(env: &BTreeMap<String, String>) -> Vec<EnvVar> {
+    env.iter()
+        .map(|(k, v)| EnvVar {
+            name: k.clone(),
+            value: Some(v.clone()),
+            value_from: None,
+        })
+        .collect()
+}
 
 /// How often to poll a pod's status while waiting for it to become ready.
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(500);

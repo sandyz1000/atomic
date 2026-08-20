@@ -674,48 +674,9 @@ impl JsGraph {
         reset_prob: f64,
         max_iter: u32,
     ) -> serde_json::Value {
-        let n = self.inner.num_vertices() as f64;
-        let mut ranks: HashMap<VertexId, f64> = self
-            .inner
-            .collect_vertices()
-            .into_iter()
-            .map(|(vid, _)| (vid, 1.0 / n))
-            .collect();
-        let edges = self.inner.collect_edges();
-        let mut in_edges: HashMap<VertexId, Vec<(VertexId, f64)>> = HashMap::new();
-        let mut out_deg: HashMap<VertexId, usize> = HashMap::new();
-        for e in &edges {
-            in_edges.entry(e.dst).or_default().push((e.src, e.attr));
-            *out_deg.entry(e.src).or_insert(0) += 1;
-        }
-        for _ in 0..max_iter {
-            let mut new_ranks: HashMap<VertexId, f64> = HashMap::new();
-            let mut max_diff = 0.0f64;
-            for &vid in ranks.keys() {
-                let sum: f64 = in_edges
-                    .get(&vid)
-                    .map(|ins| {
-                        ins.iter()
-                            .map(|(src, _w)| {
-                                let d = *out_deg.get(src).unwrap_or(&1) as f64;
-                                ranks.get(src).copied().unwrap_or(0.0) / d
-                            })
-                            .sum()
-                    })
-                    .unwrap_or(0.0);
-                let new_rank = reset_prob / n + (1.0 - reset_prob) * sum;
-                let diff = (new_rank - ranks[&vid]).abs();
-                if diff > max_diff {
-                    max_diff = diff;
-                }
-                new_ranks.insert(vid, new_rank);
-            }
-            ranks = new_ranks;
-            if max_diff < tol {
-                break;
-            }
-        }
-        i64map_f64_to_json(ranks)
+        let result =
+            page_rank::run_until_convergence(&self.inner, tol, reset_prob, max_iter as usize);
+        i64map_f64_to_json(result)
     }
 
     /// Personalized PageRank from source vertices.
@@ -726,50 +687,9 @@ impl JsGraph {
         num_iter: u32,
         reset_prob: f64,
     ) -> serde_json::Value {
-        let source_set: std::collections::HashSet<VertexId> = sources.into_iter().collect();
-        let mut ranks: HashMap<VertexId, f64> = self
-            .inner
-            .collect_vertices()
-            .into_iter()
-            .map(|(vid, _)| {
-                if source_set.contains(&vid) {
-                    (vid, 1.0 / source_set.len() as f64)
-                } else {
-                    (vid, 0.0)
-                }
-            })
-            .collect();
-        let edges = self.inner.collect_edges();
-        let mut in_edges: HashMap<VertexId, Vec<(VertexId, f64)>> = HashMap::new();
-        let mut out_deg: HashMap<VertexId, usize> = HashMap::new();
-        for e in &edges {
-            in_edges.entry(e.dst).or_default().push((e.src, e.attr));
-            *out_deg.entry(e.src).or_insert(0) += 1;
-        }
-        for _ in 0..num_iter {
-            let mut new_ranks: HashMap<VertexId, f64> = HashMap::new();
-            for &vid in ranks.keys() {
-                let sum: f64 = in_edges
-                    .get(&vid)
-                    .map(|ins| {
-                        ins.iter()
-                            .map(|(src, _w)| {
-                                let d = *out_deg.get(src).unwrap_or(&1) as f64;
-                                ranks.get(src).copied().unwrap_or(0.0) / d
-                            })
-                            .sum()
-                    })
-                    .unwrap_or(0.0);
-                let teleport: f64 = if source_set.contains(&vid) {
-                    reset_prob / source_set.len() as f64
-                } else {
-                    0.0
-                };
-                new_ranks.insert(vid, teleport + (1.0 - reset_prob) * sum);
-            }
-            ranks = new_ranks;
-        }
-        i64map_f64_to_json(ranks)
+        let result =
+            page_rank::run_personalized(&self.inner, &sources, num_iter as usize, reset_prob);
+        i64map_f64_to_json(result)
     }
 }
 

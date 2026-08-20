@@ -6,46 +6,72 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use super::PyRdd;
 
+/// Pair each element with its comparison key (`key(item)`, or the item itself if `key` is `None`).
+fn indexed_by_key(
+    py: Python,
+    elements: &[Py<PyAny>],
+    key: &Option<Py<PyAny>>,
+) -> PyResult<Vec<(Py<PyAny>, Py<PyAny>)>> {
+    elements
+        .iter()
+        .map(|item| {
+            let k = match key {
+                Some(f) => f.call1(py, (item.clone_ref(py),))?,
+                None => item.clone_ref(py),
+            };
+            Ok((item.clone_ref(py), k))
+        })
+        .collect()
+}
+
+/// Sort `indexed` in place by its key half, `ascending` or descending. Comparisons go through
+/// Python's `__lt__`, which can raise (e.g. incomparable types) — the first such error aborts
+/// the sort and is returned once `sort_by` finishes, since the comparator closure itself can't
+/// propagate a `Result`.
+fn sort_indexed(
+    py: Python,
+    indexed: &mut [(Py<PyAny>, Py<PyAny>)],
+    ascending: bool,
+) -> PyResult<()> {
+    let mut sort_error: Option<pyo3::PyErr> = None;
+    indexed.sort_by(|(_, ka), (_, kb)| {
+        if sort_error.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        let (a, b) = if ascending {
+            (ka.bind(py), kb.bind(py))
+        } else {
+            (kb.bind(py), ka.bind(py))
+        };
+        match a.lt(b.clone()) {
+            Ok(true) => std::cmp::Ordering::Less,
+            Ok(false) => match b.lt(a) {
+                Ok(true) => std::cmp::Ordering::Greater,
+                Ok(false) => std::cmp::Ordering::Equal,
+                Err(e) => {
+                    sort_error = Some(e);
+                    std::cmp::Ordering::Equal
+                }
+            },
+            Err(e) => {
+                sort_error = Some(e);
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    match sort_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 #[pymethods]
 impl PyRdd {
     /// Return the top `n` elements (largest first). Optional `key` function.
     #[pyo3(signature = (n, key=None))]
     pub fn top(&self, py: Python, n: usize, key: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        let mut indexed: Vec<(Py<PyAny>, Py<PyAny>)> = self
-            .elements
-            .iter()
-            .map(|item| {
-                let k = match &key {
-                    Some(f) => f.call1(py, (item.clone_ref(py),))?,
-                    None => item.clone_ref(py),
-                };
-                Ok((item.clone_ref(py), k))
-            })
-            .collect::<PyResult<_>>()?;
-        let mut sort_error: Option<pyo3::PyErr> = None;
-        indexed.sort_by(|(_, ka), (_, kb)| {
-            if sort_error.is_some() {
-                return std::cmp::Ordering::Equal;
-            }
-            match kb.bind(py).lt(ka.bind(py)) {
-                Ok(true) => std::cmp::Ordering::Less,
-                Ok(false) => match ka.bind(py).lt(kb.bind(py)) {
-                    Ok(true) => std::cmp::Ordering::Greater,
-                    Ok(false) => std::cmp::Ordering::Equal,
-                    Err(e) => {
-                        sort_error = Some(e);
-                        std::cmp::Ordering::Equal
-                    }
-                },
-                Err(e) => {
-                    sort_error = Some(e);
-                    std::cmp::Ordering::Equal
-                }
-            }
-        });
-        if let Some(e) = sort_error {
-            return Err(e);
-        }
+        let mut indexed = indexed_by_key(py, &self.elements, &key)?;
+        sort_indexed(py, &mut indexed, false)?;
         let result: Vec<_> = indexed
             .into_iter()
             .take(n)
@@ -62,41 +88,8 @@ impl PyRdd {
         n: usize,
         key: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let mut indexed: Vec<(Py<PyAny>, Py<PyAny>)> = self
-            .elements
-            .iter()
-            .map(|item| {
-                let k = match &key {
-                    Some(f) => f.call1(py, (item.clone_ref(py),))?,
-                    None => item.clone_ref(py),
-                };
-                Ok((item.clone_ref(py), k))
-            })
-            .collect::<PyResult<_>>()?;
-        let mut sort_error: Option<pyo3::PyErr> = None;
-        indexed.sort_by(|(_, ka), (_, kb)| {
-            if sort_error.is_some() {
-                return std::cmp::Ordering::Equal;
-            }
-            match ka.bind(py).lt(kb.bind(py)) {
-                Ok(true) => std::cmp::Ordering::Less,
-                Ok(false) => match kb.bind(py).lt(ka.bind(py)) {
-                    Ok(true) => std::cmp::Ordering::Greater,
-                    Ok(false) => std::cmp::Ordering::Equal,
-                    Err(e) => {
-                        sort_error = Some(e);
-                        std::cmp::Ordering::Equal
-                    }
-                },
-                Err(e) => {
-                    sort_error = Some(e);
-                    std::cmp::Ordering::Equal
-                }
-            }
-        });
-        if let Some(e) = sort_error {
-            return Err(e);
-        }
+        let mut indexed = indexed_by_key(py, &self.elements, &key)?;
+        sort_indexed(py, &mut indexed, true)?;
         let result: Vec<_> = indexed
             .into_iter()
             .take(n)
@@ -114,49 +107,8 @@ impl PyRdd {
         ascending: Option<bool>,
     ) -> PyResult<PyRdd> {
         let asc = ascending.unwrap_or(true);
-
-        let mut indexed: Vec<(Py<PyAny>, Py<PyAny>)> = self
-            .elements
-            .iter()
-            .map(|item| {
-                let k = match &key_fn {
-                    Some(f) => f.call1(py, (item.clone_ref(py),))?,
-                    None => item.clone_ref(py),
-                };
-                Ok((item.clone_ref(py), k))
-            })
-            .collect::<PyResult<_>>()?;
-
-        let mut sort_error: Option<pyo3::PyErr> = None;
-        indexed.sort_by(|(_, ka), (_, kb)| {
-            if sort_error.is_some() {
-                return std::cmp::Ordering::Equal;
-            }
-            let (a, b) = if asc {
-                (ka.bind(py), kb.bind(py))
-            } else {
-                (kb.bind(py), ka.bind(py))
-            };
-            match a.lt(b.clone()) {
-                Ok(true) => std::cmp::Ordering::Less,
-                Ok(false) => match b.lt(a) {
-                    Ok(true) => std::cmp::Ordering::Greater,
-                    Ok(false) => std::cmp::Ordering::Equal,
-                    Err(e) => {
-                        sort_error = Some(e);
-                        std::cmp::Ordering::Equal
-                    }
-                },
-                Err(e) => {
-                    sort_error = Some(e);
-                    std::cmp::Ordering::Equal
-                }
-            }
-        });
-        if let Some(e) = sort_error {
-            return Err(e);
-        }
-
+        let mut indexed = indexed_by_key(py, &self.elements, &key_fn)?;
+        sort_indexed(py, &mut indexed, asc)?;
         let elements = indexed
             .into_iter()
             .map(|(item, _)| item)

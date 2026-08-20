@@ -18,6 +18,7 @@ use proc_macro::TokenStream;
 
 mod body_hash;
 mod register;
+mod shape;
 mod task;
 mod task_fn;
 

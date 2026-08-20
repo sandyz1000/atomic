@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as SyncOrd};
 
 /// Represents a coalesced RDD that has fewer partitions than its parent RDD
 ///
-/// This type uses the PartitionCoalescer type to find a good partitioning of the parent RDD
+/// This type uses `DefaultPartitionCoalescer` to find a good partitioning of the parent RDD
 /// so that each new partition has roughly the same number of parent partitions and that
 /// the preferred location of each new partition overlaps with as many preferred locations of its
 /// parent partitions
@@ -151,27 +151,6 @@ impl<T: Data> Rdd for CoalescedRdd<T> {
 }
 
 type SplitIdx = usize;
-
-/// A PartitionCoalescer defines how to coalesce the partitions of a given RDD.
-///
-/// `Send + Sync` are retained for future compatibility (e.g. if coalescing is
-/// ever moved to a background thread). In practice `coalesce()` is called
-/// single-threadedly on the driver during `splits()`. They impose no real cost
-/// since `DefaultPartitionCoalescer` is stateless.
-pub trait PartitionCoalescer: Send + Sync {
-    /// Coalesce the partitions of the given RDD.
-    ///
-    /// ## Arguments
-    ///
-    /// * max_partitions: the maximum number of partitions to have after coalescing
-    /// * parent: the parent RDD whose partitions to coalesce
-    ///
-    /// ## Return
-    ///
-    /// A vec of `PartitionGroup`s, where each element is itself a vector of
-    /// `Partition`s and represents a partition after coalescing is performed.
-    fn coalesce(self, max_partitions: usize, parent: Arc<dyn RddBase>) -> Vec<PartitionGroup>;
-}
 
 pub struct PartitionGroup {
     id: usize,
@@ -595,11 +574,12 @@ impl DefaultPartitionCoalescer {
             })
             .collect()
     }
-}
 
-impl PartitionCoalescer for DefaultPartitionCoalescer {
     /// Runs the packing algorithm and returns an array of InnerPGroups that if possible are
-    /// load balanced and grouped by locality
+    /// load balanced and grouped by locality.
+    ///
+    /// * `max_partitions`: the maximum number of partitions to have after coalescing
+    /// * `prev`: the parent RDD whose partitions to coalesce
     fn coalesce(mut self, max_partitions: usize, prev: Arc<dyn RddBase>) -> Vec<PartitionGroup> {
         let mut partition_locs = PartitionLocations::new(prev.clone());
         // setup the groups (bins)

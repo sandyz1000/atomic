@@ -4,6 +4,7 @@ use atomic_compute::context::Context;
 use atomic_compute::rdd::TypedRdd;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::datasource::MemTable;
 use datafusion::execution::context::SessionContext;
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions, SessionConfig};
 
@@ -11,7 +12,24 @@ use crate::conf::AtomicSqlConfig;
 use crate::dataframe::DataFrame;
 use crate::errors::{AtomicSqlError, Result};
 use crate::rdd_table::RddTableProvider;
-use crate::table::AtomicTableProvider;
+
+/// Infer a schema from the first non-empty batch in a flat list.
+fn infer_schema(batches: &[RecordBatch]) -> Result<SchemaRef> {
+    batches
+        .first()
+        .map(|b| b.schema())
+        .ok_or_else(|| AtomicSqlError::Schema("Cannot infer schema from empty batch list".into()))
+}
+
+/// Infer a schema from the first non-empty batch across all partitions.
+fn infer_schema_from_partitions(partitions: &[Vec<RecordBatch>]) -> Result<SchemaRef> {
+    partitions
+        .iter()
+        .flat_map(|p| p.first())
+        .map(|b| b.schema())
+        .next()
+        .ok_or_else(|| AtomicSqlError::Schema("Cannot infer schema from empty partitions".into()))
+}
 
 /// The primary entry point for `atomic-sql`.
 ///
@@ -162,7 +180,8 @@ impl AtomicSqlContext {
 
     /// Register a flat list of [`RecordBatch`]es as a single-partition table.
     pub fn register_batches(&self, name: &str, batches: Vec<RecordBatch>) -> Result<()> {
-        let provider = Arc::new(AtomicTableProvider::from_batches(batches)?);
+        let schema = infer_schema(&batches)?;
+        let provider = Arc::new(MemTable::try_new(schema, vec![batches])?);
         self.session.register_table(name, provider)?;
         Ok(())
     }
@@ -174,7 +193,8 @@ impl AtomicSqlContext {
         name: &str,
         partitions: Vec<Vec<RecordBatch>>,
     ) -> Result<()> {
-        let provider = Arc::new(AtomicTableProvider::from_partitions(partitions)?);
+        let schema = infer_schema_from_partitions(&partitions)?;
+        let provider = Arc::new(MemTable::try_new(schema, partitions)?);
         self.session.register_table(name, provider)?;
         Ok(())
     }
@@ -260,7 +280,8 @@ impl AtomicSqlContext {
     /// Create a [`DataFrame`] directly from pre-loaded batches without
     /// registering the table in the catalog.
     pub fn read_batches(&self, batches: Vec<RecordBatch>) -> Result<DataFrame> {
-        let provider = Arc::new(AtomicTableProvider::from_batches(batches)?);
+        let schema = infer_schema(&batches)?;
+        let provider = Arc::new(MemTable::try_new(schema, vec![batches])?);
         let df = self.session.read_table(provider)?;
         Ok(DataFrame::new(df))
     }

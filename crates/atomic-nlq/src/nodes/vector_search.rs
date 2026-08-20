@@ -10,12 +10,9 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef, Result as DFResult};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
-    PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
 use futures::StreamExt;
 
@@ -153,12 +150,7 @@ impl VectorSearchExec {
         fields.push(Arc::new(Field::new("__vs_score", DataType::Float32, false)));
         let schema = Arc::new(Schema::new(fields));
         let n = input.output_partitioning().partition_count();
-        let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(n),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
+        let properties = Arc::new(super::passthrough_plan_properties(schema.clone(), n));
         Self {
             query_col: node.query_col.clone(),
             index_name: node.index_name.clone(),

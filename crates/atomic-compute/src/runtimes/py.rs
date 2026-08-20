@@ -138,32 +138,6 @@ impl PyWorkerPool {
     }
 }
 
-/// Run a Python tool's source against one JSON-text argument and return one
-/// JSON-text result.
-///
-/// Unlike [`PyWorkerPool::execute`] (which unpickles a closure shipped from the
-/// driver), `source` is raw Python text defining a top-level `run(args)` function —
-/// the same convention `atomic-nlq`'s `ToolRegistry::Python(String)` tools already use
-/// (see `crates/atomic-nlq/tests/test_context.rs`). Used by `agent_step` tool dispatch
-/// (`TOOL_CALL:` handling) for tools resolved into `AgentStepPayload.resolved_tools`.
-pub fn run_tool_call(source: &str, args_json: &str) -> Result<String, PythonTaskError> {
-    Python::initialize();
-    Python::attach(|py| {
-        let code = std::ffi::CString::new(source).map_err(|_| PythonTaskError::InvalidSource)?;
-        let module = PyModule::from_code(py, &code, c"<agent_tool>", c"agent_tool")?;
-        let run_fn = module
-            .getattr("run")
-            .map_err(|_| PythonTaskError::MissingRunFn)?;
-
-        let value: serde_json::Value = serde_json::from_str(args_json)?;
-        let args_obj = pythonize::pythonize(py, &value)?;
-        let result = run_fn.call1((args_obj,))?;
-
-        let out: serde_json::Value = pythonize::depythonize(&result)?;
-        Ok(serde_json::to_string(&out)?)
-    })
-}
-
 /// [`Dispatcher`] for `TaskRuntime::Python` steps.
 ///
 /// Owns a [`PyWorkerPool`] and forwards pickled task bytes + partition data to it.

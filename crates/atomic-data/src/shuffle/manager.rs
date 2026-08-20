@@ -8,12 +8,12 @@ use std::time::Duration;
 use crate::shuffle::cache::ShuffleCache;
 use crate::shuffle::config::ShuffleConfig;
 use crate::shuffle::error::{NetworkError, ShuffleError};
+use atomic_utils::get_dynamic_port;
 use crossbeam::channel as cb_channel;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode, Uri, body::Incoming, service::Service};
 use hyper_util::rt::TokioIo;
-use rand::RngExt;
 use uuid::Uuid;
 
 pub type LibResult<T> = Result<T, ShuffleError>;
@@ -31,12 +31,6 @@ fn get_free_connection(ip: Ipv4Addr) -> LibResult<(TcpListener, u16)> {
     Err(ShuffleError::NetworkError(NetworkError::FreePortNotFound(
         port, 100,
     )))
-}
-
-fn get_dynamic_port() -> u16 {
-    const FIRST_DYNAMIC_PORT: u16 = 49152;
-    const LAST_DYNAMIC_PORT: u16 = 65535;
-    rand::rng().random_range(FIRST_DYNAMIC_PORT..LAST_DYNAMIC_PORT)
 }
 
 /// Creates directories and files required for storing shuffle data.
@@ -86,24 +80,6 @@ impl ShuffleManager {
         {
             log::error!("failed removing tmp work dir: {}", e);
         }
-    }
-
-    pub fn get_output_file(
-        &self,
-        shuffle_id: usize,
-        input_id: usize,
-        output_id: usize,
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let path = self
-            .shuffle_dir
-            .join(format!("{}/{}", shuffle_id, input_id));
-        fs::create_dir_all(&path)?;
-        let file_path = path.join(format!("{}", output_id));
-        fs::File::create(&file_path)?;
-        Ok(file_path
-            .to_str()
-            .ok_or_else(|| ShuffleError::CouldNotCreateShuffleDir)?
-            .to_owned())
     }
 
     pub fn check_status(&self) -> LibResult<StatusCode> {
@@ -468,141 +444,3 @@ impl Service<Request<Incoming>> for ShuffleService {
         })
     }
 }
-
-// TODO: Tests have been commented out because they depend on env:: module which is not available
-// in the atomic-shuffle crate. These tests need to be rewritten in the main atomic crate where
-// env:: is available, creating concrete implementations of ShuffleCache and passing them to
-// ShuffleManager::new() along with ShuffleConfig.
-//
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use http_body_util::BodyExt;
-//     use std::sync::Arc;
-//     use std::thread;
-//
-//     async fn make_request(uri: Uri) -> Result<Response<Incoming>, Box<dyn std::error::Error>> {
-//         let host = uri.host().unwrap();
-//         let port = uri.port_u16().unwrap_or(80);
-//
-//         let stream = tokio::net::TcpStream::connect((host, port)).await?;
-//         let io = TokioIo::new(stream);
-//
-//         let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
-//
-//         tokio::spawn(async move {
-//             if let Err(err) = conn.await {
-//                 log::error!("Connection failed: {:?}", err);
-//             }
-//         });
-//
-//         let request = Request::builder().uri(uri).body(Body::default())?;
-//
-//         let response = sender.send_request(request).await?;
-//         Ok(response)
-//     }
-//
-//     #[tokio::test]
-//     async fn start_ok() -> Result<(), Box<dyn std::error::Error + 'static>> {
-//         let (_, port) = ShuffleManager::start_server(None)?;
-//
-//         let url = format!(
-//             "http://{}:{}/status",
-//             env::Configuration::get().local_ip,
-//             port
-//         );
-//         let res = make_request(Uri::try_from(&url)?).await?;
-//         assert_eq!(res.status(), StatusCode::OK);
-//         Ok(())
-//     }
-//
-//     #[test]
-//     fn start_failure() -> Result<(), Box<dyn std::error::Error + 'static>> {
-//         // bind first so it fails while trying to start
-//         let (_conn, port) = crate::manager::get_free_connection("0.0.0.0".parse().unwrap())?;
-//         assert!(
-//             ShuffleManager::start_server(Some(port))
-//                 .unwrap_err()
-//                 .no_port()
-//         );
-//         Ok(())
-//     }
-//
-//     #[test]
-//     fn status_checking_ok() -> Result<(), Box<dyn std::error::Error + 'static>> {
-//         let parallelism = num_cpus::get();
-//         let manager = Arc::new(env::Env::run_in_async_rt(|| ShuffleManager::new().unwrap()));
-//         let mut threads = Vec::with_capacity(parallelism);
-//         for _ in 0..parallelism {
-//             let manager = manager.clone();
-//             threads.push(thread::spawn(move || -> LibResult<()> {
-//                 for _ in 0..10 {
-//                     env::Env::run_in_async_rt(|| -> LibResult<()> {
-//                         match manager.check_status() {
-//                             Ok(StatusCode::OK) => Ok(()),
-//                             _ => Err(ShuffleError::Other),
-//                         }
-//                     })?;
-//                 }
-//                 Ok(())
-//             }));
-//         }
-//         let results = threads
-//             .into_iter()
-//             .filter_map(|res| res.join().ok())
-//             .collect::<LibResult<Vec<_>>>()?;
-//         assert_eq!(results.len(), parallelism);
-//         manager.clean_up_shuffle_data();
-//         Ok(())
-//     }
-//
-//     #[tokio::test]
-//     async fn cached_data_found() -> Result<(), Box<dyn std::error::Error + 'static>> {
-//         let (_, port) = ShuffleManager::start_server(None)?;
-//         let data = b"some random bytes".iter().copied().collect::<Vec<u8>>();
-//         {
-//             env::SHUFFLE_CACHE.insert((2, 1, 0), data.clone());
-//         }
-//         let url = format!(
-//             "http://{}:{}/shuffle/2/1/0",
-//             env::Configuration::get().local_ip,
-//             port
-//         );
-//         let res = make_request(Uri::try_from(&url)?).await?;
-//         assert_eq!(res.status(), StatusCode::OK);
-//         let body = res.into_body().collect().await?.to_bytes();
-//         assert_eq!(body.to_vec(), data);
-//         Ok(())
-//     }
-//
-//     #[tokio::test]
-//     async fn cached_data_missing() -> Result<(), Box<dyn std::error::Error + 'static>> {
-//         let (_, port) = ShuffleManager::start_server(None)?;
-//
-//         let url = format!(
-//             "http://{}:{}/shuffle/0/1/2",
-//             env::Configuration::get().local_ip,
-//             port
-//         );
-//         let res = make_request(Uri::try_from(&url)?).await?;
-//         assert_eq!(res.status(), StatusCode::NOT_FOUND);
-//         Ok(())
-//     }
-//
-//     #[tokio::test]
-//     async fn not_valid_endpoint() -> Result<(), Box<dyn std::error::Error + 'static>> {
-//         let (_, port) = ShuffleManager::start_server(None)?;
-//
-//         let url = format!(
-//             "http://{}:{}/not_valid",
-//             env::Configuration::get().local_ip,
-//             port
-//         );
-//         let res = make_request(Uri::try_from(&url)?).await?;
-//         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-//         let body = res.into_body().collect().await?.to_bytes();
-//         let body_str = String::from_utf8(body.to_vec())?;
-//         assert_eq!(body_str, "Failed to parse: /not_valid");
-//         Ok(())
-//     }
-// }

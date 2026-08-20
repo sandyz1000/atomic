@@ -138,13 +138,6 @@ pub enum EngineAction {
         /// Registered state-merge function name (e.g. `"atomic_structured::windowed_v1"`).
         merge_fn: String,
     },
-    /// Framework-native distributed sub-agent loop. The worker looks up the
-    /// registered `AgentRunner` (installed by `atomic-nlq`) and runs a multi-round
-    /// LLM plan→execute→evaluate loop over the partition's string inputs.
-    /// Config is in `Step.payload` (JSON-encoded `AgentStepPayload`);
-    /// input bytes are rkyv-encoded `Vec<String>` (or JSON fallback for Python/JS).
-    /// Returns rkyv-encoded `Vec<AgentFindings>`.
-    AgentStep,
     /// Map-side pre-combine that runs on the worker immediately before `ShuffleMap`,
     /// grouping same-key values within a map partition into fewer pre-combined pairs so
     /// less data crosses the network. Opt-in: only inserted when a combine handler was
@@ -200,96 +193,6 @@ impl StepKind {
     }
 }
 
-/// Config for a [`EngineAction::AgentStep`] op.
-///
-/// Serialized as JSON into `Step.payload` so it can be decoded by the
-/// worker's `NativeDispatcher` without a shared rkyv schema.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AgentStepPayload {
-    /// LLM model identifier, e.g. `"gpt-4o"` or `"claude-opus-4-8"`.
-    pub model: String,
-    /// System prompt describing the agent's task.
-    pub system_prompt: String,
-    /// Maximum number of LLM rounds per input.
-    pub max_rounds: u32,
-    /// Tool IDs the agent may invoke via `TOOL_CALL: <ref> <json_args>`.
-    ///
-    /// Each entry is either a `#[task]` task_name (dispatched through `TASK_REGISTRY` on the
-    /// worker — no entry needed in `resolved_tools`) or a name resolved into
-    /// `resolved_tools` by the driver before staging. Resolution happens once,
-    /// driver-side, so workers never need a `ToolRegistry`.
-    pub tool_refs: Vec<String>,
-    /// Resolved Python/JS tool source for any `tool_refs` entry that isn't a `#[task]`
-    /// task_name. Populated by the driver (see `atomic-nlq`'s tool resolution) before this
-    /// payload is staged into a pipeline op; empty for Rust-only tool_refs.
-    #[serde(default)]
-    pub resolved_tools: Vec<ResolvedTool>,
-    /// Provider string: `"openai"` (default) or `"anthropic"`.
-    pub provider: String,
-    /// Optional JSON schema for output validation (best-effort check).
-    pub output_schema: Option<String>,
-    /// Optional token budget across all inputs in this partition.
-    pub max_tokens_total: Option<u64>,
-}
-
-/// Language of a shipped (non-native) task: the runtime that executes source
-/// travelling with the job, as opposed to a compiled `#[task]`.
-///
-/// This is the strict non-`Native` subset of [`TaskRuntime`], but unlike `TaskRuntime`
-/// it is **not** feature-gated: it tags *what language the source is written in*, a fact
-/// about the data that the driver must be able to record regardless of which runtimes the
-/// driver binary was built to execute. (A driver can resolve and ship a Python tool even
-/// in a build without the `python` feature; only the executing worker needs that feature.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ScriptRuntime {
-    Python,
-    JavaScript,
-}
-
-/// Resolved Python/JS tool source for one [`AgentStepPayload::tool_refs`] entry.
-///
-/// Carries raw source text — not a pickled/compiled form. This is deliberately the
-/// one shipping form that works for *every* driver: a Rust driver (via `atomic-nlq`'s
-/// `ToolRegistry`) has no interpreter to pickle a Python callable, and JS has no pickle
-/// at all (`fn.toString()` is already source), so source is the common denominator and
-/// keeps a single worker-side tool-dispatch path across all three languages.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ResolvedTool {
-    /// The name as it appears in `tool_refs` (what the model is told to emit in `TOOL_CALL:`).
-    pub name: String,
-    /// Language the `source` is written in (drives worker-side dispatch).
-    pub runtime: ScriptRuntime,
-    /// Tool source. For Python: defines a top-level `run(args)` function. For JavaScript:
-    /// a function expression `(args) => result`. In both cases `args` is the JSON object
-    /// the model supplied in `TOOL_CALL: <name> <json_args>`, and the return value is
-    /// JSON-encoded back into the conversation. A plain string keeps the whole
-    /// `AgentStepPayload` JSON-serializable.
-    pub source: String,
-}
-
-/// Structured result returned by a sub-agent for one input string.
-///
-/// One `AgentFindings` is produced per input element in the partition.
-/// `Vec<AgentFindings>` is rkyv-encoded as the partition output of an
-/// [`EngineAction::AgentStep`] op.
-#[derive(
-    Debug, Clone, PartialEq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
-)]
-#[rkyv(derive(Debug))]
-pub struct AgentFindings {
-    /// Index of the input string within this partition (0-based).
-    pub input_id: usize,
-    /// Final answer or extracted content produced by the agent.
-    pub answer: String,
-    /// Number of LLM rounds completed.
-    pub rounds: usize,
-    /// Confidence estimate in `[0.0, 1.0]` (set by the runner; not validated).
-    pub confidence: f32,
-    /// `true` if the token budget was exhausted before all inputs were processed.
-    pub budget_exceeded: bool,
-}
-
 /// Metadata carried in `Step.payload` for a Python task step.
 ///
 /// Serialized as JSON so both Python (via `json` stdlib) and Rust (`serde_json`) can
@@ -298,8 +201,6 @@ pub struct AgentFindings {
 pub struct PythonTaskPayload {
     /// `cloudpickle`/`pickle`-serialized partition-level Python callable.
     pub fn_bytes: Vec<u8>,
-    /// Reserved for future use (currently unused). Empty for all operations.
-    pub zero_bytes: Vec<u8>,
 }
 
 /// Metadata carried in `Step.payload` for a JavaScript task step.
@@ -307,8 +208,6 @@ pub struct PythonTaskPayload {
 pub struct JsTaskPayload {
     /// JavaScript partition-level function source.
     pub fn_source: String,
-    /// Reserved for future use (currently unused). Empty for all operations.
-    pub zero_json: String,
     /// Optional JSON-encoded object of driver-side values to expose as `globalThis.__ctx`.
     /// `None` means no context — all existing payloads without this field deserialize to `None`.
     #[serde(default)]

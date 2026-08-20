@@ -25,11 +25,11 @@ use atomic_sql::context::AtomicSqlContext;
 /// every `DataFrame`/`SqlContext` method (~55 call sites); collapsing it here keeps
 /// each method's own SQL-construction logic front and center instead of buried
 /// under a repeated closure.
-fn to_js_err<E: std::fmt::Display>(e: E) -> Error {
+pub(crate) fn to_js_err<E: std::fmt::Display>(e: E) -> Error {
     Error::from_reason(e.to_string())
 }
 
-fn run_sql_async<F, T>(fut: F) -> T
+pub(crate) fn run_sql_async<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
@@ -819,6 +819,15 @@ impl JsDataFrame {
 pub struct JsSqlContext {
     inner: Arc<AtomicSqlContext>,
     session: Arc<SessionContext>,
+}
+
+impl JsSqlContext {
+    /// Wrap an existing `AtomicSqlContext` (e.g. `NlqContext.sql_ctx`) rather than
+    /// building a fresh one. Not exposed to JS (no `#[napi]`).
+    pub(crate) fn from_context(inner: Arc<AtomicSqlContext>) -> Self {
+        let session = Arc::new(inner.inner().clone());
+        Self { inner, session }
+    }
 }
 
 #[napi]

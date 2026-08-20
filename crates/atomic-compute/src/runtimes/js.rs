@@ -159,25 +159,6 @@ impl JsDispatcher {
     }
 }
 
-/// Run a JS tool function against one JSON-text argument and return one JSON-text result.
-///
-/// `fn_source` is a JS function expression (`fn.toString()`-captured, same convention as
-/// ordinary map/filter tasks); it receives the parsed `args_json` value as its single
-/// argument. Used by `agent_step` tool dispatch (`atomic-nlq`'s `TOOL_CALL:` handling) for
-/// tools resolved from `AgentStepPayload.resolved_tools`.
-pub fn run_tool_call(fn_source: &str, args_json: &str) -> Result<String, JsTaskError> {
-    let bytes = JsDispatcher::new()
-        .eval_partition(fn_source, None, args_json)
-        .inspect_err(|e| {
-            log::warn!("run_tool_call: JS eval failed for tool source {fn_source:?}: {e}")
-        })?;
-    String::from_utf8(bytes)
-        .map_err(|e| JsTaskError::Utf8(e.utf8_error()))
-        .inspect_err(|e| {
-            log::warn!("run_tool_call: JS tool result is not valid UTF-8: {e}");
-        })
-}
-
 impl JsDispatcher {
     fn dispatch_impl(
         &self,

@@ -8,22 +8,6 @@ use atomic_data::split::{ParallelCollectionSplit, Split};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-/// A collection of objects which can be sliced into partitions with a partitioning function.
-pub trait Chunkable<D>
-where
-    D: Data,
-{
-    fn slice_with_set_parts(self, parts: usize) -> Vec<Arc<Vec<D>>>;
-
-    fn slice(self) -> Vec<Arc<Vec<D>>>
-    where
-        Self: Sized,
-    {
-        let as_many_parts_as_cpus = num_cpus::get();
-        self.slice_with_set_parts(as_many_parts_as_cpus)
-    }
-}
-
 pub struct ParallelCollectionVals<T> {
     vals: Arc<RddVals>,
     splits_: Vec<Arc<Vec<T>>>,
@@ -54,21 +38,6 @@ impl<T: Data> ParallelCollection<T> {
                 vals: Arc::new(RddVals::new(id)),
                 splits_: ParallelCollection::slice(data, num_slices),
             }),
-        }
-    }
-
-    pub fn from_chunkable<C>(id: usize, data: C) -> Self
-    where
-        C: Chunkable<T>,
-    {
-        let splits_ = data.slice();
-        let rdd_vals = ParallelCollectionVals {
-            vals: Arc::new(RddVals::new(id)),
-            splits_,
-        };
-        ParallelCollection {
-            name: Mutex::new("parallel_collection".to_owned()),
-            rdd_vals: Arc::new(rdd_vals),
         }
     }
 

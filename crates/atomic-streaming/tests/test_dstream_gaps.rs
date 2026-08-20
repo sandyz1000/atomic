@@ -108,9 +108,34 @@ fn test_getorcreate_fresh() {
     assert!(ssc.checkpoint_dir.lock().is_some());
 }
 
+// `mapWithState`'s per-key logic must be a compile-time registered `MapWithStateTask`
+// (Atomic never ships raw closures to workers) — a zero-sized struct, same convention as
+// `#[task]`.
+#[derive(Default)]
+struct RunningTotal;
+
+impl atomic_streaming::dstream::map_with_state::MapWithStateTask<String, i32, i32, (String, i32)>
+    for RunningTotal
+{
+    const NAME: &'static str = "test_dstream_gaps::running_total";
+
+    fn call(
+        &self,
+        k: &String,
+        vals: &[i32],
+        cur: Option<i32>,
+    ) -> (Option<(String, i32)>, Option<i32>) {
+        let total = cur.unwrap_or(0) + vals.iter().sum::<i32>();
+        (Some((k.clone(), total)), Some(total))
+    }
+}
+
+atomic_streaming::register_map_with_state!(RunningTotal, String, i32, i32, (String, i32));
+
 #[test]
 fn test_map_with_state() {
-    use atomic_streaming::dstream::pair::{PairDStreamFunctions, StateSpecImpl};
+    use atomic_streaming::dstream::map_with_state::StateSpecImpl;
+    use atomic_streaming::dstream::pair::PairDStreamFunctions;
 
     let sc = local_sc();
     let ssc = StreamingContext::new(sc.clone(), Duration::from_millis(50));
@@ -121,13 +146,37 @@ fn test_map_with_state() {
 
     let pair_fns = PairDStreamFunctions::new(stream, ssc.clone());
     let spec: StateSpecImpl<String, i32, i32, (String, i32)> = StateSpecImpl::new();
-    let mapped = pair_fns.map_with_state(spec, |k: &String, vals: &[i32], cur: Option<i32>| {
-        let total = cur.unwrap_or(0) + vals.iter().sum::<i32>();
-        (Some((k.clone(), total)), Some(total))
-    });
+    let mapped = pair_fns.map_with_state(spec, RunningTotal);
 
     let mut got = drain(&ssc, sc, mapped, 200);
     got.sort();
     // a → 2, b → 1.
     assert_eq!(got, vec![("a".to_string(), 2), ("b".to_string(), 1)]);
+}
+
+#[test]
+fn test_map_with_state_initial_state_and_shards() {
+    use atomic_streaming::dstream::map_with_state::StateSpecImpl;
+    use atomic_streaming::dstream::pair::PairDStreamFunctions;
+
+    let sc = local_sc();
+    let ssc = StreamingContext::new(sc.clone(), Duration::from_millis(50));
+    let pairs: Vec<(String, i32)> = vec![("a".into(), 1), ("b".into(), 5)];
+    let q = VecDeque::from_iter([sc.parallelize_typed(pairs, 1).into_rdd()]);
+    let stream = ssc.queue_stream(Arc::new(Mutex::new(q)), true) as Arc<dyn DStream<(String, i32)>>;
+
+    let initial: Vec<(String, i32)> = vec![("a".into(), 100)];
+    let initial_rdd = sc.parallelize_typed(initial, 1).into_rdd();
+
+    let pair_fns = PairDStreamFunctions::new(stream, ssc.clone());
+    let spec: StateSpecImpl<String, i32, i32, (String, i32)> = StateSpecImpl::new()
+        .initial_state(initial_rdd)
+        .num_partitions(3);
+    let mapped = pair_fns.map_with_state(spec, RunningTotal);
+
+    let mut got = drain(&ssc, sc, mapped, 200);
+    got.sort();
+    // "a" starts from the seeded 100 plus this batch's 1 → 101. "b" has no seed → 5.
+    // 3 shards, only 2 keys — exercises shard_of() routing beyond a single partition.
+    assert_eq!(got, vec![("a".to_string(), 101), ("b".to_string(), 5)]);
 }

@@ -266,10 +266,6 @@ impl Partitioner {
         }
     }
 
-    pub fn get_num_of_partitions(&self) -> usize {
-        self.num_partitions()
-    }
-
     pub fn get_partition(&self, key: &dyn Any) -> usize {
         match self {
             Partitioner::Hash {

@@ -3,6 +3,7 @@
 mod context;
 mod distributed_vars;
 mod graph;
+mod nlq;
 mod rdd;
 mod sql;
 mod streaming;
@@ -11,6 +12,7 @@ mod structured;
 pub use context::JsContext;
 pub use distributed_vars::{Accumulator, BroadcastVar};
 pub use graph::JsGraph;
+pub use nlq::{JsNlqContext, NlqContextOptions};
 pub use rdd::JsRdd;
 pub use sql::{JsDataFrame, JsSqlContext};
 pub use streaming::{JsBatchQueue, JsDStream, JsStreamingContext};
@@ -21,5 +23,4 @@ pub use structured::{
 
 /// Registers the framework-native agent runner once when the native module loads,
 #[napi_derive::module_init]
-fn init() {
-}
+fn init() {}

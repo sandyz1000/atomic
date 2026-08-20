@@ -57,7 +57,6 @@ impl Context {
         }
         let local = Arc::new(LocalScheduler::new_with_coalesce(
             20,
-            true,
             config.coalesce_shuffle_threshold_bytes,
         ));
         let scheduler = atomic_scheduler::Schedulers::Local(local.clone());
@@ -99,14 +98,8 @@ impl Context {
             log::warn!("shuffle service could not start: {e}");
         }
 
-        let mut dist_sched = DistributedScheduler::new(20, true)
-            .with_driver_fingerprint(*registry::REGISTRY_FINGERPRINT);
-        if let Some(m) = config.speculation_multiplier {
-            dist_sched = dist_sched.with_speculation(m);
-        }
-        if let Some(secs) = config.agent_step_timeout_secs {
-            dist_sched = dist_sched.with_agent_step_timeout(std::time::Duration::from_secs(secs));
-        }
+        let dist_sched =
+            DistributedScheduler::new(20).with_driver_fingerprint(*registry::REGISTRY_FINGERPRINT);
         let scheduler = Arc::new(dist_sched);
         let mut address_map = Vec::new();
 
@@ -161,7 +154,6 @@ impl Context {
 
         let driver_scheduler = Arc::new(LocalScheduler::new_with_coalesce(
             20,
-            false,
             config.coalesce_shuffle_threshold_bytes,
         ));
         let active_shuffle_stages: super::ActiveShuffleStages = Arc::new(dashmap::DashMap::new());

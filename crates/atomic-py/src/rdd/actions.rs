@@ -18,7 +18,11 @@ impl PyRdd {
         {
             let result_bytes = self
                 .context
-                .dispatch_pipeline(self.placeholder_rdd(), staged.source_partitions.clone(), staged.steps.clone())
+                .dispatch_pipeline(
+                    self.placeholder_rdd(),
+                    staged.source_partitions.clone(),
+                    staged.steps.clone(),
+                )
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             return Self::collect_distributed(py, result_bytes);
         }
@@ -67,10 +71,7 @@ impl PyRdd {
                 &f,
             )?;
             let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
-            let payload_struct = PythonTaskPayload {
-                fn_bytes,
-                zero_bytes: vec![],
-            };
+            let payload_struct = PythonTaskPayload { fn_bytes };
             let payload = serde_json::to_vec(&payload_struct)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let op = Step {
@@ -84,7 +85,11 @@ impl PyRdd {
             let staged = self.staged.as_ref().unwrap();
             let result_bytes = self
                 .context
-                .dispatch_pipeline(self.placeholder_rdd(), staged.source_partitions.clone(), staged.steps.clone())
+                .dispatch_pipeline(
+                    self.placeholder_rdd(),
+                    staged.source_partitions.clone(),
+                    staged.steps.clone(),
+                )
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             let json_mod = PyModule::import(py, "json")?;
@@ -132,10 +137,7 @@ impl PyRdd {
             )?;
             let fn_bytes = Self::pickle_fn(py, &wrapper.unbind())?;
             let zero_bytes = Self::pickle_fn(py, &zero)?;
-            let payload_struct = PythonTaskPayload {
-                fn_bytes,
-                zero_bytes: vec![],
-            };
+            let payload_struct = PythonTaskPayload { fn_bytes };
             let payload = serde_json::to_vec(&payload_struct)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let op = Step {
@@ -149,7 +151,11 @@ impl PyRdd {
             let staged = self.staged.as_ref().unwrap();
             let result_bytes = self
                 .context
-                .dispatch_pipeline(self.placeholder_rdd(), staged.source_partitions.clone(), staged.steps.clone())
+                .dispatch_pipeline(
+                    self.placeholder_rdd(),
+                    staged.source_partitions.clone(),
+                    staged.steps.clone(),
+                )
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
             let json_mod = PyModule::import(py, "json")?;
@@ -427,28 +433,13 @@ impl PyRdd {
     /// (default 2). More numerically stable than a left-to-right `reduce`.
     #[pyo3(signature = (f, depth=2))]
     pub fn tree_reduce(&self, py: Python, f: Py<PyAny>, depth: usize) -> PyResult<Py<PyAny>> {
-        let mut partials = self.materialized_elements(py)?;
+        let partials = self.materialized_elements(py)?;
         if partials.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "tree_reduce on empty RDD",
             ));
         }
-        let levels = depth.max(1);
-        for _ in 0..levels {
-            if partials.len() <= 1 {
-                break;
-            }
-            let mut next = Vec::with_capacity(partials.len() / 2 + 1);
-            let mut iter = partials.into_iter();
-            while let Some(a) = iter.next() {
-                match iter.next() {
-                    Some(b) => next.push(f.call1(py, (a, b))?),
-                    None => next.push(a),
-                }
-            }
-            partials = next;
-        }
-        partials
+        Self::tree_merge(py, partials, depth, &f)?
             .into_iter()
             .next()
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("tree_reduce produced no value"))
@@ -476,21 +467,7 @@ impl PyRdd {
             }
             partials.push(acc);
         }
-        let levels = depth.max(1);
-        for _ in 0..levels {
-            if partials.len() <= 1 {
-                break;
-            }
-            let mut next = Vec::with_capacity(partials.len() / 2 + 1);
-            let mut iter = partials.into_iter();
-            while let Some(a) = iter.next() {
-                match iter.next() {
-                    Some(b) => next.push(comb_fn.call1(py, (a, b))?),
-                    None => next.push(a),
-                }
-            }
-            partials = next;
-        }
+        let partials = Self::tree_merge(py, partials, depth, &comb_fn)?;
         Ok(partials.into_iter().next().unwrap_or(zero))
     }
 
@@ -740,13 +717,44 @@ impl PyRdd {
     /// The elements to aggregate over: in distributed mode with a staged pipeline this dispatches
     /// the pipeline to workers and returns the transformed rows, so aggregations see the current
     /// logical elements rather than the stale source. In local mode it clones `self.elements`.
+    /// Balanced binary-tree merge: repeatedly pair up adjacent elements and combine them
+    /// with `comb`, for up to `depth` levels or until one element remains. Shared by
+    /// `tree_reduce` (`comb` = the user's reduce fn) and `tree_aggregate` (`comb` = `comb_fn`).
+    fn tree_merge(
+        py: Python,
+        mut partials: Vec<Py<PyAny>>,
+        depth: usize,
+        comb: &Py<PyAny>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let levels = depth.max(1);
+        for _ in 0..levels {
+            if partials.len() <= 1 {
+                break;
+            }
+            let mut next = Vec::with_capacity(partials.len() / 2 + 1);
+            let mut iter = partials.into_iter();
+            while let Some(a) = iter.next() {
+                match iter.next() {
+                    Some(b) => next.push(comb.call1(py, (a, b))?),
+                    None => next.push(a),
+                }
+            }
+            partials = next;
+        }
+        Ok(partials)
+    }
+
     fn materialized_elements(&self, py: Python) -> PyResult<Vec<Py<PyAny>>> {
         if self.context.is_distributed()
             && let Some(ref staged) = self.staged
         {
             let result_bytes = self
                 .context
-                .dispatch_pipeline(self.placeholder_rdd(), staged.source_partitions.clone(), staged.steps.clone())
+                .dispatch_pipeline(
+                    self.placeholder_rdd(),
+                    staged.source_partitions.clone(),
+                    staged.steps.clone(),
+                )
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
             let list = Self::collect_distributed(py, result_bytes)?;
             let mut out = Vec::new();

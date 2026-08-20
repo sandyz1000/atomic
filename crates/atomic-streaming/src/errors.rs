@@ -12,8 +12,6 @@ pub enum StreamingError {
     NoOutputOperations,
     #[error("Checkpoint error: {0}")]
     CheckpointError(String),
-    #[error("Receiver error: {0}")]
-    ReceiverError(String),
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("Internal error: {0}")]

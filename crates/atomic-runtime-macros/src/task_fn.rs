@@ -4,7 +4,8 @@ use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{ExprClosure, Ident, ReturnType, Token, Type, bracketed, parse_macro_input};
 
-use crate::body_hash::fnv1a_hash;
+use crate::body_hash::body_hash_parts;
+use crate::shape::{is_bool_type, is_vec_type};
 
 /// A single `name: Type` entry in a `task_fn!` capture list.
 struct CaptureItem {
@@ -190,10 +191,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
     // Hash only the body, not the full closure, so argument names (x vs item) and
     // argument patterns don't affect the id — only the actual logic does.
-    let body_token_str = quote! { #body }.to_string();
-    let body_hash_val = fnv1a_hash(&body_token_str);
-    let short_hash = format!("{:08x}", body_hash_val as u32);
-    let body_hash = proc_macro2::Literal::u64_suffixed(body_hash_val);
+    let (short_hash, body_hash) = body_hash_parts(&quote! { #body }.to_string());
 
     // Normalise a type token stream to a compact string: remove whitespace.
     let normalise_ty = |ts: &proc_macro2::TokenStream| -> String {
@@ -203,9 +201,12 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             .collect()
     };
 
+    // Return-type shape, computed once and reused both for the task_name (below) and to
+    // pick the unary dispatch arms further down — only meaningful when num_inputs != 2.
+    let is_bool_ret = matches!(&closure.output, ReturnType::Type(_, ty) if is_bool_type(ty));
+    let is_vec_ret = matches!(&closure.output, ReturnType::Type(_, ty) if is_vec_type(ty));
+
     // Determine Action label and type string from the signature.
-    // (is_bool / is_vec / num_inputs are computed later; replicate the detection here
-    //  for task_name construction before the if-else branches below.)
     let (action_label, types_str): (String, String) = if num_inputs == 2 {
         let (_, t) = &typed_args[0];
         ("Reduce".to_owned(), normalise_ty(t))
@@ -216,21 +217,6 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             ReturnType::Type(_, ret_ty) => {
                 let ret_ts = quote! { #ret_ty };
                 let ret_str = normalise_ty(&ret_ts);
-                let is_bool_ret = if let Type::Path(tp) = ret_ty.as_ref() {
-                    tp.path.is_ident("bool")
-                } else {
-                    false
-                };
-                let is_vec_ret = if let Type::Path(tp) = ret_ty.as_ref() {
-                    tp.path
-                        .segments
-                        .last()
-                        .map(|s| s.ident == "Vec")
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-
                 if is_bool_ret {
                     ("Filter".to_owned(), input_ty)
                 } else if is_vec_ret {
@@ -334,33 +320,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
         };
 
-        // Detect if return type is bool → Filter dispatch; Vec<_> → FlatMap; else Map.
-        let is_bool = match &closure.output {
-            ReturnType::Type(_, ty) => {
-                if let Type::Path(tp) = ty.as_ref() {
-                    tp.path.is_ident("bool")
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        };
-        let is_vec = match &closure.output {
-            ReturnType::Type(_, ty) => {
-                if let Type::Path(tp) = ty.as_ref() {
-                    tp.path
-                        .segments
-                        .last()
-                        .map(|s| s.ident == "Vec")
-                        .unwrap_or(false)
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        };
-
-        let dispatch_arms = if is_bool {
+        // is_bool_ret/is_vec_ret (computed above) pick the dispatch shape: bool → Filter,
+        // Vec<_> → FlatMap, else Map.
+        let dispatch_arms = if is_bool_ret {
             quote! {
                 TaskAction::Map | TaskAction::Collect => {
                     let items = ::std::vec::Vec::<#t>::decode_wire(data).map_err(|e| e.to_string())?;
@@ -378,7 +340,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 }
                 other => Err(::std::format!("task_fn (predicate) does not support action {:?}", other)),
             }
-        } else if is_vec {
+        } else if is_vec_ret {
             quote! {
                 TaskAction::Map | TaskAction::Collect => {
                     let items = ::std::vec::Vec::<#t>::decode_wire(data).map_err(|e| e.to_string())?;

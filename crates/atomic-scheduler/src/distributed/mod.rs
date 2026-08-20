@@ -29,7 +29,6 @@ use crate::{
     dag::{CompletionEvent, TaskEndReason},
     error::{LibResult, SchedulerError},
     job::JobTracker,
-    listener::LiveListenerBus,
     planner::StagePlanner,
     stage::Stage,
 };
@@ -82,16 +81,7 @@ pub struct DistributedScheduler {
     pub(crate) broadcast_sent: Arc<DashMap<SocketAddrV4, HashSet<usize>>>,
     /// Per-task timeout. `None` means no timeout (useful in tests / local mode).
     pub(crate) task_timeout: Option<Duration>,
-    /// Per-task timeout for pipelines containing an `AgentStep` op. Multi-round LLM
-    /// calls run far longer than the cheap-CPU-task default `task_timeout`, so this
-    /// is a separate, larger knob.
-    pub(crate) agent_step_timeout: Option<Duration>,
-    /// Speculative execution multiplier.
-    pub(crate) speculation_multiplier: Option<f64>,
 
-    /// Scheduler role flag taken at construction; retained as config (driver vs. worker).
-    #[allow(dead_code)]
-    pub(crate) master: bool,
     /// Per-job cancellation tokens — cancelled when `cancel_job()` is called.
     pub(crate) job_cancel_tokens: Arc<DashMap<usize, tokio_util::sync::CancellationToken>>,
 
@@ -111,7 +101,6 @@ pub struct DistributedScheduler {
     pub(crate) state_locs: Arc<DashMap<u64, SocketAddrV4>>,
 
     pub(crate) scheduler_lock: Arc<Mutex<bool>>,
-    pub(crate) live_listener_bus: LiveListenerBus,
 
     /// Merges worker-reported accumulator deltas into the driver store; `None`
     /// until the compute context installs it.
@@ -119,11 +108,7 @@ pub struct DistributedScheduler {
 }
 
 impl DistributedScheduler {
-    pub fn new(max_failures: usize, master: bool) -> Self {
-        let mut live_listener_bus = LiveListenerBus::new();
-        live_listener_bus
-            .start()
-            .expect("LiveListenerBus failed to start its event-dispatch thread");
+    pub fn new(max_failures: usize) -> Self {
         Self {
             state: SchedulerState::new(),
             max_failures,
@@ -133,14 +118,10 @@ impl DistributedScheduler {
             worker_failures: Arc::new(DashMap::new()),
             broadcast_sent: Arc::new(DashMap::new()),
             task_timeout: Some(Duration::from_secs(300)),
-            agent_step_timeout: None,
-            speculation_multiplier: None,
-            master,
             server_uris: Arc::new(Mutex::new(VecDeque::new())),
             cache_endpoints: Arc::new(DashMap::new()),
             state_locs: Arc::new(DashMap::new()),
             scheduler_lock: Arc::new(Mutex::new(false)),
-            live_listener_bus,
             job_cancel_tokens: Arc::new(DashMap::new()),
             driver_fingerprint: 0,
             accumulator_sink: Arc::new(std::sync::OnceLock::new()),
@@ -150,12 +131,6 @@ impl DistributedScheduler {
     /// Install the driver-side accumulator-delta merge. First call wins.
     pub fn set_accumulator_sink(&self, sink: AccumulatorSink) {
         let _ = self.accumulator_sink.set(sink);
-    }
-
-    /// Register a listener to observe `JobStartListener`/`JobEndListener` events
-    /// posted around every job this scheduler dispatches.
-    pub fn add_listener(&self, listener: Arc<dyn crate::listener::BusListener>) {
-        self.live_listener_bus.add_listener(listener);
     }
 
     /// Forward non-empty accumulator deltas to the installed sink, if any.
@@ -218,18 +193,6 @@ impl DistributedScheduler {
             std::thread::sleep(poll_interval);
         }
         true
-    }
-
-    /// Enable speculative execution with the given multiplier.
-    pub fn with_speculation(mut self, multiplier: f64) -> Self {
-        self.speculation_multiplier = Some(multiplier);
-        self
-    }
-
-    /// Override the per-task timeout used for pipelines containing an `AgentStep` op.
-    pub fn with_agent_step_timeout(mut self, timeout: Duration) -> Self {
-        self.agent_step_timeout = Some(timeout);
-        self
     }
 
     /// Push a completion event into the DAG event queue for `run_id`.
@@ -665,13 +628,5 @@ impl StagePlanner for DistributedScheduler {
 
     fn state(&self) -> SchedulerState {
         self.state.clone()
-    }
-}
-
-impl Drop for DistributedScheduler {
-    fn drop(&mut self) {
-        if let Err(e) = self.live_listener_bus.stop() {
-            log::warn!("failed to stop live listener bus during scheduler drop: {e}");
-        }
     }
 }

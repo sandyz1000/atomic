@@ -91,4 +91,3 @@ pub use atomic_runtime_macros::{
 
 pub use atomic_scheduler::{ResourceProfile, WorkerAllocator};
 pub use env::{Config, WorkerConfig};
-pub use registry::{AgentRunner, register_agent_runner};

@@ -98,15 +98,11 @@ impl Stage {
     }
 
     pub fn remove_output_loc(&mut self, partition: usize, host: &str) {
-        let prev_vec = self.output_locs[partition].clone();
-        let new_vec = prev_vec
-            .clone()
-            .into_iter()
-            .filter(|x| x != host)
-            .collect::<Vec<_>>();
-        if (!prev_vec.is_empty()) && (new_vec.is_empty()) {
+        let locs = &mut self.output_locs[partition];
+        let was_nonempty = !locs.is_empty();
+        locs.retain(|x| x != host);
+        if was_nonempty && locs.is_empty() {
             self.num_available_outputs -= 1;
         }
-        self.output_locs[partition] = new_vec;
     }
 }

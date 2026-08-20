@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use atomic_scheduler::{AllocatorError, AllocatorResult, ResourceProfile};
 use k8s_openapi::api::core::v1::{
-    Affinity, Container, ContainerPort, EnvVar, Pod, PodSpec, ResourceRequirements, Toleration,
+    Affinity, Container, ContainerPort, Pod, PodSpec, ResourceRequirements, Toleration,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
@@ -48,15 +48,7 @@ pub(crate) fn build_pod(
         labels.insert(k.clone(), v.clone());
     }
 
-    let env: Vec<EnvVar> = profile
-        .env
-        .iter()
-        .map(|(k, v)| EnvVar {
-            name: k.clone(),
-            value: Some(v.clone()),
-            value_from: None,
-        })
-        .collect();
+    let env = crate::env_vars(&profile.env);
 
     let tolerations: Option<Vec<Toleration>> = match &profile.tolerations {
         Some(v) => Some(

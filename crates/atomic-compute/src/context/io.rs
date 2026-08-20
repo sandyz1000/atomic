@@ -3,7 +3,6 @@ use std::sync::Arc;
 use atomic_data::data::Data;
 use atomic_data::rdd::Rdd;
 
-use crate::io::ReaderConfiguration;
 use crate::rdd::typed::TypedRdd;
 use crate::rdd::{ParallelCollection, UnionRdd};
 
@@ -65,18 +64,6 @@ impl Context {
         let id = self.new_rdd_id();
         let rdd = Arc::new(ParallelCollection::new(id, seq, num_slices));
         TypedRdd::new(rdd, self.clone())
-    }
-
-    pub fn read_source<F, C, I: Data, O: Data>(
-        self: &Arc<Self>,
-        config: C,
-        func: F,
-    ) -> Arc<dyn Rdd<Item = O>>
-    where
-        F: Fn(I) -> O + Send + Sync + 'static,
-        C: ReaderConfiguration<I>,
-    {
-        config.make_reader(self.clone(), func)
     }
 
     /// Read a text file (or directory of files, or S3 prefix) as a `TypedRdd<String>`.

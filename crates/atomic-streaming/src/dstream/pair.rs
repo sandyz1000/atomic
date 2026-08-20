@@ -16,60 +16,6 @@ type GeneratedRdds<T> = Mutex<HashMap<u64, Arc<dyn Rdd<Item = T>>>>;
 /// Cached running-state RDD for stateful DStreams.
 type StateRdd<T> = Mutex<Option<Arc<dyn Rdd<Item = T>>>>;
 
-// StateSpec and StateSpecImpl (stubs for mapWithState)
-
-pub trait StateSpec<K, V, S, M>: Sized + Send + Sync + 'static {
-    fn initial_state(self, rdd: Arc<dyn Rdd<Item = (K, S)>>) -> Self;
-    fn num_partitions(self, n: usize) -> Self;
-    fn timeout(self, idle: Duration) -> Self;
-}
-
-#[derive(Clone)]
-pub struct StateSpecImpl<K, V, S, M> {
-    initial_state_rdd: Option<Arc<dyn Rdd<Item = (K, S)>>>,
-    num_partitions: Option<usize>,
-    timeout: Option<Duration>,
-    _marker: std::marker::PhantomData<(K, V, S, M)>,
-}
-
-impl<K, V, S, M> StateSpecImpl<K, V, S, M> {
-    pub fn new() -> Self {
-        StateSpecImpl {
-            initial_state_rdd: None,
-            num_partitions: None,
-            timeout: None,
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<K, V, S, M> Default for StateSpecImpl<K, V, S, M> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<K, V, S, M> StateSpec<K, V, S, M> for StateSpecImpl<K, V, S, M>
-where
-    K: Data + Clone + Hash + Eq,
-    V: Data + Clone,
-    S: Data + Clone,
-    M: Data + Clone,
-{
-    fn initial_state(mut self, rdd: Arc<dyn Rdd<Item = (K, S)>>) -> Self {
-        self.initial_state_rdd = Some(rdd);
-        self
-    }
-    fn num_partitions(mut self, n: usize) -> Self {
-        self.num_partitions = Some(n);
-        self
-    }
-    fn timeout(mut self, idle: Duration) -> Self {
-        self.timeout = Some(idle);
-        self
-    }
-}
-
 // PairDStreamFunctions
 
 pub struct PairDStreamFunctions<K, V>
@@ -183,28 +129,33 @@ where
         ))
     }
 
-    /// Per-key state tracking that emits only the mapped output records each batch (not the full
-    /// state), with optional idle-key timeout from `spec`. Mirrors `mapWithState`.
+    /// Per-key state tracking that emits only the mapped output records each batch (not
+    /// the full state), sharded across the cluster via the distributed `MergeState`
+    /// mechanism. Mirrors `mapWithState`.
     ///
-    /// `mapping_fn(&key, &new_values, current_state)` returns `(Option<output>, Option<new_state>)`
-    /// — `None` new state evicts the key.
-    pub fn map_with_state<S, M, F>(
+    /// `task` is a compile-time [`MapWithStateTask`] (registered with
+    /// [`register_map_with_state!`](crate::register_map_with_state)) — Atomic never ships
+    /// raw closures to workers, so the mapping logic can't be an arbitrary `Fn` here the
+    /// way it is for `update_state_by_key`.
+    pub fn map_with_state<S, M, T>(
         &self,
-        spec: StateSpecImpl<K, V, S, M>,
-        mapping_fn: F,
-    ) -> Arc<MapWithStateDStream<K, V, S, M, F>>
+        spec: crate::dstream::map_with_state::StateSpecImpl<K, V, S, M>,
+        _task: T,
+    ) -> Arc<crate::dstream::map_with_state::MapWithStateDStream<K, V, S, M, T>>
     where
-        S: Data + Clone + 'static,
-        M: Data + Clone + 'static,
-        F: Fn(&K, &[V], Option<S>) -> (Option<M>, Option<S>) + Send + Sync + Clone + 'static,
+        S: Data + Clone + WireSerde + 'static,
+        M: Data + Clone + WireSerde + 'static,
+        K: WireSerde,
+        T: crate::dstream::map_with_state::MapWithStateTask<K, V, S, M>,
+        Vec<(K, V)>: Data + Clone,
+        Vec<(K, S)>: Data + Clone,
     {
         let id = self.ssc.sc.new_rdd_id();
-        Arc::new(MapWithStateDStream::new(
+        Arc::new(crate::dstream::map_with_state::MapWithStateDStream::new(
             id,
             self.stream.clone(),
             self.ssc.clone(),
-            mapping_fn,
-            spec.timeout,
+            spec,
         ))
     }
 }
@@ -672,143 +623,6 @@ where
     }
 
     fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = (K, S)>>> {
-        {
-            let cache = self.generated.lock();
-            if let Some(rdd) = cache.get(&valid_time_ms) {
-                return Some(rdd.clone());
-            }
-        }
-        let rdd = self.compute(valid_time_ms)?;
-        self.generated.lock().insert(valid_time_ms, rdd.clone());
-        Some(rdd)
-    }
-}
-
-// MapWithStateDStream — mapWithState
-
-/// Stateful streaming that emits only the mapped output records per batch (not the full state),
-/// with optional idle-key timeout.
-///
-/// Each batch groups the new `(K, V)` values by key and calls
-/// `mapping_fn(&key, &new_values, current_state)`, which returns `(Option<output>, Option<S>)`:
-/// the output record for that key this batch (if any) and the new state (`None` evicts the key).
-/// Keys untouched for longer than the spec's `timeout` are evicted between batches.
-pub struct MapWithStateDStream<K, V, S, M, F>
-where
-    K: Data + Clone + Hash + Eq,
-    V: Data + Clone,
-    S: Data + Clone,
-    M: Data + Clone,
-    F: Fn(&K, &[V], Option<S>) -> (Option<M>, Option<S>) + Send + Sync + Clone + 'static,
-{
-    stream_id: usize,
-    parent: Arc<dyn DStream<(K, V)>>,
-    ssc: Arc<StreamingContext>,
-    mapping_fn: Arc<F>,
-    timeout: Option<Duration>,
-    /// Per-key `(state, last_updated_batch_ms)`, carried across batches.
-    state: Mutex<HashMap<K, (S, u64)>>,
-    generated: Mutex<HashMap<u64, Arc<dyn Rdd<Item = M>>>>,
-}
-
-impl<K, V, S, M, F> MapWithStateDStream<K, V, S, M, F>
-where
-    K: Data + Clone + Hash + Eq,
-    V: Data + Clone,
-    S: Data + Clone,
-    M: Data + Clone,
-    F: Fn(&K, &[V], Option<S>) -> (Option<M>, Option<S>) + Send + Sync + Clone + 'static,
-{
-    pub fn new(
-        stream_id: usize,
-        parent: Arc<dyn DStream<(K, V)>>,
-        ssc: Arc<StreamingContext>,
-        mapping_fn: F,
-        timeout: Option<Duration>,
-    ) -> Self {
-        MapWithStateDStream {
-            stream_id,
-            parent,
-            ssc,
-            mapping_fn: Arc::new(mapping_fn),
-            timeout,
-            state: Mutex::new(HashMap::new()),
-            generated: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl<K, V, S, M, F> DStreamBase for MapWithStateDStream<K, V, S, M, F>
-where
-    K: Data + Clone + Hash + Eq,
-    V: Data + Clone,
-    S: Data + Clone,
-    M: Data + Clone,
-    F: Fn(&K, &[V], Option<S>) -> (Option<M>, Option<S>) + Send + Sync + Clone + 'static,
-{
-    fn slide_duration(&self) -> Duration {
-        self.parent.slide_duration()
-    }
-    fn id(&self) -> usize {
-        self.stream_id
-    }
-    fn base_dependencies(&self) -> Vec<Arc<dyn DStreamBase>> {
-        vec![self.parent.clone() as Arc<dyn DStreamBase>]
-    }
-}
-
-impl<K, V, S, M, F> DStream<M> for MapWithStateDStream<K, V, S, M, F>
-where
-    K: Data + Clone + Hash + Eq + 'static,
-    V: Data + Clone + 'static,
-    S: Data + Clone + 'static,
-    M: Data + Clone + 'static,
-    F: Fn(&K, &[V], Option<S>) -> (Option<M>, Option<S>) + Send + Sync + Clone + 'static,
-    Vec<(K, V)>: Data + Clone,
-{
-    fn compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = M>>> {
-        let parent_rdd = self.parent.get_or_compute(valid_time_ms)?;
-        let ctx = self.ssc.sc.clone();
-
-        // Group this batch's new values by key.
-        let mut new_by_key: HashMap<K, Vec<V>> = HashMap::new();
-        for partition in ctx
-            .run_job(parent_rdd, |iter| iter.collect::<Vec<(K, V)>>())
-            .unwrap_or_default()
-        {
-            for (k, v) in partition {
-                new_by_key.entry(k).or_default().push(v);
-            }
-        }
-
-        let mut state = self.state.lock();
-        let mut outputs: Vec<M> = Vec::new();
-        for (k, vals) in new_by_key {
-            let cur = state.remove(&k).map(|(s, _)| s);
-            let (out, new_s) = (self.mapping_fn)(&k, &vals, cur);
-            if let Some(m) = out {
-                outputs.push(m);
-            }
-            if let Some(s) = new_s {
-                state.insert(k, (s, valid_time_ms));
-            }
-        }
-
-        // Evict keys idle longer than the timeout.
-        if let Some(idle) = self.timeout {
-            let idle_ms = idle.as_millis() as u64;
-            state.retain(|_, (_, last)| valid_time_ms.saturating_sub(*last) <= idle_ms);
-        }
-        drop(state);
-
-        let id = ctx.new_rdd_id();
-        let rdd: Arc<dyn Rdd<Item = M>> = Arc::new(
-            atomic_compute::rdd::parallel_collection::ParallelCollection::new(id, outputs, 1),
-        );
-        Some(rdd)
-    }
-
-    fn get_or_compute(&self, valid_time_ms: u64) -> Option<Arc<dyn Rdd<Item = M>>> {
         {
             let cache = self.generated.lock();
             if let Some(rdd) = cache.get(&valid_time_ms) {

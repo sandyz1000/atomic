@@ -1,7 +1,3 @@
-pub mod error;
-
-pub use error::{CacheError, Result};
-
 use std::any::Any;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -26,8 +22,6 @@ pub enum StorageLevel {
     /// the disk file is read back into memory.  Requires the RDD to be persisted
     /// via `TypedRdd::persist_with_disk(StorageLevel::MemoryAndDisk)`.
     MemoryAndDisk,
-    /// Reserved — treated as `MemoryOnly` (serialized form, same memory path).
-    MemoryOnlySer,
     /// Reserved — treated as `MemoryOnly` until disk-only path is implemented.
     DiskOnly,
 }

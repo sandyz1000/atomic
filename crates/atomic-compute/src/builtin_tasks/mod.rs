@@ -20,11 +20,12 @@
 //! - **`sum` also implements `BinaryTask<T>`** but registers by hand, because it folds from a
 //!   payload-supplied zero (the fold identity) rather than seeding from the first element.
 //!
-//! - **`mean`, `variance`, `stats`, `count_approx_distinct` implement
+//! - **`mean`, `stats`, `count_approx_distinct` implement
 //!   [`AggregateTask<A, T>`](crate::task_traits::AggregateTask)**, registered with
 //!   `register_aggregate_task!`. Their accumulator type `A` differs from the element type `T`
-//!   (`mean`: `(f64, u64)`; `variance`: `(u64, f64, f64)`), the asymmetric `seqOp: fn(A, T) -> A`
-//!   shape that `BinaryTask` cannot express.
+//!   (`mean`: `(f64, u64)`; `stats`: `(u64, f64, f64, f64, f64)`), the asymmetric
+//!   `seqOp: fn(A, T) -> A` shape that `BinaryTask` cannot express. `variance`/`stdev` delegate
+//!   to `stats` rather than registering their own task.
 //!
 //! - **`distinct`, `sort`, `topk`, `take_ordered` implement
 //!   [`PartitionTask<T>`](crate::task_traits::PartitionTask)**, registered with
@@ -65,7 +66,6 @@ pub mod stats;
 pub mod sum;
 pub mod take_ordered;
 pub mod topk;
-pub mod variance;
 
 /// Widening conversion to `f64` for the numeric primitives, so generic aggregations
 /// (`mean`, `variance`, `histogram`) can accept any of them without a per-type macro at the

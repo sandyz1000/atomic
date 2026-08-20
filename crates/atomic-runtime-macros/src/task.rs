@@ -4,7 +4,8 @@ use proc_macro2::Span;
 use quote::quote;
 use syn::{ItemFn, LitStr, ReturnType, Type, parse_macro_input};
 
-use crate::body_hash::fnv1a_hash;
+use crate::body_hash::body_hash_parts;
+use crate::shape::{is_bool_type, is_vec_type};
 
 /// Attribute macro for defining a distributed Atomic task function.
 ///
@@ -140,37 +141,19 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Whether the return type is plain `bool` — determines if Filter is generated.
     let is_bool_return = match &input.sig.output {
-        ReturnType::Type(_, ty) => {
-            if let Type::Path(tp) = ty.as_ref() {
-                tp.path.is_ident("bool")
-            } else {
-                false
-            }
-        }
+        ReturnType::Type(_, ty) => is_bool_type(ty),
         _ => false,
     };
 
     // Whether the return type is `Vec<_>` — determines if FlatMap is generated.
     let is_vec_return = match &input.sig.output {
-        ReturnType::Type(_, ty) => {
-            if let Type::Path(tp) = ty.as_ref() {
-                tp.path
-                    .segments
-                    .last()
-                    .map(|s| s.ident == "Vec")
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        }
+        ReturnType::Type(_, ty) => is_vec_type(ty),
         _ => false,
     };
 
     // Body hash — FNV-1a of the function block tokens. Stable across line-number
     // changes and reformatting; changes only when the body logic changes.
-    let body_hash_val: u64 = fnv1a_hash(&quote! { #fn_block }.to_string());
-    let body_hash_short = format!("{:08x}", body_hash_val as u32);
-    let body_hash_lit = proc_macro2::Literal::u64_suffixed(body_hash_val);
+    let (body_hash_short, body_hash_lit) = body_hash_parts(&quote! { #fn_block }.to_string());
 
     // task_name: custom names are left as-is (user owns stability); generated names
     // include the body hash so a body change produces a new task_name and workers fail

@@ -1,7 +1,6 @@
 //! HTTP-shape coverage for `AnthropicClient`/`OpenAiClient` against a local `wiremock`
 //! server: real request serialization, real response deserialization, real retry
-//! timing — no live network call. Complements `MockLlmClient` (trait-level, used by
-//! `test_agent_step.rs`), which skips the wire format entirely.
+//! timing — no live network call.
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use atomic_nlq::llm::LlmClient;

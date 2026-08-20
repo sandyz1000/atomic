@@ -13,3 +13,13 @@ pub(crate) fn fnv1a_hash(s: &str) -> u64 {
     }
     h
 }
+
+/// Hash a body's token text into the two forms `#[task]`/`task_fn!` each need for
+/// `task_name` generation: an 8-hex-digit short form, and a `u64`-suffixed token literal
+/// for embedding in generated code.
+pub(crate) fn body_hash_parts(body_token_str: &str) -> (String, proc_macro2::Literal) {
+    let hash = fnv1a_hash(body_token_str);
+    let short = format!("{:08x}", hash as u32);
+    let lit = proc_macro2::Literal::u64_suffixed(hash);
+    (short, lit)
+}

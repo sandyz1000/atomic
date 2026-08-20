@@ -27,8 +27,6 @@ atomic-graph = { workspace = true }
 atomic-nlq = { workspace = true, features = ["python"] }
 datafusion = { workspace = true }
 tokio = { workspace = true }
-pyo3-arrow = { workspace = true }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
-rayon = { workspace = true }
 thiserror = { workspace = true }

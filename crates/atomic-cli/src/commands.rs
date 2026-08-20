@@ -9,6 +9,15 @@ use crate::cluster::{WorkerEntry, load_cluster_config, save_cluster_config};
 use crate::ssh::{sha256_hex, ship_to_host};
 use crate::{BuildArgs, CliError, Result, ShipArgs, StopArgs, SubmitArgs};
 
+/// Worker addresses from `hosts.conf`, used when `--workers` isn't given.
+fn worker_addresses_from_config() -> Result<Vec<String>> {
+    Ok(load_cluster_config()?
+        .workers
+        .into_iter()
+        .map(|w| w.address)
+        .collect())
+}
+
 pub(crate) fn cmd_build(args: BuildArgs) -> Result<()> {
     ensure_zigbuild()?;
 
@@ -106,11 +115,7 @@ pub(crate) async fn cmd_submit(args: SubmitArgs) -> Result<()> {
     }
 
     let worker_addrs: Vec<String> = if args.workers.is_empty() {
-        load_cluster_config()?
-            .workers
-            .into_iter()
-            .map(|w| w.address)
-            .collect()
+        worker_addresses_from_config()?
     } else {
         args.workers
             .iter()
@@ -144,11 +149,7 @@ pub(crate) async fn cmd_submit(args: SubmitArgs) -> Result<()> {
 
 pub(crate) fn cmd_stop(args: StopArgs) -> Result<()> {
     let addresses: Vec<String> = if args.workers.is_empty() {
-        load_cluster_config()?
-            .workers
-            .into_iter()
-            .map(|w| w.address)
-            .collect()
+        worker_addresses_from_config()?
     } else {
         args.workers
     };

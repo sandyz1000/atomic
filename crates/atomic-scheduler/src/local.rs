@@ -13,7 +13,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -22,9 +22,7 @@ use crate::base::{NativeScheduler, SchedulerState};
 use crate::dag::{CompletionEvent, FetchFailedVals, TaskEndReason};
 use crate::error::LibResult;
 use crate::job::JobTracker;
-use crate::listener::{
-    BusListener, JobEndListener, JobListener, JobStartListener, LiveListenerBus, NoOpListener,
-};
+use crate::listener::{JobListener, NoOpListener};
 use crate::planner::StagePlanner;
 use crate::stage::Stage;
 
@@ -46,11 +44,7 @@ pub struct LocalScheduler {
     poll_timeout: u64,
     /// Shared mutable state: stage cache, event queues, map-output tracker, and ID counters.
     state: SchedulerState,
-    /// Scheduler role flag taken at construction; retained as config (driver vs. worker).
-    #[allow(dead_code)]
-    master: bool,
     scheduler_lock: Arc<Mutex<()>>,
-    live_listener_bus: LiveListenerBus,
     /// Distributed map-output recovery hook; `None` in pure local mode.
     map_output_recovery: Arc<std::sync::OnceLock<MapOutputRecovery>>,
     /// Driver-side merge of accumulator deltas produced by `PipelineTask` runs — the local
@@ -61,26 +55,18 @@ pub struct LocalScheduler {
 }
 
 impl LocalScheduler {
-    pub fn new(max_failures: usize, master: bool) -> Self {
-        Self::new_with_coalesce(max_failures, master, 0)
+    pub fn new(max_failures: usize) -> Self {
+        Self::new_with_coalesce(max_failures, 0)
     }
 
-    pub fn new_with_coalesce(
-        max_failures: usize,
-        master: bool,
-        coalesce_threshold_bytes: u64,
-    ) -> Self {
-        let mut live_listener_bus = LiveListenerBus::new();
-        live_listener_bus.start().unwrap();
+    pub fn new_with_coalesce(max_failures: usize, coalesce_threshold_bytes: u64) -> Self {
         LocalScheduler {
             state: SchedulerState::new().with_coalesce_threshold(coalesce_threshold_bytes),
             max_failures,
             attempt_id: Arc::new(AtomicUsize::new(0)),
             resubmit_timeout: 2000,
             poll_timeout: 50,
-            master,
             scheduler_lock: Arc::new(Mutex::new(())),
-            live_listener_bus,
             map_output_recovery: Arc::new(std::sync::OnceLock::new()),
             accumulator_sink: Arc::new(std::sync::OnceLock::new()),
         }
@@ -95,12 +81,6 @@ impl LocalScheduler {
     /// Install the driver-side accumulator-delta merge sink. First call wins.
     pub fn set_accumulator_sink(&self, sink: crate::distributed::AccumulatorSink) {
         let _ = self.accumulator_sink.set(sink);
-    }
-
-    /// Register a listener to observe `JobStartListener`/`JobEndListener` events
-    /// posted around every job this scheduler runs.
-    pub fn add_listener(&self, listener: Arc<dyn BusListener>) {
-        self.live_listener_bus.add_listener(listener);
     }
 
     /// Run an approximate job on the given RDD and pass all the results to an ApproximateEvaluator
@@ -131,17 +111,6 @@ impl LocalScheduler {
                 JobTracker::from_scheduler(&*self, func, final_rdd.clone(), partitions, listener)
                     .await?;
             if final_rdd.number_of_splits() == 0 {
-                let time = Instant::now();
-                self.live_listener_bus.post(Box::new(JobStartListener {
-                    job_id: jt.run_id,
-                    time,
-                    stage_infos: vec![],
-                }));
-                self.live_listener_bus.post(Box::new(JobEndListener {
-                    job_id: jt.run_id,
-                    time,
-                    job_result: true,
-                }));
                 let res =
                     PartialResult::new(jt.listener.evaluator.lock().await.current_result(), true);
                 return Ok(res);
@@ -180,21 +149,9 @@ impl LocalScheduler {
                 NoOpListener,
             )
             .await?;
-            self.live_listener_bus.post(Box::new(JobStartListener {
-                job_id: jt.run_id,
-                time: Instant::now(),
-                stage_infos: vec![],
-            }));
-            let result = self
-                .clone()
+            self.clone()
                 .event_process_loop(allow_local, jt.clone())
-                .await;
-            self.live_listener_bus.post(Box::new(JobEndListener {
-                job_id: jt.run_id,
-                time: Instant::now(),
-                job_result: result.is_ok(),
-            }));
-            result
+                .await
         })
     }
 
@@ -231,18 +188,7 @@ impl LocalScheduler {
                 pipeline_data,
             )
             .await?;
-            self.live_listener_bus.post(Box::new(JobStartListener {
-                job_id: jt.run_id,
-                time: Instant::now(),
-                stage_infos: vec![],
-            }));
-            let result = self.clone().event_process_loop(false, jt.clone()).await;
-            self.live_listener_bus.post(Box::new(JobEndListener {
-                job_id: jt.run_id,
-                time: Instant::now(),
-                job_result: result.is_ok(),
-            }));
-            result
+            self.clone().event_process_loop(false, jt.clone()).await
         })
     }
 
@@ -499,12 +445,6 @@ impl StagePlanner for LocalScheduler {
                 Ok(updated)
             }
         }
-    }
-}
-
-impl Drop for LocalScheduler {
-    fn drop(&mut self) {
-        self.live_listener_bus.stop().unwrap();
     }
 }
 

@@ -81,10 +81,3 @@ pub trait Rdd: RddBase + 'static {
         self.compute(split)
     }
 }
-
-/// Iterator adapter that folds elements pairwise using a commutative-associative function.
-pub trait Reduce<T> {
-    fn reduce<F>(self, f: F) -> Option<T>
-    where
-        F: FnMut(T, T) -> T;
-}

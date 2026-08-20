@@ -39,7 +39,7 @@ fn capabilities(steps: &[&str]) -> WorkerCapabilities {
 /// `register_worker()` must make the endpoint available for task dispatch.
 #[test]
 fn test_worker_selectable() {
-    let sched = DistributedScheduler::new(3, true);
+    let sched = DistributedScheduler::new(3);
     let addr = worker_addr(29100);
     sched.register_worker(addr, capabilities(&[]));
 
@@ -53,7 +53,7 @@ fn test_worker_selectable() {
 /// Registering the same worker twice must not duplicate it in the round-robin list.
 #[test]
 fn test_register_worker_idempotent() {
-    let sched = DistributedScheduler::new(3, true);
+    let sched = DistributedScheduler::new(3);
     let addr = worker_addr(29101);
     sched.register_worker(addr, capabilities(&[]));
     sched.register_worker(addr, capabilities(&[]));
@@ -69,7 +69,7 @@ fn test_register_worker_idempotent() {
 /// `next_executor()` on an empty scheduler returns an error.
 #[test]
 fn test_next_executor_empty() {
-    let sched = DistributedScheduler::new(3, true);
+    let sched = DistributedScheduler::new(3);
     let result = sched.next_executor();
     assert!(
         result.is_err(),
@@ -82,7 +82,7 @@ fn test_next_executor_empty() {
 /// Worker with empty `registered_ops` accepts any op (backwards compatibility).
 #[test]
 fn test_empty_ops_accepts() {
-    let sched = DistributedScheduler::new(3, true);
+    let sched = DistributedScheduler::new(3);
     let addr = worker_addr(29102);
     sched.register_worker(addr, capabilities(&[])); // empty = accept all
     // No assertion needed — if next_executor_with_capacity() returns Ok the
@@ -124,7 +124,7 @@ async fn test_worker_tcp_removal() {
         }
     });
 
-    let sched = DistributedScheduler::new(3, true);
+    let sched = DistributedScheduler::new(3);
     sched.register_worker(addr, capabilities(&[]));
 
     // Confirm the worker is initially registered.
@@ -205,7 +205,7 @@ async fn test_exponential_backoff() {
     });
 
     // max_failures = 2 → 3 total attempts, backoff after attempts 0 and 1.
-    let sched = DistributedScheduler::new(2, true);
+    let sched = DistributedScheduler::new(2);
     sched.register_worker(addr, capabilities(&[]));
 
     let task = TaskEnvelope::new(
@@ -244,7 +244,7 @@ async fn test_exponential_backoff() {
 /// `NoCompatibleWorker`.
 #[test]
 fn test_zero_capacity() {
-    let sched = DistributedScheduler::new(3, true);
+    let sched = DistributedScheduler::new(3);
     let addr = worker_addr(29103);
     sched.register_worker(
         addr,
@@ -279,7 +279,7 @@ fn removed_clears_outputs() {
     );
     atomic_data::env::set_map_output_tracker(Arc::clone(&tracker));
 
-    let sched = DistributedScheduler::new(3, true);
+    let sched = DistributedScheduler::new(3);
     let dead = worker_addr(31500); // 127.0.0.1 — matches map 0's host
     sched.register_worker(dead, capabilities(&[]));
     sched.remove_worker(dead);

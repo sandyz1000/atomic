@@ -168,17 +168,12 @@ fn collect_reduce_side_shuffles(
 }
 
 /// Every [`ShuffleDependency`] reachable from `rdd`, including ancestors behind other
-/// shuffle boundaries, collected in map-to-reduce order (innermost/map-side first).
+/// shuffle boundaries, collected post-order so innermost/map-side shuffles come first.
 ///
-/// Unlike [`reduce_side_shuffles`], this continues the walk *past* a `ShuffleDependency` by
-/// re-enqueuing its own map-side RDD, so a shuffle whose input is itself another shuffle's
-/// output (e.g. `left/right_outer_join` chained via `by_dst.join` in graph `triplets`) is
-/// discovered. A reduce side that fetches `ShuffledRdd` input during its own shuffle-map task
-/// needs every ancestor map output registered first, or the fetch only ever finds nothing.
-///
-/// The yield is post-order (map-side/innermost first), so consumers registering in iteration
-/// order see each ancestor's map outputs before the shuffle that reads them. Seen shuffles
-/// deduplicated by rdd_id to keep the walk acyclic and idempotent.
+/// Unlike [`reduce_side_shuffles`], this recurses past each `ShuffleDependency` into its
+/// own map-side RDD, discovering chained shuffles (e.g. `by_dst.join` in graph `triplets`).
+/// Consumers registering in iteration order see each ancestor's map outputs before the
+/// shuffle that reads them.
 pub fn ancestor_shuffles(rdd: &Arc<dyn RddBase>) -> Vec<Arc<ShuffleDependency>> {
     let mut out = Vec::new();
     let mut visited = std::collections::HashSet::new();
@@ -197,10 +192,9 @@ fn collect_ancestor_shuffles(
     for dep in rdd.get_dependencies() {
         match dep {
             Dependency::Shuffle(shuf) => {
-                // To register map outputs map-side-first, the walk recurses past this
-                // shuffle into its own input RDD before emitting it (post-order). Do the
-                // same here so a shuffled RDD's own shuffle is emitted before the one that
-                // reads it.
+                // Recurse past this shuffle into its own map-side input before emitting
+                // it (post-order), so ancestors are registered before the shuffle that
+                // reads them.
                 collect_ancestor_shuffles(&shuf.get_rdd_base(), out, visited);
                 out.push(shuf.clone());
             }

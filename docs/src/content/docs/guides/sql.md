@@ -72,9 +72,7 @@ table = df.to_arrow()      # PyArrow table
 |---|---|
 | `AtomicSqlContext` | Entry point; wraps a DataFusion `SessionContext` |
 | `DataFrame` | Lazy result; wraps a DataFusion `DataFrame` |
-| `AtomicTableProvider` | Table backed by pre-loaded `RecordBatch`es |
 | `RddTableProvider` | Table backed by a live `TypedRdd<RecordBatch>` |
-| `UdfRegistry` | Registers scalar and aggregate user-defined functions |
 
 The row format is Arrow `RecordBatch` throughout. Custom optimizer rules and
 physical operators are not added on top of DataFusion; its built-in rules and

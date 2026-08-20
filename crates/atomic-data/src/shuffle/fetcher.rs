@@ -551,28 +551,3 @@ mod tests {
         assert_eq!(n, 0);
     }
 }
-
-// TODO: Tests have been commented out because they depend on env:: module which is not available
-// in the atomic-shuffle crate. These tests need to be rewritten in the main atomic crate where
-// env:: is available, creating concrete implementations of MapOutputTracker and passing them to
-// ShuffleFetcher::new().
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//
-//     #[test]
-//     fn build_shuffle_uri() -> Result<(), Box<dyn std::error::Error + 'static>> {
-//         let base = "http://127.0.0.1/shuffle";
-//         let mut chunk = base.to_owned();
-//
-//         let uri0 = ShuffleFetcher::make_chunk_uri(base, &mut chunk, 0, 1)?;
-//         let expected = format!("{}/0/1", base);
-//         assert_eq!(expected.as_str(), uri0);
-//
-//         let uri1 = ShuffleFetcher::make_chunk_uri(base, &mut chunk, 123, 123)?;
-//         let expected = format!("{}/123/123", base);
-//         assert_eq!(expected.as_str(), uri1);
-//
-//         Ok(())
-//     }
-// }

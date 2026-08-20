@@ -43,11 +43,6 @@ pub use crate::{
     local::{LocalScheduler, MapOutputRecovery},
 };
 
-pub enum Sequence<T> {
-    Range(std::ops::Range<T>),
-    Vec(Vec<T>),
-}
-
 #[derive(Clone)]
 pub enum Schedulers {
     Local(Arc<LocalScheduler>),
@@ -56,7 +51,7 @@ pub enum Schedulers {
 
 impl Default for Schedulers {
     fn default() -> Schedulers {
-        Schedulers::Local(Arc::new(LocalScheduler::new(20, true)))
+        Schedulers::Local(Arc::new(LocalScheduler::new(20)))
     }
 }
 

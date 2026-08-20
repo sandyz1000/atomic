@@ -7,8 +7,6 @@ use crate::task_traits::AggregateTask;
 /// error. The precision is not fixed — it travels in the accumulator vector's length, so the
 /// driver can pick any `P` per call (see [`hll_zero_p`] and [`precision_for`]).
 pub const HLL_P: u32 = 12;
-/// Number of registers at the default precision.
-pub const HLL_M: usize = 1 << HLL_P;
 
 /// The identity accumulator at the default precision (all registers zero).
 pub fn hll_zero() -> Vec<u8> {

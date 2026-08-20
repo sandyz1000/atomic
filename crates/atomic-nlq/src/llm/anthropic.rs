@@ -98,22 +98,10 @@ impl LlmClient for AnthropicClient {
         user: &str,
         max_tokens: u32,
     ) -> Result<String> {
-        let mut delay = Duration::from_millis(500);
-        let mut last_err = String::new();
-        for attempt in 0..=self.max_retries {
-            match self.do_chat(model, system, user, max_tokens).await {
-                Ok(text) => return Ok(text),
-                Err(e) => {
-                    last_err = e.to_string();
-                    log::warn!("Anthropic chat attempt {}: {last_err}", attempt + 1);
-                    if attempt < self.max_retries {
-                        tokio::time::sleep(delay).await;
-                        delay = (delay * 2).min(Duration::from_secs(30));
-                    }
-                }
-            }
-        }
-        Err(NlqError::Api(last_err))
+        crate::llm::chat_with_retry("Anthropic", self.max_retries, || {
+            self.do_chat(model, system, user, max_tokens)
+        })
+        .await
     }
 
     /// Anthropic does not provide an embeddings API.

@@ -7,12 +7,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
 mod actions;
-mod errors;
 mod pair_ops;
 mod sort;
 mod transforms;
-
-use errors::PyTaskStageError;
 
 /// Spark-compatible partition boundaries: exactly `np` half-open ranges
 /// `[i * total / np, (i + 1) * total / np)`. Surplus ranges are empty when `np > total`,
@@ -96,9 +93,10 @@ impl PyRdd {
         pickle
             .call_method1("loads", (PyBytes::new(py, &bytes),))
             .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    PyTaskStageError::Unpicklable(e.to_string()).to_string(),
-                )
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "task function serialized but failed to load back (workers would fail): \
+                     {e}. Avoid capturing open files, locks, or C-extension handles."
+                ))
             })?;
         Ok(bytes)
     }
@@ -172,7 +170,6 @@ impl PyRdd {
     ) -> PyResult<()> {
         let payload_struct = PythonTaskPayload {
             fn_bytes: partition_fn_bytes,
-            zero_bytes: vec![],
         };
         let payload = serde_json::to_vec(&payload_struct)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;

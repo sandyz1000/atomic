@@ -262,58 +262,14 @@ impl PyRdd {
     /// when the right side is itself a pending staged pipeline.
     #[pyo3(signature = (other))]
     pub fn join(&mut self, py: Python, other: &PyRdd) -> PyResult<PyRdd> {
-        if self.context.is_distributed() && other.staged.is_none() {
-            // join is an action: dispatch immediately and leave `self` reusable for
-            // further transforms/actions, same as the local (non-mutating) path.
-            let saved_staged = self.staged.clone();
-            let right_json = Self::elements_to_json(py, &other.elements)?;
-            if right_json.len() > 50_000_000 {
-                let warnings = PyModule::import(py, "warnings")?;
-                warnings.call_method1(
-                    "warn",
-                    ("join: right side exceeds 50 MB serialized; consider pre-reducing cardinality",),
-                )?;
-            }
-            let helpers = PyModule::import(py, "atomic_compute._pair_helpers")?;
-            let join_fn = helpers
-                .getattr("make_join_fn")?
-                .call1((right_json.as_str(),))?;
-            let fn_bytes = Self::pickle_fn(py, &join_fn.unbind())?;
-            self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
-
-            let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.steps.clone());
-            self.staged = saved_staged;
-            let result_bytes = self
-                .context
-                .dispatch_pipeline(self.placeholder_rdd(), source_partitions, ops)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-            let elements = Self::decode_result_bytes(py, result_bytes)?;
-            return Ok(PyRdd::from_data(
-                py,
-                elements,
-                self.num_partitions,
-                Arc::clone(&self.context),
-            ));
-        }
-
-        if self.context.is_distributed() && other.staged.is_some() {
-            eprintln!("join: right side is a staged pipeline; collecting both sides to driver");
+        if let Some(result) =
+            self.dispatch_distributed_pair_join(py, other, "make_join_fn", "join")?
+        {
+            return Ok(result);
         }
 
         // Driver-side hash join (local mode or staged right side)
-        let right_map = PyDict::new(py);
-        for item in &other.elements {
-            let bound = item.bind(py);
-            let (k, v) = Self::extract_pair(bound)?;
-            match right_map.get_item(&k)? {
-                Some(lst) => lst.cast::<PyList>()?.append(v)?,
-                None => {
-                    right_map.set_item(&k, PyList::new(py, [v])?)?;
-                }
-            }
-        }
+        let right_map = Self::build_multimap(py, &other.elements)?;
         let mut elements: Vec<Py<PyAny>> = Vec::new();
         for item in &self.elements {
             let bound = item.bind(py);
@@ -340,60 +296,17 @@ impl PyRdd {
     /// side is captured in the worker closure — same approach as `join`.
     #[pyo3(signature = (other))]
     pub fn left_outer_join(&mut self, py: Python, other: &PyRdd) -> PyResult<PyRdd> {
-        if self.context.is_distributed() && other.staged.is_none() {
-            // left_outer_join is an action: dispatch immediately and leave `self` reusable
-            // for further transforms/actions, same as the local (non-mutating) path.
-            let saved_staged = self.staged.clone();
-            let right_json = Self::elements_to_json(py, &other.elements)?;
-            if right_json.len() > 50_000_000 {
-                let warnings = PyModule::import(py, "warnings")?;
-                warnings.call_method1(
-                    "warn",
-                    ("left_outer_join: right side exceeds 50 MB serialized; consider pre-reducing cardinality",),
-                )?;
-            }
-            let helpers = PyModule::import(py, "atomic_compute._pair_helpers")?;
-            let join_fn = helpers
-                .getattr("make_left_outer_join_fn")?
-                .call1((right_json.as_str(),))?;
-            let fn_bytes = Self::pickle_fn(py, &join_fn.unbind())?;
-            self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
-
-            let staged = self.staged.as_ref().unwrap();
-            let (source_partitions, ops) = (staged.source_partitions.clone(), staged.steps.clone());
-            self.staged = saved_staged;
-            let result_bytes = self
-                .context
-                .dispatch_pipeline(self.placeholder_rdd(), source_partitions, ops)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-            let elements = Self::decode_result_bytes(py, result_bytes)?;
-            return Ok(PyRdd::from_data(
-                py,
-                elements,
-                self.num_partitions,
-                Arc::clone(&self.context),
-            ));
-        }
-
-        if self.context.is_distributed() && other.staged.is_some() {
-            eprintln!(
-                "left_outer_join: right side is a staged pipeline; collecting both sides to driver"
-            );
+        if let Some(result) = self.dispatch_distributed_pair_join(
+            py,
+            other,
+            "make_left_outer_join_fn",
+            "left_outer_join",
+        )? {
+            return Ok(result);
         }
 
         // Driver-side (local mode or staged right side)
-        let right_map = PyDict::new(py);
-        for item in &other.elements {
-            let bound = item.bind(py);
-            let (k, v) = Self::extract_pair(bound)?;
-            match right_map.get_item(&k)? {
-                Some(lst) => lst.cast::<PyList>()?.append(v)?,
-                None => {
-                    right_map.set_item(&k, PyList::new(py, [v])?)?;
-                }
-            }
-        }
+        let right_map = Self::build_multimap(py, &other.elements)?;
         let mut elements: Vec<Py<PyAny>> = Vec::new();
         for item in &self.elements {
             let bound = item.bind(py);
@@ -429,17 +342,7 @@ impl PyRdd {
     /// Driver-side hash join (local mode or staged right side).
     #[pyo3(signature = (other))]
     pub fn right_outer_join(&self, py: Python, other: &PyRdd) -> PyResult<PyRdd> {
-        let left_map = PyDict::new(py);
-        for item in &self.elements {
-            let bound = item.bind(py);
-            let (k, v) = Self::extract_pair(bound)?;
-            match left_map.get_item(&k)? {
-                Some(lst) => lst.cast::<PyList>()?.append(v)?,
-                None => {
-                    left_map.set_item(&k, PyList::new(py, [v])?)?;
-                }
-            }
-        }
+        let left_map = Self::build_multimap(py, &self.elements)?;
         let mut elements: Vec<Py<PyAny>> = Vec::new();
         for item in &other.elements {
             let bound = item.bind(py);
@@ -475,28 +378,8 @@ impl PyRdd {
     /// Driver-side implementation — collects both sides and merges.
     #[pyo3(signature = (other))]
     pub fn full_outer_join(&self, py: Python, other: &PyRdd) -> PyResult<PyRdd> {
-        let left_map = PyDict::new(py);
-        for item in &self.elements {
-            let bound = item.bind(py);
-            let (k, v) = Self::extract_pair(bound)?;
-            match left_map.get_item(&k)? {
-                Some(lst) => lst.cast::<PyList>()?.append(v)?,
-                None => {
-                    left_map.set_item(&k, PyList::new(py, [v])?)?;
-                }
-            }
-        }
-        let right_map = PyDict::new(py);
-        for item in &other.elements {
-            let bound = item.bind(py);
-            let (k, v) = Self::extract_pair(bound)?;
-            match right_map.get_item(&k)? {
-                Some(lst) => lst.cast::<PyList>()?.append(v)?,
-                None => {
-                    right_map.set_item(&k, PyList::new(py, [v])?)?;
-                }
-            }
-        }
+        let left_map = Self::build_multimap(py, &self.elements)?;
+        let right_map = Self::build_multimap(py, &other.elements)?;
         let mut seen_keys = std::collections::HashSet::new();
         let mut elements: Vec<Py<PyAny>> = Vec::new();
         for item in &self.elements {
@@ -578,28 +461,8 @@ impl PyRdd {
     /// In local mode, both sides are accumulated into dicts and merged.
     #[pyo3(signature = (other))]
     pub fn cogroup(&self, py: Python, other: &PyRdd) -> PyResult<PyRdd> {
-        let left_map = PyDict::new(py);
-        for item in &self.elements {
-            let bound = item.bind(py);
-            let (k, v) = Self::extract_pair(bound)?;
-            match left_map.get_item(&k)? {
-                Some(lst) => lst.cast::<PyList>()?.append(v)?,
-                None => {
-                    left_map.set_item(&k, PyList::new(py, [v])?)?;
-                }
-            }
-        }
-        let right_map = PyDict::new(py);
-        for item in &other.elements {
-            let bound = item.bind(py);
-            let (k, v) = Self::extract_pair(bound)?;
-            match right_map.get_item(&k)? {
-                Some(lst) => lst.cast::<PyList>()?.append(v)?,
-                None => {
-                    right_map.set_item(&k, PyList::new(py, [v])?)?;
-                }
-            }
-        }
+        let left_map = Self::build_multimap(py, &self.elements)?;
+        let right_map = Self::build_multimap(py, &other.elements)?;
         let all_keys = PyDict::new(py);
         for item in &self.elements {
             let (k, _) = Self::extract_pair(item.bind(py))?;
@@ -803,6 +666,84 @@ impl PyRdd {
         item: &Bound<'py, PyAny>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
         Ok((item.get_item(0)?, item.get_item(1)?))
+    }
+
+    /// Distributed fast path shared by `join` and `left_outer_join`: ship the right side
+    /// (captured via `atomic_compute._pair_helpers.{helper_fn_name}`) to workers as a map
+    /// closure over the left side's partitions. Returns `None` when not applicable (local
+    /// mode, or the right side is itself a pending staged pipeline), so the caller falls
+    /// through to a driver-side hash join.
+    fn dispatch_distributed_pair_join(
+        &mut self,
+        py: Python,
+        other: &PyRdd,
+        helper_fn_name: &str,
+        op_label: &str,
+    ) -> PyResult<Option<PyRdd>> {
+        if !self.context.is_distributed() || other.staged.is_some() {
+            if self.context.is_distributed() && other.staged.is_some() {
+                eprintln!(
+                    "{op_label}: right side is a staged pipeline; collecting both sides to driver"
+                );
+            }
+            return Ok(None);
+        }
+
+        // `op_label` is an action: dispatch immediately and leave `self` reusable for
+        // further transforms/actions, same as the local (non-mutating) path.
+        let saved_staged = self.staged.clone();
+        let right_json = Self::elements_to_json(py, &other.elements)?;
+        if right_json.len() > 50_000_000 {
+            let warnings = PyModule::import(py, "warnings")?;
+            warnings.call_method1(
+                "warn",
+                (format!(
+                    "{op_label}: right side exceeds 50 MB serialized; consider pre-reducing cardinality"
+                ),),
+            )?;
+        }
+        let helpers = PyModule::import(py, "atomic_compute._pair_helpers")?;
+        let join_fn = helpers
+            .getattr(helper_fn_name)?
+            .call1((right_json.as_str(),))?;
+        let fn_bytes = Self::pickle_fn(py, &join_fn.unbind())?;
+        self.stage_python_task(py, fn_bytes, TaskAction::Map)?;
+
+        let staged = self.staged.as_ref().unwrap();
+        let (source_partitions, ops) = (staged.source_partitions.clone(), staged.steps.clone());
+        self.staged = saved_staged;
+        let result_bytes = self
+            .context
+            .dispatch_pipeline(self.placeholder_rdd(), source_partitions, ops)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        let elements = Self::decode_result_bytes(py, result_bytes)?;
+        Ok(Some(PyRdd::from_data(
+            py,
+            elements,
+            self.num_partitions,
+            Arc::clone(&self.context),
+        )))
+    }
+
+    /// Build a key → `[values]` multimap from an RDD's `(key, value)` pair elements.
+    /// Shared by every hash-join variant and `cogroup` to index one side for lookup by key.
+    fn build_multimap<'py>(
+        py: Python<'py>,
+        elements: &[Py<PyAny>],
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let map = PyDict::new(py);
+        for item in elements {
+            let bound = item.bind(py);
+            let (k, v) = Self::extract_pair(bound)?;
+            match map.get_item(&k)? {
+                Some(lst) => lst.cast::<PyList>()?.append(v)?,
+                None => {
+                    map.set_item(&k, PyList::new(py, [v])?)?;
+                }
+            }
+        }
+        Ok(map)
     }
 
     /// JSON-encode a slice of Python objects into a UTF-8 string.

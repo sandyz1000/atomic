@@ -35,7 +35,6 @@ Capabilities worth building next:
   current recommendation.
 - **Kinesis source** — follow-on from the Kafka source.
 - **GCS and Azure Blob connectors** — S3 covers AWS; these add multi-cloud parity.
-- **`map_with_state`** — arbitrary stateful streaming beyond `update_state_by_key`.
 - **Broadcast join, sort-merge join, skew handling** — for very large shuffles
   and complex joins.
 - **Kubernetes CRD operator** — a controller for declarative cluster management

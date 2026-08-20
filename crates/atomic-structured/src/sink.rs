@@ -1,7 +1,6 @@
 //! Streaming sinks — where each batch's results are emitted.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use datafusion::arrow::record_batch::RecordBatch;
 use parking_lot::Mutex;
@@ -54,11 +53,6 @@ impl MemorySink {
     /// Total number of rows emitted so far.
     pub fn row_count(&self) -> usize {
         self.batches.lock().iter().map(RecordBatch::num_rows).sum()
-    }
-
-    /// Drop all collected batches.
-    pub fn clear(&self) {
-        self.batches.lock().clear();
     }
 }
 
@@ -141,28 +135,4 @@ impl Sink for FileSink {
             .map_err(|e| StructuredError::Sink(e.to_string()))?;
         Ok(())
     }
-}
-
-/// Helper: wrap a concrete sink into the shared trait object the query holds.
-pub fn shared<S: Sink + 'static>(sink: S) -> Arc<dyn Sink> {
-    Arc::new(sink)
-}
-
-/// Sink that calls `f` once per row in each non-empty batch.
-pub fn foreach<F>(f: F) -> Arc<dyn Sink>
-where
-    F: Fn(&RecordBatch, usize) + Send + Sync + 'static,
-{
-    struct ForeachSink<F>(F);
-    impl<F: Fn(&RecordBatch, usize) + Send + Sync> Sink for ForeachSink<F> {
-        fn add_batch(&self, _epoch: u64, batches: &[RecordBatch]) -> StructuredResult<()> {
-            for batch in batches {
-                for row in 0..batch.num_rows() {
-                    (self.0)(batch, row);
-                }
-            }
-            Ok(())
-        }
-    }
-    Arc::new(ForeachSink(f))
 }

@@ -1,23 +1,10 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::parse::{Parse, ParseStream};
-use syn::{Token, Type, parse_macro_input};
+use syn::Type;
+use syn::parse_macro_input;
 
-/// `register_shuffle_map!`/`register_sort_shuffle_map!` input: `$K:ty, $V:ty`.
-struct KvPair {
-    k: Type,
-    v: Type,
-}
-
-impl Parse for KvPair {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let k: Type = input.parse()?;
-        input.parse::<Token![,]>()?;
-        let v: Type = input.parse()?;
-        Ok(KvPair { k, v })
-    }
-}
+use super::KvPair;
 
 /// The base hash-partitioned handler registration, shared by both macros below:
 /// `register_sort_shuffle_map!` registers this too (matching the original

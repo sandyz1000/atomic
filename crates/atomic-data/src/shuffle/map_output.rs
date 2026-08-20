@@ -20,12 +20,6 @@ type Result<T> = std::result::Result<T, MapOutputError>;
 //     nesting_limit: 64,
 // };
 
-pub enum MapOutputTrackerMessage {
-    // Contains shuffle_id
-    GetMapOutputLocations(i64),
-    StopMapOutputTracker,
-}
-
 /// The key is the shuffle_id
 pub type ServerUris = Arc<DashMap<usize, Vec<Option<String>>>>;
 

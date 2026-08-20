@@ -35,6 +35,33 @@ of rounds, and an optional visualization. `query_streaming` emits progress
 events through a channel for a live UI. `plan` is a dry run that returns the
 workflow plan without executing it.
 
+### Python / JavaScript
+
+`NlqContext` is also available from `atomic-py` and `atomic-js`, built against a
+fresh local compute context:
+
+```python
+import atomic_compute as ac
+
+ctx = ac.NlqContext(api_key="sk-...")  # or provider="anthropic"
+ctx.sql_ctx().register_batches("orders", batches)
+result = ctx.query("find customers who bought luxury items")
+print(result["answer"])
+```
+
+```javascript
+const { NlqContext } = require("atomic-compute");
+
+const ctx = new NlqContext({ apiKey: "sk-..." });
+ctx.sqlCtx().registerCsv("orders", "orders.csv");
+const result = ctx.query("find customers who bought luxury items");
+console.log(result.answer);
+```
+
+Both bindings expose `sqlCtx()`/`sql_ctx()`, `query()`, and `plan()` (the dry
+run). `register_tool`, `register_vector_index`, and `query_streaming` are not
+yet bound — use the Rust API directly for those.
+
 ## How it works
 
 ```text

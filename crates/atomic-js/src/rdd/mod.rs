@@ -93,7 +93,6 @@ impl JsRdd {
     ) -> Result<()> {
         let payload_struct = JsTaskPayload {
             fn_source,
-            zero_json: String::new(),
             context_json,
         };
         let payload = serde_json::to_vec(&payload_struct)
@@ -211,26 +210,5 @@ impl JsRdd {
             (JsonValue::String(as_), JsonValue::String(bs)) => as_.cmp(bs),
             _ => a.to_string().cmp(&b.to_string()),
         }
-    }
-}
-
-/// Tiny LCG for reproducible random sampling — no `rand` dependency needed
-/// in the binding crate.
-pub(crate) struct SimpleLcg {
-    state: u64,
-}
-
-impl SimpleLcg {
-    pub(crate) fn new(seed: u64) -> Self {
-        Self { state: seed | 1 }
-    }
-
-    /// Uniform [0, 1) from the top 53 bits.
-    pub(crate) fn next_f64(&mut self) -> f64 {
-        self.state = self
-            .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        (self.state >> 11) as f64 / (1u64 << 53) as f64
     }
 }

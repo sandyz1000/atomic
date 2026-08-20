@@ -28,8 +28,8 @@
 //!    operations (`LlmFilter`, `LlmMap`, `Embed`, `VectorSearch`) batched by [`optimizer::LlmBatchingRule`].
 //!
 //! Requires `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY` with `LLM_PROVIDER=anthropic`) in
-//! the environment at runtime. Tests use [`llm::mock::MockLlmClient`] or a local
-//! `wiremock` server and never call a real provider.
+//! the environment at runtime. Tests use a local `wiremock` server and never call a
+//! real provider.
 
 pub mod config;
 pub mod context;

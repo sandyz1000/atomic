@@ -48,7 +48,7 @@ where
 pub trait WireSerde:
     Archive<
         Archived: for<'a> rkyv::bytecheck::CheckBytes<RkyvWireValidator<'a>>
-            + RkyvDeserialize<Self, RkyvWireStrategy>,
+                      + RkyvDeserialize<Self, RkyvWireStrategy>,
     > + for<'a> RkyvSerialize<RkyvWireSerializer<'a>>
     + Sized
 {

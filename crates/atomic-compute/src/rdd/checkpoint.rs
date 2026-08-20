@@ -188,9 +188,7 @@ where
                             DataError::Other(format!("checkpoint s3 base64 decode: {e}"))
                         })?;
                 let items = Vec::<T>::decode_wire(&bytes)
-                    .map_err(|e| {
-                        DataError::Other(format!("checkpoint s3 decode: {e}"))
-                    })?;
+                    .map_err(|e| DataError::Other(format!("checkpoint s3 decode: {e}")))?;
                 Ok(Box::new(items.into_iter()))
             }
         }

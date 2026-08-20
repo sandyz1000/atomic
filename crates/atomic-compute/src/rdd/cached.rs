@@ -31,7 +31,6 @@ use crate::rdd::{Rdd, RddBase};
 /// | `MemoryOnly`      | Store in `PARTITION_CACHE`; evict via LRU when full |
 /// | `MemoryAndDisk`   | Store in `PARTITION_CACHE`; on LRU eviction fall back to a disk file |
 /// | `DiskOnly`        | Skip `PARTITION_CACHE`; always read/write from a disk file |
-/// | `MemoryOnlySer`   | Treated as `MemoryOnly` (serialized-memory path deferred) |
 ///
 /// Disk partitions are stored at:
 /// `{RDD_CACHE_SPILL_DIR}/{rdd_id}/{partition_index}.bin` (encoded `Vec<T>`).
@@ -141,7 +140,7 @@ impl<T: Data + Clone + 'static> Rdd for CachedRdd<T> {
         let rdd_id = self.rdd_id();
 
         match self.storage_level {
-            StorageLevel::MemoryOnly | StorageLevel::MemoryOnlySer => {
+            StorageLevel::MemoryOnly => {
                 if let Some(store) = PARTITION_CACHE.get()
                     && let Some(cached) = store.get::<T>(rdd_id, idx)
                 {

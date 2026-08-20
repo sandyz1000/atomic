@@ -5,14 +5,15 @@ use atomic_data::broadcast;
 use atomic_data::cache::worker_partition_cache;
 use atomic_data::distributed::{
     EngineAction, FileSplitPayload, ResultStatus, ShuffleMapPayload, StateMergePayload, Step,
-    StepKind, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime, WireEncode, decode_payload,
+    StepKind, TaskAction, TaskEnvelope, TaskResultEnvelope, TaskRuntime, WireEncode,
+    decode_payload,
 };
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 use crate::error::{ComputeError, ComputeResult};
 use crate::registry::{
-    AGENT_RUNNER_REGISTRY, STATE_MERGE_REGISTRY, ShuffleWriteCtx, TASK_REGISTRY,
-    combine::CombineCtx, resolve_shuffle_handler,
+    STATE_MERGE_REGISTRY, ShuffleWriteCtx, TASK_REGISTRY, combine::CombineCtx,
+    resolve_shuffle_handler,
 };
 use crate::runtimes::Dispatcher;
 
@@ -169,23 +170,6 @@ impl Dispatcher for NativeDispatcher {
                 }
                 store.put(payload.state_id, new_state);
                 Ok(emitted)
-            }
-            StepKind::Engine(EngineAction::AgentStep) => {
-                let payload: atomic_data::distributed::AgentStepPayload =
-                    serde_json::from_slice(&op.payload).map_err(|e| {
-                        ComputeError::InvalidPayload(format!("AgentStep payload decode: {e}"))
-                    })?;
-                let runner = AGENT_RUNNER_REGISTRY.get().ok_or_else(|| {
-                    ComputeError::UnknownOperation(
-                        "AgentStep: no agent runner registered; \
-                         call `atomic_compute::register_agent_runner(...)` at startup \
-                         or link `atomic-nlq` and call `atomic_nlq::agent_runner::register()`"
-                            .to_string(),
-                    )
-                })?;
-                runner
-                    .run_partition(&payload, data)
-                    .map_err(ComputeError::InvalidPayload)
             }
             StepKind::Task(action) => match TASK_REGISTRY.get(op.task_name.as_str()) {
                 None => {
@@ -408,7 +392,11 @@ impl ComputeEngine {
     ///
     /// Errors are encoded as `FatalFailure` rather than propagated so the
     /// scheduler can handle them uniformly.
-    pub fn execute(&self, worker_id: &str, task: &TaskEnvelope) -> ComputeResult<TaskResultEnvelope> {
+    pub fn execute(
+        &self,
+        worker_id: &str,
+        task: &TaskEnvelope,
+    ) -> ComputeResult<TaskResultEnvelope> {
         let data = match resolve_input(task, worker_id)? {
             InputData::EarlyReturn(r) => return Ok(r),
             InputData::Pipeline(d) => d,

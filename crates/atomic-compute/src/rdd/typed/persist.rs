@@ -11,7 +11,7 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
 
     /// Persist this RDD's partitions using the given storage level.
     ///
-    /// - `MemoryOnly` / `MemoryOnlySer`: memoises in the global `PartitionStore` (LRU-bounded).
+    /// - `MemoryOnly`: memoises in the global `PartitionStore` (LRU-bounded).
     /// - `MemoryAndDisk` / `DiskOnly`: accepted but fall back to memory semantics unless `T`
     ///   implements `WireEncode + WireDecode`. For actual disk spill, call
     ///   `persist_with_disk(level)` instead.
@@ -177,7 +177,8 @@ impl<T: Data + Clone + 'static> TypedRdd<T> {
 
                 CheckpointStore::S3 { bucket, prefix } => {
                     use crate::io::s3::write_text;
-                    let bytes = data.encode_wire()
+                    let bytes = data
+                        .encode_wire()
                         .map_err(|e| DataError::Other(format!("checkpoint encode: {e}")))?;
                     let b64 =
                         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);

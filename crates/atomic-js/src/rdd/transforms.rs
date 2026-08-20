@@ -3,9 +3,10 @@ use std::sync::Arc;
 use atomic_data::distributed::TaskAction;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use rand::{RngExt, SeedableRng, rngs::SmallRng};
 use serde_json::Value as JsonValue;
 
-use super::{JsRdd, SimpleLcg};
+use super::JsRdd;
 
 #[napi]
 impl JsRdd {
@@ -419,8 +420,8 @@ impl JsRdd {
         let s = seed.unwrap_or(0) as u64;
         let mut buckets: Vec<Vec<JsonValue>> = vec![Vec::new(); weights.len()];
         for (i, elem) in self.elements.iter().enumerate() {
-            let mut rng = SimpleLcg::new(s ^ (i as u64));
-            let roll = rng.next_f64();
+            let mut rng = SmallRng::seed_from_u64(s ^ (i as u64));
+            let roll = rng.random::<f64>();
             for k in 0..weights.len() {
                 if roll >= bounds[k] && roll < bounds[k + 1] {
                     buckets[k].push(elem.clone());

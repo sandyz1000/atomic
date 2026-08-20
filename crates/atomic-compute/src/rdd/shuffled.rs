@@ -284,7 +284,7 @@ where
     }
 
     fn splits(&self) -> Vec<Box<dyn Split>> {
-        (0..self.part.get_num_of_partitions())
+        (0..self.part.num_partitions())
             .map(|x| Box::new(ShuffledRddSplit::new(x)) as Box<dyn Split>)
             .collect()
     }
@@ -296,7 +296,7 @@ where
         {
             return *entry;
         }
-        self.part.get_num_of_partitions()
+        self.part.num_partitions()
     }
 
     fn partitioner(&self) -> Option<Partitioner> {
@@ -350,7 +350,7 @@ where
         let start = Instant::now();
 
         let coalesced_id = split.get_index();
-        let original_num_partitions = self.part.get_num_of_partitions();
+        let original_num_partitions = self.part.num_partitions();
 
         // Determine which original reduce-partition IDs this coalesced split covers.
         let mut original_ids: Vec<usize> = vec![coalesced_id];

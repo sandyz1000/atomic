@@ -84,12 +84,12 @@ impl StatCounter {
 /// The identity accumulator for [`StatCounterTask`] — an empty counter.
 pub const STAT_ZERO: (u64, f64, f64, f64, f64) = (0, 0.0, 0.0, f64::INFINITY, f64::NEG_INFINITY);
 
-/// Built-in: single-pass `(count, mean, m2, min, max)` accumulator behind `stats()`.
+/// Built-in: single-pass `(count, mean, m2, min, max)` accumulator behind `stats()`
+/// (and, via it, `variance()`/`stdev()`).
 ///
-/// The [`AggregateTask`] shape combines Welford's online `(count, mean, m2)` (as in
-/// [`VarianceTask`](crate::builtin_tasks::variance::VarianceTask)) with running min/max, so one
-/// worker pass yields every summary statistic. Registered for the numeric primitives via
-/// [`register_aggregate_task!`], keyed `atomic::builtin::stats::<ty>`.
+/// The [`AggregateTask`] shape combines Welford's online `(count, mean, m2)` update with
+/// running min/max, so one worker pass yields every summary statistic. Registered for the
+/// numeric primitives via [`register_aggregate_task!`], keyed `atomic::builtin::stats::<ty>`.
 #[derive(Clone, Copy, Default)]
 pub struct StatCounterTask<T>(std::marker::PhantomData<T>);
 

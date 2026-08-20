@@ -42,15 +42,7 @@ pub struct DriverJobSpec<'a> {
 
 /// Build the `Job` for one `atomic submit-k8s` invocation.
 pub fn build_driver_job(spec: &DriverJobSpec<'_>, name: &str) -> Job {
-    let env: Vec<EnvVar> = spec
-        .env
-        .iter()
-        .map(|(k, v)| EnvVar {
-            name: k.clone(),
-            value: Some(v.clone()),
-            value_from: None,
-        })
-        .collect();
+    let env = crate::env_vars(&spec.env);
 
     let mut args = vec!["--driver".to_string()];
     args.extend(spec.job_args.iter().cloned());

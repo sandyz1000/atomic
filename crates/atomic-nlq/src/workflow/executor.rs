@@ -42,63 +42,18 @@ impl WorkflowExecutor {
     }
 
     /// Execute a plan and return results keyed by step id.
+    ///
+    /// Delegates to `execute_streaming` with the receiver dropped immediately, so its
+    /// `StepStarted`/`StepCompleted`/`StepFailed` sends are no-ops (swallowed by the
+    /// `let _ =` at each send site) and only the wave-scheduling logic runs.
     pub async fn execute(&self, plan: WorkflowPlan) -> Result<HashMap<String, StepResult>> {
-        let mut completed: HashMap<String, StepResult> = HashMap::new();
-        let mut remaining: Vec<WorkflowStep> = plan.steps;
-
-        while !remaining.is_empty() {
-            let done_ids: HashSet<&str> = completed.keys().map(|s| s.as_str()).collect();
-
-            // Partition into ready (all deps satisfied) and not-yet-ready.
-            let (ready, blocked): (Vec<_>, Vec<_>) = remaining.into_iter().partition(|step| {
-                step.depends_on
-                    .iter()
-                    .all(|d| done_ids.contains(d.as_str()))
-            });
-
-            if ready.is_empty() {
-                // Circular dependency or missing dep — report which steps are stuck.
-                let stuck: Vec<_> = blocked.iter().map(|s| s.id.as_str()).collect();
-                return Err(NlqError::WorkflowExecution(format!(
-                    "workflow is stuck; steps with unresolvable dependencies: {stuck:?}"
-                )));
-            }
-
-            remaining = blocked;
-
-            // Collect the upstream results each ready step needs.
-            let upstream_snapshots: HashMap<String, StepResult> = ready
-                .iter()
-                .flat_map(|s| s.depends_on.iter())
-                .filter_map(|dep_id| completed.get(dep_id).map(|r| (dep_id.clone(), r.clone())))
-                .collect();
-
-            let mut join_set: JoinSet<Result<StepResult>> = JoinSet::new();
-
-            for step in ready {
-                let tool_registry = Arc::clone(&self.tool_registry);
-                let context = Arc::clone(&self.context);
-
-                let sql_ctx = self.sql_ctx.clone();
-                let openai_client = Arc::clone(&self.openai_client);
-                let upstream = upstream_snapshots.clone();
-
-                join_set.spawn(async move {
-                    run_step(step, tool_registry, sql_ctx, context, openai_client, upstream).await
-                });
-            }
-
-            while let Some(res) = join_set.join_next().await {
-                let step_result = res.map_err(|e| NlqError::WorkflowExecution(e.to_string()))??;
-                completed.insert(step_result.step_id.clone(), step_result);
-            }
-        }
-
-        Ok(completed)
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+        self.execute_streaming(plan, 0, &tx).await
     }
 
     /// Like `execute` but emits `StepStarted`/`StepCompleted`/`StepFailed` events
-    /// through `tx` as each step runs. The existing `execute` is not modified.
+    /// through `tx` as each step runs.
     pub async fn execute_streaming(
         &self,
         plan: WorkflowPlan,
@@ -156,8 +111,15 @@ impl WorkflowExecutor {
                 let upstream = upstream_snapshots.clone();
 
                 join_set.spawn(async move {
-                    let result =
-                        run_step(step, tool_registry, sql_ctx, context, openai_client, upstream).await;
+                    let result = run_step(
+                        step,
+                        tool_registry,
+                        sql_ctx,
+                        context,
+                        openai_client,
+                        upstream,
+                    )
+                    .await;
                     (step_id, tool_name, result)
                 });
             }
@@ -324,14 +286,17 @@ async fn run_builtin(
     }
 }
 
-async fn run_python(
+/// Dispatch a scripted (Python/JS) partition-map task to workers. Shared by
+/// `run_python`/`run_javascript`; `lang` only affects log/error text.
+async fn run_scripted(
+    lang: &str,
     code: &str,
     step: &WorkflowStep,
     context: &Arc<Context>,
     upstream: &HashMap<String, StepResult>,
 ) -> Result<StepOutput> {
     log::debug!(
-        "running Python tool for step '{}': {} bytes of code",
+        "running {lang} tool for step '{}': {} bytes of code",
         step.id,
         code.len()
     );
@@ -347,7 +312,7 @@ async fn run_python(
     );
     let result_bytes = context
         .dispatch_pipeline(placeholder, source_partitions, vec![op])
-        .map_err(|e| NlqError::WorkflowExecution(format!("python tool dispatch: {e}")))?;
+        .map_err(|e| NlqError::WorkflowExecution(format!("{lang} tool dispatch: {e}")))?;
     let text: String = result_bytes
         .into_iter()
         .map(|b| String::from_utf8(b).unwrap_or_else(|e| format!("utf-8 error: {e}")))
@@ -356,36 +321,22 @@ async fn run_python(
     Ok(StepOutput::Text(text))
 }
 
+async fn run_python(
+    code: &str,
+    step: &WorkflowStep,
+    context: &Arc<Context>,
+    upstream: &HashMap<String, StepResult>,
+) -> Result<StepOutput> {
+    run_scripted("python", code, step, context, upstream).await
+}
+
 async fn run_javascript(
     code: &str,
     step: &WorkflowStep,
     context: &Arc<Context>,
     upstream: &HashMap<String, StepResult>,
 ) -> Result<StepOutput> {
-    log::debug!(
-        "running JS tool for step '{}': {} bytes of code",
-        step.id,
-        code.len()
-    );
-    let source_partitions = upstream_to_partitions(upstream);
-    let op = Step {
-        task_name: step.id.clone(),
-        kind: StepKind::Task(TaskAction::Map),
-        runtime: TaskRuntime::Native,
-        payload: code.as_bytes().to_vec(),
-    };
-    let placeholder: Arc<dyn atomic_data::rdd::Rdd<Item = String>> = Arc::new(
-        atomic_compute::rdd::ParallelCollection::new(context.new_rdd_id(), Vec::<String>::new(), 1),
-    );
-    let result_bytes = context
-        .dispatch_pipeline(placeholder, source_partitions, vec![op])
-        .map_err(|e| NlqError::WorkflowExecution(format!("js tool dispatch: {e}")))?;
-    let text: String = result_bytes
-        .into_iter()
-        .map(|b| String::from_utf8(b).unwrap_or_else(|e| format!("utf-8 error: {e}")))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(StepOutput::Text(text))
+    run_scripted("js", code, step, context, upstream).await
 }
 
 /// Collect upstream step results into source partitions for `dispatch_pipeline`.

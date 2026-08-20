@@ -360,19 +360,7 @@ impl JsRdd {
         }
 
         // Driver-side hash join (local mode or staged right side)
-        let mut right_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
-        for elem in &other.elements {
-            let pair = elem.as_array().ok_or_else(|| {
-                Error::from_reason("join: right RDD requires [key, value] arrays")
-            })?;
-            if pair.len() != 2 {
-                return Err(Error::from_reason(
-                    "join: right RDD requires 2-element arrays",
-                ));
-            }
-            let key_str = Self::key_to_string(&pair[0])?;
-            right_map.entry(key_str).or_default().push(pair[1].clone());
-        }
+        let right_map = Self::build_pair_multimap(&other.elements, "join: right RDD")?;
         let mut elements = Vec::new();
         for elem in &self.elements {
             let pair = elem
@@ -443,19 +431,7 @@ impl JsRdd {
         }
 
         // Driver-side (local mode or staged right side)
-        let mut right_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
-        for elem in &other.elements {
-            let pair = elem.as_array().ok_or_else(|| {
-                Error::from_reason("left_outer_join: right RDD requires [key, value] arrays")
-            })?;
-            if pair.len() != 2 {
-                return Err(Error::from_reason(
-                    "left_outer_join: right RDD requires 2-element arrays",
-                ));
-            }
-            let key_str = Self::key_to_string(&pair[0])?;
-            right_map.entry(key_str).or_default().push(pair[1].clone());
-        }
+        let right_map = Self::build_pair_multimap(&other.elements, "left_outer_join: right RDD")?;
         let mut elements = Vec::new();
         for elem in &self.elements {
             let pair = elem.as_array().ok_or_else(|| {
@@ -492,19 +468,7 @@ impl JsRdd {
     /// `[key, [null, right_value]]` for unmatched right keys.
     #[napi]
     pub fn right_outer_join(&self, other: &JsRdd) -> Result<JsRdd> {
-        let mut left_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
-        for elem in &self.elements {
-            let pair = elem.as_array().ok_or_else(|| {
-                Error::from_reason("right_outer_join: requires [key, value] arrays")
-            })?;
-            if pair.len() != 2 {
-                return Err(Error::from_reason(
-                    "right_outer_join: requires 2-element arrays",
-                ));
-            }
-            let key_str = Self::key_to_string(&pair[0])?;
-            left_map.entry(key_str).or_default().push(pair[1].clone());
-        }
+        let left_map = Self::build_pair_multimap(&self.elements, "right_outer_join")?;
         let mut elements = Vec::new();
         for elem in &other.elements {
             let pair = elem.as_array().ok_or_else(|| {
@@ -539,32 +503,8 @@ impl JsRdd {
     /// Full outer join: all keys from both sides preserved.
     #[napi]
     pub fn full_outer_join(&self, other: &JsRdd) -> Result<JsRdd> {
-        let mut left_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
-        for elem in &self.elements {
-            let pair = elem.as_array().ok_or_else(|| {
-                Error::from_reason("full_outer_join: requires [key, value] arrays")
-            })?;
-            if pair.len() != 2 {
-                return Err(Error::from_reason(
-                    "full_outer_join: requires 2-element arrays",
-                ));
-            }
-            let key_str = Self::key_to_string(&pair[0])?;
-            left_map.entry(key_str).or_default().push(pair[1].clone());
-        }
-        let mut right_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
-        for elem in &other.elements {
-            let pair = elem.as_array().ok_or_else(|| {
-                Error::from_reason("full_outer_join: requires [key, value] arrays")
-            })?;
-            if pair.len() != 2 {
-                return Err(Error::from_reason(
-                    "full_outer_join: requires 2-element arrays",
-                ));
-            }
-            let key_str = Self::key_to_string(&pair[0])?;
-            right_map.entry(key_str).or_default().push(pair[1].clone());
-        }
+        let left_map = Self::build_pair_multimap(&self.elements, "full_outer_join")?;
+        let right_map = Self::build_pair_multimap(&other.elements, "full_outer_join")?;
         let mut all_keys: HashMap<String, (JsonValue, bool)> = HashMap::new();
         for elem in &self.elements {
             let pair = elem.as_array().unwrap();
@@ -612,28 +552,8 @@ impl JsRdd {
     /// Co-group: `[key, [left_values], [right_values]]` for every key on either side.
     #[napi]
     pub fn cogroup(&self, other: &JsRdd) -> Result<JsRdd> {
-        let mut left_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
-        for elem in &self.elements {
-            let pair = elem
-                .as_array()
-                .ok_or_else(|| Error::from_reason("cogroup: requires [key, value] arrays"))?;
-            if pair.len() != 2 {
-                return Err(Error::from_reason("cogroup: requires 2-element arrays"));
-            }
-            let key_str = Self::key_to_string(&pair[0])?;
-            left_map.entry(key_str).or_default().push(pair[1].clone());
-        }
-        let mut right_map: HashMap<String, Vec<JsonValue>> = HashMap::new();
-        for elem in &other.elements {
-            let pair = elem
-                .as_array()
-                .ok_or_else(|| Error::from_reason("cogroup: requires [key, value] arrays"))?;
-            if pair.len() != 2 {
-                return Err(Error::from_reason("cogroup: requires 2-element arrays"));
-            }
-            let key_str = Self::key_to_string(&pair[0])?;
-            right_map.entry(key_str).or_default().push(pair[1].clone());
-        }
+        let left_map = Self::build_pair_multimap(&self.elements, "cogroup")?;
+        let right_map = Self::build_pair_multimap(&other.elements, "cogroup")?;
         let mut all_keys = std::collections::BTreeSet::new();
         for k in left_map.keys() {
             all_keys.insert(k.clone());
@@ -919,6 +839,23 @@ impl JsRdd {
             return Err(Error::from_reason("expected [key, value] pair"));
         }
         Ok((arr[0].clone(), arr[1].clone()))
+    }
+
+    /// Build a key → `[values]` multimap from an RDD's `[key, value]` pair elements.
+    /// Shared by every hash-join variant and `cogroup` to index one side for lookup by key.
+    fn build_pair_multimap(
+        elements: &[JsonValue],
+        op_label: &str,
+    ) -> Result<HashMap<String, Vec<JsonValue>>> {
+        let mut map: HashMap<String, Vec<JsonValue>> = HashMap::new();
+        for elem in elements {
+            let (key, val) = Self::split_pair(elem).map_err(|_| {
+                Error::from_reason(format!("{op_label} requires [key, value] arrays"))
+            })?;
+            let key_str = Self::key_to_string(&key)?;
+            map.entry(key_str).or_default().push(val);
+        }
+        Ok(map)
     }
 
     /// The `[key, value]` pairs after a per-partition key-wise combine. In distributed mode the

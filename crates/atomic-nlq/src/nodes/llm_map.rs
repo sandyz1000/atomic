@@ -10,12 +10,9 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DFSchema, DFSchemaRef, Result as DFResult};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, Partitioning,
-    PlanProperties,
+    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
 };
 use futures::StreamExt;
 
@@ -182,12 +179,7 @@ impl LlmMapExec {
         )));
         let schema = Arc::new(Schema::new(fields));
         let n = input.output_partitioning().partition_count();
-        let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(n),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
+        let properties = Arc::new(super::passthrough_plan_properties(schema.clone(), n));
         Self {
             prompt: node.prompt.clone(),
             model: node.model.clone(),

@@ -9,9 +9,6 @@ pub struct AtomicSqlConfig {
 
     /// Enable Parquet row-group pruning using column statistics.
     pub enable_parquet_pruning: bool,
-
-    /// Enable predicate push-down into data source scans.
-    pub enable_predicate_pushdown: bool,
 }
 
 impl Default for AtomicSqlConfig {
@@ -20,7 +17,6 @@ impl Default for AtomicSqlConfig {
             default_parallelism: num_cpus(),
             batch_size: 8192,
             enable_parquet_pruning: true,
-            enable_predicate_pushdown: true,
         }
     }
 }

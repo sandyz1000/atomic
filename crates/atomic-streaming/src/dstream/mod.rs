@@ -6,6 +6,7 @@ crate::cfg_kafka! {
     pub mod kafka;
     pub mod kafka_direct;
 }
+pub mod map_with_state;
 pub mod mapped;
 pub mod pair;
 pub mod transformed;
