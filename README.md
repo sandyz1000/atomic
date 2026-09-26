@@ -11,8 +11,7 @@ cluster. Doing that usually means a heavy stack: a language runtime on every
 node, a cluster manager, containers. Atomic removes that. You ship **one small
 executable** to each machine and you are running in under a minute. Write your
 logic in **Python or TypeScript** to move fast, or in **Rust** for maximum speed
-— the same job API in every language. SQL and LLM-powered natural-language
-queries are built in.
+— the same job API in every language. SQL is built in.
 
 ## What makes it different
 
@@ -139,8 +138,6 @@ rewritten as a Rust `#[task]` later without changing the program's shape.
 - **Graph** — `Graph<VD,ED>` with a Pregel engine: PageRank, shortest path,
   strongly connected components (Tarjan), label propagation, triangle count,
   connected components.
-- **Natural language queries** — `atomic-nlq` plans a workflow of tool calls
-  from a plain-language question and runs it on the SQL and compute layers.
 - **Deployment** — static musl binary, SSH/SFTP distribution, Kubernetes Helm
   chart with per-job worker allocation, mutual TLS, Prometheus metrics.
 
@@ -152,7 +149,6 @@ See the [documentation](docs/src/content/docs/) for full guides.
 Driver (Python / TypeScript / Rust)
   Context → TypedRdd → StagedPipeline → TaskEnvelope
        AtomicSqlContext → DataFusion LogicalPlan
-       NlqContext → LlmPlanner → WorkflowPlan
                          │  TCP (optional mTLS)
         ┌────────────────┼────────────────┐
    ┌────▼────┐      ┌────▼────┐       ┌────▼────┐
@@ -183,7 +179,6 @@ See [docs/.../architecture/](docs/src/content/docs/architecture/) for detail.
 | `atomic-streaming` | Micro-batch streaming + Kafka source |
 | `atomic-structured` | Continuous SQL queries — windows, joins, watermark, state store |
 | `atomic-graph` | Graph processing — `Graph<VD,ED>`, Pregel, algorithms |
-| `atomic-nlq` | Natural-language query — workflow planner, LLM DataFusion nodes |
 | `atomic-py` / `atomic-js` | Python and Node.js bindings |
 | `atomic-worker` | Worker binary with embedded PyO3 + V8 |
 | `atomic-cli` | Cross-compilation + SSH/SFTP binary distribution |

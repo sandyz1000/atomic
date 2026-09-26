@@ -44,7 +44,6 @@ parking_lot = { workspace = true }
 
 [workspace.dependencies]
 atomic-graph = { path = "crates/atomic-graph" }
-atomic-nlq = { path = "crates/atomic-nlq" }
 atomic-sql = { path = "crates/atomic-sql" }
 atomic-compute = { path = "crates/atomic-compute" }
 atomic-scheduler = { path = "crates/atomic-scheduler" }

@@ -821,15 +821,6 @@ pub struct JsSqlContext {
     session: Arc<SessionContext>,
 }
 
-impl JsSqlContext {
-    /// Wrap an existing `AtomicSqlContext` (e.g. `NlqContext.sql_ctx`) rather than
-    /// building a fresh one. Not exposed to JS (no `#[napi]`).
-    pub(crate) fn from_context(inner: Arc<AtomicSqlContext>) -> Self {
-        let session = Arc::new(inner.inner().clone());
-        Self { inner, session }
-    }
-}
-
 #[napi]
 impl JsSqlContext {
     /// Create an SQL context.

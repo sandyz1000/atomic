@@ -91,10 +91,9 @@ impl AtomicSqlContext {
 
     /// Create a context from a pre-built [`SessionContext`].
     ///
-    /// Used by `atomic-nlq` to inject a custom `SessionState` with its own
-    /// optimizer rules and physical planner before handing the session to
-    /// `AtomicSqlContext`. Prefer the other constructors unless you need to
-    /// customize the `SessionState`.
+    /// Use this to inject a custom `SessionState` with your own optimizer
+    /// rules and physical planner. Prefer the other constructors unless you
+    /// need to customize the `SessionState`.
     pub fn from_session(session: SessionContext, sc: Option<Arc<Context>>) -> Self {
         Self { session, sc }
     }

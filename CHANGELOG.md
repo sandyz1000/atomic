@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Dead-Code Audit Cleanup, Distributed `mapWithState`
 
+### Removed: `atomic-nlq` crate
+
+Deleted the whole `atomic-nlq` crate — the coordinator-level agentic loop
+(`LlmPlanner`/`AgentLoop`/`WorkflowExecutor`/`ToolRegistry`) and the LLM-native
+DataFusion operators (`llm_filter`/`llm_map`/`embed`/`vector_search`). Atomic's
+core product does not own an agentic layer; that job moves to an external MCP
+plugin that lets Pi/Claude Code drive Atomic directly.
+
+- **Breaking change**: `PyNlqContext` (`atomic-py`) and `JsNlqContext` /
+  `NlqContextOptions` (`atomic-js`) are gone, along with their exports.
+- Removed `examples/nlq`, `examples/nlq_demo`, `examples/agent_workflow_dag`,
+  and the `docs/.../guides/nlq.md` guide.
+
 ### New feature: distributed `mapWithState`
 
 `PairDStreamFunctions::map_with_state` now shards per-key state across the cluster via

@@ -172,15 +172,12 @@ pub enum ToolInvokeError {
 /// Invoke a registered `fn(String) -> String` `#[task]` by its task_name, using the same
 /// `TaskAction::Map` wire encoding the macro generates for that signature.
 ///
-/// Used by `agent_step` tool dispatch (`atomic-nlq`'s `TOOL_CALL:` handling) to call a
-/// Rust tool by task_name with one JSON-text argument and get one JSON-text result back —
-/// the `fn(String) -> String` shape `AgentStepPayload.tool_refs` requires for Rust tools
-/// (see `agent-step-tool-calling` design notes: `serde_json::Value` has no rkyv impl, so
-/// the wire-level signature must be `String` in/out).
+/// Calls a Rust task by task_name with one JSON-text argument and returns one JSON-text
+/// result — the `fn(String) -> String` shape suited to tool-style calls, where
+/// `serde_json::Value` has no rkyv impl so the wire-level signature must be `String` in/out.
 ///
-/// Every failure is logged at `warn` before it's returned — the caller (`dispatch_tool` in
-/// `atomic-nlq`) feeds the error back into the LLM conversation as plain text rather than
-/// propagating it, so this is the only place a broken tool call is visible to an operator.
+/// Every failure is logged at `warn` before it's returned, so a call that fails on the
+/// tool side is still visible to an operator.
 pub fn invoke_str_task(task_name: &str, arg: String) -> Result<String, ToolInvokeError> {
     let entry = TASK_REGISTRY.get(task_name).ok_or_else(|| {
         log::warn!("invoke_str_task: '{task_name}' is not registered in TASK_REGISTRY");

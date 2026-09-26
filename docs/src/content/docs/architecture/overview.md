@@ -18,7 +18,6 @@ moves through them.
 | `atomic-streaming` | Micro-batch streaming |
 | `atomic-structured` | Continuous SQL/DataFrame queries with windows, joins, watermarks |
 | `atomic-graph` | Graph processing: `Graph<VD, ED>`, Pregel, built-in algorithms |
-| `atomic-nlq` | Natural-language query layer |
 | `atomic-py` / `atomic-js` | Python and Node.js bindings |
 | `atomic-cli` | Cross-compilation and binary distribution |
 | `atomic-k8s` | Kubernetes per-job worker allocation |

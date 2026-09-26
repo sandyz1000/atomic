@@ -49,7 +49,6 @@ export default defineConfig({
             { label: 'SQL and DataFrames', link: '/guides/sql/' },
             { label: 'Streaming', link: '/guides/streaming/' },
             { label: 'Graph Processing', link: '/guides/graph/' },
-            { label: 'Natural Language Queries', link: '/guides/nlq/' },
             { label: 'Distributed Subagents', link: '/guides/agent-step/' },
             { label: 'Configuration', link: '/guides/configuration/' },
             { label: 'Deployment', link: '/guides/deployment/' },
