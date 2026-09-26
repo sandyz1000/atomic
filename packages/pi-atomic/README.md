@@ -118,6 +118,34 @@ described exactly as given, with the Zod shape as its input schema. If a task re
 array longer than 50 elements, the tool response stores it behind a handle and returns a
 preview instead of the full array, matching the fixed tools' preview convention.
 
+## Chaining
+
+A task that consumes an earlier result instead of inline data lists those argument names in
+`handleArgs`. The dispatcher swaps each handle for its stored rows before calling the task, so
+the data moves server-side and only the handle crosses the model's context:
+
+```typescript
+registerTask(
+  {
+    name: "count_by",
+    description: "Count rows from an earlier tool result, grouped by one of their columns.",
+    inputSchema: {
+      rows: z.string().describe("Handle to rows produced by an earlier tool call"),
+      column: z.string().describe("Column to group by"),
+    },
+    handleArgs: ["rows"],
+  },
+  (ctx, args: { rows: Record<string, unknown>[]; column: string }) => {
+    // args.rows is already materialized here
+  },
+);
+```
+
+Handles come from any tool that produced one — `atomic_sql`, or another task that returned a
+large array — so `atomic_register_source` → `atomic_sql` → task is a working chain. An unknown
+handle is rejected as a tool error rather than reaching the task as `undefined`. The agent
+drives the chain one hop per turn; nothing pre-plans it.
+
 ## Transports
 
 Stdio is the default. Set `ATOMIC_TRANSPORT=http` to serve Streamable HTTP instead, on

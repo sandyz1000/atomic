@@ -6,6 +6,11 @@ export interface TaskSpec {
   description: string;
   /** Zod raw shape (e.g. `{ words: z.array(z.string()) }`) — matches the MCP SDK's registerTool input schema. */
   inputSchema: Record<string, z.ZodTypeAny>;
+  /**
+   * Names of args that carry a handle from an earlier tool result instead of inline data.
+   * The dispatcher swaps each handle for its stored rows before calling the task.
+   */
+  handleArgs?: string[];
 }
 
 export type TaskFn = (ctx: Context, args: any) => any;

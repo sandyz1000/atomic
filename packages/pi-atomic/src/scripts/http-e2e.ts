@@ -4,7 +4,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 async function main() {
   const client = new Client({ name: "pi-atomic-http-e2e", version: "0.1.0" });
   await client.connect(
-    new StreamableHTTPClientTransport(new URL("http://127.0.0.1:3124/mcp")),
+    new StreamableHTTPClientTransport(new URL("http://127.0.0.1:3125/mcp")),
   );
 
   const tools = await client.listTools();

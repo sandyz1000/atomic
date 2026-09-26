@@ -33,6 +33,9 @@ no longer ships.
 - `registerTask()` turns a user-authored TypeScript task function into its own MCP tool,
   named and described by its spec. The function runs its own map-reduce through the
   `@atomic-compute/js` RDD API; the plugin only exposes it.
+- A task can declare `handleArgs` to consume a handle produced by an earlier tool —
+  `atomic_sql` or another task — so chained results stay server-side and only the handle
+  crosses the model's context.
 - stdio by default; `ATOMIC_TRANSPORT=http` serves Streamable HTTP on `ATOMIC_HTTP_PORT`.
 - Distributed execution comes from `Context::from_env()` (`ATOMIC_DEPLOYMENT_MODE`,
   `~/hosts.conf`), so it needs no plugin-side configuration.
