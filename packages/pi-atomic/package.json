@@ -1,0 +1,26 @@
+{
+  "name": "pi-atomic",
+  "version": "0.1.0",
+  "description": "MCP server exposing Atomic's distributed compute engine as tools for Pi/Claude Code",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/src/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/server.js",
+    "smoke": "tsx src/scripts/smoke.ts"
+  },
+  "dependencies": {
+    "@atomic-compute/js": "file:../../crates/atomic-js",
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.22.4",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.10.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -22,6 +22,21 @@ plugin that lets Pi/Claude Code drive Atomic directly.
 - Removed `examples/nlq`, `examples/nlq_demo`, `examples/agent_workflow_dag`,
   and the `docs/.../guides/nlq.md` guide.
 
+### Added: `packages/pi-atomic` MCP server
+
+New Node/TS package exposing Atomic's distributed compute as MCP tools, so an external
+agent (Pi/Claude Code) drives the engine directly and supplies the planning loop Atomic
+no longer ships.
+
+- Fixed tools: `atomic_register_source`, `atomic_sql` (returns a handle plus a row
+  preview), `atomic_collect_handle` (paged read-back).
+- `registerTask()` turns a user-authored TypeScript task function into its own MCP tool,
+  named and described by its spec. The function runs its own map-reduce through the
+  `@atomic-compute/js` RDD API; the plugin only exposes it.
+- stdio by default; `ATOMIC_TRANSPORT=http` serves Streamable HTTP on `ATOMIC_HTTP_PORT`.
+- Distributed execution comes from `Context::from_env()` (`ATOMIC_DEPLOYMENT_MODE`,
+  `~/hosts.conf`), so it needs no plugin-side configuration.
+
 ### New feature: distributed `mapWithState`
 
 `PairDStreamFunctions::map_with_state` now shards per-key state across the cluster via
