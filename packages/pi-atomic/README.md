@@ -47,15 +47,55 @@ lifetime — every tool call in the session shares the same compute context.
 
 ## Fixed tools
 
-Three tools are always registered:
+Data tools, always registered:
 
 - `atomic_register_source({ name, path, format })` — registers a CSV, Parquet, or JSON
   file or directory as a named SQL table.
 - `atomic_sql({ sql })` — runs a query against registered tables. Returns a handle, the
-  column names, a preview of the first 20 rows, and the total row count — not the full
+  result schema, a preview of the first 20 rows, and the total row count — not the full
   result, so large results don't consume the client's context budget.
 - `atomic_collect_handle({ handle, offset?, limit? })` — pages through the rows behind a
   handle returned by `atomic_sql`.
+
+Inspection tools, which let the agent reason about a query without running it. These mirror
+[`pyspark-mcp`](https://github.com/SemyonSinchenko/pyspark-mcp-server), which exposes Spark's
+logical and physical plans plus catalog metadata so an agent can optimize a query:
+
+- `atomic_explain({ sql, stage })` — the `analyzed`, `optimized`, or `physical` plan.
+  Plans come from `EXPLAIN VERBOSE`, and because DataFusion collapses an unchanged stage to
+  the literal `SAME TEXT AS ABOVE`, the previous stage's text is carried forward.
+- `atomic_plan_tables({ sql })` — the tables a query reads, extracted from its logical plan.
+- `atomic_estimate_size({ sql })` — estimated result rows and bytes from the physical plan's
+  statistics. Read the caveat below.
+- `atomic_list_tables()` — tables registered in this server's SQL context.
+- `atomic_table_schema({ table })` — column names, types, and nullability.
+- `atomic_query_schema({ sql })` — the columns and types a query would return, resolved
+  without executing it.
+- `atomic_read_head({ path, lines })` — first lines of a local file, capped at 200 lines /
+  64 KiB, to discover a source's format before registering it.
+- `atomic_version()` — the engine binding version.
+
+### What does not map
+
+`pyspark-mcp` tools that have no Atomic equivalent, and why:
+
+- **Catalog / database hierarchy** (current catalog, list databases, database exists, table
+  comments). Atomic's SQL context has a flat namespace of registered tables and no catalog
+  concept. DataFusion's `information_schema` would provide most of this, but it is disabled
+  in Atomic's `SessionConfig`, so `SHOW TABLES` and `information_schema.tables` both fail
+  today. Enabling it is a small change in `atomic-sql`, not something this package can do.
+- **Size estimation is source-dependent.** `atomic_estimate_size` reads
+  `physical_plan_with_stats`. Parquet reports `Rows=Inexact(n)` from file metadata; CSV and
+  JSON report `Rows=Absent` because they carry none, and DataFusion's `ANALYZE TABLE` is
+  parsed but unimplemented. The tool therefore reports `available: false` rather than
+  guessing — check that flag before trusting the numbers.
+
+### File reads
+
+`atomic_read_head` reads any path the server process can open. It exists because
+determining a source's format is otherwise guesswork, but it means an agent driving this
+server can read local files. The same is true of the SQL tools, which can read any path
+passed to `atomic_register_source`.
 
 Example: register a CSV and query it.
 

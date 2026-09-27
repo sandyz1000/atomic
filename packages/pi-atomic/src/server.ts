@@ -4,11 +4,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { registerFixedTools } from "./tools";
+import { registerIntrospectTools } from "./introspect";
 import { registerTaskTools } from "./dispatch";
 
 function buildServer(): McpServer {
   const server = new McpServer({ name: "pi-atomic", version: "0.1.0" });
   registerFixedTools(server);
+  registerIntrospectTools(server);
   registerTaskTools(server);
   return server;
 }

@@ -36,6 +36,17 @@ no longer ships.
 - A task can declare `handleArgs` to consume a handle produced by an earlier tool —
   `atomic_sql` or another task — so chained results stay server-side and only the handle
   crosses the model's context.
+- Query-inspection tools mirroring `pyspark-mcp`, so an agent can read a query's analyzed,
+  optimized, and physical plans, its result schema, and its source tables without running
+  it: `atomic_explain`, `atomic_plan_tables`, `atomic_estimate_size`, `atomic_query_schema`,
+  `atomic_list_tables`, `atomic_table_schema`, `atomic_read_head`, `atomic_version`.
+  `atomic_sql` now also returns the result schema.
+- Size estimates come from `physical_plan_with_stats`, which reports row counts for Parquet
+  and `Absent` for CSV/JSON, and DataFusion's `ANALYZE TABLE` is parsed but unimplemented —
+  so the tool reports `available: false` rather than guessing.
+- ​Catalog and database introspection do not map: Atomic's SQL context is a flat table
+  namespace, and DataFusion's `information_schema` is disabled in its `SessionConfig`, so
+  `SHOW TABLES` fails too.
 - stdio by default; `ATOMIC_TRANSPORT=http` serves Streamable HTTP on `ATOMIC_HTTP_PORT`.
 - Distributed execution comes from `Context::from_env()` (`ATOMIC_DEPLOYMENT_MODE`,
   `~/hosts.conf`), so it needs no plugin-side configuration.

@@ -38,12 +38,14 @@ export function registerFixedTools(server: McpServer) {
       },
     },
     async ({ sql }) => {
-      const rows = sqlCtx.sql(sql).collect();
+      const df = sqlCtx.sql(sql);
+      const schema = (df.dtypes() as [string, string][]).map(([column, type]) => ({ column, type }));
+      const rows = df.collect();
       const handle = storeRows(rows);
-      const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
       return json({
         handle,
-        columns,
+        schema,
+        columns: schema.map((c) => c.column),
         previewRows: rows.slice(0, PREVIEW_ROWS),
         rowCount: rows.length,
       });
