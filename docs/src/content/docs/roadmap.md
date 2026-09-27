@@ -39,8 +39,6 @@ Capabilities worth building next:
   and complex joins.
 - **Kubernetes CRD operator** — a controller for declarative cluster management
   beyond the Helm chart.
-- **NLQ CI integration test** — end-to-end test requiring `OPENAI_API_KEY`.
-- **Streaming NLQ** — natural-language queries over micro-batch streams.
 
 ## Out of scope
 

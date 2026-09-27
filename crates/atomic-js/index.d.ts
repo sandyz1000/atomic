@@ -723,36 +723,6 @@ export declare class JsRdd {
   foldWithContext(ctx: JsonValue, zero: JsonValue, f: (arg0: JsonValue, arg1: JsonValue, arg2: JsonValue) => JsonValue): JsonValue
 }
 
-/**
- * Entry point for natural-language queries against Atomic.
- *
- * ```javascript
- * const { NlqContext } = require('atomic-compute');
- *
- * const ctx = new NlqContext({ apiKey: 'sk-...' });
- * ctx.sqlCtx().registerCsv('orders', 'orders.csv');
- * const result = ctx.query('what is the total revenue per category');
- * console.log(result.answer);
- * ```
- */
-export declare class NlqContext {
-  /** Build against a fresh local compute context. */
-  constructor(options?: NlqContextOptions | undefined | null)
-  /** The underlying `SqlContext` — register tables here before calling `query`. */
-  sqlCtx(): JsSqlContext
-  /**
-   * Translate a natural-language query into an executed result:
-   * `{ answer, rounds, steps: [{ stepId, text }] }`.
-   */
-  query(nl: string): any
-  /**
-   * Dry-run: return the JSON-serialized `WorkflowPlan` the LLM would produce for
-   * `nl`, without executing it. Useful for debugging tool/SQL step selection.
-   */
-  plan(nl: string): string
-}
-export type JsNlqContext = NlqContext
-
 /** Builds a session-window aggregation query. */
 export declare class SessionBuilder {
   /** Group each session by `cols` before aggregating. */
@@ -980,20 +950,6 @@ export interface AggSpec {
   kind: string
   col?: string
   output: string
-}
-
-/**
- * Options for constructing an `NlqContext`. All fields optional; unset ones fall back
- * to `NlqConfig`'s defaults (which read `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` /
- * `LLM_PROVIDER` from the environment).
- */
-export interface NlqContextOptions {
-  apiKey?: string
-  /** `"openai"` (default) or `"anthropic"`. */
-  provider?: string
-  model?: string
-  baseUrl?: string
-  maxRounds?: number
 }
 
 /**

@@ -927,15 +927,6 @@ pub struct PySqlContext {
     session: Arc<SessionContext>,
 }
 
-impl PySqlContext {
-    /// Wrap an existing `AtomicSqlContext` (e.g. `NlqContext.sql_ctx`) rather than
-    /// building a fresh one.
-    pub(crate) fn from_context(inner: Arc<AtomicSqlContext>) -> Self {
-        let session = Arc::new(inner.inner().clone());
-        Self { inner, session }
-    }
-}
-
 #[pymethods]
 impl PySqlContext {
     /// Create an SQL context.

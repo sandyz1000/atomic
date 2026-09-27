@@ -24,7 +24,6 @@ atomic-sql = { workspace = true }
 atomic-streaming = { workspace = true }
 atomic-structured = { workspace = true }
 atomic-graph = { workspace = true }
-atomic-nlq = { workspace = true, features = ["python"] }
 datafusion = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

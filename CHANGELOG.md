@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — Dead-Code Audit Cleanup, Distributed `mapWithState`
 
+### Removed: `atomic-nlq` crate
+
+Deleted the whole `atomic-nlq` crate — the coordinator-level agentic loop
+(`LlmPlanner`/`AgentLoop`/`WorkflowExecutor`/`ToolRegistry`) and the LLM-native
+DataFusion operators (`llm_filter`/`llm_map`/`embed`/`vector_search`). Atomic's
+core product does not own an agentic layer; that job moves to an external MCP
+plugin that lets Pi/Claude Code drive Atomic directly.
+
+- **Breaking change**: `PyNlqContext` (`atomic-py`) and `JsNlqContext` /
+  `NlqContextOptions` (`atomic-js`) are gone, along with their exports.
+- Removed `examples/nlq`, `examples/nlq_demo`, `examples/agent_workflow_dag`,
+  and the `docs/.../guides/nlq.md` guide.
+
+### Added: `packages/pi-atomic` MCP server
+
+New Node/TS package exposing Atomic's distributed compute as MCP tools, so an external
+agent (Pi/Claude Code) drives the engine directly and supplies the planning loop Atomic
+no longer ships.
+
+- Fixed tools: `atomic_register_source`, `atomic_sql` (returns a handle plus a row
+  preview), `atomic_collect_handle` (paged read-back).
+- `registerTask()` turns a user-authored TypeScript task function into its own MCP tool,
+  named and described by its spec. The function runs its own map-reduce through the
+  `@atomic-compute/js` RDD API; the plugin only exposes it.
+- A task can declare `handleArgs` to consume a handle produced by an earlier tool —
+  `atomic_sql` or another task — so chained results stay server-side and only the handle
+  crosses the model's context.
+- Query-inspection tools mirroring `pyspark-mcp`, so an agent can read a query's analyzed,
+  optimized, and physical plans, its result schema, and its source tables without running
+  it: `atomic_explain`, `atomic_plan_tables`, `atomic_estimate_size`, `atomic_query_schema`,
+  `atomic_list_tables`, `atomic_table_schema`, `atomic_read_head`, `atomic_version`.
+  `atomic_sql` now also returns the result schema.
+- Size estimates come from `physical_plan_with_stats`, which reports row counts for Parquet
+  and nothing for CSV/JSON, and DataFusion's `ANALYZE TABLE` is parsed but unimplemented —
+  so `atomic_estimate_size` returns `rows`/`bytes` as `number | null`, `null` meaning
+  unavailable rather than zero, mirroring the sentinel `pyspark-mcp`'s own size-estimation
+  tool returns (`-1.0`, `"missing"`) when its regex over `EXPLAIN COST` doesn't match.
+- ​Catalog and database introspection do not map: Atomic's SQL context is a flat table
+  namespace, and DataFusion's `information_schema` is disabled in its `SessionConfig`, so
+  `SHOW TABLES` fails too.
+- stdio by default; `ATOMIC_TRANSPORT=http` serves Streamable HTTP on `ATOMIC_HTTP_PORT`.
+- Distributed execution comes from `Context::from_env()` (`ATOMIC_DEPLOYMENT_MODE`,
+  `~/hosts.conf`), so it needs no plugin-side configuration.
+
 ### New feature: distributed `mapWithState`
 
 `PairDStreamFunctions::map_with_state` now shards per-key state across the cluster via

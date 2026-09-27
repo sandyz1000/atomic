@@ -57,7 +57,6 @@ The design targets three problems:
 | `atomic-streaming` | Micro-batch streaming |
 | `atomic-structured` | Continuous SQL/DataFrame queries with windows, joins, and watermarks |
 | `atomic-graph` | Graph processing with a Pregel engine and built-in algorithms |
-| `atomic-nlq` | Natural-language query layer over the SQL and compute layers |
 | `atomic-py` | Python bindings (PyO3 / maturin) |
 | `atomic-js` | Node.js bindings (NAPI) |
 | `atomic-cli` | Cross-compilation and binary distribution to workers |
