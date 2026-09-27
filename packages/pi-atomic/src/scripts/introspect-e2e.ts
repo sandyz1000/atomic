@@ -2,8 +2,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
+import { sqlCtx as localSqlCtx } from "../context";
 
 const FIXTURE = "/tmp/chain-fixture.csv";
+const PARQUET_DIR = "/tmp/chain-fixture-parquet";
 
 function check(label: string, ok: boolean, detail?: unknown) {
   if (!ok) {
@@ -15,6 +17,11 @@ function check(label: string, ok: boolean, detail?: unknown) {
 
 async function main() {
   writeFileSync(FIXTURE, "id,region,amount\n1,eu,10\n2,us,80\n3,eu,60\n4,us,20\n5,eu,5\n");
+
+  // Parquet fixture, written directly via the binding (not through the server) so
+  // atomic_estimate_size has a source that actually carries row-count metadata.
+  localSqlCtx.registerCsv("sales_src", FIXTURE);
+  localSqlCtx.sql("SELECT * FROM sales_src").writeParquet(PARQUET_DIR);
 
   const client = new Client({ name: "pi-atomic-introspect-e2e", version: "0.1.0" });
   await client.connect(
@@ -58,9 +65,16 @@ async function main() {
     querySchema,
   );
 
-  // CSV carries no statistics, so the estimate is reported as unavailable rather than guessed.
+  // CSV carries no statistics, so the estimate is null rather than a guessed number.
   const size = await call("atomic_estimate_size", { sql });
-  check("atomic_estimate_size reports absent", size.available === false && size.rows === "Absent", size);
+  check("atomic_estimate_size reports null for csv", size.rows === null && size.bytes === null, size);
+
+  // Parquet carries row-count metadata, so the same tool resolves a real number here.
+  await call("atomic_register_source", { name: "sales_pq", path: PARQUET_DIR, format: "parquet" });
+  const pqSize = await call("atomic_estimate_size", {
+    sql: "SELECT region, COUNT(*) AS n FROM sales_pq GROUP BY region",
+  });
+  check("atomic_estimate_size resolves rows for parquet", pqSize.rows === 5, pqSize);
 
   const head = await call("atomic_read_head", { path: FIXTURE, lines: 1 });
   check("atomic_read_head", head.lines[0] === "id,region,amount", head);

@@ -85,10 +85,10 @@ logical and physical plans plus catalog metadata so an agent can optimize a quer
   in Atomic's `SessionConfig`, so `SHOW TABLES` and `information_schema.tables` both fail
   today. Enabling it is a small change in `atomic-sql`, not something this package can do.
 - **Size estimation is source-dependent.** `atomic_estimate_size` reads
-  `physical_plan_with_stats`. Parquet reports `Rows=Inexact(n)` from file metadata; CSV and
-  JSON report `Rows=Absent` because they carry none, and DataFusion's `ANALYZE TABLE` is
-  parsed but unimplemented. The tool therefore reports `available: false` rather than
-  guessing — check that flag before trusting the numbers.
+  `physical_plan_with_stats`. Parquet reports a row count from file metadata; CSV and JSON
+  report nothing because they carry none, and DataFusion's `ANALYZE TABLE` is parsed but
+  unimplemented. `rows`/`bytes` are `number | null` — `null` means unavailable, not zero,
+  the same sentinel role `pyspark-mcp`'s size-estimation tool fills with `-1`/`"missing"`.
 
 ### File reads
 

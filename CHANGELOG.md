@@ -42,8 +42,10 @@ no longer ships.
   `atomic_list_tables`, `atomic_table_schema`, `atomic_read_head`, `atomic_version`.
   `atomic_sql` now also returns the result schema.
 - Size estimates come from `physical_plan_with_stats`, which reports row counts for Parquet
-  and `Absent` for CSV/JSON, and DataFusion's `ANALYZE TABLE` is parsed but unimplemented —
-  so the tool reports `available: false` rather than guessing.
+  and nothing for CSV/JSON, and DataFusion's `ANALYZE TABLE` is parsed but unimplemented —
+  so `atomic_estimate_size` returns `rows`/`bytes` as `number | null`, `null` meaning
+  unavailable rather than zero, mirroring the sentinel `pyspark-mcp`'s own size-estimation
+  tool returns (`-1.0`, `"missing"`) when its regex over `EXPLAIN COST` doesn't match.
 - ​Catalog and database introspection do not map: Atomic's SQL context is a flat table
   namespace, and DataFusion's `information_schema` is disabled in its `SessionConfig`, so
   `SHOW TABLES` fails too.

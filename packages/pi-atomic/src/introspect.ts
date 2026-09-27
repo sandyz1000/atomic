@@ -51,6 +51,12 @@ function verbosePlan(sql: string): PlanRow[] {
 }
 
 /// Table names reach SQL as text, so they are checked against the registry rather than interpolated blind.
+// DataFusion reports "Absent" or "Exact(n)"/"Inexact(n)"; only the number is useful to a caller.
+function parseStatValue(raw: string): number | null {
+  const match = /\((\d+)\)/.exec(raw);
+  return match ? Number(match[1]) : null;
+}
+
 function registeredTable(name: string): string | undefined {
   const tables = sqlCtx.tableNames();
   return tables.includes(name) ? name : undefined;
@@ -115,7 +121,9 @@ export function registerIntrospectTools(server: McpServer) {
     "atomic_estimate_size",
     {
       description:
-        "Estimate a query's result size from the physical plan's statistics, without running it. Statistics come from source metadata, so Parquet reports a row estimate and CSV/JSON report 'Absent'.",
+        "Estimate a query's result rows/bytes from the physical plan's statistics, without running it. " +
+        "Statistics come from source metadata: Parquet reports a row estimate, CSV/JSON report null " +
+        "(null means unavailable, not zero).",
       inputSchema: {
         sql: z.string().describe("SQL query to estimate"),
       },
@@ -130,9 +138,8 @@ export function registerIntrospectTools(server: McpServer) {
         const rowsStat = /Rows=([^,\]]+)/.exec(stats)?.[1] ?? "Absent";
         const bytesStat = /Bytes=([^,\]]+)/.exec(stats)?.[1] ?? "Absent";
         return json({
-          rows: rowsStat,
-          bytes: bytesStat,
-          available: rowsStat !== "Absent" || bytesStat !== "Absent",
+          rows: parseStatValue(rowsStat),
+          bytes: parseStatValue(bytesStat),
           rootOperator: root.split(", statistics=")[0],
         });
       } catch (e) {
